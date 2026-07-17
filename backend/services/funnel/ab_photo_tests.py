@@ -5,10 +5,13 @@
 - Ротация «кругами»: круг закрывается по истечении round_minutes (смена фото
   гарантирована по времени — на слабом трафике круг не растягивается), либо ДОСРОЧНО,
   когда активное фото набрало views_per_round показов. Порядок — round-robin по position.
-- Метрики круга — дельты накопительных счётчиков «за сегодня»: реклама fullstats по
-  nmId (показы/клики/корзины/заказы/расход) + воронка v3 (органика: переходы/корзины/
-  заказы всех источников). WB внутридневную разбивку не отдаёт — копим сами вперёд
-  (паттерн WbAdCampaignSnapshot / get_intraday_metrics).
+- Метрики круга — дельты накопительных СУТОЧНЫХ строк из НАШЕЙ БД: реклама
+  wb_ad_nm_daily (показы/клики/корзины/заказы/расход по nmId) + органика
+  wb_funnel_daily (переходы/корзины/заказы всех источников). Обе таблицы обновляет
+  ежечасный funnel-синк. Тик НЕ ходит в WB за статистикой вообще: точечные
+  fullstats-запросы не пробиваются через per-seller лимитер, который выедают
+  прод-синки (16.07 проверено вживую — 10 попыток подряд 429). Смена фото идёт
+  через Content API — у него свой лимит, с синками не конкурирует.
 - Финиш: каждый невыключенный вариант набрал target_views (или прошло max_days) →
   возвращаем исходное фото, победитель — по CTR (клики/показы), НЕ применяется
   автоматически (кнопка «Применить победителя»).
@@ -20,7 +23,7 @@ import asyncio
 import io
 import logging
 from typing import Any
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import httpx
@@ -29,7 +32,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
-from backend.models import AbPhotoRound, AbPhotoTest, AbPhotoVariant, WbAdCampaign
+from backend.models import AbPhotoRound, AbPhotoTest, AbPhotoVariant, WbAdCampaign, WbAdNmDaily, WbFunnelDaily
 from backend.storage import get_minio
 from backend.utils.time import utcnow
 
@@ -545,7 +548,7 @@ async def tick_project(db: AsyncSession, project_id: int) -> dict:
     if not tests:
         return {"ticked": 0}
     try:
-        content_key, adv_key, analytics_key = await _get_keys(db, project_id)
+        content_key, _, _ = await _get_keys(db, project_id)
     except ValueError as e:
         logger.warning(f"AB tick: project {project_id} без ключей: {e}")
         return {"ticked": 0, "error": "no_keys"}
@@ -553,7 +556,7 @@ async def tick_project(db: AsyncSession, project_id: int) -> dict:
     ticked = 0
     for test in tests:
         try:
-            await _tick_test(db, test, content_key, adv_key, analytics_key)
+            await _tick_test(db, test, content_key)
             ticked += 1
         except asyncio.CancelledError:
             raise
@@ -562,17 +565,61 @@ async def tick_project(db: AsyncSession, project_id: int) -> dict:
     return {"ticked": ticked}
 
 
-async def _tick_test(
-    db: AsyncSession, test: AbPhotoTest, content_key: str, adv_key: str, analytics_key: str
-) -> None:
-    from backend.services.funnel.wb_advertising_api import fetch_ad_stats_today_nm
-    from backend.services.funnel.wb_funnel_api import fetch_funnel_nm
+async def _read_today_stats(
+    db: AsyncSession, project_id: int, campaign_id: int, nm_id: int, today: str
+) -> tuple[dict | None, dict | None]:
+    """Накопительные счётчики «за сегодня» из НАШИХ таблиц (наполняет ежечасный синк).
 
+    None — строки за сегодня ещё нет (синк не добежал): вызывающий не двигает базу
+    дельт, ничего не теряется. Числа суточные накопительные — ровно то, что нужно
+    compute_tick_delta.
+    """
+    day = date.fromisoformat(today)
+    adv_row = (
+        await db.execute(
+            select(WbAdNmDaily).where(
+                WbAdNmDaily.project_id == project_id,
+                WbAdNmDaily.campaign_id == campaign_id,
+                WbAdNmDaily.nm_id == nm_id,
+                WbAdNmDaily.date == day,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    adv = None
+    if adv_row is not None:
+        adv = {
+            "views": adv_row.views or 0,
+            "clicks": adv_row.clicks or 0,
+            "atbs": adv_row.atbs or 0,
+            "orders": adv_row.orders or 0,
+            "spend": float(adv_row.spend or 0),
+            "orders_sum": float(adv_row.orders_sum or 0),
+        }
+    org_row = (
+        await db.execute(
+            select(WbFunnelDaily).where(
+                WbFunnelDaily.project_id == project_id,
+                WbFunnelDaily.nm_id == nm_id,
+                WbFunnelDaily.date == day,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    org = None
+    if org_row is not None:
+        org = {
+            "open": org_row.open_card or 0,
+            "cart": org_row.add_to_cart or 0,
+            "orders": org_row.orders_count or 0,
+            "orders_sum": float(org_row.orders_sum_rub or 0),
+        }
+    return adv, org
+
+
+async def _tick_test(db: AsyncSession, test: AbPhotoTest, content_key: str) -> None:
     now = utcnow()
     today = pytz.UTC.localize(now).astimezone(MSK).strftime("%Y-%m-%d")
 
-    adv = await fetch_ad_stats_today_nm(adv_key, test.campaign_id, test.nm_id, today)
-    org = await fetch_funnel_nm(analytics_key, today, test.nm_id)
+    adv, org = await _read_today_stats(db, test.project_id, test.campaign_id, test.nm_id, today)
     if adv is None and org is None:
         return  # WB недоступен — тик пропускаем, дельты не теряются (накопительные счётчики)
     adv = adv or {}
@@ -755,6 +802,14 @@ async def _finish_test(
     test.active_variant_id = control.id if control else None
 
 
+def _iso(dt: datetime | None) -> str | None:
+    """Naive-UTC datetime → ISO с +00:00: фронтовый new Date() покажет локальное время
+    (без суффикса таймзоны браузер трактует строку как локальную — время уезжало на -3ч)."""
+    if dt is None:
+        return None
+    return pytz.UTC.localize(dt).isoformat()
+
+
 # ── Выдача результатов ───────────────────────────────────────────────────────
 
 
@@ -817,18 +872,18 @@ async def get_test_results(db: AsyncSession, project_id: int, test_id: int) -> d
             "max_days": test.max_days,
             "title": (test.original_media or {}).get("title") or "",
             "vendor_code": (test.original_media or {}).get("vendor_code") or "",
-            "started_at": test.started_at.isoformat() if test.started_at else None,
-            "finished_at": test.finished_at.isoformat() if test.finished_at else None,
+            "started_at": _iso(test.started_at),
+            "finished_at": _iso(test.finished_at),
             "winner_variant_id": test.winner_variant_id,
-            "winner_applied_at": test.winner_applied_at.isoformat() if test.winner_applied_at else None,
+            "winner_applied_at": _iso(test.winner_applied_at),
         },
         "variants": per_variant,
         "rounds": [
             {
                 "round_no": r.round_no,
                 "variant_id": r.variant_id,
-                "started_at": r.started_at.isoformat(),
-                "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+                "started_at": _iso(r.started_at),
+                "ended_at": _iso(r.ended_at),
                 "views": r.views,
                 "clicks": r.clicks,
                 "ctr": round(r.clicks / r.views * 100, 2) if r.views else 0.0,
@@ -879,9 +934,9 @@ async def list_tests(db: AsyncSession, project_id: int) -> list[dict]:
                 "vendor_code": (t.original_media or {}).get("vendor_code") or "",
                 "variants_count": len(variants),
                 "progress_pct": min(100, round(got / target_total * 100)) if target_total else 0,
-                "created_at": t.created_at.isoformat(),
-                "started_at": t.started_at.isoformat() if t.started_at else None,
-                "finished_at": t.finished_at.isoformat() if t.finished_at else None,
+                "created_at": _iso(t.created_at),
+                "started_at": _iso(t.started_at),
+                "finished_at": _iso(t.finished_at),
             }
         )
     return out

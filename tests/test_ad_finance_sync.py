@@ -72,3 +72,56 @@ def test_payment_rows_skip_missing_id_or_date():
         {"id": 1, "date": None, "sum": 1},
     ])
     assert rows == []
+
+
+# ─── Чанкинг вставки: asyncpg-лимит 32767 параметров ─────────────────────────
+
+
+def test_insert_chunks_split_and_preserve_order():
+    from backend.services.funnel.ad_finance_sync import _INSERT_CHUNK, _insert_chunks
+
+    rows = [{"i": i} for i in range(_INSERT_CHUNK * 2 + 5)]
+    chunks = list(_insert_chunks(rows))
+    assert [len(c) for c in chunks] == [_INSERT_CHUNK, _INSERT_CHUNK, 5]
+    assert [r["i"] for c in chunks for r in c] == list(range(len(rows)))
+    # лимит asyncpg: у WbAdUpd 10 колонок — чанк обязан влезать с запасом
+    assert _INSERT_CHUNK * 10 <= 32767
+
+
+async def test_sync_ad_upd_chunks_large_insert(monkeypatch):
+    """15k списаний (10 колонок) обязаны вставляться несколькими INSERT.
+
+    Регресс: один multi-VALUES INSERT падал с asyncpg InterfaceError
+    «the number of query arguments cannot exceed 32767» — дозагрузка
+    «Истории затрат» за 30 дней не работала вовсе.
+    """
+    from unittest.mock import AsyncMock
+
+    from backend.services.funnel import ad_finance_sync as m
+
+    n = 15_000
+    items = [
+        {
+            "updTime": f"2026-07-{(i % 28) + 1:02d}T10:00:00+03:00",
+            "advertId": 1000 + i, "updSum": 1.5, "updNum": i,
+            "campName": "c", "advertType": 9, "paymentType": "Баланс",
+            "advertStatus": 9, "currency": "RUB",
+        }
+        for i in range(n)
+    ]
+    monkeypatch.setattr(
+        "backend.services.funnel.wb_advertising_api.fetch_adv_upd",
+        AsyncMock(return_value=items),
+    )
+    monkeypatch.setattr(
+        "backend.services.funnel.ads_manager._get_advert_api_key",
+        AsyncMock(return_value="key"),
+    )
+    db = AsyncMock()
+    res = await m.sync_ad_upd(db, 1, "2026-06-15", "2026-07-14")
+
+    assert res["status"] == "ok"
+    assert res["rows"] == n
+    import math
+
+    assert db.execute.await_count == math.ceil(n / m._INSERT_CHUNK), "вставка не чанкуется"

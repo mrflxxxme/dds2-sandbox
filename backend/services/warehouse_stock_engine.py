@@ -3,11 +3,12 @@ Warehouse stock engine — stock balance updates, movements, adjustments, summar
 """
 
 import logging
+import zlib
 from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
-from sqlalchemy import and_, case, exists, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -76,9 +77,30 @@ async def _resolve_barcodes_batch(db: AsyncSession, project_id: int, barcodes: l
 # ─── Next number generator ─────────────────────────────────────────────────
 
 
+def _number_lock_ns(prefix: str) -> int:
+    """Стабильный int32-неймспейс advisory-лока из префикса документа.
+
+    crc32, а не hash(): тот рандомизирован PYTHONHASHSEED и различается между
+    процессами (api ‖ worker) — лок обязан совпадать. Приводим к знаковому int32,
+    как требует pg_advisory_xact_lock(int4, int4)."""
+    ns = zlib.crc32(prefix.encode("utf-8"))
+    return ns - 0x1_0000_0000 if ns >= 0x8000_0000 else ns
+
+
 async def _next_number(db: AsyncSession, project_id: int, prefix: str, table) -> str:
     """Generate next sequential number for a document (IN-1, OUT-1, TR-1).
-    Counts ALL records (including soft-deleted) to avoid number collisions."""
+    Counts ALL records (including soft-deleted) to avoid number collisions.
+
+    Конкурентные транзакции не видят незакоммиченных INSERT друг друга
+    (READ COMMITTED) → одинаковый count → два документа с одним номером
+    (unique-индекса на number нет; номер — идентификатор для оператора ФФ в
+    TG-нотификациях и Excel). pg_advisory_xact_lock(_number_lock_ns(prefix), project_id)
+    сериализует выдачу per (тип документа, проект); лок снимается на commit —
+    к этому моменту строка с номером уже видна следующему ожидающему."""
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :pid)"),
+        {"ns": _number_lock_ns(prefix), "pid": project_id},
+    )
     result = await db.execute(
         select(func.count(table.id)).where(
             table.project_id == project_id,

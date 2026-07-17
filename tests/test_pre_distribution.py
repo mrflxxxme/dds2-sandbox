@@ -843,3 +843,35 @@ async def test_accept_receipt_ff_advances_predist(db_session, env):
     assert req.status == AssemblyStatus.IN_PROGRESS
     await db_session.refresh(env.vehicle)
     assert env.vehicle.status == VehicleStatus.DELIVERED
+
+
+# ─── Сериализация конкурентных сабмитов (advisory-lock) ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_pre_distribution_takes_advisory_lock_before_pool_reads(db_session, env, monkeypatch):
+    """Конкурентные сабмиты «Распределить машину» (две вкладки/два юзера):
+    over-commit-гард (gross/reserved) и дедуп existing_pd — обычные SELECT под
+    READ COMMITTED, оба запроса проходят гард по stale-резерву и плодят
+    дубль-заявку/оверрезерв пула. create_pre_distribution обязан взять
+    pg_advisory_xact_lock(project_id) ДО первого чтения пула — детерминированно
+    проверяем порядок операций (честная гонка не эмулируется)."""
+    executed: list[str] = []
+    orig_execute = db_session.execute
+
+    async def spy(statement, *args, **kwargs):
+        executed.append(str(statement))
+        return await orig_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(db_session, "execute", spy)
+    await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(
+            vehicle_id=env.vehicle.id,
+            rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=10)],
+        ),
+    )
+    lock_positions = [i for i, s in enumerate(executed) if "pg_advisory_xact_lock" in s]
+    assert lock_positions, "create_pre_distribution не берёт advisory-лок"
+    assert lock_positions[0] == 0, "лок должен браться ДО чтения машины/пула/гарда/дедупа"

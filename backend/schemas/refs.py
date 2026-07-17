@@ -189,6 +189,26 @@ class PalletBoxesBySizePayload(BaseModel):
     sizes: dict[str, int]
 
 
+class PalletCompatGroup(BaseModel):
+    """Группа категорий, которым разрешено ехать на одной смешанной BOX-паллете."""
+
+    name: str | None = None
+    categories: list[str]
+
+
+class PalletCategoryCompatPayload(BaseModel):
+    """Правила совместимости категорий на паллете (строгий режим).
+
+    `enabled=False` — правила выключены, поведение прежнее (любые SKU миксуются).
+    `enabled=True` — каждая «эффективная категория» (CategoryOverride ??
+    Nomenclature.subject) едет ТОЛЬКО своей паллетой; `groups` разрешают
+    перечисленным категориям грузиться вместе. Категория не может состоять в
+    двух группах (400). Действует только на BOX; моно (≤3 артикулов) не трогаем."""
+
+    enabled: bool = False
+    groups: list[PalletCompatGroup] = []
+
+
 class BoxWeightPayload(BaseModel):
     """Вес пустой коробки (кг) — одно число на проект. Входит в расчётный вес
     отгрузки сборки: нетто товаров + вес_коробки × число коробов (тара паллеты

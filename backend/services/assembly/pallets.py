@@ -318,6 +318,8 @@ async def apply_goods_weight(
     db: AsyncSession,
     project_id: int,
     request_id: int,
+    *,
+    preserve_set_pallets: bool = False,
 ) -> AssemblyRequest:
     """Проставить расчётный ВЕС ОТГРУЗКИ в ручной `pallet_weight_kg` (÷ паллеты) и,
     если считается геометрия, авто-число паллет.
@@ -325,7 +327,15 @@ async def apply_goods_weight(
     Вес отгрузки = нетто товаров (Σ qty × вес/шт) + вес_коробки × число коробов
     (тара паллеты НЕ учитывается). `pallet_weight_kg = вес_отгрузки / pallets_count`.
     Кол-во паллет оценивается по геометрии коробки (footprint) и затем правится
-    вручную. Нет ни одной позиции с весом → ValueError (→ 400)."""
+    вручную. Нет ни одной позиции с весом → ValueError (→ 400).
+
+    preserve_set_pallets=True (путь mark_ready): уже заданное `pallets_count` (>0)
+    НЕ перетирается автооценкой — заявки из commit черновика несут паллеты,
+    посчитанные фронтом ПО КЛАССАМ совместимости категорий (несовместимые SKU не
+    делят паллету) и с допуском на сливер дискретизации; здешний footprint классов
+    не знает (BOX — один общий ceil) и молча менял бы физическое число паллет.
+    Ручная правка оператора — тем более авторитет. При False (кнопка «Рассчитать
+    вес» / bulk / ФФ-флоу с заглушкой pallets=1) — прежнее поведение: пересчёт."""
     from backend.services.assembly.weight import (
         compute_boxes_count,
         compute_goods_weight,
@@ -349,9 +359,11 @@ async def apply_goods_weight(
     # Вес отгрузки = нетто + тара коробов; без веса коробки = чистое нетто (fallback).
     total = compute_suggested_total_weight(goods_weight, boxes_count, box_weight) or goods_weight
 
-    suggested_pallets = await _suggest_pallets_count(db, project_id, request, box_qty_by_wh_bc)
-    if suggested_pallets and suggested_pallets > 0:
-        request.pallets_count = suggested_pallets
+    keep_set_pallets = preserve_set_pallets and bool(request.pallets_count and request.pallets_count > 0)
+    if not keep_set_pallets:
+        suggested_pallets = await _suggest_pallets_count(db, project_id, request, box_qty_by_wh_bc)
+        if suggested_pallets and suggested_pallets > 0:
+            request.pallets_count = suggested_pallets
 
     pallets = request.pallets_count or 1
     request.pallet_weight_kg = (total / Decimal(pallets)).quantize(Decimal("0.01"))

@@ -1,11 +1,15 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { api } from '@/lib/api';
+import type { PalletCategoryCompat } from '@/types/api';
 
 export function WarehouseExclusionSettings() {
     const [warehouses, setWarehouses] = useState<Array<{ name: string; is_sorting_center?: boolean }>>([]);
     const [excluded, setExcluded] = useState<string[]>([]);
     const [preorderAllowed, setPreorderAllowed] = useState<string[]>([]);
+    const [compat, setCompat] = useState<PalletCategoryCompat>({ enabled: false, groups: [] });
+    const [compatError, setCompatError] = useState('');
+    const [allCategories, setAllCategories] = useState<string[]>([]);
     const [rfDefaultDays, setRfDefaultDays] = useState<number>(8);
     const [rfDefaultDaysSaved, setRfDefaultDaysSaved] = useState<number>(8);
     const [savingRf, setSavingRf] = useState(false);
@@ -18,17 +22,35 @@ export function WarehouseExclusionSettings() {
     useEffect(() => {
         (async () => {
             try {
-                const [wh, ex, pa, rf] = await Promise.all([
+                const [wh, ex, pa, rf, compatRes, cats] = await Promise.all([
                     api.getAllWbWarehouses(),
                     api.getExcludedWarehouses(),
                     api.getPreorderAllowedWarehouses(),
                     api.getForecastRfDefaultDays(),
+                    // best-effort: сбой правил/списка категорий не должен ломать остальные секции
+                    api.getPalletCategoryCompat().catch(() => null),
+                    Promise.all([
+                        api.getBoxMultiplicity()
+                            .then(r => r.items.map(i => (i.subject || '').trim()).filter(Boolean))
+                            .catch(() => [] as string[]),
+                        api.getCategoryOverrides()
+                            .then(o => Object.values(o).map(v => (v || '').trim()).filter(Boolean))
+                            .catch(() => [] as string[]),
+                    ]).then(([subjects, overrides]) =>
+                        Array.from(new Set([...subjects, ...overrides])).sort((a, b) => a.localeCompare(b, 'ru'))
+                    ),
                 ]);
                 setWarehouses(wh);
                 setExcluded(ex);
                 setPreorderAllowed(pa);
                 setRfDefaultDays(rf.days);
                 setRfDefaultDaysSaved(rf.days);
+                if (compatRes) {
+                    setCompat(compatRes);
+                } else {
+                    setCompatError('Не удалось загрузить правила совместимости категорий');
+                }
+                setAllCategories(cats);
             } catch {
                 setMsg('Ошибка загрузки складов');
             } finally {
@@ -68,14 +90,58 @@ export function WarehouseExclusionSettings() {
         setHasChanges(true);
     };
 
+    // ─── Совместимость категорий на паллете ───────────────────────────
+    const mutateCompat = (updater: (prev: PalletCategoryCompat) => PalletCategoryCompat) => {
+        setCompat(updater);
+        setHasChanges(true);
+    };
+
+    const toggleCompatEnabled = () => mutateCompat(prev => ({ ...prev, enabled: !prev.enabled }));
+
+    const addCompatGroup = () => mutateCompat(prev => ({
+        ...prev,
+        groups: [...prev.groups, { name: null, categories: [] }],
+    }));
+
+    const removeCompatGroup = (idx: number) => mutateCompat(prev => ({
+        ...prev,
+        groups: prev.groups.filter((_, i) => i !== idx),
+    }));
+
+    const renameCompatGroup = (idx: number, name: string) => mutateCompat(prev => ({
+        ...prev,
+        groups: prev.groups.map((g, i) => (i === idx ? { ...g, name: name || null } : g)),
+    }));
+
+    const addCompatCategory = (idx: number, cat: string) => {
+        if (!cat) return;
+        mutateCompat(prev => ({
+            ...prev,
+            groups: prev.groups.map((g, i) =>
+                i === idx && !g.categories.includes(cat) ? { ...g, categories: [...g.categories, cat] } : g
+            ),
+        }));
+    };
+
+    const removeCompatCategory = (idx: number, cat: string) => mutateCompat(prev => ({
+        ...prev,
+        groups: prev.groups.map((g, i) => (i === idx ? { ...g, categories: g.categories.filter(c => c !== cat) } : g)),
+    }));
+
     const save = async () => {
         setSaving(true);
         setMsg('');
         try {
-            await Promise.all([
+            const [, , savedCompat] = await Promise.all([
                 api.setExcludedWarehouses(excluded),
                 api.setPreorderAllowedWarehouses(preorderAllowed),
+                // не перезаписываем правила дефолтом, если их не удалось загрузить
+                compatError ? Promise.resolve(null) : api.setPalletCategoryCompat(compat),
             ]);
+            if (savedCompat) {
+                // сервер нормализует (trim, выкидывает пустые группы) — синхронизируем стейт
+                setCompat({ enabled: savedCompat.enabled, groups: savedCompat.groups });
+            }
             setMsg('✅ Сохранено');
             setHasChanges(false);
         } catch {
@@ -194,7 +260,7 @@ export function WarehouseExclusionSettings() {
                                     type="checkbox"
                                     checked={!isExcluded}
                                     onChange={() => toggle(w.name)}
-                                    style={{ accentColor: 'var(--color-primary)' }}
+                                    style={{ accentColor: 'var(--color-accent)' }}
                                 />
                                 <span style={{
                                     fontSize: 14,
@@ -258,6 +324,148 @@ export function WarehouseExclusionSettings() {
                         );
                     })}
                 </div>
+            </div>
+
+            <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                <h3 style={{ margin: '0 0 8px' }}>🧩 Совместимость категорий на паллете</h3>
+                <p style={{ color: 'var(--color-text-muted)', margin: '0 0 16px', fontSize: 14 }}>
+                    По умолчанию (при включённых правилах) каждая категория едет отдельной паллетой.
+                    Группа разрешает перечисленным категориям грузиться на одну.
+                    Действует только на короб; моно-паллеты не затрагиваются.
+                </p>
+
+                {compatError ? (
+                    <p style={{ color: 'var(--color-danger)', fontSize: 14, margin: 0 }}>⚠️ {compatError}</p>
+                ) : (
+                    <>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, cursor: 'pointer', width: 'fit-content' }}>
+                            <input
+                                type="checkbox"
+                                checked={compat.enabled}
+                                onChange={toggleCompatEnabled}
+                                style={{ accentColor: 'var(--color-accent)' }}
+                            />
+                            <span style={{ fontWeight: 500 }}>Применять правила</span>
+                        </label>
+                        {!compat.enabled && (
+                            <p style={{ color: 'var(--color-text-muted)', fontSize: 13, margin: '6px 0 0' }}>
+                                выключено: любые категории миксуются на паллете (как раньше)
+                            </p>
+                        )}
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 16 }}>
+                            {compat.groups.length === 0 && (
+                                <p style={{ color: 'var(--color-text-muted)', fontSize: 13, margin: 0 }}>
+                                    Групп нет — при включённых правилах каждая категория едет отдельной паллетой.
+                                </p>
+                            )}
+                            {compat.groups.map((g, idx) => {
+                                const usedElsewhere = new Set(compat.groups.flatMap((og, oi) => (oi === idx ? [] : og.categories)));
+                                const available = allCategories.filter(c => !usedElsewhere.has(c) && !g.categories.includes(c));
+                                return (
+                                    <div
+                                        key={idx}
+                                        style={{
+                                            border: '1px solid var(--color-border)',
+                                            borderRadius: 12,
+                                            padding: 12,
+                                            background: 'var(--color-bg-card)',
+                                        }}
+                                    >
+                                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+                                            <input
+                                                type="text"
+                                                value={g.name ?? ''}
+                                                placeholder={`Группа ${idx + 1}`}
+                                                onChange={(e) => renameCompatGroup(idx, e.target.value)}
+                                                style={{
+                                                    flex: 1,
+                                                    minWidth: 120,
+                                                    padding: '6px 10px',
+                                                    borderRadius: 8,
+                                                    border: '1px solid var(--color-border)',
+                                                    background: 'var(--color-bg-card)',
+                                                    color: 'var(--color-text)',
+                                                    fontSize: 14,
+                                                }}
+                                            />
+                                            <button
+                                                className="btn btn-danger btn-sm"
+                                                type="button"
+                                                onClick={() => removeCompatGroup(idx)}
+                                                title="Удалить группу"
+                                            >
+                                                🗑 Удалить
+                                            </button>
+                                        </div>
+                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                                            {g.categories.length === 0 && (
+                                                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                                    Категории не выбраны — пустая группа не сохранится
+                                                </span>
+                                            )}
+                                            {g.categories.map(cat => (
+                                                <span
+                                                    key={cat}
+                                                    className="badge badge-info"
+                                                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                                                >
+                                                    {cat}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => removeCompatCategory(idx, cat)}
+                                                        aria-label={`Убрать категорию ${cat}`}
+                                                        style={{
+                                                            background: 'none',
+                                                            border: 'none',
+                                                            padding: 0,
+                                                            cursor: 'pointer',
+                                                            color: 'inherit',
+                                                            fontSize: 12,
+                                                            lineHeight: 1,
+                                                        }}
+                                                    >
+                                                        ✕
+                                                    </button>
+                                                </span>
+                                            ))}
+                                        </div>
+                                        <select
+                                            value=""
+                                            onChange={(e) => addCompatCategory(idx, e.target.value)}
+                                            disabled={available.length === 0}
+                                            style={{
+                                                padding: '6px 10px',
+                                                borderRadius: 8,
+                                                border: '1px solid var(--color-border)',
+                                                background: 'var(--color-bg-card)',
+                                                color: 'var(--color-text)',
+                                                fontSize: 13,
+                                                maxWidth: '100%',
+                                            }}
+                                        >
+                                            <option value="">
+                                                {allCategories.length === 0
+                                                    ? 'Список категорий недоступен'
+                                                    : available.length === 0
+                                                        ? 'Все категории уже распределены'
+                                                        : '+ добавить категорию'}
+                                            </option>
+                                            {available.map(c => (
+                                                <option key={c} value={c}>{c}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                );
+                            })}
+                            <div>
+                                <button className="btn btn-secondary btn-sm" type="button" onClick={addCompatGroup}>
+                                    + Новая группа
+                                </button>
+                            </div>
+                        </div>
+                    </>
+                )}
             </div>
 
             <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>

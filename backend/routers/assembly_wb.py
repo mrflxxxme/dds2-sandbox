@@ -15,6 +15,8 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.assembly_wb import (
     WbBoxesUpdate,
+    WbBulkPreorderStart,
+    WbBulkPreorderStatus,
     WbBulkSyncResult,
     WbCabinetBoxes,
     WbCabinetPass,
@@ -82,6 +84,33 @@ async def sync_wb_states(
     except WbSupplyError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return WbBulkSyncResult(**res)
+
+
+@router.post("/wb/bulk-preorder", response_model=WbBulkPreorderStatus)
+async def start_bulk_preorder(
+    body: WbBulkPreorderStart,
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+    _: None = Depends(rate_limit_write),
+) -> WbBulkPreorderStatus:
+    """Фоновый батч-занос преордеров: по одной заявке с паузой ~10с (кабинет
+    не любит частые заносы). Уже заведённые скипаются. Один батч на проект —
+    повторный запуск при живом батче → 409 (фронт подключается к статусу)."""
+    try:
+        job = await wb_supply_service.start_bulk_preorder(db, project.id, body.assembly_ids)
+    except wb_supply_service.WbBulkAlreadyRunning as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except WbSupplyError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return WbBulkPreorderStatus.model_validate(job)
+
+
+@router.get("/wb/bulk-preorder/status", response_model=WbBulkPreorderStatus)
+async def bulk_preorder_status(
+    project: Project = Depends(get_current_project),
+) -> WbBulkPreorderStatus:
+    """Статус последнего батч-заноса проекта (для поллинга модалки/списка)."""
+    return WbBulkPreorderStatus.model_validate(wb_supply_service.get_bulk_preorder_status(project.id))
 
 
 @router.get("/{assembly_id}/wb", response_model=WbSupplyState)

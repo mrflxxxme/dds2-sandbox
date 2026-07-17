@@ -142,6 +142,18 @@ def test_enrich_adds_bid_minus_and_lock():
     assert edge["locked"] is False       # ровно 100 — уже не залочен
 
 
+def test_enrich_biddable_from_getbids_set():
+    """biddable = фраза есть в get-bids (зафиксирована). None → признак не определён → True."""
+    from backend.services.funnel.cluster_analysis_service import _enrich
+
+    fixed = _enrich({"norm_query": "палатка", "views": 500}, set(), {}, None, {"палатка"})
+    assert fixed["biddable"] is True     # в get-bids → биддируема
+    broad = _enrich({"norm_query": "беседка", "views": 500}, set(), {}, None, {"палатка"})
+    assert broad["biddable"] is False    # нет в get-bids → broad-match, ставка невозможна
+    unknown = _enrich({"norm_query": "y", "views": 500}, set(), {})
+    assert unknown["biddable"] is True   # biddable_set=None (нет bidding-контекста) → True
+
+
 def test_enrich_lock_uses_alltime_views_not_range():
     """locked считается по показам за ВСЮ историю (all_views), а не за выбранный период.
 

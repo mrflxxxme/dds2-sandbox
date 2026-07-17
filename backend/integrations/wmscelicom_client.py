@@ -64,11 +64,16 @@ class WmsCelicomApiError(ValueError):
 
     Исключён из circuit breaker — плохой токен не должен блокировать
     интеграцию на recovery_timeout.
+
+    `reason` — ЧИСТЫЙ текст причины от провайдера (без технической обёртки
+    «API error at <path>») — для человеческих сообщений в UI; str(e) с
+    обёрткой остаётся для логов.
     """
 
-    def __init__(self, message: str, status_code: int):
+    def __init__(self, message: str, status_code: int, reason: str | None = None):
         super().__init__(message)
         self.status_code = status_code
+        self.reason = reason
 
 
 # Per-project circuit breakers — one project's failures don't block others
@@ -126,6 +131,7 @@ class WmsCelicomClient:
             raise WmsCelicomApiError(
                 self._redact(f"WMS Celicom API error ({response.status_code}) at {path}: {response.text[:200]}"),
                 status_code=response.status_code,
+                reason=self._redact(response.text[:200]),
             )
         if response.status_code != 200:
             # 5xx — деградация сервиса: считается circuit breaker'ом и ретраится
@@ -138,6 +144,7 @@ class WmsCelicomClient:
             raise WmsCelicomApiError(
                 self._redact(f"WMS Celicom API error at {path}: {str(data.get('message'))[:200]}"),
                 status_code=response.status_code,
+                reason=self._redact(str(data.get("message") or "")[:200]) or None,
             )
         return data
 

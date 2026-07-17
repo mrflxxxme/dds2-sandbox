@@ -208,24 +208,12 @@ def test_next_variant_rotates_off_excluded_even_to_single_active():
 
 
 class _FakeWb:
-    """Стенд WB: накопительные счётчики + галерея + загрузки фото."""
+    """Стенд WB: галерея + загрузки фото (статистика теперь читается из БД)."""
 
     def __init__(self):
-        self.cum_views = 0
-        self.cum_clicks = 0
-        self.org_open = 0
         self.gallery = [{"big": "u1"}, {"big": "u2"}]
         self.uploads: list[bytes] = []
         self.storage: dict[str, bytes] = {}
-
-    async def fetch_adv(self, key, campaign_id, nm_id, day):
-        return {
-            "views": self.cum_views, "clicks": self.cum_clicks,
-            "atbs": 0, "orders": 0, "spend": 0.0, "orders_sum": 0.0,
-        }
-
-    async def fetch_org(self, key, day, nm_id):
-        return {"open": self.org_open, "cart": 0, "orders": 0, "orders_sum": 0.0}
 
     async def fetch_card(self, key, nm_id):
         return {"title": "Тестовый товар", "vendor_code": "vc-1", "photos": self.gallery}
@@ -257,14 +245,14 @@ async def test_full_lifecycle_rotation_and_finish(db_session, project, monkeypat
     """Черновик → 2 фото → старт → тики: ротация по кругам → финиш с возвратом оригинала."""
     from datetime import timedelta as _td
 
+    from datetime import date as _date
+
+    from backend.models import WbAdNmDaily, WbFunnelDaily
+
     import backend.integrations.wb_content_api as content_api
     import backend.services.funnel.ab_photo_tests as svc
-    import backend.services.funnel.wb_advertising_api as adv_api
-    import backend.services.funnel.wb_funnel_api as funnel_api
 
     wb = _FakeWb()
-    monkeypatch.setattr(adv_api, "fetch_ad_stats_today_nm", wb.fetch_adv)
-    monkeypatch.setattr(funnel_api, "fetch_funnel_nm", wb.fetch_org)
     monkeypatch.setattr(content_api, "fetch_card", wb.fetch_card)
     monkeypatch.setattr(content_api, "upload_main_photo", wb.upload)
     monkeypatch.setattr(svc, "_put_photo", wb.put_photo)
@@ -279,6 +267,21 @@ async def test_full_lifecycle_rotation_and_finish(db_session, project, monkeypat
     t0 = datetime(2026, 7, 13, 8, 0, 0)
     now = {"v": t0}
     monkeypatch.setattr(svc, "utcnow", lambda: now["v"])
+
+    day = _date(2026, 7, 13)  # МСК-день всех тиков в этом сценарии
+    adv_daily = WbAdNmDaily(project_id=project.id, campaign_id=222, nm_id=111, date=day)
+    org_daily = WbFunnelDaily(project_id=project.id, nm_id=111, date=day)
+    db_session.add_all([adv_daily, org_daily])
+    await db_session.commit()
+
+    def set_cum(views=None, clicks=None, org_open=None):
+        """Обновить накопительные суточные счётчики — как это делает ежечасный синк."""
+        if views is not None:
+            adv_daily.views = views
+        if clicks is not None:
+            adv_daily.clicks = clicks
+        if org_open is not None:
+            org_daily.open_card = org_open
 
     # Черновик: контроль скачан с CDN и лёг в MinIO
     test = await svc.create_test(
@@ -298,7 +301,7 @@ async def test_full_lifecycle_rotation_and_finish(db_session, project, monkeypat
     control_id = test.active_variant_id
 
     # Тик 1: показов мало (50 < 100), время не вышло → без ротации
-    wb.cum_views, wb.cum_clicks, wb.org_open = 50, 3, 40
+    set_cum(views=50, clicks=3, org_open=40)
     now["v"] = t0 + _td(minutes=10)
     await svc.tick_project(db_session, project.id)
     await db_session.refresh(test)
@@ -313,7 +316,7 @@ async def test_full_lifecycle_rotation_and_finish(db_session, project, monkeypat
     assert len(wb.uploads) == 1
 
     # Тик 3: большой трафик — 100+ показов за 10 минут → ДОСРОЧНАЯ смена по показам
-    wb.cum_views += 150
+    set_cum(views=(adv_daily.views or 0) + 150)
     now["v"] = now["v"] + _td(minutes=10)
     await svc.tick_project(db_session, project.id)
     await db_session.refresh(test)
@@ -324,9 +327,11 @@ async def test_full_lifecycle_rotation_and_finish(db_session, project, monkeypat
     for i in range(20):
         if test.status != "running":
             break
-        wb.cum_views += 400
-        wb.cum_clicks += 20 + i  # разный CTR по кругам
-        wb.org_open += 30
+        set_cum(
+            views=(adv_daily.views or 0) + 400,
+            clicks=(adv_daily.clicks or 0) + 20 + i,  # разный CTR по кругам
+            org_open=(org_daily.open_card or 0) + 30,
+        )
         now["v"] = now["v"] + _td(minutes=35)
         await svc.tick_project(db_session, project.id)
         await db_session.refresh(test)
@@ -341,7 +346,7 @@ async def test_full_lifecycle_rotation_and_finish(db_session, project, monkeypat
     # каждый невыключенный вариант набрал цель
     assert all(pv["views"] >= 1000 for pv in per_variant.values())
     # органика разложилась по кругам
-    assert sum(pv["organic_open"] for pv in per_variant.values()) == wb.org_open
+    assert sum(pv["organic_open"] for pv in per_variant.values()) == (org_daily.open_card or 0)
     # все круги закрыты
     assert all(r["ended_at"] for r in results["rounds"])
 
@@ -352,10 +357,12 @@ async def test_finish_restore_failure_pauses_instead_of_finishing(db_session, pr
     после оживления WB добивает финиш и возвращает оригинал."""
     from datetime import timedelta as _td
 
+    from datetime import date as _date
+
+    from backend.models import WbAdNmDaily, WbFunnelDaily
+
     import backend.integrations.wb_content_api as content_api
     import backend.services.funnel.ab_photo_tests as svc
-    import backend.services.funnel.wb_advertising_api as adv_api
-    import backend.services.funnel.wb_funnel_api as funnel_api
     from backend.integrations.wb_content_api import WbContentError
 
     wb = _FakeWb()
@@ -366,8 +373,6 @@ async def test_finish_restore_failure_pauses_instead_of_finishing(db_session, pr
             raise WbContentError("WB media/file: 500")
         wb.uploads.append(content)
 
-    monkeypatch.setattr(adv_api, "fetch_ad_stats_today_nm", wb.fetch_adv)
-    monkeypatch.setattr(funnel_api, "fetch_funnel_nm", wb.fetch_org)
     monkeypatch.setattr(content_api, "fetch_card", wb.fetch_card)
     monkeypatch.setattr(content_api, "upload_main_photo", flaky_upload)
     monkeypatch.setattr(svc, "_put_photo", wb.put_photo)
@@ -382,6 +387,21 @@ async def test_finish_restore_failure_pauses_instead_of_finishing(db_session, pr
     t0 = datetime(2026, 7, 13, 8, 0, 0)
     now = {"v": t0}
     monkeypatch.setattr(svc, "utcnow", lambda: now["v"])
+
+    day = _date(2026, 7, 13)  # МСК-день всех тиков в этом сценарии
+    adv_daily = WbAdNmDaily(project_id=project.id, campaign_id=222, nm_id=111, date=day)
+    org_daily = WbFunnelDaily(project_id=project.id, nm_id=111, date=day)
+    db_session.add_all([adv_daily, org_daily])
+    await db_session.commit()
+
+    def set_cum(views=None, clicks=None, org_open=None):
+        """Обновить накопительные суточные счётчики — как это делает ежечасный синк."""
+        if views is not None:
+            adv_daily.views = views
+        if clicks is not None:
+            adv_daily.clicks = clicks
+        if org_open is not None:
+            org_daily.open_card = org_open
 
     test = await svc.create_test(
         db_session, project.id, nm_id=111, campaign_id=222,
@@ -411,3 +431,46 @@ async def test_finish_restore_failure_pauses_instead_of_finishing(db_session, pr
     assert test.pause_reason is None
     assert test.active_variant_id != v1.id
     assert wb.uploads[-1] == b"ORIGINAL"
+
+
+async def test_running_test_campaigns_prioritized_in_sync_order(db_session, project, monkeypatch):
+    """Кампании активных АБ-тестов поднимаются в голову очереди fetch_ad_stats:
+    на больших кабинетах TIME_BUDGET скипает хвост чанков — тестовая кампания
+    обязана попадать в первый чанк, иначе тест слепнет (прод-инцидент 16.07)."""
+    import backend.integrations.wb_content_api as content_api
+    import backend.services.funnel.ab_photo_tests as svc
+
+    wb = _FakeWb()
+    monkeypatch.setattr(content_api, "fetch_card", wb.fetch_card)
+    monkeypatch.setattr(svc, "_put_photo", wb.put_photo)
+    monkeypatch.setattr(svc, "_download_wb_photo", wb.download_wb)
+
+    async def fake_keys(db, project_id):
+        return "content-key", "adv-key", "analytics-key"
+
+    monkeypatch.setattr(svc, "_get_keys", fake_keys)
+
+    test = await svc.create_test(db_session, project.id, nm_id=111, campaign_id=555)
+    await svc.add_variant(db_session, project.id, test.id, _jpeg_bytes())
+    await svc.start_test(db_session, project.id, test.id)
+
+    # воспроизводим переупорядочивание из sync.py
+    from sqlalchemy import select as _select
+
+    from backend.models import AbPhotoTest
+
+    campaign_ids = [111111, 222222, 555, 333333]
+    ab_campaigns = set(
+        (
+            await db_session.execute(
+                _select(AbPhotoTest.campaign_id).where(
+                    AbPhotoTest.project_id == project.id,
+                    AbPhotoTest.status == "running",
+                    AbPhotoTest.is_deleted == False,  # noqa: E712
+                ).limit(100)
+            )
+        ).scalars().all()
+    )
+    reordered = [c for c in campaign_ids if c in ab_campaigns] + [c for c in campaign_ids if c not in ab_campaigns]
+    assert reordered[0] == 555
+    assert sorted(reordered) == sorted(campaign_ids)

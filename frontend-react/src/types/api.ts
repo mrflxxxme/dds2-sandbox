@@ -1896,6 +1896,27 @@ export interface WbSupplyState {
 }
 
 // Компактная WB-сводка в строке списка заявок (F1/F2).
+/** Итог одной заявки в фоновом батч-заносе преордеров WB. */
+export interface WbBulkPreorderItemResult {
+  assembly_id: number;
+  number: string;
+  ok: boolean;
+  /** «Преордер 123…» / текст ошибки / «уже заведена». */
+  note: string | null;
+}
+
+/** Статус фонового батч-заноса преордеров WB (по одной с паузой ~10с). */
+export interface WbBulkPreorderStatus {
+  running: boolean;
+  total: number;
+  done: number;
+  current_assembly_id: number | null;
+  interval_sec: number;
+  results: WbBulkPreorderItemResult[];
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 export interface WbSupplyStateBrief {
   sync_status: WbSupplySyncStatus;
   wb_supply_state: string | null;
@@ -3441,6 +3462,7 @@ export interface AdsManagerCampaign {
   rev_yesterday: number;  // сумма заказов товаров кампании ВЧЕРА (для «ДРР план» = rev_yesterday × целевой ДРР%)
   budget_gap: number;  // недобор бюджета до конца дня, ₽ (0 — бюджет не исчерпан сегодня)
   bid_mode?: string | null;  // для CPM: 'unified' (единая) / 'manual' (ручная); пока не синкается
+  default_bid?: number | null;  // ставка кампании ₽ по активной зоне (для инлайн-правки в списке); null — WB не отдал/не синкано
   updated_at: string | null;
 }
 
@@ -3469,6 +3491,16 @@ export interface AdsAutopayLogEntry {
   budget_before: number | null;
   budget_after: number | null;
   reason: string | null;  // текст ошибки WB, если была
+}
+
+// Единая лента движения бюджета из данных, парсимых из WB (пополнения + списания)
+export interface BudgetLedgerEntry {
+  ts: string;  // ISO UTC
+  kind: 'campaign_topup' | 'account_topup' | 'charge';  // пополнение кампании / счёта / списание
+  amount: number;  // ₽ со знаком: + пополнение, − списание
+  campaign_id: number | null;  // null у пополнений счёта (уровень аккаунта)
+  source: string;
+  note: string | null;
 }
 
 /** Результат смены статуса кампании (запуск/пауза) в WB. */
@@ -3502,13 +3534,43 @@ export interface AdsBudgetGap {
   brands: string[];
   subjects: string[];
   spend_today: number;
-  ran_out_at: string | null;  // null = кончился до первого синка (час неизвестен)
+  ran_out_at: string | null;  // null = кончился до первого синка / прогноз (ещё не кончился)
+  predicted: boolean;             // true — риск по истории (кампания сегодня ещё крутится), не факт
+  typical_stop_hour: number | null;  // медиана часа остановки за окно, МСК (дробный) — «обычно ~15:00»
+  runout_days: number;            // дней-остановок за окно
+  active_days: number;            // дней с расходом за окно
   burn_rate: number;
   needed_till_midnight: number;  // с учётом минимума пополнения WB (1000 ₽)
   raw_needed: number;  // расчётная нужда без учёта минимума
   min_topup: number;
   hours_active: number;
   remaining_hours: number;
+  // «Реальные возможности»: медиана экстраполяции дней-остановок (скорость × 24 ч)
+  potential_daily: number | null;  // потенциал полного дня, ₽ (null — нет данных для оценки)
+  full_days: number;               // сколько дней в медиане потенциала
+  window_days: number;             // окно поиска, дней
+  needed_potential: number;        // долить до потенциала сегодня, ₽ (с минимумом WB)
+  raw_needed_potential: number;    // потенциал − потрачено сегодня, без минимума
+}
+
+export interface AdsBudgetGapHistoryDay {
+  date: string;             // YYYY-MM-DD (МСК)
+  spend: number;            // расход за день, ₽
+  views: number;
+  clicks: number;
+  ran_out: boolean;         // кончился ли бюджет в этот день
+  ran_out_at: string | null;  // ISO МСК момента остановки (null — не останавливалась/час неизвестен)
+  shortfall: number;        // недобор за день, ₽: экстраполяция скорости до 24:00 (0 — если день полный)
+}
+
+export interface AdsBudgetGapHistory {
+  campaign_id: number;
+  window_days: number;
+  potential_daily: number | null;  // потенциал полного дня, ₽
+  full_days: number;               // сколько полных дней в базе потенциала
+  days_ran_out: number;            // дней с исчерпанным бюджетом за окно
+  total_shortfall: number;         // суммарный недобор за окно, ₽
+  days: AdsBudgetGapHistoryDay[];  // от свежих к старым
 }
 
 export interface AdCampaign {
@@ -3539,7 +3601,8 @@ export interface AdTabProduct {
   ctr: number;
   cpc: number;
   cpm: number;
-  drr: number;
+  /** null = расход есть, заказов нет (ДРР бесконечен) — хуже любого порога */
+  drr: number | null;
   abc_revenue: string;
   abc_profit: string;
   bdr_revenue: number;
@@ -3587,6 +3650,14 @@ export interface SearchCluster {
   is_minused?: boolean;  // только в разрезе кампании; в категории отсутствует
   bid?: number | null;   // текущая ставка CPM по кластеру, ₽ (null — не задана)
   locked?: boolean;      // views < 100 — WB не даёт ставку/минус («стадия сбора данных»)
+  biddable?: boolean;    // фраза зафиксирована (WB принимает пофразовую ставку); false — broad-match, ставка невозможна
+  // «Паспорт ставки»: с какого дня стоит текущая ставка и от каких данных её считали.
+  // null — паспорта нет (ставку не через нас ставили / сменили вне приложения / сброшена).
+  bid_set_at?: string | null;    // ISO-дата применения текущей ставки
+  bid_days?: number | null;      // дней стоит (для колонки «Стоит» и порога зрелости 7 дн)
+  bid_source?: string | null;    // recommendation | manual
+  bid_basis_drr?: number | null; // ДРР фразы на момент применения, %
+  bid_basis_cpm?: number | null; // оплаченная CPM на момент, ₽
 }
 
 export interface ClusterTotals {
@@ -3631,6 +3702,7 @@ export interface CampaignZones {
   lock_reason?: string | null;  // почему нельзя — показываем в подсказке у тумблера
   single_bid: boolean;    // ставка одна: на все зоны (CPM-единая) или на все фразы (CPC)
   zone_stats?: CampaignZoneStats | null;  // только для CPC: зона одна, данные прямые
+  min_bids?: { search: number | null; recommendations: number | null };  // аукционный «пол» ПО ЗОНАМ, ₽ (справочно; null — узнать не удалось)
   error?: string;
 }
 
@@ -3822,9 +3894,30 @@ export interface ClusterMinusResult {
 export interface ClusterBidResult {
   ok: boolean;
   norm_query?: string;
-  bid?: number | null;
+  bid?: number | null;  // фактически применённая ставка ₽ (может быть минимумом WB)
+  adjusted?: boolean;  // WB поднял ставку до своего минимума
+  verified?: boolean | null;  // перечитано из WB: true — применилась, false — не подтвердилась, null — не проверяли
+  unsupported?: boolean;  // тип кампании не поддерживает пофразовую ставку (гейт до записи в WB)
   campaigns?: number;
   error?: string;
+}
+
+/** Результат ОДНОЙ фразы в массовой ставке. */
+export interface ClusterBidBulkItemResult {
+  norm_query: string;
+  ok: boolean;
+  bid?: number | null;  // фактически применённая ставка ₽ (может быть минимумом WB)
+  error?: string | null;
+}
+
+/** Ответ массовой ставки по кластерам (пачкой, одним запросом). */
+export interface ClusterBidBulkResult {
+  ok: boolean;
+  results?: ClusterBidBulkItemResult[];
+  applied?: number;       // сколько фраз применилось
+  failed?: string[];      // norm_query отбитых
+  unsupported?: boolean;  // тип кампании не поддерживает пофразовую ставку (гейт до записи)
+  error?: string;         // общая ошибка (нет кампании/ключа/гейт)
 }
 
 export interface ProductClusterCampaign {
@@ -5043,6 +5136,35 @@ export interface AssemblyDraftDistribution {
   /** РУЧНЫЕ SKU (nm_id): план правлен в матрице-редакторе (степпер/✕) — авто-синк
    *  расчёта такие SKU не трогает, пока юзер не вернёт SKU «в авто». */
   manual_nms?: number[];
+  /** КАТЕГОРИЙНЫЙ СКОУП черновика: «эффективные категории» (override ?? subject).
+   *  null/[] = обычный черновик. Скоупленный заполняется/распределяется только по
+   *  этим категориям; его содержимое резервирует сток от других черновиков. */
+  category_scope?: string[] | null;
+  /** Ограничение ФФ-источника скоупленного черновика (id склада). null = все ФФ. */
+  scope_ff_id?: number | null;
+}
+
+/** Группа категорий, которым разрешено ехать на одной смешанной BOX-паллете. */
+export interface PalletCompatGroup {
+  name?: string | null;
+  categories: string[];
+}
+
+/** Правила совместимости категорий на паллете (строгий режим).
+ *  enabled=false — правила выключены (любые SKU миксуются, как раньше).
+ *  enabled=true — каждая эффективная категория едет только своей паллетой;
+ *  groups разрешают перечисленным категориям грузиться вместе.
+ *  Действует только на BOX; моно (≤3 артикулов) не трогаем. */
+export interface PalletCategoryCompat {
+  enabled: boolean;
+  groups: PalletCompatGroup[];
+}
+
+/** Резерв стока черновиками: barcode → { ff_warehouse_id(str) → qty }.
+ *  Σ rows.src + prebook.src + handed_units.items всех не-удалённых черновиков
+ *  проекта (кроме exclude_draft_id). Вычитается из доступного при расчётах. */
+export interface DraftsReservedResponse {
+  reserved: Record<string, Record<string, number>>;
 }
 
 /** Ссылка на заявку-юнит черновика (hand-off / revert / commit).
@@ -5693,6 +5815,9 @@ export interface FulfillmentStatus {
   /** migfull: GUID кабинета */
   tenant_guid: string | null;
   last_sync_at: string | null;
+  /** Складом управляет оператор ФФ-портала (напр. Хамза): сборки видны ему
+   *  в /ff/* автоматически — отдельная «заявка ФФ» не нужна. */
+  has_portal_operator?: boolean;
 }
 
 export interface FulfillmentConnectPayload {
@@ -6305,6 +6430,8 @@ export interface RawSource {
   rows: number | null;
   first_date: string | null;
   last_date: string | null;
+  /** когда данные обновлялись у нас (MAX(freshness_field)); null → считать по last_date */
+  fresh_at?: string | null;
   progress: RawRefreshProgress | null;
 }
 

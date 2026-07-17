@@ -43,6 +43,7 @@ from backend.integrations.wb_portal_client import (
     WbPortalError,
     WbSessionExpired,
 )
+from backend.database import AsyncSessionLocal
 from backend.utils.phone import normalize_ru_phone
 from backend.utils.time import utcnow
 
@@ -1248,5 +1249,149 @@ def _match_supply(supplies: list, preorder_id: int) -> int | None:
             val = s.get("supplyId") or s.get("id")
             return int(val) if val else None
     return None
+
+
+# ─── Фоновый батч-занос преордеров (по одной с паузой — кабинет не любит частые) ──
+
+_BULK_PREORDER_INTERVAL_SEC = 10.0
+_BULK_PREORDER_MAX = 100
+# project_id → снапшот джоба (in-memory: пропадает при рестарте — фронт это
+# переживает, per-заявка итоги durable в AssemblyWbSupply.sync_status).
+_bulk_preorder_jobs: dict[int, dict] = {}
+# Strong-ref на фоновые таски: event loop держит таск weak-ref'ом — без якоря
+# GC может убить батч посреди прогона (CPython docs про create_task).
+_bulk_preorder_tasks: set[asyncio.Task] = set()
+
+
+class WbBulkAlreadyRunning(WbSupplyError):
+    """Батч-занос уже идёт по проекту (роутер отдаёт 409, не 400)."""
+
+
+def get_bulk_preorder_status(project_id: int) -> dict:
+    """Снапшот последнего батча проекта (WbBulkPreorderStatus-shaped)."""
+    job = _bulk_preorder_jobs.get(project_id)
+    if not job:
+        return {"running": False, "interval_sec": _BULK_PREORDER_INTERVAL_SEC}
+    return job
+
+
+async def start_bulk_preorder(db: AsyncSession, project_id: int, assembly_ids: list[int]) -> dict:
+    """Запустить фоновый батч-занос преордеров: по одной заявке с паузой ~10с.
+
+    Заявки с уже заведённым преордером скипаются (повторный create_preorder
+    создал бы дубль в кабинете). Один активный батч на проект (иначе 409 в
+    роутере). Джоб — asyncio-таск в api-процессе: живёт после ответа, гибнет
+    на рестарте (незанесённые просто останутся без преордера — видно в списке).
+    """
+    job = _bulk_preorder_jobs.get(project_id)
+    if job and job.get("running"):
+        raise WbBulkAlreadyRunning("Батч-занос уже идёт — дождись завершения (статус в модалке/списке)")
+    ids = list(dict.fromkeys(assembly_ids))[:_BULK_PREORDER_MAX]
+    if not ids:
+        raise WbSupplyError("Пустой список заявок")
+    # TOCTOU-гард: бронируем слот СИНХРОННО, до первого await — иначе два
+    # одновременных POST (двойной клик/две вкладки) проходят проверку выше и
+    # оба стартуют батч → дубли преордеров в кабинете WB.
+    placeholder: dict = {
+        "running": True,
+        "total": len(ids),
+        "done": 0,
+        "current_assembly_id": None,
+        "interval_sec": _BULK_PREORDER_INTERVAL_SEC,
+        "results": [],
+        "started_at": utcnow(),
+        "finished_at": None,
+    }
+    _bulk_preorder_jobs[project_id] = placeholder
+    try:
+        rows = (
+            await db.execute(
+                select(AssemblyRequest.id, AssemblyRequest.number)
+                .where(
+                    AssemblyRequest.project_id == project_id,
+                    AssemblyRequest.id.in_(ids),
+                    AssemblyRequest.is_deleted == False,  # noqa: E712
+                )
+                .limit(_BULK_PREORDER_MAX)
+            )
+        ).all()
+        number_by_id = {r.id: r.number for r in rows}
+        # Уже заведённые (есть preorder_id, не ERROR) — скип с пометкой, не дублируем.
+        links = (
+            await db.execute(
+                select(AssemblyWbSupply.assembly_request_id, AssemblyWbSupply.preorder_id, AssemblyWbSupply.sync_status)
+                .where(
+                    AssemblyWbSupply.project_id == project_id,
+                    AssemblyWbSupply.assembly_request_id.in_(list(number_by_id)),
+                )
+                .limit(_BULK_PREORDER_MAX)
+            )
+        ).all()
+    except BaseException:
+        # Валидация не удалась — освобождаем забронированный слот, иначе проект
+        # навсегда заблокирован «идущим» батчем, который не стартовал.
+        _bulk_preorder_jobs.pop(project_id, None)
+        raise
+    already = {
+        link.assembly_request_id: link.preorder_id
+        for link in links
+        if link.preorder_id and link.sync_status != WbSupplySyncStatus.ERROR.value
+    }
+    results: list[dict] = []
+    todo: list[tuple[int, str]] = []
+    for aid in ids:
+        number = number_by_id.get(aid)
+        if number is None:
+            results.append({"assembly_id": aid, "number": "—", "ok": False, "note": "Заявка не найдена"})
+        elif aid in already:
+            results.append({"assembly_id": aid, "number": number, "ok": True, "note": f"Уже заведена (преордер {already[aid]})"})
+        else:
+            todo.append((aid, number))
+    job = placeholder
+    job["running"] = bool(todo)
+    job["done"] = len(results)
+    job["results"] = results
+    job["finished_at"] = None if todo else utcnow()
+    if todo:
+        # Отпускаем транзакцию запуска до старта фонового таска (валидация — чтения).
+        await db.commit()
+        task = asyncio.create_task(_run_bulk_preorder(project_id, todo))
+        _bulk_preorder_tasks.add(task)
+        task.add_done_callback(_bulk_preorder_tasks.discard)
+    return job
+
+
+async def _run_bulk_preorder(project_id: int, todo: list[tuple[int, str]]) -> None:
+    """Фоновый прогон: каждая заявка — своя короткая сессия, между ними пауза."""
+    job = _bulk_preorder_jobs[project_id]
+    try:
+        for i, (aid, number) in enumerate(todo):
+            job["current_assembly_id"] = aid
+            ok, note = False, "Ошибка"
+            try:
+                async with AsyncSessionLocal() as db:
+                    link = await create_preorder(db, project_id, aid, None)
+                if link.sync_status == WbSupplySyncStatus.ERROR.value:
+                    note = link.last_error or "Ошибка WB"
+                else:
+                    ok = True
+                    note = f"Преордер {link.preorder_id}" if link.preorder_id else "Заведена"
+            except asyncio.CancelledError:
+                job["results"].append({"assembly_id": aid, "number": number, "ok": False, "note": "Прервано рестартом"})
+                job["done"] += 1
+                raise
+            except WbSupplyError as e:
+                note = str(e)[:200]
+            except Exception as e:  # заявка не валит остальной батч
+                logger.warning("bulk_preorder.item_failed", project_id=project_id, assembly_id=aid, error=str(e)[:200])
+                note = f"{type(e).__name__}: {e}"[:200]
+            job["results"].append({"assembly_id": aid, "number": number, "ok": ok, "note": note})
+            job["done"] += 1
+            if i < len(todo) - 1:
+                await asyncio.sleep(_BULK_PREORDER_INTERVAL_SEC)
+    finally:
+        job["current_assembly_id"] = None
+        job["running"] = False
+        job["finished_at"] = utcnow()
 
 

@@ -550,6 +550,192 @@ input[type="number"] {
     box-shadow: 0 2px 8px rgba(0, 113, 227, 0.3);
 }
 
+/* ─── Changelog Bell ────────────────────────────────────────────────────────── */
+
+/* Логотип + колокольчик в одну строку: сайдбар скроллится, шапка должна быть видна сразу */
+.sidebar-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-right: 16px;
+    flex-shrink: 0;
+}
+
+.changelog-bell-btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--color-text-dim);
+    transition: background 0.2s ease, color 0.2s ease;
+}
+
+.changelog-bell-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text);
+}
+
+.changelog-bell-count {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 24px;
+    background: var(--color-danger);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 16px;
+    text-align: center;
+}
+
+.changelog-panel {
+    position: fixed;
+    z-index: 120;
+    width: 380px;
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    /* Панель висит над контентом страницы — фон плотный, иначе цифры под ней просвечивают */
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 20px;
+    box-shadow: inset 0 1px 0 0 var(--color-border-inner), var(--shadow-glass-hover);
+    overflow: hidden;
+}
+
+.changelog-panel-head {
+    padding: 20px 20px 12px;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.changelog-panel-title {
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--color-text);
+}
+
+.changelog-panel-sub {
+    font-size: 13px;
+    color: var(--color-text-muted);
+    margin-top: 2px;
+}
+
+.changelog-panel-body {
+    overflow-y: auto;
+    padding: 8px 12px 12px;
+}
+
+.changelog-group-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-dim);
+    padding: 12px 8px 4px;
+}
+
+.changelog-item {
+    border-radius: 12px;
+    transition: background 0.2s ease;
+}
+
+.changelog-item:hover,
+.changelog-item.expanded {
+    background: var(--color-bg-hover);
+}
+
+.changelog-item-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    width: 100%;
+    padding: 12px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+}
+
+.changelog-item-main {
+    flex: 1;
+    min-width: 0;
+}
+
+.changelog-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.changelog-item-section {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--color-text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.changelog-item-title {
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.35;
+    color: var(--color-text);
+}
+
+.changelog-item-dot {
+    width: 6px;
+    height: 6px;
+    margin-top: 8px;
+    border-radius: 50%;
+    background: var(--color-danger);
+    flex-shrink: 0;
+}
+
+.changelog-item-body {
+    padding: 0 12px 12px;
+}
+
+.changelog-item-text {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--color-text-muted);
+}
+
+.changelog-item-impact {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--color-text-muted);
+    margin-top: 8px;
+}
+
+.changelog-item-impact-label {
+    font-weight: 600;
+    color: var(--color-text);
+}
+
+.changelog-item-link {
+    margin-top: 12px;
+}
+
+.changelog-empty {
+    padding: 24px 12px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--color-text-dim);
+}
+
 /* ─── Main Content ──────────────────────────────────────────────────────────── */
 
 .main-content {

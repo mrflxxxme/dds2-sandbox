@@ -562,6 +562,39 @@ async def test_commit_draft_one_source_two_targets(db_session):
 
 
 @pytest.mark.asyncio
+async def test_commit_draft_notifies_ff_portal(db_session, monkeypatch):
+    """Коммит черновика шлёт notify_new_ff_assembly по каждой созданной заявке —
+    оператор ФФ-портала (напр. Хамза) узнаёт о новой сборке (для складов без
+    привязанного чата уведомление — no-op внутри notify)."""
+    from backend.services import fulfillment_notify
+
+    calls: list[tuple[int, object, int | None]] = []
+
+    async def fake_notify(db, project_id, warehouse_id, *, assembly_number, warehouse_name=None, qty=None, wb_number=None):
+        calls.append((warehouse_id, assembly_number, qty))
+
+    monkeypatch.setattr(fulfillment_notify, "notify_new_ff_assembly", fake_notify)
+
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=111,
+            barcode=TEST_BARCODE_1,
+            src={str(wh_a): 10},
+            tgt={"Электросталь": 6, "Казань": 4},
+        )
+    ]
+    payload = _build_payload([wh_a], ["Электросталь", "Казань"], rows, pallets=1, weight=10.0, eta="2026-06-15")
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert len(resp.created_request_ids) == 2
+    assert len(calls) == 2
+    assert {c[0] for c in calls} == {wh_a}
+    assert sorted(c[2] or 0 for c in calls) == [4, 6]
+
+
+@pytest.mark.asyncio
 async def test_commit_draft_pallet_counts_per_request(db_session):
     """pallet_counts проставляет паллеты per-request по ключу «ff::wb::pkg»;
     отсутствующий ключ → плоский distribution.pallets_count (fallback)."""
@@ -1452,6 +1485,80 @@ async def test_delete_unit_auto_clears_empty_draft(db_session, setup_newcomer_no
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
     await assembly_draft_service.delete_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
     assert await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id) is None
+
+
+@pytest.mark.asyncio
+async def test_commit_unit_keeps_draft_alive_when_prebook_remains(db_session, setup_newcomer_nomenclature):
+    """Коммит ПОСЛЕДНЕГО юнита при непустой предброни НЕ удаляет черновик.
+
+    Предбронь — зарезервированные целые коробы, ждущие паллету; она участвует в
+    GET /assembly/drafts/reserved. Инвариант «prebook держит черновик живым»
+    commit_draft соблюдает — юнит-пути обязаны тоже, иначе предбронь и её
+    межчерновичный резерв молча исчезают вместе с черновиком."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=REGULAR_NM_ID,
+            barcode=REGULAR_BARCODE,
+            src={str(wh_a): 7},
+            tgt={"Электросталь": 7},
+            package_type="BOX",
+        )
+    ]
+    payload = _build_payload([wh_a], ["Электросталь"], rows)
+    payload.distribution.prebook = [
+        AssemblyDraftRow(
+            nm_id=REGULAR_NM_ID,
+            barcode=REGULAR_BARCODE,
+            src={str(wh_a): 40},
+            tgt={"Казань": 40},
+            package_type="BOX",
+        )
+    ]
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    resp = await assembly_draft_service.commit_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
+    assert len(resp.created_request_ids) == 1
+
+    alive = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    assert alive is not None, "черновик с живой предбронью удалён — предбронь потеряна"
+    dist = AssemblyDraftDistribution.model_validate(alive.distribution)
+    assert dist.rows == [] and dist.handed_units == []
+    assert len(dist.prebook) == 1 and dist.prebook[0].src == {str(wh_a): 40}
+
+
+@pytest.mark.asyncio
+async def test_delete_unit_keeps_draft_alive_when_prebook_remains(db_session, setup_newcomer_nomenclature):
+    """Удаление последнего юнита при непустой предброни НЕ удаляет черновик."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=REGULAR_NM_ID,
+            barcode=REGULAR_BARCODE,
+            src={str(wh_a): 7},
+            tgt={"Электросталь": 7},
+            package_type="BOX",
+        )
+    ]
+    payload = _build_payload([wh_a], ["Электросталь"], rows)
+    payload.distribution.prebook = [
+        AssemblyDraftRow(
+            nm_id=REGULAR_NM_ID,
+            barcode=REGULAR_BARCODE,
+            src={str(wh_a): 40},
+            tgt={"Казань": 40},
+            package_type="BOX",
+        )
+    ]
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    await assembly_draft_service.delete_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
+
+    alive = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    assert alive is not None, "черновик с живой предбронью удалён — предбронь потеряна"
+    dist = AssemblyDraftDistribution.model_validate(alive.distribution)
+    assert dist.rows == [] and dist.handed_units == []
+    assert len(dist.prebook) == 1 and dist.prebook[0].tgt == {"Казань": 40}
 
 
 @pytest.mark.asyncio
@@ -2529,11 +2636,14 @@ async def test_remove_rows_by_nm(db_session):
 
 @pytest.mark.asyncio
 async def test_remove_rows_clears_handed_units(db_session):
-    """remove_rows_by_nm чистит handed-юниты от удаляемых SKU; пустые юниты дропаются."""
+    """remove_rows_by_nm чистит DRAFT-снимки от удаляемых SKU; пустые юниты дропаются.
+
+    Чистятся только ручные снимки (status='draft') — физически переданные (handed)
+    неприкосновенны, см. test_remove_rows_keeps_handed_status_units."""
     wh_a, _ = await _get_warehouse_ids(db_session)
     handed = [
         HandedUnit(
-            source_ff_id=wh_a, target_wb_name="Электросталь", package_type="BOX", status="handed",
+            source_ff_id=wh_a, target_wb_name="Электросталь", package_type="BOX", status="draft",
             items=[
                 HandedUnitItem(nm_id=111, barcode=TEST_BARCODE_1, vendor_code="", qty=5),
                 HandedUnitItem(nm_id=222, barcode=TEST_BARCODE_2, vendor_code="", qty=3),
@@ -2551,6 +2661,36 @@ async def test_remove_rows_clears_handed_units(db_session):
     dist = AssemblyDraftDistribution.model_validate(updated.distribution)
     assert len(dist.handed_units) == 1  # юнит остался (есть 222)
     assert {it.nm_id for it in dist.handed_units[0].items} == {222}  # 111 вычищен
+
+
+@pytest.mark.asyncio
+async def test_remove_rows_keeps_handed_status_units(db_session):
+    """Физически переданный юнит (status='handed') чистка неликвида НЕ трогает.
+
+    handed — факт выдачи товара оператору ФФ; молчаливое вырезание SKU из него
+    рассинхронизировало бы запись с физикой и отпустило бы резерв /drafts/reserved
+    (та же природа, что гвард delete_draft на handed-юниты)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    handed = [
+        HandedUnit(
+            source_ff_id=wh_a, target_wb_name="Электросталь", package_type="BOX", status="handed",
+            items=[
+                HandedUnitItem(nm_id=111, barcode=TEST_BARCODE_1, vendor_code="", qty=5),
+                HandedUnitItem(nm_id=222, barcode=TEST_BARCODE_2, vendor_code="", qty=3),
+            ],
+        )
+    ]
+    create = AssemblyDraftCreate(
+        name="H2", distribution=AssemblyDraftDistribution(
+            source_warehouse_ids=[wh_a], target_warehouse_names=["Электросталь"], rows=[], handed_units=handed,
+        ),
+    )
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, create)
+
+    updated = await assembly_draft_service.remove_rows_by_nm(db_session, PROJECT_ID, draft.id, [111])
+    dist = AssemblyDraftDistribution.model_validate(updated.distribution)
+    assert len(dist.handed_units) == 1
+    assert {it.nm_id for it in dist.handed_units[0].items} == {111, 222}  # нетронут
 
 
 @pytest.mark.asyncio
@@ -2981,3 +3121,457 @@ async def test_commit_revert_lifo_guard(db_session):
     hist2 = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
     older2 = next(e for e in hist2.events if e.id == older.id)
     assert older2.can_revert is True
+
+
+# ─── Tests: аудит warehouse/assembly/distribute (лейн BE-1) ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_fold_keeps_weight_when_added_weight_zero(db_session):
+    """Fold-долив с нулевым весом черновика НЕ разбавляет проставленный вес паллеты.
+
+    Черновики со страницы распределения несут pallet_weight_kg=0; если у заявки
+    вес уже проставлен (ручной/«Расчётный вес»), взвешивание с нулём занижало бы
+    per-pallet вес (2×150 + 1×0 → «100 кг») при физически выросшем грузе."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    dist = AssemblyDraftDistribution(
+        source_warehouse_ids=[wh_a],
+        target_warehouse_names=["Тула"],
+        rows=[AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 6}, tgt={"Тула": 6})],
+        prebook=[AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_a): 3}, tgt={"Тула": 3})],
+        pallets_count=1,
+        pallet_weight_kg=0.0,
+    )
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, AssemblyDraftCreate(name="W", distribution=dist)
+    )
+    resp1 = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    req_id = resp1.created_request_ids[0]
+
+    # Вес и паллеты проставлены на заявке уже после первого коммита.
+    req = (await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id == req_id))).scalar_one()
+    req.pallets_count = 2
+    req.pallet_weight_kg = Decimal("150.00")
+    await db_session.commit()
+
+    await assembly_draft_service.add_rows_to_draft(
+        db_session, PROJECT_ID, draft.id,
+        [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 4}, tgt={"Тула": 4})],
+    )
+    resp2 = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert resp2.created_request_ids == [req_id]
+
+    await db_session.refresh(req)
+    assert req.pallets_count == 3
+    assert float(req.pallet_weight_kg) == 150.0, "вес паллеты разбавлен нулевым весом черновика"
+
+
+@pytest.mark.asyncio
+async def test_fold_takes_new_weight_when_old_zero(db_session):
+    """Fold: если у заявки вес 0, а долив несёт вес — берём новый (не среднее с нулём)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    dist = AssemblyDraftDistribution(
+        source_warehouse_ids=[wh_a],
+        target_warehouse_names=["Тула"],
+        rows=[AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 6}, tgt={"Тула": 6})],
+        prebook=[AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_a): 3}, tgt={"Тула": 3})],
+        pallets_count=1,
+        pallet_weight_kg=0.0,
+    )
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, AssemblyDraftCreate(name="W0", distribution=dist)
+    )
+    resp1 = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    req_id = resp1.created_request_ids[0]
+
+    # У черновика появился вес (например, пересчёт на фронте) — долив несёт 120 кг.
+    d = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    raw = dict(d.distribution)
+    raw["pallet_weight_kg"] = 120.0
+    d.distribution = raw
+    await db_session.commit()
+
+    await assembly_draft_service.add_rows_to_draft(
+        db_session, PROJECT_ID, draft.id,
+        [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 4}, tgt={"Тула": 4})],
+    )
+    resp2 = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert resp2.created_request_ids == [req_id]
+
+    req = (await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id == req_id))).scalar_one()
+    assert req.pallets_count == 2
+    assert float(req.pallet_weight_kg) == 120.0, "нулевой старый вес должен замениться новым, а не усредняться"
+
+
+def test_carve_unit_keeps_unbalanced_remainder():
+    """_carve_unit_from_rows НЕ выбрасывает остаток несбалансированной строки («!»):
+    опустевшая одна сторона не должна уносить ненулевой остаток другой."""
+    rows = [
+        AssemblyDraftRow(nm_id=555, barcode="BC-U", src={"5": 10}, tgt={"Коледино": 30}, package_type="BOX")
+    ]
+    carved, remaining = assembly_draft_service._carve_unit_from_rows(rows, 5, "Коледино", "BOX")
+    assert carved["BC-U"].qty == 10
+    assert len(remaining) == 1, "остаток несбалансированной строки выброшен целиком"
+    assert remaining[0].src == {}
+    assert remaining[0].tgt == {"Коледино": 20}
+
+
+@pytest.mark.asyncio
+async def test_delete_draft_blocked_when_handed_units(db_session):
+    """delete_draft с handed-юнитом (физически переданный на ФФ товар) → 400,
+    как у delete_unit; после «Вернуть в черновик» удаление проходит."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 5}, tgt={"Электросталь": 5})]
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _build_payload([wh_a], ["Электросталь"], rows)
+    )
+    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
+
+    with pytest.raises(HTTPException) as exc:
+        await assembly_draft_service.delete_draft(db_session, PROJECT_ID, draft.id)
+    assert exc.value.status_code == 400
+    assert "ФФ" in exc.value.detail
+
+    await assembly_draft_service.revert_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
+    await assembly_draft_service.delete_draft(db_session, PROJECT_ID, draft.id)
+    assert await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id) is None
+
+
+@pytest.mark.asyncio
+async def test_commit_draft_invalidates_warehouse_need_cache(db_session, monkeypatch):
+    """commit_draft создаёт заявки, попадающие в «Потребность по складам» (in_assembly)
+    → обязан инвалидировать reports:warehouse_need (паритет с status/crud путями)."""
+    calls: list[str] = []
+
+    async def _fake_invalidate(prefix: str) -> None:
+        calls.append(prefix)
+
+    monkeypatch.setattr(assembly_draft_service, "invalidate_cache", _fake_invalidate)
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    draft = await _make_draft(db_session, wh_a, "Тула", {TEST_BARCODE_1: 5})
+    await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert "reports:warehouse_need" in calls
+
+
+@pytest.mark.asyncio
+async def test_commit_unit_invalidates_warehouse_need_cache(db_session, monkeypatch):
+    """commit_unit — та же инвалидация reports:warehouse_need, что и commit_draft."""
+    calls: list[str] = []
+
+    async def _fake_invalidate(prefix: str) -> None:
+        calls.append(prefix)
+
+    monkeypatch.setattr(assembly_draft_service, "invalidate_cache", _fake_invalidate)
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    draft = await _make_draft(db_session, wh_a, "Тула", {TEST_BARCODE_1: 5})
+    await assembly_draft_service.commit_unit(db_session, PROJECT_ID, draft.id, wh_a, "Тула", "BOX")
+    assert "reports:warehouse_need" in calls
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_unions_manual_nms_and_prebook_origin(db_session):
+    """merge_drafts объединяет manual_nms (✋ ручные решения) и prebook_origin
+    (бейджи «из предброни») всех сливаемых черновиков — иначе авто-синк
+    перезапишет ручной план не-survivor'а."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+
+    def _payload(rows: list[AssemblyDraftRow], manual: list[int], origin: list[str]) -> AssemblyDraftCreate:
+        return AssemblyDraftCreate(
+            name="M",
+            distribution=AssemblyDraftDistribution(
+                source_warehouse_ids=[wh_a],
+                target_warehouse_names=["Тула"],
+                rows=rows,
+                manual_nms=manual,
+                prebook_origin=origin,
+            ),
+        )
+
+    d1 = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID,
+        _payload(
+            [
+                AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 5}, tgt={"Тула": 5}),
+                AssemblyDraftRow(nm_id=333, barcode="BC-333", src={str(wh_a): 1}, tgt={"Тула": 1}),
+            ],
+            [111],
+            ["111::Тула"],
+        ),
+    )
+    d2 = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID,
+        _payload(
+            [AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_a): 3}, tgt={"Тула": 3})],
+            [222, 111],
+            ["222::Тула"],
+        ),
+    )
+    survivor = await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d1.id, d2.id])
+    assert survivor.id == d1.id  # у d1 больше строк
+    dist = AssemblyDraftDistribution.model_validate(survivor.distribution)
+    assert set(dist.manual_nms) == {111, 222}, "manual_nms не-survivor'а потеряны при слиянии"
+    assert set(dist.prebook_origin) == {"111::Тула", "222::Тула"}
+
+
+@pytest.mark.asyncio
+async def test_revert_unit_keeps_barcodes_separate_same_nm(db_session):
+    """«Вернуть в черновик»: два баркода одного nm_id (размерные варианты) обязаны
+    вернуться РАЗДЕЛЬНЫМИ строками — влив по (nm_id, pkg) без barcode приписал бы
+    qty чужому баркоду (commit отгрузил бы чужой физический товар)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 5}, tgt={"Электросталь": 5}),
+        AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_2, src={str(wh_a): 7}, tgt={"Электросталь": 7}),
+    ]
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _build_payload([wh_a], ["Электросталь"], rows)
+    )
+    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
+    read = await assembly_draft_service.revert_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
+
+    by_bc = {r.barcode: r for r in read.distribution.rows}
+    assert set(by_bc) == {TEST_BARCODE_1, TEST_BARCODE_2}, "баркоды одного nm_id слиты в одну строку"
+    assert by_bc[TEST_BARCODE_1].src == {str(wh_a): 5}
+    assert by_bc[TEST_BARCODE_2].src == {str(wh_a): 7}
+    assert by_bc[TEST_BARCODE_2].tgt == {"Электросталь": 7}
+
+
+@pytest.mark.asyncio
+async def test_move_unit_keeps_barcodes_separate_same_nm(db_session):
+    """«Сменить склад WB» без снимка на получателе: возврат в rows per-barcode."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 5}, tgt={"Электросталь": 5}),
+        AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_2, src={str(wh_a): 7}, tgt={"Электросталь": 7}),
+    ]
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _build_payload([wh_a], ["Электросталь"], rows)
+    )
+    read = await assembly_draft_service.move_unit(
+        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", "Казань"
+    )
+    by_bc = {r.barcode: r for r in read.distribution.rows}
+    assert set(by_bc) == {TEST_BARCODE_1, TEST_BARCODE_2}, "баркоды одного nm_id слиты в одну строку"
+    assert by_bc[TEST_BARCODE_1].tgt == {"Казань": 5}
+    assert by_bc[TEST_BARCODE_2].tgt == {"Казань": 7}
+
+
+@pytest.mark.asyncio
+async def test_matrix_edit_event_revertible(db_session):
+    """MATRIX_EDIT (степпер/carve) пишется со снапшотом → обязан быть откатываемым;
+    раньше «неизвестный тип события» блокировал и его, и весь LIFO-стек под ним."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    draft = await _make_draft(db_session, wh_a, "Электросталь", {TEST_BARCODE_1: 10})
+    bumped = AssemblyDraftDistribution(
+        source_warehouse_ids=[wh_a],
+        target_warehouse_names=["Электросталь"],
+        rows=[AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, vendor_code="v", src={str(wh_a): 25}, tgt={"Электросталь": 25})],
+    )
+    await assembly_draft_service.update_draft(
+        db_session, PROJECT_ID, draft.id,
+        AssemblyDraftUpdate(distribution=bumped, event=DraftEventLog(event_type="MATRIX_EDIT", summary="степпер")),
+        changed_by="user",
+    )
+    hist = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    ev = hist.events[0]
+    assert ev.event_type == "MATRIX_EDIT"
+    assert ev.can_revert is True, f"MATRIX_EDIT неоткатываем: {ev.revert_blocked_reason}"
+
+    await draft_history.revert_draft_event(db_session, PROJECT_ID, draft.id, ev.id)
+    d = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    dist = AssemblyDraftDistribution.model_validate(d.distribution)
+    assert sum(dist.rows[0].tgt.values()) == 10
+
+
+@pytest.mark.asyncio
+async def test_remove_rows_event_revertible(db_session):
+    """REMOVE_ROWS (✕ SKU из матрицы) пишется со снапшотом → откат возвращает SKU."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    draft = await _make_draft(db_session, wh_a, "Электросталь", {TEST_BARCODE_1: 10, TEST_BARCODE_2: 4})
+    await assembly_draft_service.remove_rows_by_nm(db_session, PROJECT_ID, draft.id, [111])
+
+    hist = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    ev = hist.events[0]
+    assert ev.event_type == "REMOVE_ROWS"
+    assert ev.can_revert is True, f"REMOVE_ROWS неоткатываем: {ev.revert_blocked_reason}"
+
+    await draft_history.revert_draft_event(db_session, PROJECT_ID, draft.id, ev.id)
+    d = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    dist = AssemblyDraftDistribution.model_validate(d.distribution)
+    assert {r.nm_id for r in dist.rows} == {111, 222}, "откат REMOVE_ROWS не вернул удалённый SKU"
+
+
+@pytest.mark.asyncio
+async def test_commit_revert_blocked_when_any_request_deleted(db_session):
+    """Откат COMMIT_REQUEST блокируется, если ХОТЬ ОДНА из созданных заявок уже
+    удалена (например, объединена с чужой сборкой merge'ем): полный возврат
+    committed_rows задваивал бы количество слитой заявки (в survivor и в черновике)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    # Один коммит → 2 заявки (два направления).
+    rows = [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, vendor_code="v", src={str(wh_a): 10}, tgt={"Тула": 4, "Казань": 6})]
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _build_payload([wh_a], ["Тула", "Казань"], rows)
+    )
+    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert len(resp.created_request_ids) == 2
+
+    # Одну заявку «объединили» (soft-delete, количества уехали в survivor).
+    merged_away = (
+        await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id == resp.created_request_ids[0]))
+    ).scalar_one()
+    merged_away.soft_delete()
+    await db_session.commit()
+
+    hist = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    ev = hist.events[0]
+    assert ev.can_revert is False, "откат разрешён при частично удалённых заявках — задвоение"
+    assert ev.revert_blocked_reason and "удален" in ev.revert_blocked_reason
+
+    with pytest.raises(HTTPException) as exc:
+        await draft_history.revert_draft_event(db_session, PROJECT_ID, draft.id, ev.id)
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_commit_revert_blocked_after_fold(db_session):
+    """Откат COMMIT-события после fold-долива в ту же заявку блокируется: удаление
+    заявки унесло бы и количества ДРУГОГО (неоткаченного) коммита."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    dist = AssemblyDraftDistribution(
+        source_warehouse_ids=[wh_a],
+        target_warehouse_names=["Тула"],
+        rows=[AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 6}, tgt={"Тула": 6})],
+        prebook=[AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_a): 3}, tgt={"Тула": 3})],
+    )
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, AssemblyDraftCreate(name="F", distribution=dist)
+    )
+    resp1 = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    await assembly_draft_service.add_rows_to_draft(
+        db_session, PROJECT_ID, draft.id,
+        [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 4}, tgt={"Тула": 4})],
+    )
+    resp2 = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert resp2.created_request_ids == resp1.created_request_ids  # fold в ту же заявку
+
+    hist = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    assert len(hist.events) == 2
+    newest = hist.events[0]
+    assert newest.can_revert is False, "откат fold-коммита разрешён — удалит и предыдущий коммит"
+    assert newest.revert_blocked_reason and "долив" in newest.revert_blocked_reason
+
+    with pytest.raises(HTTPException) as exc:
+        await draft_history.revert_draft_event(db_session, PROJECT_ID, draft.id, newest.id)
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_commit_revert_merges_rows_when_draft_deleted_by_other_op(db_session):
+    """Черновик пережил коммит (предбронь), потом его удалили delete_draft'ом.
+    Откат коммита обязан вернуть committed_rows merge'ем: rows в БД — состояние
+    ПОСЛЕ коммита (вынесенные строки вырезаны), голый restore() их теряет."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    dist = AssemblyDraftDistribution(
+        source_warehouse_ids=[wh_a],
+        target_warehouse_names=["Тула"],
+        rows=[AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 10}, tgt={"Тула": 10})],
+        prebook=[AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_a): 3}, tgt={"Казань": 3})],
+    )
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, AssemblyDraftCreate(name="DL", distribution=dist)
+    )
+    await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    alive = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    assert alive is not None  # предбронь держит черновик живым, rows вынесены
+
+    await assembly_draft_service.delete_draft(db_session, PROJECT_ID, draft.id)
+
+    hist = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    ev = hist.events[0]
+    assert ev.event_type == "COMMIT_REQUEST"
+    await draft_history.revert_draft_event(db_session, PROJECT_ID, draft.id, ev.id)
+
+    restored = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    assert restored is not None
+    rdist = AssemblyDraftDistribution.model_validate(restored.distribution)
+    assert any(
+        r.barcode == TEST_BARCODE_1 and sum(r.tgt.values()) == 10 for r in rdist.rows
+    ), "committed_rows потеряны: черновик восстановлен без вынесенных строк"
+    assert len(rdist.prebook) == 1  # предбронь пережила цикл
+
+
+@pytest.mark.asyncio
+async def test_snapshot_chain_undo_two_topups(db_session):
+    """Многошаговый undo снапшот-событий: после отката новейшего события предыдущее
+    остаётся откатываемым (подсказка UI «сначала откатите более новое» обязана
+    приводить к работающему откату, а не к вечному «черновик изменился»)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    draft = await _make_draft(db_session, wh_a, "Электросталь", {TEST_BARCODE_1: 10})
+
+    def _dist(qty: int) -> AssemblyDraftDistribution:
+        return AssemblyDraftDistribution(
+            source_warehouse_ids=[wh_a],
+            target_warehouse_names=["Электросталь"],
+            rows=[AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, vendor_code="v", src={str(wh_a): qty}, tgt={"Электросталь": qty})],
+        )
+
+    await assembly_draft_service.update_draft(
+        db_session, PROJECT_ID, draft.id,
+        AssemblyDraftUpdate(distribution=_dist(20), event=DraftEventLog(event_type="PREBOOK_TOPUP", summary="t1")),
+    )
+    await assembly_draft_service.update_draft(
+        db_session, PROJECT_ID, draft.id,
+        AssemblyDraftUpdate(distribution=_dist(30), event=DraftEventLog(event_type="PREBOOK_TOPUP", summary="t2")),
+    )
+
+    hist = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    newest, older = hist.events[0], hist.events[1]
+    await draft_history.revert_draft_event(db_session, PROJECT_ID, draft.id, newest.id)
+
+    hist2 = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    older2 = next(e for e in hist2.events if e.id == older.id)
+    assert older2.can_revert is True, f"цепной undo сломан: {older2.revert_blocked_reason}"
+
+    await draft_history.revert_draft_event(db_session, PROJECT_ID, draft.id, older.id)
+    d = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    dist = AssemblyDraftDistribution.model_validate(d.distribution)
+    assert sum(dist.rows[0].tgt.values()) == 10
+
+
+@pytest.mark.asyncio
+async def test_commit_unit_logs_commit_event_and_revert_restores(db_session):
+    """commit_unit пишет COMMIT_REQUEST (паритет с commit_draft): заявка видна в
+    «🕘 История», откат удаляет её и возвращает позиции юнита в rows."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    dist = AssemblyDraftDistribution(
+        source_warehouse_ids=[wh_a],
+        target_warehouse_names=["Электросталь"],
+        rows=[AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 7}, tgt={"Электросталь": 7})],
+        prebook=[AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_a): 3}, tgt={"Казань": 3})],
+    )
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, AssemblyDraftCreate(name="U", distribution=dist)
+    )
+    resp = await assembly_draft_service.commit_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
+    assert len(resp.created_request_ids) == 1
+
+    hist = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    commit_events = [e for e in hist.events if e.event_type == "COMMIT_REQUEST"]
+    assert commit_events, "commit_unit не пишет COMMIT_REQUEST — заявка невидима в истории"
+    ev = commit_events[0]
+    assert ev.created_request_ids == resp.created_request_ids
+    assert ev.can_revert is True, f"откат заблокирован: {ev.revert_blocked_reason}"
+
+    rev = await draft_history.revert_draft_event(db_session, PROJECT_ID, draft.id, ev.id)
+    assert rev.deleted_request_ids == resp.created_request_ids
+    req = (
+        await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id == resp.created_request_ids[0]))
+    ).scalar_one()
+    assert req.is_deleted is True
+
+    d = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    rdist = AssemblyDraftDistribution.model_validate(d.distribution)
+    assert any(
+        r.barcode == TEST_BARCODE_1 and r.src == {str(wh_a): 7} and r.tgt == {"Электросталь": 7}
+        for r in rdist.rows
+    ), "позиции юнита не вернулись в rows при откате"

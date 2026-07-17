@@ -1,8 +1,8 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
 import type {
-    AdSubject, AdNmCard, CreateCampaignResult, FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsCampaignStateResult, AdsAutopaySaveResult, AdsBudgetGap, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionsResponse, PositionsProgress, CollectPositionsResult, CollectOneResult, CampaignZones,
-    CampaignZonesUpdate, ClusterMinusResult, ClusterBidResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse } from '@/types/api';
+    AdSubject, AdNmCard, CreateCampaignResult, FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, BudgetLedgerEntry, AdsCampaignStateResult, AdsAutopaySaveResult, AdsBudgetGap, AdsBudgetGapHistory, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionsResponse, PositionsProgress, CollectPositionsResult, CollectOneResult, CampaignZones,
+    CampaignZonesUpdate, ClusterMinusResult, ClusterBidResult, ClusterBidBulkResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -124,6 +124,10 @@ export function addFunnelMethods(api: ApiClient) {
         getAdsBudgetGaps() {
             return api.request<AdsBudgetGap[]>('GET', '/api/v1/funnel/campaigns/budget_gaps');
         },
+        getBudgetGapHistory(campaignId: number, days = 30) {
+            const q = new URLSearchParams({ days: String(days) });
+            return api.request<AdsBudgetGapHistory>('GET', `/api/v1/funnel/campaigns/${campaignId}/budget_gap_history?${q.toString()}`);
+        },
         getCampaignHistory(campaignId: number, dateFrom?: string, dateTo?: string) {
             const q = new URLSearchParams();
             if (dateFrom) q.set('date_from', dateFrom);
@@ -187,9 +191,15 @@ export function addFunnelMethods(api: ApiClient) {
         stopPositions(nmId: number) {
             return api.request<{ stopping: boolean }>('POST', `/api/v1/funnel/positions/stop?nm_id=${nmId}`, {});
         },
-        /** Сменить ставку кампании для зоны (Поиск/Рекомендации). Реальные деньги. */
+        /** Сменить ставку кампании для зоны (Поиск/Рекомендации). Реальные деньги.
+         *  adjusted=true — WB поднял ставку до своего минимума (bid — применённая ставка). */
         setCampaignZoneBid(campaignId: number, zone: 'search' | 'recommendations', bid: number) {
-            return api.request<{ ok: boolean; error: string | null; bid: number | null }>('PUT', `/api/v1/funnel/campaigns/${campaignId}/zone-bid`, { zone, bid });
+            return api.request<{ ok: boolean; error: string | null; bid: number | null; adjusted?: boolean; min_bid?: number }>('PUT', `/api/v1/funnel/campaigns/${campaignId}/zone-bid`, { zone, bid });
+        },
+        /** Сменить ставку кампании из списка (инлайн, по активной зоне). Реальные деньги.
+         *  Можно ввести любую ставку — WB поднимет до минимума (adjusted=true, bid — применённая). */
+        setCampaignBid(campaignId: number, bid: number) {
+            return api.request<{ ok: boolean; error: string | null; bid: number | null; adjusted?: boolean; min_bid?: number }>('PUT', `/api/v1/funnel/campaigns/${campaignId}/bid`, { bid });
         },
         /** Ручное пополнение бюджета кампании (реальные деньги). */
         depositCampaignBudget(campaignId: number, amount: number, source = 0) {
@@ -248,8 +258,19 @@ export function addFunnelMethods(api: ApiClient) {
             const qs = q.toString();
             return api.request<AdsAutopayLogEntry[]>('GET', `/api/v1/funnel/campaigns/autopay/log${qs ? `?${qs}` : ''}`);
         },
-        syncAdCampaigns() {
-            return api.request<{ status: string }>('POST', '/api/v1/funnel/sync_campaigns');
+        getBudgetLedger(campaignId?: number, kind?: 'topup' | 'charge') {
+            const q = new URLSearchParams();
+            if (campaignId != null) q.set('campaign_id', String(campaignId));
+            if (kind) q.set('kind', kind);
+            const qs = q.toString();
+            return api.request<BudgetLedgerEntry[]>('GET', `/api/v1/funnel/campaigns/budget/ledger${qs ? `?${qs}` : ''}`);
+        },
+        syncAdCampaigns(priorityCampaignIds: number[] = []) {
+            // priorityCampaignIds — кампании под текущим фильтром страницы: их бюджеты
+            // бэкенд тянет первыми, остальные — следом.
+            return api.request<{ status: string }>('POST', '/api/v1/funnel/sync_campaigns', {
+                priority_campaign_ids: priorityCampaignIds,
+            });
         },
         getSyncCampaignsProgress() {
             return api.request<{ status: string; campaigns_total?: number; budgets_done?: number; budgets_total?: number; error?: string }>('GET', '/api/v1/funnel/sync_campaigns_progress');
@@ -289,8 +310,13 @@ export function addFunnelMethods(api: ApiClient) {
         toggleClusterMinus(campaignId: number, body: { nm_id: number; norm_query: string; action: 'add' | 'remove' }) {
             return api.request<ClusterMinusResult>('POST', `/api/v1/funnel/campaigns/${campaignId}/clusters/minus`, body);
         },
-        setCampaignClusterBid(campaignId: number, body: { nm_id: number; norm_query: string; bid: number }) {
+        // basis_* / source — «паспорт» применения для колонки «Стоит»: с какого дня и от каких данных.
+        setCampaignClusterBid(campaignId: number, body: { nm_id: number; norm_query: string; bid: number; verify?: boolean; source?: string; basis_drr?: number | null; basis_cpm?: number | null; target_drr?: number | null }) {
             return api.request<ClusterBidResult>('POST', `/api/v1/funnel/campaigns/${campaignId}/clusters/bid`, body);
+        },
+        // Массовая ставка ОДНИМ запросом (WB normquery/bids батчевый) — мгновенно, без rate-limit 429.
+        setCampaignClusterBidsBulk(campaignId: number, items: { nm_id: number; norm_query: string; bid: number; source?: string; basis_drr?: number | null; basis_cpm?: number | null; target_drr?: number | null }[]) {
+            return api.request<ClusterBidBulkResult>('POST', `/api/v1/funnel/campaigns/${campaignId}/clusters/bid-bulk`, { items });
         },
         getAdCategories() {
             return api.request<AdCategory[]>('GET', '/api/v1/funnel/categories');

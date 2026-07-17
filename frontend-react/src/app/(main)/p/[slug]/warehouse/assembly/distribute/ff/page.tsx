@@ -177,13 +177,22 @@ export default function AssemblyFfPage() {
             const resp = await api.commitDraftUnit(draftId, unitRef(u));
             const id = resp.created_request_ids[0];
             setToast({ message: `Заявка на сборку создана${id ? ` (#${id})` : ''}`, type: 'success' });
+            // Последний юнит мог закрыть черновик (commit_unit soft-delete'ит пустой):
+            // безусловный load() тогда ронял страницу в error «Draft not found» на
+            // УСПЕШНОМ пути. Пустого черновика больше нет — уходим на основной.
+            try {
+                await api.getAssemblyDraft(draftId);
+            } catch {
+                router.push(`/p/${slug}/warehouse/assembly/distribute`);
+                return;
+            }
             await load();
         } catch (e: unknown) {
             setToast({ message: e instanceof Error ? e.message : 'Ошибка', type: 'error' });
         } finally {
             setBusy(false);
         }
-    }, [draftId, load]);
+    }, [draftId, load, router, slug]);
 
     const handleDeleteUnit = useCallback(async (u: DraftUnit) => {
         if (!draftId) return;

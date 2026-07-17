@@ -1,8 +1,9 @@
 'use client';
-import React, { useEffect, useMemo, useState } from 'react';
-import { formatNumber, exportToExcel } from '@/lib/utils';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import type { SearchCluster, ClusterDailyPoint } from '@/types/api';
 import { cpmForTargetCpc } from './clusterBid';
+import { effectiveDrr, campaignEffAverages, recommendBid, recommendProjectedBid } from './clusterEff';
 import Tooltip from './Tooltip';
 
 // ─── Форматтеры (Decimal-поля бэка приходят строкой → Number() перед formatNumber) ───
@@ -67,11 +68,19 @@ const filterThStyle: React.CSSProperties = { background: '#f3f4f6', borderBottom
 const DROP_LINE = '#3b82f6';
 // Синяя черта у ставки: фраза набрала ≥100 показов, WB даёт по ней ставку
 const BID_ACTIVE_LINE = '#3b82f6';
+// Ставка «созрела»: стоит ≥7 дней — статистики под неё уже достаточно, можно пересматривать
+const BID_MATURE_DAYS = 7;
 // Тонкая линия-разделитель столбцов — через всю таблицу
 const COL_DIVIDER = '1px solid #e5e7eb';
 // Подсветка строк: выбранная — синяя, под курсором — светло-серая
 const ROW_SELECTED = '#dbeafe';
 const ROW_HOVER = '#f1f5f9';
+// Excel-выделение ячеек: захваченные ячейки — насыщённее светло-голубым (виднее поверх строк)
+const CELL_SELECTED = '#bfdbfe';
+// Колонки, у которых есть числовое значение для итога по выделению (сумма/среднее/мин/макс).
+// norm_query (текст) — не числовая; eff (эффективный ДРР, %) — числовая.
+const NUMERIC_COLS = new Set<ColKey>(['bid', 'rec_bid', 'position', 'prev_pos', 'views', 'clicks', 'ctr', 'cpc', 'cpm', 'cpl',
+    'atbs', 'orders', 'cr', 'cr1', 'cr2', 'cpo', 'drr', 'eff', 'share', 'avg_pos', 'spend']);
 
 /** Выдача WB по поисковому запросу (URLSearchParams: русские буквы и «&» кодируются). */
 const wbSearchUrl = (q: string) => `https://www.wildberries.ru/catalog/0/search.aspx?${new URLSearchParams({ search: q })}`;
@@ -79,13 +88,25 @@ const wbSearchUrl = (q: string) => `https://www.wildberries.ru/catalog/0/search.
 /** Цвет позиции: 1–10 зелёный, 11–30 жёлтый, 31 и дальше красный. */
 const posColor = (pos: number) => (pos <= 0 ? '#d1d5db' : pos <= 10 ? '#10b981' : pos <= 30 ? '#f59e0b' : '#ef4444');
 
-type SortField = 'norm_query' | 'bid' | 'position' | 'prev_pos' | 'views' | 'clicks' | 'ctr' | 'cpc' | 'cpm' | 'cpl'
-    | 'orders' | 'cr' | 'cr1' | 'cr2' | 'cpo' | 'drr' | 'share' | 'avg_pos' | 'spend';
+// Цветовые группы (тиры) рекомендаций по ДРР — для раздельного массового применения 🟢/🟡/🔴.
+type RecTier = 'green' | 'amber' | 'red';
+const REC_TIERS: { key: RecTier; label: string; color: string; bg: string }[] = [
+    { key: 'green', label: 'Эффективные — ДРР ≤ цели', color: '#10b981', bg: '#ecfdf5' },
+    { key: 'amber', label: 'Средние — ДРР до 1,5× цели', color: '#f59e0b', bg: '#fffbeb' },
+    { key: 'red', label: 'Неэффективные — высокий ДРР', color: '#ef4444', bg: '#fef2f2' },
+];
+const recTierByColor = (col: string): RecTier => (col === '#10b981' ? 'green' : col === '#ef4444' ? 'red' : 'amber');
+
+type SortField = 'norm_query' | 'bid' | 'bid_since' | 'rec_bid' | 'position' | 'prev_pos' | 'views' | 'clicks' | 'ctr' | 'cpc' | 'cpm' | 'cpl'
+    | 'atbs' | 'orders' | 'cr' | 'cr1' | 'cr2' | 'cpo' | 'drr' | 'eff' | 'share' | 'avg_pos' | 'spend';
 
 /** Кластер + метрики, которых нет в ответе WB (считаем из его же полей), + органическая
  *  позиция товара по фразе из отдельного сбора (search.wb.ru): position/prev_pos + глубина. */
 type Row = SearchCluster & {
     cpl: number | null; cr1: number; cr2: number; share: number;
+    eff: number | null; eff_projected: boolean;  // эффективный ДРР (%): факт или прогноз (нет заказов)
+    rec_bid: number | null; rec_dir: 'up' | 'down' | null; rec_step: number; rec_ceil: number;  // рекомендация ставки
+    rec_projected: boolean;  // рекомендация по ПРОГНОЗНОМУ ДРР (беззаказная фраза) — спекулятивна, метится «~»
     position: number | null; prev_pos: number | null; pos_depth: number | null;
 };
 
@@ -100,9 +121,11 @@ type ColKey = SortField;
 type Range = { min: string; max: string };
 
 // Конфиг колонок: подпись, тип фильтра, выравнивание. Порядок — переставляемый (drag).
-const COL_DEFS: Record<ColKey, { label: string; title?: string; align: 'left' | 'right'; filter: 'text' | 'range' }> = {
+const COL_DEFS: Record<ColKey, { label: string; title?: string; align: 'left' | 'right'; filter: 'text' | 'range' | 'none' }> = {
     norm_query: { label: 'Ключевая фраза', align: 'left', filter: 'text' },
     bid: { label: 'Ставка', title: 'CPM-ставка кластера, ₽', align: 'right', filter: 'range' },
+    bid_since: { label: 'Стоит', title: 'Сколько дней стоит текущая ставка (с момента её применения через приложение) и от каких данных её считали. «—» — паспорта нет: ставку задали не через нас, сменили в кабинете WB или сбросили. Зелёным — стоит ≥7 дней: статистики под эту ставку уже достаточно, можно пересматривать.', align: 'right', filter: 'none' },
+    rec_bid: { label: 'Реком. ставка', title: 'Рекомендованная ставка на один шаг ДРР к цели: пока ср. позиция не топ-1 и ДРР < целевого — поднимаем до следующего целого ДРР (напр. 1,3%→2%). Подъём — только при ≥3 заказах (по 1–2 ДРР ненадёжен); снижение при высоком ДРР — без порога. Ставка не опускается ниже минимума WB (150 ₽). Клик по числу применит ставку. «—» — рекомендации нет (мало заказов/данных или уже у цели).', align: 'right', filter: 'none' },
     position: { label: 'Позиция', title: 'Органическая позиция товара по фразе (последний сбор). «N+» — не в топ-N.', align: 'right', filter: 'range' },
     prev_pos: { label: 'Была', title: 'Органическая позиция в предыдущем сборе — для динамики', align: 'right', filter: 'range' },
     views: { label: 'Показы', align: 'right', filter: 'range' },
@@ -111,18 +134,20 @@ const COL_DEFS: Record<ColKey, { label: string; title?: string; align: 'left' | 
     cpc: { label: 'CPC', title: 'Цена клика', align: 'right', filter: 'range' },
     cpm: { label: 'CPM', title: 'Цена 1000 показов', align: 'right', filter: 'range' },
     cpl: { label: 'CPL', title: 'Стоимость корзины: расход / корзины', align: 'right', filter: 'range' },
+    atbs: { label: 'Корзины', title: 'Добавления в корзину (атрибуция рекламы)', align: 'right', filter: 'range' },
     orders: { label: 'Заказы', align: 'right', filter: 'range' },
     cr: { label: 'CR', title: 'Конверсия клик→заказ', align: 'right', filter: 'range' },
     cr1: { label: 'CR1', title: 'Конверсия в корзину: корзины / клики', align: 'right', filter: 'range' },
     cr2: { label: 'CR2', title: 'Конверсия в заказ: заказы / корзины', align: 'right', filter: 'range' },
     cpo: { label: 'CPO', title: 'Стоимость заказа', align: 'right', filter: 'range' },
     drr: { label: 'ДРР', title: 'Доля рекламных расходов = расход / (заказы × AOV)', align: 'right', filter: 'range' },
+    eff: { label: 'Прогноз ДРР', title: 'Прогноз ДРР, %: с заказами — фактический ДРР; без заказов — прогнозный (заказы оценены из корзин/кликов по средним конверсиям кампании), показан курсивом. Цвет как у ДРР: ≤ целевого зелёный, до 1.5× жёлтый, выше красный.', align: 'right', filter: 'range' },
     share: { label: '%', title: 'Доля затрат фразы во всех затратах кампании', align: 'right', filter: 'range' },
     avg_pos: { label: 'Поз.', title: 'Средняя позиция', align: 'right', filter: 'range' },
     spend: { label: 'Затраты', align: 'right', filter: 'range' },
 };
-const DEFAULT_ORDER: ColKey[] = ['norm_query', 'bid', 'position', 'prev_pos', 'views', 'clicks', 'ctr', 'cpc', 'cpm', 'cpl',
-    'orders', 'cr', 'cr1', 'cr2', 'cpo', 'drr', 'share', 'avg_pos', 'spend'];
+const DEFAULT_ORDER: ColKey[] = ['norm_query', 'bid', 'bid_since', 'rec_bid', 'position', 'prev_pos', 'views', 'clicks', 'ctr', 'cpc', 'cpm', 'cpl',
+    'atbs', 'orders', 'cr', 'cr1', 'cr2', 'cpo', 'drr', 'eff', 'share', 'avg_pos', 'spend'];
 const RANGE_FIELDS = DEFAULT_ORDER.filter(k => COL_DEFS[k].filter === 'range');
 const ORDER_LS_KEY = 'ads_cluster_col_order';
 const emptyRanges = (): Record<ColKey, Range> =>
@@ -135,11 +160,15 @@ export interface MinusControls {
     error?: string | null;        // текст последней ошибки
 }
 
+/** Паспорт применения для колонки «Стоит»: источник (реком./руками) + цель ДРР на момент.
+ *  Точку отсчёта (ДРР/CPM фразы) обработчик берёт из самого кластера. */
+export type BidMeta = { source?: 'recommendation' | 'manual'; targetDrr?: number | null };
+
 export interface BidControls {
     pending: Set<string>;         // norm_query, по которым идёт запись ставки
-    onSetBid: (c: SearchCluster, bid: number) => void;
+    onSetBid: (c: SearchCluster, bid: number, meta?: BidMeta) => void;
     /** Массово: пары «фраза → ставка ₽». Ставка 0 = сброс к ставке кампании. */
-    onBulkBid?: (items: { cluster: SearchCluster; bid: number }[], label: string) => void;
+    onBulkBid?: (items: { cluster: SearchCluster; bid: number }[], label: string, meta?: BidMeta) => void;
     error?: string | null;        // текст последней ошибки
 }
 
@@ -151,6 +180,7 @@ function BidCell({ cluster, bids, defaultBid, clusterLock }: { cluster: SearchCl
     const own = cluster.bid == null ? null : Number(cluster.bid);
     const current = own ?? (defaultBid ?? null);
     const [val, setVal] = useState<string>(current == null ? '' : String(current));
+    const [confirmVal, setConfirmVal] = useState<number | null>(null);  // ставка ждёт встроенного подтверждения
     useEffect(() => { setVal(current == null ? '' : String(current)); }, [current]);
 
     if (!bids) return <span>{current == null ? '—' : clMoney(current)}</span>;
@@ -162,6 +192,7 @@ function BidCell({ cluster, bids, defaultBid, clusterLock }: { cluster: SearchCl
         return <Tooltip text="<100 показов — WB не даёт ставку"><span style={{ color: '#9ca3af', fontSize: 10.5, fontStyle: 'italic' }}>сбор данных</span></Tooltip>;
     }
     const pending = bids.pending.has(cluster.norm_query);
+    // Шаг 1: правка «взводит» встроенное подтверждение (не пишем сразу — реальные деньги).
     const commit = () => {
         if (pending) return;
         const s = val.trim();
@@ -169,7 +200,7 @@ function BidCell({ cluster, bids, defaultBid, clusterLock }: { cluster: SearchCl
         const n = Number(s);
         if (!Number.isFinite(n) || n <= 0) { setVal(current == null ? '' : String(current)); return; }
         if (n === current) return;
-        bids.onSetBid(cluster, n);
+        setConfirmVal(n);
     };
     // Кружок относительно базовой ставки кампании: выше — зелёный, ниже — оранжевый, равна — без метки
     const diff = own == null || defaultBid == null ? 0 : own - defaultBid;
@@ -184,15 +215,28 @@ function BidCell({ cluster, bids, defaultBid, clusterLock }: { cluster: SearchCl
                 <span aria-hidden style={{ width: 2, alignSelf: 'stretch', minHeight: 16, borderRadius: 1, background: BID_ACTIVE_LINE }} />
             </Tooltip>
             {dot && <Tooltip text={dot.title}><span style={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0, background: dot.color }} /></Tooltip>}
-            <input type="number" min={0} value={val} disabled={pending}
-                onChange={e => setVal(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-                onBlur={commit}
-                title={own == null
-                    ? `Своей ставки нет — действует ставка кампании${current == null ? '' : ` (${current} ₽)`}. Введите значение, чтобы задать ставку фразы.`
-                    : 'CPM-ставка фразы, ₽ — Enter или потеря фокуса применит в кабинете WB'}
-                style={{ width: 54, boxSizing: 'border-box', padding: '1px 5px', fontSize: 11, textAlign: 'right', border: '1px solid #e5e7eb', borderRadius: 5, color: own == null ? '#9ca3af' : '#111827', background: pending ? '#f3f4f6' : '#fff', opacity: pending ? 0.6 : 1 }} />
-            {pending ? <span style={{ fontSize: 10, color: '#9ca3af' }}>…</span> : <span style={{ fontSize: 10, color: '#9ca3af' }}>₽</span>}
+            {confirmVal != null ? (
+                // Шаг 2: встроенное подтверждение — реальные деньги пишутся только по клику ✓
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }} onMouseDown={e => e.stopPropagation()}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: '#7c3aed', whiteSpace: 'nowrap' }}>{confirmVal} ₽?</span>
+                    <button aria-label="Применить ставку" title={`Применить ${confirmVal} ₽`} onClick={() => { bids.onSetBid(cluster, confirmVal, { source: 'manual' }); setConfirmVal(null); }}
+                        style={{ border: '1px solid #10b981', background: '#ecfdf5', color: '#059669', borderRadius: 4, cursor: 'pointer', width: 18, height: 18, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0, fontSize: 11 }}>✓</button>
+                    <button aria-label="Отменить" title="Отменить" onClick={() => { setConfirmVal(null); setVal(current == null ? '' : String(current)); }}
+                        style={{ border: '1px solid #e5e7eb', background: '#fff', color: '#6b7280', borderRadius: 4, cursor: 'pointer', width: 18, height: 18, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0, fontSize: 11 }}>✕</button>
+                </span>
+            ) : (
+                <>
+                    <input type="number" min={0} value={val} disabled={pending}
+                        onChange={e => setVal(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                        onBlur={commit}
+                        title={own == null
+                            ? `Своей ставки нет — действует ставка кампании${current == null ? '' : ` (${current} ₽)`}. Введите значение, чтобы задать ставку фразы.`
+                            : 'CPM-ставка фразы, ₽ — Enter/потеря фокуса покажут подтверждение, применит в WB кнопка ✓'}
+                        style={{ width: 54, boxSizing: 'border-box', padding: '1px 5px', fontSize: 11, textAlign: 'right', border: '1px solid #e5e7eb', borderRadius: 5, color: own == null ? '#9ca3af' : '#111827', background: pending ? '#f3f4f6' : '#fff', opacity: pending ? 0.6 : 1 }} />
+                    {pending ? <span style={{ fontSize: 10, color: '#9ca3af' }}>…</span> : <span style={{ fontSize: 10, color: '#9ca3af' }}>₽</span>}
+                </>
+            )}
         </span>
     );
 }
@@ -277,7 +321,7 @@ function BidPopover({ targets, onApply, onClose }: {
  * Сортируемая таблица кластеров: сегмент релевантности + пер-колоночные фильтры,
  * перестановка колонок (drag), ячейки выбора + массовые действия.
  */
-export default function ClusterTable({ clusters, targetDrr, exportName, minus, bids, defaultBid, aov = 0, positions, onCollectPositions, onStopPositions, collecting, onCollectOne, collectingOne, clusterLock = null }: {
+export default function ClusterTable({ clusters, targetDrr, exportName, minus, bids, defaultBid, minBid, aov = 0, positions, onCollectPositions, onStopPositions, collecting, onCollectOne, collectingOne, clusterLock = null }: {
     clusters: SearchCluster[];
     targetDrr: number;
     exportName: string;
@@ -286,6 +330,7 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
     /** Причина блокировки управления кластерами (единая ставка CPM) — гасит минус/ставки. */
     clusterLock?: string | null;
     defaultBid?: number | null;  // ставка кампании для фраз без своей
+    minBid?: number | null;      // реальный аукционный пол зоны «Поиск» (живой пробник) — кламп рекомендаций
     aov?: number;                // средний чек — нужен для итогового ДРР
     positions?: PositionsMap;    // органические позиции по фразам (отдельный сбор)
     onCollectPositions?: () => void;  // Play: массовый сбор позиций по всем фразам
@@ -304,6 +349,25 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
     const [dropPos, setDropPos] = useState<{ key: ColKey; after: boolean } | null>(null);
     const [selected, setSelected] = useState<Set<string>>(new Set());
     const [hoverKey, setHoverKey] = useState<string | null>(null);
+    const [recPending, setRecPending] = useState<{ norm_query: string; value: number } | null>(null);  // реком. ставка ждёт подтверждения
+    const [recBulkConfirm, setRecBulkConfirm] = useState(false);  // массовое применение реком. ставок (все видимые) ждёт подтверждения
+    const [recTiers, setRecTiers] = useState<Set<RecTier>>(new Set<RecTier>(['green', 'amber', 'red']));  // какие цвета применяем массово
+    const [recSelConfirm, setRecSelConfirm] = useState(false);    // применение реком. ставок к ВЫБРАННЫМ строкам ждёт подтверждения
+    const [nonBidOpen, setNonBidOpen] = useState(false);          // окно «⚠ Без ставки»: список фраз <100 показов (небиддируемых)
+    // Целевой ДРР задаёт менеджер в тулбаре (переопределяет значение кампании); переживает reload.
+    const [drrOverride, setDrrOverride] = useState<number | null>(null);
+    const [drrInput, setDrrInput] = useState<string | null>(null);  // черновик ввода цели ДРР (свободный ввод)
+    useEffect(() => {
+        try { const s = localStorage.getItem('ads_cluster_target_drr'); const v = s == null ? NaN : Number(s); if (isFinite(v) && v > 0) setDrrOverride(v); } catch { /* SSR */ }
+    }, []);
+    const setDrrTarget = (raw: string) => {
+        const v = Math.round(Number(raw.replace(',', '.')));
+        if (!isFinite(v) || v <= 0) { setDrrOverride(null); try { localStorage.removeItem('ads_cluster_target_drr'); } catch { /* SSR */ } return; }
+        setDrrOverride(v);
+        try { localStorage.setItem('ads_cluster_target_drr', String(v)); } catch { /* SSR */ }
+    };
+    // Действующий целевой ДРР: переопределение менеджера → иначе из кампании → иначе 8
+    const drrTarget = drrOverride != null && drrOverride > 0 ? drrOverride : (targetDrr > 0 ? targetDrr : 8);
     const [bidPopover, setBidPopover] = useState(false);
     // Подтверждение массового действия — внутри панели, без системного window.confirm
     const [confirmAsk, setConfirmAsk] = useState<{ text: string; run: () => void } | null>(null);
@@ -341,20 +405,42 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
     // Доля — от затрат ВСЕЙ кампании, а не от видимых строк, иначе она «плавала» бы от фильтра.
     const rows: Row[] = useMemo(() => {
         const totalSpend = clusters.reduce((s, c) => s + num(c.spend), 0) || 1;
+        // Средние конверсии ВСЕЙ кампании — база прогноза беззаказных (не «плавают» от фильтра).
+        const effCtx = campaignEffAverages(clusters, drrTarget, aov);
         return clusters.map(c => {
             const p = positions?.[c.norm_query];
+            const e = effectiveDrr(c, effCtx);
+            // Рекомендуем ставку везде, где ставку в принципе можно править: не минус-фраза
+            // И набрано ≥100 показов (не locked). У фраз <100 показов WB ставку не принимает —
+            // им рекомендации не даём (список таких — в окне «⚠ Без ставки»).
+            // Заказные — по реальному ДРР; беззаказные — по прогнозному (если он есть).
+            const canRec = !c.is_minused && !c.locked;
+            // Кламп рекомендаций к РЕАЛЬНОМУ полу зоны (живой пробник); пока зоны не подъехали
+            // (minBid null) — фолбэк на дефолт WB_MIN_CPM внутри формулы.
+            const recMin = minBid ?? undefined;
+            let rec = canRec ? recommendBid(c, { targetDrr: drrTarget, defaultBid: defaultBid ?? null, minBid: recMin }) : null;
+            if (canRec && !rec && e.projected && e.value != null) {
+                rec = recommendProjectedBid(c, e.value, { targetDrr: drrTarget, defaultBid: defaultBid ?? null, minBid: recMin });
+            }
             return {
                 ...c,
                 cpl: num(c.atbs) > 0 ? num(c.spend) / num(c.atbs) : null,
                 cr1: num(c.clicks) > 0 ? (num(c.atbs) / num(c.clicks)) * 100 : 0,
                 cr2: num(c.atbs) > 0 ? (num(c.orders) / num(c.atbs)) * 100 : 0,
                 share: (num(c.spend) / totalSpend) * 100,
+                eff: e.value,
+                eff_projected: e.projected,
+                rec_bid: rec ? rec.bid : null,
+                rec_dir: rec ? rec.dir : null,
+                rec_step: rec ? rec.stepDrr : 0,
+                rec_ceil: rec ? rec.ceilBid : 0,
+                rec_projected: rec ? rec.projected : false,
                 position: p ? p.position : null,
                 prev_pos: p ? p.prev : null,
                 pos_depth: p ? p.depth : null,
             };
         });
-    }, [clusters, positions]);
+    }, [clusters, positions, drrTarget, aov, defaultBid, minBid]);
 
     const filtered = useMemo(() => {
         const cont = contains.trim().toLowerCase();
@@ -367,17 +453,22 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
             if (cont && !q.includes(cont)) return false;
             if (ncont && q.includes(ncont)) return false;
             for (const f of RANGE_FIELDS) {
-                if (!inRange(c[f] as number | null | undefined, ranges[f])) return false;
+                // bid_since (filter:'none') в RANGE_FIELDS не попадает; каст — из-за расширения ColKey
+                if (!inRange((c as unknown as Record<string, unknown>)[f] as number | null | undefined, ranges[f])) return false;
             }
             return true;
         });
         const dir = sort.dir === 'asc' ? 1 : -1;
         // null у полей-позиций — «в конец» (не найден = хуже всех), у прочих — как раньше.
         const nullVal = POS_FIELDS.has(sort.field) ? Infinity : -Infinity;
+        const f = sort.field;  // локальная — TS сужает Exclude<'bid_since'> в else-ветке
         return [...base].sort((a, b) => {
-            if (sort.field === 'norm_query') return dir * a.norm_query.localeCompare(b.norm_query, 'ru');
-            const av = a[sort.field] == null ? nullVal : Number(a[sort.field]);
-            const bv = b[sort.field] == null ? nullVal : Number(b[sort.field]);
+            if (f === 'norm_query') return dir * a.norm_query.localeCompare(b.norm_query, 'ru');
+            // «Стоит» сортируем по дням (bid_days); нет паспорта → в конец
+            const rawA = f === 'bid_since' ? a.bid_days : a[f];
+            const rawB = f === 'bid_since' ? b.bid_days : b[f];
+            const av = rawA == null ? nullVal : Number(rawA);
+            const bv = rawB == null ? nullVal : Number(rawB);
             return dir * (av - bv);
         });
     }, [rows, rel, contains, notContains, ranges, sort]);
@@ -418,13 +509,16 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
             case 'cpc': return clMoney(totals.cpc);
             case 'cpm': return clMoney(totals.cpm);
             case 'cpl': return clMoneyN(totals.cpl);
+            case 'atbs': return clNum(totals.atbs);
             case 'orders': return clNum(totals.orders);
             case 'cr': return clPct(totals.cr, 2);
             case 'cr1': return clPct(totals.cr1, 2);
             case 'cr2': return clPct(totals.cr2, 2);
             case 'share': return clPct(totals.share, 1);
             case 'cpo': return clMoneyN(totals.cpo);
-            case 'drr': return <span style={{ color: drrColor(totals.drr, targetDrr) }}>{clPctN(totals.drr)}</span>;
+            case 'drr': return <span style={{ color: drrColor(totals.drr, drrTarget) }}>{clPctN(totals.drr)}</span>;
+            case 'eff': return <span style={{ color: drrColor(totals.drr, drrTarget) }}>{clPctN(totals.drr)}</span>;
+            case 'rec_bid': return '—';
             case 'avg_pos': return totals.avg_pos > 0 ? formatNumber(totals.avg_pos, 1) : '—';
             case 'spend': return clMoney(totals.spend);
             default: return null;
@@ -472,18 +566,31 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
     // Действия применимы не ко всем: locked (<100 показов) WB не примет, минус-фразы уже отключены
     const toMinus = selectedClusters.filter(c => !c.is_minused && !c.locked);
     const toReturn = selectedClusters.filter(c => c.is_minused && !c.locked);
+    // Ставку можно ставить только на фразы с ≥100 показов (не locked) — WB не принимает ставку
+    // по фразам «в стадии сбора данных». Единственное условие биддируемости — порог показов.
     const biddable = selectedClusters.filter(c => !c.locked);
+    // Визуальное подтверждение копирования: кнопка ненадолго превращается в «Скопировано ✓»
+    const [copyFlash, setCopyFlash] = useState<'cells' | 'rows' | null>(null);
+    const flashCopied = useCallback((which: 'cells' | 'rows') => {
+        setCopyFlash(which);
+        window.setTimeout(() => setCopyFlash(f => (f === which ? null : f)), 1500);
+    }, []);
     const copySelected = () => {
         const text = selectedClusters.map(c => c.norm_query).join('\n');
-        navigator.clipboard?.writeText(text).catch(() => { /* нет доступа к буферу — молча */ });
+        navigator.clipboard?.writeText(text)?.then(() => flashCopied('rows'))?.catch(() => { /* нет доступа к буферу — молча */ });
     };
 
     const doExport = () => exportToExcel(filtered.map(c => ({
         'Кластер': c.norm_query, 'Релевантность': c.relevant ? 'целевой' : 'мусор', 'Причина': c.reason,
         'Ставка ₽': c.bid == null ? '' : Number(c.bid),
+        'Стоит дней': c.bid_days == null ? '' : c.bid_days,
+        'Ставка с': c.bid_set_at == null ? '' : formatDate(c.bid_set_at),
+        'Ставка — источник': c.bid_source === 'recommendation' ? 'рекомендация' : c.bid_source === 'manual' ? 'вручную' : '',
+        'Реком. ставка ₽': c.rec_bid == null ? '' : c.rec_bid,
         'Показы': num(c.views), 'Клики': num(c.clicks), 'CTR %': num(c.ctr), 'CPC ₽': num(c.cpc), 'CPM ₽': num(c.cpm),
-        'Заказы': num(c.orders), 'CR %': num(c.cr), 'CPO ₽': c.cpo == null ? '' : Number(c.cpo),
-        'ДРР %': c.drr == null ? '' : Number(c.drr), 'Ср. позиция': num(c.avg_pos), 'Расход ₽': num(c.spend),
+        'Корзины': num(c.atbs), 'Заказы': num(c.orders), 'CR %': num(c.cr), 'CPO ₽': c.cpo == null ? '' : Number(c.cpo),
+        'ДРР %': c.drr == null ? '' : Number(c.drr), 'Прогноз ДРР %': c.eff == null ? '' : Number(c.eff.toFixed(1)),
+        'Ср. позиция': num(c.avg_pos), 'Расход ₽': num(c.spend),
         'В минусе': c.is_minused ? 'да' : '',
     })), exportName);
 
@@ -492,6 +599,109 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
         selected.has(c.norm_query) ? ROW_SELECTED
         : hoverKey === c.norm_query ? ROW_HOVER
         : c.is_minused ? '#fafafa' : undefined;
+
+    // ─── Excel-выделение ячеек: прямоугольник по данным (перетаскивание / Shift), итог, копирование ───
+    const [cellSel, setCellSel] = useState<{ r0: number; c0: number; r1: number; c1: number } | null>(null);
+    const cellDrag = useRef(false);
+    const cellAnchor = useRef<{ r: number; c: number } | null>(null);
+    const cellMoved = useRef(false);  // было ли перетаскивание — чтобы клик по ссылке-фразе всё же открывал WB
+
+    // Числовое значение ячейки для итога (null у текстовых/пустых). Decimal-поля бэка — строкой.
+    const cellNumber = useCallback((c: Row, k: ColKey): number | null => {
+        if (!NUMERIC_COLS.has(k)) return null;
+        const raw = (c as unknown as Record<string, unknown>)[k];
+        if (raw == null) return null;
+        const n = Number(raw);
+        return Number.isFinite(n) ? n : null;
+    }, []);
+    // Текст ячейки для буфера: числа — как есть (вставятся в Excel числами), текст/вердикт — строкой.
+    const cellCopy = useCallback((c: Row, k: ColKey): string => {
+        if (k === 'norm_query') return c.norm_query;
+        const v = cellNumber(c, k);
+        return v == null ? '' : String(v);
+    }, [cellNumber]);
+
+    const inCellSel = (r: number, ci: number) => cellSel != null
+        && r >= Math.min(cellSel.r0, cellSel.r1) && r <= Math.max(cellSel.r0, cellSel.r1)
+        && ci >= Math.min(cellSel.c0, cellSel.c1) && ci <= Math.max(cellSel.c0, cellSel.c1);
+
+    const onCellMouseDown = (r: number, ci: number, e: React.MouseEvent) => {
+        const t = e.target as HTMLElement;
+        // Ставка/кнопки — не трогаем (контрол работает). Ссылки (фраза, ср. позиция) выделять МОЖНО,
+        // но одиночный клик по ним всё равно откроет WB (см. onClick ссылки — гасим только при драге/Shift).
+        if (t.closest('input, button, textarea, select, [role="button"]')) return;
+        const isLink = !!t.closest('a');
+        cellMoved.current = false;
+        // preventDefault на mousedown гасит нативное выделение текста и drag-«призрак» ссылки,
+        // но НЕ отменяет клик-навигацию (она на событии click) — ссылка-фраза по клику откроется.
+        e.preventDefault();
+        if (e.shiftKey && cellAnchor.current) { setCellSel({ r0: cellAnchor.current.r, c0: cellAnchor.current.c, r1: r, c1: ci }); return; }
+        cellAnchor.current = { r, c: ci };
+        cellDrag.current = true;
+        // Для ссылки выделение сразу не рисуем — прямоугольник появится при перетаскивании,
+        // а чистый клик уйдёт в ссылку (откроет выдачу WB).
+        if (isLink) return;
+        setCellSel({ r0: r, c0: ci, r1: r, c1: ci });
+    };
+    const onCellMouseEnter = (r: number, ci: number) => {
+        if (!cellDrag.current || !cellAnchor.current) return;
+        cellMoved.current = true;
+        setCellSel({ r0: cellAnchor.current.r, c0: cellAnchor.current.c, r1: r, c1: ci });
+    };
+    // Отпускание мыши где угодно завершает перетаскивание
+    useEffect(() => {
+        const up = () => { cellDrag.current = false; };
+        window.addEventListener('mouseup', up);
+        return () => window.removeEventListener('mouseup', up);
+    }, []);
+
+    // Итог по выделению: всего ячеек, из них числовых, сумма/среднее/мин/макс
+    const cellStats = useMemo(() => {
+        if (!cellSel) return null;
+        const rMin = Math.min(cellSel.r0, cellSel.r1), rMax = Math.max(cellSel.r0, cellSel.r1);
+        const cMin = Math.min(cellSel.c0, cellSel.c1), cMax = Math.max(cellSel.c0, cellSel.c1);
+        const vals: number[] = [];
+        let cells = 0;
+        for (let r = rMin; r <= rMax; r++) {
+            const row = filtered[r]; if (!row) continue;
+            for (let ci = cMin; ci <= cMax; ci++) {
+                cells++;
+                const v = cellNumber(row, order[ci]);
+                if (v != null) vals.push(v);
+            }
+        }
+        if (vals.length === 0) return { cells, count: 0, sum: 0, avg: 0, min: 0, max: 0 };
+        const sum = vals.reduce((a, b) => a + b, 0);
+        return { cells, count: vals.length, sum, avg: sum / vals.length, min: Math.min(...vals), max: Math.max(...vals) };
+    }, [cellSel, filtered, order, cellNumber]);
+
+    const copyCellSelection = useCallback(() => {
+        if (!cellSel) return;
+        const rMin = Math.min(cellSel.r0, cellSel.r1), rMax = Math.max(cellSel.r0, cellSel.r1);
+        const cMin = Math.min(cellSel.c0, cellSel.c1), cMax = Math.max(cellSel.c0, cellSel.c1);
+        const lines: string[] = [];
+        for (let r = rMin; r <= rMax; r++) {
+            const row = filtered[r]; if (!row) continue;
+            const cells: string[] = [];
+            for (let ci = cMin; ci <= cMax; ci++) cells.push(cellCopy(row, order[ci]));
+            lines.push(cells.join('\t'));
+        }
+        navigator.clipboard?.writeText(lines.join('\n'))?.then(() => flashCopied('cells'))?.catch(() => { /* нет буфера — молча */ });
+    }, [cellSel, filtered, order, cellCopy, flashCopied]);
+
+    // Ctrl/Cmd+C — копировать выделенные ячейки (TSV, вставляется в Excel); Esc — снять выделение.
+    // Русская раскладка на Ctrl+C даёт key='с' — ловим оба.
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (!cellSel) return;
+            const tag = (e.target as HTMLElement | null)?.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+            if ((e.key === 'c' || e.key === 'C' || e.key === 'с' || e.key === 'С') && (e.metaKey || e.ctrlKey)) { e.preventDefault(); copyCellSelection(); }
+            else if (e.key === 'Escape') setCellSel(null);
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [cellSel, copyCellSelection]);
 
     const REL_TABS: { key: RelFilter; label: string }[] = [
         { key: 'all', label: 'Все' }, { key: 'active', label: 'Активные' }, { key: 'excluded', label: 'Исключённые' },
@@ -505,7 +715,7 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
             // (отдельная подпись «исключена» не нужна: цвет уже всё говорит).
             case 'norm_query': return (
                 <a href={wbSearchUrl(c.norm_query)} target="_blank" rel="noreferrer"
-                    onClick={e => e.stopPropagation()}
+                    onClick={e => { e.stopPropagation(); if (e.shiftKey || cellMoved.current) e.preventDefault(); }}
                     title={`Открыть выдачу WB по запросу «${c.norm_query}»`}
                     style={{
                         display: 'block', maxWidth: '100%', textDecorationLine: c.is_minused ? 'line-through' : 'none',
@@ -514,6 +724,59 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                     }}>{c.norm_query}</a>
             );
             case 'bid': return <BidCell cluster={c} bids={bids} defaultBid={defaultBid} clusterLock={clusterLock} />;
+            // «Стоит N дн»: с какого дня стоит текущая ставка. Зелёным — созрела (≥7 дн, данных
+            // достаточно для пересмотра), серым — ещё собирает. «—» — паспорта нет.
+            case 'bid_since': {
+                const days = c.bid_days;
+                if (days == null || c.bid_set_at == null) return <span style={{ color: '#d1d5db' }}>—</span>;
+                const mature = days >= BID_MATURE_DAYS;
+                const srcTxt = c.bid_source === 'recommendation' ? 'по рекомендации' : 'вручную';
+                const basis = [
+                    c.bid_basis_drr != null ? `ДРР тогда ${formatNumber(c.bid_basis_drr, 1)}%` : null,
+                    c.bid_basis_cpm != null ? `CPM ${formatNumber(c.bid_basis_cpm, 0)} ₽` : null,
+                ].filter(Boolean).join(', ');
+                const tip = `Ставка ${clMoneyN(c.bid)} ${srcTxt} от ${formatDate(c.bid_set_at)}`
+                    + (basis ? ` · ${basis}` : '')
+                    + ` · стоит ${days} дн.`
+                    + (mature ? ' Данных достаточно — можно пересматривать.' : ` Наберёт статистику через ${BID_MATURE_DAYS - days} дн.`);
+                return (
+                    <Tooltip text={tip}>
+                        <span style={{ fontWeight: 600, color: mature ? '#10b981' : '#9ca3af', whiteSpace: 'nowrap' }}>
+                            {days === 0 ? 'сегодня' : `${days} дн`}
+                        </span>
+                    </Tooltip>
+                );
+            }
+            case 'rec_bid': {
+                if (c.rec_bid == null || c.rec_dir == null) return <span style={{ color: '#d1d5db' }}>—</span>;
+                const proj = c.rec_projected;
+                // Прогнозные — бледнее и курсивом, с «~»: это оценка по средним конверсиям, а не факт
+                const color = proj ? (c.rec_dir === 'up' ? '#6ee7b7' : '#fcd34d') : (c.rec_dir === 'up' ? '#10b981' : '#f59e0b');
+                const arrow = c.rec_dir === 'up' ? '↑' : '↓';
+                const mark = proj ? '~' : '';
+                const projStyle = proj ? { fontStyle: 'italic' as const } : {};
+                const isConfirm = recPending?.norm_query === c.norm_query;
+                // Без права записи (bids нет) — просто число, без клика
+                if (!bids) return <span style={{ fontWeight: 600, color, ...projStyle }}>{mark}{arrow} {formatNumber(c.rec_bid, 0)} ₽</span>;
+                if (isConfirm) {
+                    return (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, justifyContent: 'flex-end' }} onClick={e => e.stopPropagation()}>
+                            <span style={{ fontWeight: 700, color: '#7c3aed', whiteSpace: 'nowrap' }}>{formatNumber(c.rec_bid, 0)} ₽?</span>
+                            <button aria-label="Применить ставку" title={`Применить ${formatNumber(c.rec_bid, 0)} ₽`} onClick={() => { bids.onSetBid(c, c.rec_bid as number, { source: 'recommendation', targetDrr: drrTarget }); setRecPending(null); }}
+                                style={{ border: '1px solid #10b981', background: '#ecfdf5', color: '#059669', borderRadius: 4, cursor: 'pointer', width: 18, height: 18, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0, fontSize: 11 }}>✓</button>
+                            <button aria-label="Отменить" title="Отменить" onClick={() => setRecPending(null)}
+                                style={{ border: '1px solid #e5e7eb', background: '#fff', color: '#6b7280', borderRadius: 4, cursor: 'pointer', width: 18, height: 18, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0, fontSize: 11 }}>✕</button>
+                        </span>
+                    );
+                }
+                return (
+                    <button onClick={e => { e.stopPropagation(); setRecPending({ norm_query: c.norm_query, value: c.rec_bid as number }); }}
+                        title={`Шаг к ДРР ${formatNumber(c.rec_step, 0)}% · потолок по ${formatNumber(drrTarget, 0)}% ≈ ${formatNumber(c.rec_ceil, 0)} ₽${proj ? ' · ПРОГНОЗ: нет заказов, оценка по средним конверсиям кампании' : ''}`}
+                        style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontWeight: 600, color, padding: 0, whiteSpace: 'nowrap', textDecorationLine: 'underline', textDecorationStyle: 'dotted', textUnderlineOffset: 2, ...projStyle }}>
+                        {mark}{arrow} {formatNumber(c.rec_bid, 0)} ₽
+                    </button>
+                );
+            }
             // Органическая позиция товара по фразе (последний сбор). null+depth>0 = «N+» (не в топ-N),
             // null+depth 0 = не собрано. Дельта к «Была»: ↑ зелёная (улучшилась), ↓ красная (упала).
             case 'position': {
@@ -560,20 +823,27 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
             case 'cpc': return clMoney(c.cpc);
             case 'cpm': return clMoney(c.cpm);
             case 'cpl': return clMoneyN(c.cpl);
+            case 'atbs': return clNum(c.atbs);
             case 'cr1': return clPct(c.cr1, 2);
             case 'cr2': return clPct(c.cr2, 2);
             case 'share': return c.share > 0 ? clPct(c.share, 1) : '—';
             case 'orders': return <span style={{ fontWeight: 600 }}>{clNum(c.orders)}</span>;
             case 'cr': return clPct(c.cr, 2);
             case 'cpo': return clMoneyN(c.cpo);
-            case 'drr': return <span style={{ fontWeight: 600, color: drrColor(c.drr, targetDrr) }}>{clPctN(c.drr)}</span>;
+            case 'drr': return <span style={{ fontWeight: 600, color: drrColor(c.drr, drrTarget) }}>{clPctN(c.drr)}</span>;
+            case 'eff': {
+                // Эффективный ДРР, %: факт (обычный) или прогноз (курсив). Цвет — как у ДРР.
+                if (c.eff == null) return <span style={{ color: '#9ca3af' }}>—</span>;
+                return <span title={c.eff_projected ? 'Прогнозный ДРР: заказов пока нет — оценка по корзинам/кликам и средним конверсиям кампании' : 'Фактический ДРР'}
+                    style={{ fontWeight: 600, color: drrColor(c.eff, drrTarget), fontStyle: c.eff_projected ? 'italic' : 'normal', whiteSpace: 'nowrap' }}>{clPctN(c.eff)}</span>;
+            }
             // Средняя позиция — ссылка на выдачу WB: проверить, где товар стоит сейчас.
             // Кружок здесь не нужен — он у ставки (сравнение с базовой ставкой кампании).
             case 'avg_pos': {
                 const pos = num(c.avg_pos);
                 if (pos <= 0) return '—';
                 return (
-                    <a href={wbSearchUrl(c.norm_query)} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+                    <a href={wbSearchUrl(c.norm_query)} target="_blank" rel="noreferrer" onClick={e => { e.stopPropagation(); if (e.shiftKey || cellMoved.current) e.preventDefault(); }}
                         title={`Проверить позицию товара в выдаче WB по запросу «${c.norm_query}»`}
                         style={{ color: posColor(pos), fontWeight: 600, textDecoration: 'none' }}>
                         {formatNumber(pos, 1)}
@@ -587,6 +857,8 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
 
     // Ячейка фильтра колонки: текст (содержит/не содержит) или диапазон «от / до» (вертикально)
     const renderFilter = (k: ColKey) => {
+        // Колонки без фильтра (эффективность — категориальная, сортируется кликом по шапке)
+        if (COL_DEFS[k].filter === 'none') return null;
         // Оба поля — одинаковой ширины, строго друг под другом (симметрия рядов «от» / «до»)
         if (COL_DEFS[k].filter === 'text') {
             return (
@@ -604,6 +876,27 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
         );
     };
 
+    // Все видимые строки, у которых есть рекомендация по ставке — для массового применения.
+    // Два режима: шаг (rec_bid, +1 п.п. ДРР) и «сразу к цели» (rec_ceil, ставка при ДРР = целевого).
+    // Все видимые строки с рекомендацией (доказанные по заказам + прогнозные по беззаказным).
+    // Прогнозные помечены «~» в колонке. Массовое применение можно фильтровать по цвету ДРР (тиру).
+    const recRows = filtered.filter(c => c.rec_bid != null);
+    // Небиддируемые фразы (<100 показов, «сбор данных»): WB не принимает по ним ставку, поэтому
+    // рекомендованной ставки у них нет. Список показываем в окне «⚠ Без ставки», чтобы было видно,
+    // ПОЧЕМУ именно у этих ключей нет рекомендации.
+    const nonBid = filtered.filter(c => c.locked && !c.is_minused);
+    const recTierOf = (c: Row): RecTier => recTierByColor(drrColor(c.eff, drrTarget));
+    const recTierCount: Record<RecTier, number> = { green: 0, amber: 0, red: 0 };
+    recRows.forEach(c => { recTierCount[recTierOf(c)]++; });
+    const recTierRows = recRows.filter(c => recTiers.has(recTierOf(c)));  // строки выбранных цветов
+    const recItems = recTierRows.map(c => ({ cluster: c as SearchCluster, bid: c.rec_bid as number }));
+    const recCeilItems = recTierRows.filter(c => c.rec_ceil > 0).map(c => ({ cluster: c as SearchCluster, bid: c.rec_ceil }));
+    const targetPct = formatNumber(drrTarget, 0);
+    // Те же рекомендации, но только по ВЫБРАННЫМ строкам — чтобы часть применить руками, часть массово.
+    const recSelRows = selectedClusters.filter(c => c.rec_bid != null);
+    const recSelItems = recSelRows.map(c => ({ cluster: c as SearchCluster, bid: c.rec_bid as number }));
+    const recSelCeilItems = recSelRows.filter(c => c.rec_ceil > 0).map(c => ({ cluster: c as SearchCluster, bid: c.rec_ceil }));
+
     return (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10, flexShrink: 0 }}>
@@ -619,6 +912,19 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                     })}
                 </div>
                 <span style={{ fontSize: 12, color: 'var(--color-text-dim)', marginLeft: 'auto' }}>Кластеров: {filtered.length}</span>
+                {/* Целевой ДРР — задаёт менеджер; влияет на рекомендации ставок, «Прогноз ДРР» и цвета */}
+                <Tooltip text="Целевой ДРР, % — под него считаются рекомендации ставок и цвет ДРР. Переопределяет значение кампании, сохраняется.">
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: '#6b7280', whiteSpace: 'nowrap' }}>
+                        Цель ДРР
+                        <input type="text" inputMode="decimal" aria-label="Целевой ДРР %"
+                            value={drrInput ?? String(drrTarget)}
+                            onFocus={() => setDrrInput(String(drrTarget))}
+                            onChange={e => { setDrrInput(e.target.value); setDrrTarget(e.target.value); }}
+                            onBlur={() => setDrrInput(null)}
+                            style={{ width: 40, padding: '2px 4px', fontSize: 12, textAlign: 'right', border: `1px solid ${drrOverride != null ? '#c4b5fd' : '#e2e4e8'}`, borderRadius: 4, color: '#111827', fontWeight: drrOverride != null ? 700 : 400 }} />
+                        %
+                    </span>
+                </Tooltip>
                 {onCollectPositions && (collecting ? (
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                         <span style={{ fontSize: 12, color: '#6b7280' }}>
@@ -634,6 +940,49 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                         <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={onCollectPositions} disabled={clusters.length === 0}>▶ Собрать позиции</button>
                     </Tooltip>
                 ))}
+                {/* Массовое применение рекомендованных ставок — с фильтром по цвету ДРР (🟢/🟡/🔴) */}
+                {bids?.onBulkBid && recRows.length > 0 && (
+                    recBulkConfirm ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, flexWrap: 'wrap' }}>
+                            {/* Чипы цветов — тумблеры: можно применить отдельно зелёные / жёлтые / красные */}
+                            {REC_TIERS.map(t => {
+                                const cnt = recTierCount[t.key];
+                                const on = recTiers.has(t.key);
+                                return (
+                                    <Tooltip key={t.key} text={`${t.label} · ${cnt} фраз`}>
+                                        <button disabled={cnt === 0}
+                                            onClick={() => setRecTiers(prev => { const n = new Set(prev); n.has(t.key) ? n.delete(t.key) : n.add(t.key); return n; })}
+                                            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 6, fontSize: 12,
+                                                cursor: cnt === 0 ? 'default' : 'pointer', opacity: cnt === 0 ? 0.4 : 1,
+                                                border: `1px solid ${on ? t.color : '#e5e7eb'}`, background: on ? t.bg : '#fff', color: '#374151', fontWeight: on ? 600 : 400 }}>
+                                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: t.color }} />{cnt}
+                                        </button>
+                                    </Tooltip>
+                                );
+                            })}
+                            <span style={{ color: '#7c3aed', fontWeight: 600, whiteSpace: 'nowrap' }}>→ {recItems.length}:</span>
+                            <Tooltip text="Один шаг ДРР к цели по выбранным цветам">
+                                <button className="btn btn-success btn-sm" disabled={recItems.length === 0} style={{ fontSize: 12, whiteSpace: 'nowrap' }}
+                                    onClick={() => { bids.onBulkBid!(recItems, 'реком. ставки (шаг)', { source: 'recommendation', targetDrr: drrTarget }); setRecBulkConfirm(false); }}>Шаг</button>
+                            </Tooltip>
+                            <Tooltip text={`Сразу до целевого ДРР ${targetPct}% по выбранным цветам (потолок за один раз)`}>
+                                <button className="btn btn-success btn-sm" disabled={recCeilItems.length === 0} style={{ fontSize: 12, whiteSpace: 'nowrap' }}
+                                    onClick={() => { bids.onBulkBid!(recCeilItems, `реком. ставки (к ${targetPct}%)`, { source: 'recommendation', targetDrr: drrTarget }); setRecBulkConfirm(false); }}>Сразу к {targetPct}%</button>
+                            </Tooltip>
+                            <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={() => setRecBulkConfirm(false)}>Отмена</button>
+                        </span>
+                    ) : (
+                        <Tooltip text="Массово поставить рекомендованные ставки. В подтверждении — фильтр по цвету ДРР: 🟢 эффективные / 🟡 средние / 🔴 неэффективные, можно применить отдельно.">
+                            <button className="btn btn-secondary btn-sm" style={{ fontSize: 12, whiteSpace: 'nowrap' }} onClick={() => setRecBulkConfirm(true)}>↑↓ Реком. ставки ({recRows.length})</button>
+                        </Tooltip>
+                    )
+                )}
+                {/* Фразы <100 показов: WB не даёт по ним ставку → нет рекомендации. Список — по клику. */}
+                {nonBid.length > 0 && (
+                    <Tooltip text="Фразы с <100 показов — WB не принимает по ним ставку, поэтому рекомендованной ставки у них нет. Нажмите, чтобы увидеть список.">
+                        <button className="btn btn-secondary btn-sm" style={{ fontSize: 12, whiteSpace: 'nowrap', color: '#b45309', borderColor: '#fcd34d' }} onClick={() => setNonBidOpen(true)}>⚠ Без ставки ({nonBid.length})</button>
+                    </Tooltip>
+                )}
                 <Tooltip text="Выгрузить в Excel"><button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={doExport} disabled={filtered.length === 0}>Excel</button></Tooltip>
             </div>
 
@@ -650,7 +999,7 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
             ) : (
                 // Прокручиваются строки, а не страница: скролл заполняет остаток flex-колонки,
                 // sticky-шапка и tfoot-итоги остаются на виду при любой высоте хедера
-                <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+                <div style={{ flex: 1, minHeight: 0, overflow: 'auto', userSelect: cellSel ? 'none' : undefined }}>
                     <table className="data-table" style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>
                         <thead>
                             <tr>
@@ -698,18 +1047,22 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                             </tr>
                         </thead>
                         <tbody>
-                            {filtered.map(c => {
+                            {filtered.map((c, ri) => {
                                 const bg = rowBg(c) ?? '#fff';
                                 return (
-                                    <tr key={c.norm_query} style={{ color: '#111827', background: bg, cursor: 'pointer' }}
+                                    <tr key={c.norm_query} style={{ color: '#111827', background: bg }}
                                         onMouseEnter={() => setHoverKey(c.norm_query)}
-                                        onMouseLeave={() => setHoverKey(h => (h === c.norm_query ? null : h))}
-                                        onClick={() => toggleRow(c.norm_query)}>
-                                        <td style={{ ...tdStyle, textAlign: 'center', position: 'sticky', left: 0, zIndex: 2, background: bg }} onClick={e => e.stopPropagation()}>
+                                        onMouseLeave={() => setHoverKey(h => (h === c.norm_query ? null : h))}>
+                                        <td style={{ ...tdStyle, textAlign: 'center', position: 'sticky', left: 0, zIndex: 2, background: bg }}>
                                             <input type="checkbox" checked={selected.has(c.norm_query)} onChange={() => toggleRow(c.norm_query)} />
                                         </td>
-                                        {order.map((k, i) => (
-                                            <td key={k} style={{
+                                        {order.map((k, i) => {
+                                            const sel = inCellSel(ri, i);
+                                            return (
+                                            <td key={k}
+                                                onMouseDown={e => onCellMouseDown(ri, i, e)}
+                                                onMouseEnter={() => onCellMouseEnter(ri, i)}
+                                                style={{
                                                 ...(COL_DEFS[k].align === 'left' ? tdLeft : tdStyle),
                                                 // Фраза — строго в одну строку: перенос делал ряды разной высоты
                                                 ...(k === 'norm_query' ? { whiteSpace: 'nowrap' as const, overflow: 'hidden', textOverflow: 'ellipsis' } : null),
@@ -717,8 +1070,11 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                                                 ...frozenCell(i, dragKey === k ? '#eff6ff' : bg, 2, freezeCols),
                                                 boxShadow: dropShadow(k) ?? frozenCell(i, '', 0, freezeCols)?.boxShadow,
                                                 ...(dragKey === k ? { background: '#eff6ff' } : null),
+                                                // Выделение ячейки Excel-стилем перекрывает фон строки/заморозки
+                                                ...(sel ? { background: CELL_SELECTED } : null),
                                             }}>{renderCell(k, c)}</td>
-                                        ))}
+                                            );
+                                        })}
                                     </tr>
                                 );
                             })}
@@ -742,6 +1098,28 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                 </div>
             )}
 
+            {/* Итог по Excel-выделению ячеек: сумма/среднее/мин/макс + копирование (Ctrl/Cmd+C) */}
+            {cellStats && (
+                <div style={{
+                    flexShrink: 0, marginTop: 10, display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap',
+                    padding: '8px 12px', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 12, fontSize: 12, color: '#1e3a8a',
+                }}>
+                    <span style={{ fontWeight: 600 }}>Выделено ячеек: {clNum(cellStats.cells)}</span>
+                    {cellStats.count > 0 ? (
+                        <>
+                            <span>Чисел: <b>{clNum(cellStats.count)}</b></span>
+                            <span>Сумма: <b>{formatNumber(cellStats.sum, 2)}</b></span>
+                            <span>Среднее: <b>{formatNumber(cellStats.avg, 2)}</b></span>
+                            <span>Мин: <b>{formatNumber(cellStats.min, 2)}</b></span>
+                            <span>Макс: <b>{formatNumber(cellStats.max, 2)}</b></span>
+                        </>
+                    ) : <span style={{ color: '#6b7280' }}>нет числовых ячеек в выделении</span>}
+                    <button className={`btn btn-sm ${copyFlash === 'cells' ? 'btn-success' : 'btn-secondary'}`} style={{ fontSize: 12, marginLeft: 'auto' }}
+                        onClick={copyCellSelection} title="Скопировать выделенные ячейки (или Ctrl/Cmd+C)">{copyFlash === 'cells' ? 'Скопировано ✓' : 'Копировать'}</button>
+                    <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={() => setCellSel(null)}>Снять</button>
+                </div>
+            )}
+
             {/* Нижняя панель действий — появляется при выборе фраз; flex-сосед снизу (не перекрывает итог) */}
             {selected.size > 0 && (
                 <div style={{
@@ -754,7 +1132,7 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                         <>
                             <span style={{ fontSize: 12, color: '#111827' }}>{confirmAsk.text}</span>
                             <button className="btn btn-primary btn-sm" style={{ fontSize: 12 }}
-                                onClick={() => { confirmAsk.run(); setConfirmAsk(null); }}>Применить в WB</button>
+                                onClick={() => { confirmAsk.run(); setConfirmAsk(null); setSelected(new Set()); setBidPopover(false); }}>Применить в WB</button>
                             <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }}
                                 onClick={() => setConfirmAsk(null)}>Отмена</button>
                         </>
@@ -762,8 +1140,8 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                     <>
                     <span style={{ fontSize: 12, fontWeight: 600, color: '#1e3a8a' }}>Выбрано: {selected.size}</span>
 
-                    <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={copySelected}
-                        title="Скопировать фразы в буфер обмена">Скопировать</button>
+                    <button className={`btn btn-sm ${copyFlash === 'rows' ? 'btn-success' : 'btn-secondary'}`} style={{ fontSize: 12 }} onClick={copySelected}
+                        title="Скопировать фразы в буфер обмена">{copyFlash === 'rows' ? 'Скопировано ✓' : 'Скопировать'}</button>
 
                     {minus?.onBulk && (
                         <>
@@ -790,7 +1168,7 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                                 <BidPopover targets={biddable} onClose={() => setBidPopover(false)}
                                     onApply={(items, label) => setConfirmAsk({
                                         text: `Поставить ${label} на ${items.length} фраз(ы)?`,
-                                        run: () => bids.onBulkBid!(items, label),
+                                        run: () => bids.onBulkBid!(items, label, { source: 'manual' }),
                                     })} />
                             )}
                         </div>
@@ -801,15 +1179,75 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                             disabled={biddable.length === 0 || !!clusterLock}
                             onClick={() => setConfirmAsk({
                                 text: `Сбросить ставку у ${biddable.length} фраз(ы) — вернуть ставку кампании?`,
-                                run: () => bids.onBulkBid!(biddable.map(c => ({ cluster: c, bid: 0 })), 'сброс к ставке кампании'),
+                                run: () => bids.onBulkBid!(biddable.map(c => ({ cluster: c, bid: 0 })), 'сброс к ставке кампании', { source: 'manual' }),
                             })}
                             title={clusterLock ?? 'Убрать свою ставку — фраза вернётся на ставку кампании'}>Сбросить ставку</button>
                     )}
 
+                    {/* Рекомендованные ставки только по ВЫБРАННЫМ строкам (часть руками, часть массово) */}
+                    {bids?.onBulkBid && recSelItems.length > 0 && (
+                        recSelConfirm ? (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                                <span style={{ color: '#7c3aed', fontWeight: 600, whiteSpace: 'nowrap' }}>Реком. на {recSelItems.length}:</span>
+                                <Tooltip text="Один шаг ДРР к цели (осторожно, рекомендованный режим)">
+                                    <button className="btn btn-success btn-sm" style={{ fontSize: 12, whiteSpace: 'nowrap' }}
+                                        onClick={() => { bids.onBulkBid!(recSelItems, 'реком. ставки (шаг, выбранные)', { source: 'recommendation', targetDrr: drrTarget }); setRecSelConfirm(false); setSelected(new Set()); }}>Шаг</button>
+                                </Tooltip>
+                                <Tooltip text={`Сразу до целевого ДРР ${targetPct}% (потолок за один раз)`}>
+                                    <button className="btn btn-success btn-sm" style={{ fontSize: 12, whiteSpace: 'nowrap' }}
+                                        onClick={() => { bids.onBulkBid!(recSelCeilItems, `реком. ставки (к ${targetPct}%, выбранные)`, { source: 'recommendation', targetDrr: drrTarget }); setRecSelConfirm(false); setSelected(new Set()); }}>Сразу к {targetPct}%</button>
+                                </Tooltip>
+                                <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={() => setRecSelConfirm(false)}>Отмена</button>
+                            </span>
+                        ) : (
+                            <Tooltip text="Поставить рекомендованные ставки только выбранным фразам. Реальные деньги.">
+                                <button className="btn btn-secondary btn-sm" style={{ fontSize: 12, whiteSpace: 'nowrap' }} onClick={() => setRecSelConfirm(true)}>↑↓ Реком. выбранным ({recSelItems.length})</button>
+                            </Tooltip>
+                        )
+                    )}
+
                     <button className="btn btn-secondary btn-sm" style={{ fontSize: 12, marginLeft: 'auto' }}
-                        onClick={() => { setSelected(new Set()); setBidPopover(false); }}>Снять выделение</button>
+                        onClick={() => { setSelected(new Set()); setBidPopover(false); setRecSelConfirm(false); }}>Снять выделение</button>
                     </>
                     )}
+                </div>
+            )}
+
+            {/* Окно «⚠ Без ставки»: фразы <100 показов — WB не принимает по ним ставку,
+                поэтому рекомендованной ставки у них нет. Список с числом показов. */}
+            {nonBidOpen && (
+                <div onClick={() => setNonBidOpen(false)}
+                    style={{ position: 'fixed', inset: 0, background: 'rgba(17,24,39,.4)', zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+                    <div onClick={e => e.stopPropagation()}
+                        style={{ background: '#fff', borderRadius: 12, boxShadow: '0 20px 60px rgba(17,24,39,.3)', width: 'min(560px, 100%)', maxHeight: '80vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                        <div style={{ padding: '14px 16px', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontSize: 14, fontWeight: 700, color: '#b45309' }}>⚠ Фразы без ставки · {nonBid.length}</span>
+                            <button className="btn btn-secondary btn-sm" style={{ fontSize: 12, marginLeft: 'auto' }} onClick={() => setNonBidOpen(false)}>Закрыть</button>
+                        </div>
+                        <div style={{ padding: '10px 16px 4px', fontSize: 12, color: '#6b7280', lineHeight: 1.4 }}>
+                            У этих фраз набрано менее 100 показов — WB не принимает по ним ставку («стадия сбора данных»),
+                            поэтому рекомендованной ставки нет и ставку нельзя редактировать. Как только фраза наберёт ≥100 показов,
+                            она станет биддируемой и появится рекомендация.
+                        </div>
+                        <div style={{ overflowY: 'auto', padding: '8px 16px 16px' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                                <thead>
+                                    <tr style={{ textAlign: 'left', color: '#6b7280' }}>
+                                        <th style={{ padding: '4px 6px', borderBottom: '1px solid #e5e7eb', fontWeight: 600 }}>Ключевая фраза</th>
+                                        <th style={{ padding: '4px 6px', borderBottom: '1px solid #e5e7eb', fontWeight: 600, textAlign: 'right', whiteSpace: 'nowrap' }}>Показы</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {nonBid.map(c => (
+                                        <tr key={c.norm_query}>
+                                            <td style={{ padding: '4px 6px', borderBottom: '1px solid #f3f4f6', color: '#111827' }}>{c.norm_query}</td>
+                                            <td style={{ padding: '4px 6px', borderBottom: '1px solid #f3f4f6', textAlign: 'right', color: '#9ca3af' }}>{formatNumber(num(c.views), 0)}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
             )}
         </div>

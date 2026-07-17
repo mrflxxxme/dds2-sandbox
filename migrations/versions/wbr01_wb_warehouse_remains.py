@@ -6,7 +6,7 @@
 на складах») хранятся строками как отдаёт API. Full replace на каждом синке.
 
 Revision ID: wbr01_wb_warehouse_remains
-Revises: abt01_ab_photo_tests
+Revises: ads10_wb_ad_cluster_bid
 Create Date: 2026-07-16
 
 """
@@ -18,7 +18,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "wbr01_wb_warehouse_remains"
-down_revision: str | None = "abt01_ab_photo_tests"
+down_revision: str | None = "ads10_wb_ad_cluster_bid"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

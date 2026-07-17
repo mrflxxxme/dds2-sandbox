@@ -30,6 +30,7 @@ import NeedMatrixCell, { type CellMark } from '../components/NeedMatrixCell';
 import AcceptanceBanner, { type AcceptanceSummary } from '../components/AcceptanceBanner';
 import PrebookView, { type PrebookAcceptanceMark } from '../components/PrebookView';
 import DraftPreview from '../components/DraftPreview';
+import CreatedRequestsModal, { type CreatedRequestRow } from '../components/CreatedRequestsModal';
 import { seedNewcomerWholeBoxes, type SeedAnchor } from '@/lib/assembly/coldStartSeed';
 import { allocateWholeBoxes, buildLeftoverWeights } from '@/lib/assembly/leftoverAlloc';
 import type {
@@ -137,7 +138,7 @@ function buildDistAgg(
 
 /** Экран «Распределить машину» — открывается из вкладки «🚚 Предраспределение» (?vehicle=<id>).
  *  Полноэкранная матрица как «Потребность по складам», но источник = остатки машины (пул):
- *  per-WB-склад остаток 🏬 / в сборке-в пути 🚚 / потребность + что отправляем (коробá),
+ *  per-WB-склад остаток 🏬 / в сборке 🔧 / в пути 🚚 / потребность + что отправляем (коробá),
  *  бейджи «новинка» / «кратно N», счётчик коробов и паллет. Заявки создаются со статусом
  *  «Предраспределение» (без фейкового стока); при разгрузке станут обычными сборками. */
 export default function PreDistVehiclePage() {
@@ -206,6 +207,8 @@ export default function PreDistVehiclePage() {
     const [distComputing, setDistComputing] = useState(false);
     const [acceptanceNote, setAcceptanceNote] = useState<AcceptanceSummary | null>(null);
     const [submitting, setSubmitting] = useState(false);
+    // Модалка «Созданные заявки» после коммита машины (занос WB/ФФ); закрытие → к списку.
+    const [createdModal, setCreatedModal] = useState<{ rows: CreatedRequestRow[]; listQuery: string } | null>(null);
 
     // Сортировка таблицы раскладки (клик по заголовку). Дефолт — Σ отпр. по убыванию
     // (прежнее поведение: сначала то, что отправляем).
@@ -592,7 +595,14 @@ export default function PreDistVehiclePage() {
                 setDistRows([...whole.rows, ...pinnedRows]);
                 setPrebookRows(whole.prebook);
                 setAcceptanceNote(summary);
-                setAcceptanceByNm(accByNm);
+                // МЕРЖ, не замена: карту наполняют ещё префетч ручного режима и
+                // ленивые per-click проверки — замена стирала бы их метки (гонка).
+                setAcceptanceByNm((prev) => {
+                    if (prev.size === 0) return accByNm;
+                    const m = new Map(prev);
+                    for (const [nm, it] of accByNm) m.set(nm, it);
+                    return m;
+                });
             }
         } catch (e) {
             if (!signal.aborted) { setDistRows([]); setPrebookRows([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
@@ -858,8 +868,11 @@ export default function PreDistVehiclePage() {
     // Метка приёмки WB ячейки отгрузки: ⌛ нет лимита приёмки (нужна предзаявка).
     // Тип для выбора meta — по факту отправки (shipPkg), иначе высший доступный.
     const markFor = useCallback((nm: number, wh: string, shipPkg: PackageType | null): CellMark | null => {
-        const flags = acceptanceByNm.get(nm)?.availability?.[wh];
-        if (!flags) return null;
+        const checked = acceptanceByNm.get(nm);
+        if (!checked) return null; // приёмка ещё не проверялась
+        const flags = checked.availability?.[wh];
+        // Проверка была, склада в ответе нет — WB не предлагает его для товара → ⛔.
+        if (!flags) return { noLimit: false, closed: true };
         // Закрыто по всем типам → ⛔ (важно для ручных пинов: авто-раскладка сюда не поедет,
         // а пин юзера — да, поэтому предупреждаем, что склад физически не принимает).
         if (!flags.can_box && !flags.can_monopallet && !flags.can_supersafe) return { noLimit: false, closed: true };
@@ -868,16 +881,67 @@ export default function PreDistVehiclePage() {
         const wanted: 'box' | 'mono' | 'super' | null = shipPkg === 'MONOPALLET' ? 'mono' : shipPkg === 'SUPERSAFE' ? 'super' : shipPkg === 'BOX' ? 'box' : null;
         const type = wanted && canOf(wanted) ? wanted : flags.can_box ? 'box' : flags.can_monopallet ? 'mono' : 'super';
         const meta = type === 'box' ? flags.box_meta : type === 'mono' ? flags.mono_meta : flags.super_meta;
-        return { noLimit: ((meta?.free_days_14 ?? 0) + (meta?.paid_days_14 ?? 0)) <= 0 };
+        // 📐 «только моно»: короб не принимается — пин станет моно-паллетой (pinnedPkgOf).
+        return {
+            noLimit: ((meta?.free_days_14 ?? 0) + (meta?.paid_days_14 ?? 0)) <= 0,
+            monoOnly: !flags.can_box && flags.can_monopallet,
+        };
     }, [acceptanceByNm]);
 
     // Правка ячейки матрицы на ±1 короб (зеркало степперов матрицы черновика). Первая
     // правка баркода «замораживает» его ТЕКУЩИЙ план (строки + 🅿️ предбронь) в пины —
     // соседние ячейки не прыгают, предбронь SKU сливается в точный ручной план; остальные
     // SKU остаются в авто. Σ коробов баркода капится остатком машины.
+    // Ленивый фолбэк проверки приёмки для SKU без данных: проверяем, кэшируем
+    // (метки ⛔/⌛ в ячейках) и повторяем клик свежим хендлером (канон 2026-07-16 —
+    // «+» только в склады, куда реально можно сдать; зеркало матрицы черновика).
+    const accCheckBusyRef = useRef<Set<number>>(new Set());
+    const editCellBoxesRef = useRef<(barcode: string, nm: number, wh: string, delta: number) => void>(() => {});
+    const checkCellAcceptance = useCallback(async (barcode: string, nm: number, wh: string, delta: number) => {
+        if (accCheckBusyRef.current.has(nm)) return;
+        accCheckBusyRef.current.add(nm);
+        showToast('⏳ Проверяю приёмку WB для этого товара…', 'success');
+        try {
+            const ppb = nmPpb.get(nm) || 0;
+            const resp = await api.checkWbAcceptance({ items: [{ nm_id: nm, barcode, distribution: { [wh]: Math.max(ppb, 1) } }] });
+            const it = (resp.items || []).find(i => i.nm_id === nm);
+            if (it) setAcceptanceByNm(prev => new Map(prev).set(nm, it));
+            if (!it) { showToast(`Приёмка по «${wh}» не вернулась — попробуй ещё раз`, 'error'); return; }
+            if (!it.availability?.[wh]) {
+                // Ответ пришёл, но склада в нём нет — WB не предлагает его для этого
+                // товара (раньше зацикливалось в «попробуй ещё раз»).
+                showToast(`⛔ WB не предлагает «${wh}» для этого товара — приёмка закрыта`, 'error');
+                return;
+            }
+            editCellBoxesRef.current(barcode, nm, wh, delta);
+        } catch {
+            showToast('Не удалось проверить приёмку WB (лимит ~6 зап/мин) — подожди минуту и повтори', 'error');
+        } finally {
+            accCheckBusyRef.current.delete(nm);
+        }
+    }, [nmPpb, showToast]);
+
     const editCellBoxes = useCallback((barcode: string, nm: number, wh: string, delta: number) => {
         const ppb = nmPpb.get(nm) || 0;
         if (ppb <= 0) return;
+        // РОСТ пина — только в склады, принимающие товар с лимитом (канон 2026-07-16):
+        // раньше пин в закрытый склад оставался с ⛔ (override) — теперь блокируем.
+        if (delta > 0) {
+            const checked = acceptanceByNm.get(nm);
+            const flags = checked?.availability?.[wh];
+            if (!flags) {
+                if (checked) {
+                    // Проверка была, склада нет в ответе — WB не предлагает его для товара.
+                    showToast(`⛔ WB не предлагает «${wh}» для этого товара — приёмка закрыта`, 'error');
+                    return;
+                }
+                void checkCellAcceptance(barcode, nm, wh, delta);
+                return;
+            }
+            const m = markFor(nm, wh, null);
+            if (m?.closed) { showToast(`⛔ WB не принимает на «${wh}» — приём закрыт, пин невозможен`, 'error'); return; }
+            if (m?.noLimit) { showToast(`⌛ «${wh}»: приём открыт, но лимита нет — в отгрузку не поедет (моно — через предзаявку)`, 'error'); return; }
+        }
         const avail = availByBc.get(barcode) ?? 0;
         const firstPin = !cellEdits.has(barcode);
         setCellEdits(prev => {
@@ -898,7 +962,9 @@ export default function PreDistVehiclePage() {
         // Первый пин забирает план баркода целиком (включая уже влитый в plan.cellByBc дозабор) —
         // снимаем его накопленный manualTopUp, иначе после ↺ он «воскреснет» фантомными коробами.
         if (firstPin) setManualTopUp(prev => { if (!prev.has(barcode)) return prev; const n = new Map(prev); n.delete(barcode); return n; });
-    }, [nmPpb, availByBc, plan, cellEdits]);
+    }, [nmPpb, availByBc, plan, cellEdits, acceptanceByNm, markFor, checkCellAcceptance, showToast]);
+    // Свежий хендлер для отложенного повтора клика после фоновой проверки приёмки.
+    useEffect(() => { editCellBoxesRef.current = editCellBoxes; }, [editCellBoxes]);
     const resetRowEdits = useCallback((barcode: string) => {
         setCellEdits(prev => { if (!prev.has(barcode)) return prev; const n = new Map(prev); n.delete(barcode); return n; });
     }, []);
@@ -911,20 +977,14 @@ export default function PreDistVehiclePage() {
     const pinRowLeftover = useCallback((
         row: PreDistVehiclePool['rows'][number],
         edits: CellEdits,
-    ): { rec?: Record<string, number>; boxes: number; ppb: number; skip?: 'noPpb' | 'guard' | 'nothing' | 'noTarget' } => {
+    ): { rec?: Record<string, number>; boxes: number; ppb: number; skip?: 'noPpb' | 'nothing' | 'noTarget' } => {
         const nm = nmByBc.get(row.barcode) ?? 0;
         const ppb = nmPpb.get(nm) || 0;
         const avail = Number(row.available_qty) || 0;
         if (ppb <= 0) return { boxes: 0, ppb: 0, skip: 'noPpb' };
-        // Гвард пересорта: посев лежит без продаж — авто-досев запрещён (степпер работает).
-        if (guardByNm.has(nm)) return { boxes: 0, ppb, skip: 'guard' };
-        // Новинка МАШИНЫ (без ФФ-остатка) в cold-start-справочник не попадает и
-        // guardByNm её не видит — та же проверка локально: посев уже лежит на WB,
-        // продаж нет → раздача остатков досыпала бы пересорт (кейс зебра_молочный).
-        const _na = needArtByNm.get(nm);
-        if (newcomerSet.has(nm) && (Number(_na?.eff_avg_daily) || 0) === 0 && (Number(_na?.stocks_wb) || 0) > 0) {
-            return { boxes: 0, ppb, skip: 'guard' };
-        }
+        // Гвард пересорта ручную раздачу НЕ блокирует (решение юзера 2026-07-16):
+        // клик «Распределить остатки» — явное решение человека, строка пинуется ✏️.
+        // Гвард остаётся только в авто-засеве машины (движок скипает guarded SKU).
         if (avail <= 0) return { boxes: 0, ppb, skip: 'nothing' };
         const prev = edits.get(row.barcode);
         const rec: Record<string, number> = prev ? { ...prev } : {};
@@ -945,7 +1005,7 @@ export default function PreDistVehiclePage() {
         if (alloc.size === 0) return { boxes: 0, ppb, skip: 'noTarget' };
         for (const [wh, b] of alloc) rec[wh] = (rec[wh] ?? 0) + b;
         return { rec, boxes, ppb };
-    }, [nmByBc, nmPpb, plan, enrichMap, markFor, guardByNm, needArtByNm, newcomerSet]);
+    }, [nmByBc, nmPpb, plan, enrichMap, markFor]);
 
     // «Распределить все остатки»: раздать остаток машины сверх плана ЦЕЛЫМИ коробами
     // как ручные пины — дальше тот же конвейер (приёмка/паллеты/предбронь), капы
@@ -954,13 +1014,12 @@ export default function PreDistVehiclePage() {
         // Во время пересчёта plan.cellByBc пуст/устарел — сид пинов раздал бы весь
         // остаток мимо плана (кнопка тоже disabled, гард — от stale-рендера).
         if (!pool || distComputing || distRows === null) return;
-        let addedBoxes = 0, addedUnits = 0, touched = 0, skipNoPpb = 0, skipNoTarget = 0, skipGuard = 0;
+        let addedBoxes = 0, addedUnits = 0, touched = 0, skipNoPpb = 0, skipNoTarget = 0;
         const nextEdits: CellEdits = new Map(cellEdits);
         const pinnedNow: string[] = [];
         for (const row of pool.rows) {
             const res = pinRowLeftover(row, nextEdits);
             if (res.skip === 'noPpb') { skipNoPpb++; continue; }
-            if (res.skip === 'guard') { skipGuard++; continue; }
             if (res.skip === 'noTarget') { skipNoTarget++; continue; }
             if (!res.rec || res.boxes <= 0) continue;
             nextEdits.set(row.barcode, res.rec);
@@ -968,14 +1027,14 @@ export default function PreDistVehiclePage() {
             addedBoxes += res.boxes; addedUnits += res.boxes * res.ppb; touched++;
         }
         if (touched === 0) {
-            showToast(`Нечего распределять: остатки уже в плане${skipNoPpb ? ` · без кратности: ${skipNoPpb} SKU` : ''}${skipNoTarget ? ` · некуда (нет спроса и присутствия): ${skipNoTarget} SKU` : ''}${skipGuard ? ` · гвард пересорта: ${skipGuard} SKU` : ''}`, 'error');
+            showToast(`Нечего распределять: остатки уже в плане${skipNoPpb ? ` · без кратности: ${skipNoPpb} SKU` : ''}${skipNoTarget ? ` · некуда (нет спроса и присутствия): ${skipNoTarget} SKU` : ''}`, 'error');
             return;
         }
         setCellEdits(nextEdits);
         // Пин забирает план баркода целиком (его дозабор уже в базе пина через plan.cellByBc).
         setManualTopUp(prevT => { const n = new Map(prevT); for (const bc of pinnedNow) n.delete(bc); return n; });
         setEditMode(true);
-        showToast(`Распределено ${formatNumber(addedUnits, 0)} шт (${formatNumber(addedBoxes, 0)} кор) по ${formatNumber(touched, 0)} SKU${skipNoPpb ? ` · пропущено без кратности: ${skipNoPpb}` : ''}${skipNoTarget ? ` · некуда: ${skipNoTarget}` : ''}${skipGuard ? ` · гвард пересорта: ${skipGuard}` : ''}`, 'success');
+        showToast(`Распределено ${formatNumber(addedUnits, 0)} шт (${formatNumber(addedBoxes, 0)} кор) по ${formatNumber(touched, 0)} SKU${skipNoPpb ? ` · пропущено без кратности: ${skipNoPpb}` : ''}${skipNoTarget ? ` · некуда: ${skipNoTarget}` : ''}`, 'success');
     }, [pool, distComputing, distRows, cellEdits, pinRowLeftover, showToast]);
 
     // Раздача остатка ОДНОЙ строки машины (кнопка в «Остаётся ФФ»).
@@ -983,9 +1042,7 @@ export default function PreDistVehiclePage() {
         if (!pool || distComputing || distRows === null) return;
         const res = pinRowLeftover(row, cellEdits);
         if (!res.rec || res.boxes <= 0) {
-            const nm = nmByBc.get(row.barcode) ?? 0;
             const msg = res.skip === 'noPpb' ? 'Не задана кратность короба'
-                : res.skip === 'guard' ? `Гвард пересорта: ${guardByNm.get(nm) || 'посев лежит без продаж'} — только вручную степпером`
                 : res.skip === 'noTarget' ? 'Некуда: нет ни потребности, ни присутствия на открытых складах'
                 : 'Остаток меньше короба — распределять нечего';
             showToast(msg, 'error');
@@ -995,10 +1052,54 @@ export default function PreDistVehiclePage() {
         setManualTopUp(prev => { if (!prev.has(row.barcode)) return prev; const n = new Map(prev); n.delete(row.barcode); return n; });
         setEditMode(true);
         showToast(`${row.article_seller || row.barcode}: распределено ${formatNumber(res.boxes * res.ppb, 0)} шт (${formatNumber(res.boxes, 0)} кор) — строка запинована ✏️`, 'success');
-    }, [pool, distComputing, distRows, cellEdits, pinRowLeftover, nmByBc, guardByNm, showToast]);
+    }, [pool, distComputing, distRows, cellEdits, pinRowLeftover, showToast]);
 
     // Вход в ручной режим = просто показать степперы поверх авто-раскладки (как в матрице
     // черновика). Пины НЕ сеются: нетронутые SKU остаются в авто, «вручную» становится
+    // Префетч приёмки в ручном режиме: батчем проверяем SKU пула машины без данных
+    // (по всем видимым складам) → метки ⛔/⌛ видны до кликов, гейт решается из кэша.
+    // Сигнатура-гард: одна попытка на состав недостающих (ошибку добьют клики).
+    const [accPrefetching, setAccPrefetching] = useState(false);
+    const accPrefetchSigRef = useRef('');
+    const prefetchAcceptance = useCallback(async () => {
+        const missing = (pool?.rows ?? []).filter((r) => {
+            const nm = r.article_wb ? Number(r.article_wb) : 0;
+            return nm > 0 && !acceptanceByNm.has(nm) && (nmPpb.get(nm) || 0) > 0;
+        });
+        if (missing.length === 0 || wbCols.length === 0) return;
+        setAccPrefetching(true);
+        try {
+            const items = missing.slice(0, 300).map((r) => {
+                const nm = Number(r.article_wb);
+                const ppb = nmPpb.get(nm) || 1;
+                const dist: Record<string, number> = {};
+                for (const c of wbCols) dist[c.name] = ppb;
+                return { nm_id: nm, barcode: r.barcode, distribution: dist };
+            });
+            const resp = await api.checkWbAcceptance({ items });
+            setAcceptanceByNm((prev) => {
+                const m = new Map(prev);
+                for (const it of resp.items || []) m.set(it.nm_id, it);
+                return m;
+            });
+        } catch {
+            showToast('Приёмку по товарам проверить не удалось — метки появятся при кликах', 'error');
+        } finally {
+            setAccPrefetching(false);
+        }
+    }, [pool, acceptanceByNm, nmPpb, wbCols, showToast]);
+    useEffect(() => {
+        if (!editMode || accPrefetching) return;
+        const missing = (pool?.rows ?? [])
+            .map((r) => (r.article_wb ? Number(r.article_wb) : 0))
+            .filter((nm) => nm > 0 && !acceptanceByNm.has(nm) && (nmPpb.get(nm) || 0) > 0);
+        if (missing.length === 0) return;
+        const sig = missing.sort((x, y) => x - y).join(',');
+        if (accPrefetchSigRef.current === sig) return;
+        accPrefetchSigRef.current = sig;
+        void prefetchAcceptance();
+    }, [editMode, pool, acceptanceByNm, nmPpb, accPrefetching, prefetchAcceptance]);
+
     // лишь баркод, где юзер кликнул −/+ (editCellBoxes сидит его текущий план в пин).
     const enterManual = useCallback(() => setEditMode(true), []);
 
@@ -1107,7 +1208,20 @@ export default function PreDistVehiclePage() {
                 pallets_by_group: Object.fromEntries(commit.palletsByGroup),
             });
             showToast(`Создано ${formatNumber(res.created, 0)} заявок`, 'success');
-            backToList();
+            // Модалка «Созданные заявки» (занос WB/ФФ по строке и массово);
+            // закрытие → прежний возврат к списку машин.
+            const rows: CreatedRequestRow[] = (res.requests ?? []).map(r => ({
+                id: r.id,
+                number: r.number,
+                ffId: r.warehouse_id,
+                ffName: r.warehouse_name || `Склад ${r.warehouse_id}`,
+                wbName: r.effective_wb_warehouse ?? r.wb_warehouse_name_manual ?? r.wb_warehouse_name ?? null,
+                pkg: r.package_type ?? 'BOX',
+                qty: (r.items ?? []).reduce((s, i) => s + (i.quantity || 0), 0),
+                sku: (r.items ?? []).length,
+            }));
+            if (rows.length > 0) setCreatedModal({ rows, listQuery: `just_created=${(res.request_ids ?? []).join(',')}` });
+            else backToList();
         } catch (e) {
             showToast(e instanceof Error ? e.message : 'Ошибка создания заявок', 'error');
         } finally {
@@ -1270,12 +1384,22 @@ export default function PreDistVehiclePage() {
                         onShipAsIs={promoteDir}
                         onDelete={(nm, wb, pkg) => setHiddenSkus(s => new Set(s).add(`${nm}::${wb}::${pkg}`))}
                         onDeleteDirection={hideDir}
-                        onCreatePrebooking={promoteDir}
+                        onCreatePrebooking={(pkg, wb, ffId) => {
+                            if (window.confirm(`На экране машины «Создать предзаявку» НЕ создаёт бронь — направление «${wb}» целиком уйдёт в план заявок машины (предзаявку можно сделать после приёмки из основного черновика). Продолжить?`)) promoteDir(pkg, wb, ffId);
+                        }}
                         onTopUpPrebook={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
-                        onTrimTail={(wb, ffId) => hideDir('MONOPALLET', wb, ffId)}
-                        onBookPallets={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
-                        onReleasePallets={(wb, ffId) => hideDir('MONOPALLET', wb, ffId)}
-                        onDraftPallets={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
+                        onTrimTail={(wb, ffId) => {
+                            if (window.confirm(`На экране машины «Убрать неполную» скрывает ВСЁ направление «${wb}» из плана (не только хвост). Продолжить?`)) hideDir('MONOPALLET', wb, ffId);
+                        }}
+                        onBookPallets={(wb, ffId, sel) => {
+                            if (window.confirm(`На экране машины предзаявка формируется ВСЕМ направлением «${wb}»${sel?.length ? ` — не только выбранными паллетами (${sel.length})` : ''}. Продолжить?`)) promoteDir('MONOPALLET', wb, ffId);
+                        }}
+                        onReleasePallets={(wb, ffId, sel) => {
+                            if (window.confirm(`На экране машины «На ФФ» скрывает ВСЁ направление «${wb}» из плана${sel?.length ? ` — не только выбранные паллеты (${sel.length})` : ''}. Продолжить?`)) hideDir('MONOPALLET', wb, ffId);
+                        }}
+                        onDraftPallets={(wb, ffId, sel) => {
+                            if (window.confirm(`На экране машины «В черновик как есть» переносит ВСЁ направление «${wb}»${sel?.length ? ` — не только выбранные паллеты (${sel.length})` : ''}. Продолжить?`)) promoteDir('MONOPALLET', wb, ffId);
+                        }}
                     />
                 )
             ) : subTab === 'preview' ? (
@@ -1299,6 +1423,12 @@ export default function PreDistVehiclePage() {
                     <button className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`} onClick={editMode ? () => setEditMode(false) : enterManual}>
                         {editMode ? '✓ Готово с ручной раскладкой' : '✏️ Разложить вручную'}
                     </button>
+                    {accPrefetching && (
+                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}
+                            title="Батч-проверка приёмки WB по товарам машины — метки ⛔/⌛ появятся в ячейках">
+                            ⏳ проверяю приёмку по товарам…
+                        </span>
+                    )}
                     <button className="btn btn-sm btn-secondary" onClick={distributeAllLeftovers} disabled={computing}
                         title="Раздать весь остаток машины сверх плана целыми коробами: по складам с потребностью, иначе — куда товар уже лежит/едет; закрытые по приёмке пропускаются. Результат — ручные пины (правь степперами/вводом). Кнопка 📦→ на строке — то же для одного SKU.">
                         📦 Распределить все остатки
@@ -1325,7 +1455,7 @@ export default function PreDistVehiclePage() {
                 </div>
                 <div style={{ color: 'var(--color-muted)', fontSize: 13 }}>
                     Матрица показывает <b style={{ color: 'var(--color-text)' }}>план машины</b>: заявки (целые паллеты) и 🅿️ предбронь каждого SKU единой суммой (ячейки с предбронью подсвечены, доля — в подсказке «Σ отпр.»),
-                    источник — остатки этой машины. Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность.
+                    источник — остатки этой машины. Колонки складов: 🏬 остаток на WB · 🔧 в сборке · 🚚 в пути · потребность.
                     В <b style={{ color: 'var(--color-text)' }}>Заявки</b> идут целые паллеты и ручные пины; под-паллетные хвосты — в 🅿️ Предбронь (Дозабить / Оставить так / На ФФ) — числа сходятся с матрицей по построению.
                 </div>
             </div>
@@ -1414,7 +1544,7 @@ export default function PreDistVehiclePage() {
                                                 <span style={{ fontWeight: 600 }}>{label}</span>
                                                 {e?.isNew && <span className="badge" style={{ background: 'rgba(168,85,247,0.16)', color: '#a855f7', fontSize: 10, padding: '1px 6px' }}>🆕 новинка</span>}
                                                 {guardByNm.has(nm) && (
-                                                    <span className="badge" title={`Гвард пересорта: ${guardByNm.get(nm)}. Авто-засев машины выключен; ручные −/+ работают.`}
+                                                    <span className="badge" title={`Гвард пересорта: ${guardByNm.get(nm)}. Авто-засев машины выключен; ручной степпер и «Распределить остатки» работают.`}
                                                         style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>
                                                         ⚠ посев лежит без продаж
                                                     </span>
@@ -1477,14 +1607,14 @@ export default function PreDistVehiclePage() {
                                         {wbCols.map(c => {
                                             const cell = cells?.get(c.name);
                                             const ctx = e?.byWh[c.name];
-                                            const ctxBusy = (ctx?.asm ?? 0) + (ctx?.transit ?? 0);
                                             const pbPart = prebookCellByBc.get(row.barcode)?.get(c.name) ?? 0;
                                             return (
                                                 <NeedMatrixCell
                                                     key={c.name}
                                                     ship={cell ?? null}
                                                     stock={ctx?.stock ?? 0}
-                                                    onWay={ctxBusy}
+                                                    asm={ctx?.asm ?? 0}
+                                                    transit={ctx?.transit ?? 0}
                                                     tint={pbPart > 0 ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : districtTint(c.district)}
                                                     mark={markFor(nm, c.name, cell?.pkg ?? null)}
                                                     edit={rowEditable && ppb ? {
@@ -1566,6 +1696,14 @@ export default function PreDistVehiclePage() {
                 </div>
             )}
             </>)}
+            {createdModal && (
+                <CreatedRequestsModal
+                    slug={slug}
+                    rows={createdModal.rows}
+                    listQuery={createdModal.listQuery}
+                    onClose={() => { setCreatedModal(null); backToList(); }}
+                />
+            )}
         </div>
     );
 }

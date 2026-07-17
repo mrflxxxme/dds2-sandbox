@@ -23,6 +23,7 @@ from backend.schemas.refs import (
     ForecastRfDefaultDaysPayload,
     ImtAliasPayload,
     PalletBoxesBySizePayload,
+    PalletCategoryCompatPayload,
     PreorderAllowedWarehousesPayload,
     ProductStatusBulkPayload,
     ProductStatusPayload,
@@ -272,6 +273,39 @@ async def set_pallet_boxes_by_size(
 
     result = await settings_service.set_pallet_boxes_by_size(db, project.id, payload.sizes)
     return {"ok": True, "sizes": result}
+
+
+@router.get("/pallet-category-compat")
+async def get_pallet_category_compat(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Правила совместимости категорий на паллете: {"enabled": bool, "groups": [...]}."""
+    from backend.services import settings_service
+
+    return await settings_service.get_pallet_category_compat(db, project.id)
+
+
+@router.put("/pallet-category-compat")
+async def set_pallet_category_compat(
+    payload: PalletCategoryCompatPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    """Set pallet category compat rules. Body: {"enabled": true, "groups": [{"name": ..., "categories": [...]}]}.
+
+    Категория в двух группах / дубль внутри группы → 400.
+    """
+    from backend.services import settings_service
+
+    try:
+        result = await settings_service.set_pallet_category_compat(
+            db, project.id, payload.enabled, [g.model_dump() for g in payload.groups]
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    return {"ok": True, **result}
 
 
 @router.get("/box-weight")

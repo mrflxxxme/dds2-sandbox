@@ -59,6 +59,9 @@ export interface DistributionGeom {
     /** Вес приоритета WB-склада (серверная «схема воришек») — порядок среза при
      *  дефиците источника (паритет с greedy черновика). */
     priorityOf?: (wh: string) => number;
+    /** Класс совместимости категорий (`lib/assembly/categoryCompat`): SKU разных
+     *  классов не делят смешанную BOX-паллету (паллет-срез партиционируется). */
+    classOf?: (nm_id: number) => string;
 }
 
 /** Применённый результат приёмки: per (nm_id::barcode) → набор сплитов (тип упаковки × распределение). */
@@ -112,18 +115,40 @@ export function buildDistributionSkus(
     geom: DistributionGeom,
 ): DraftSkuInput[] {
     const needByNm = needByNmFromStockNeed(stockNeed);
+    // Мульти-баркодный nm (машина: размерные варианты карточки — отдельные строки
+    // пула): потребность nm ПАРТИЦИОНИРУЕТСЯ между баркодами — каждый следующий
+    // получает остаток после ёмкости предыдущих, Σ target == need. Копия ПОЛНОЙ
+    // per-nm потребности каждому баркоду планировала до N× спроса. Одиночный баркод
+    // (черновик: одна статья-представитель на nm) получает потребность целиком БЕЗ
+    // ёмкостного капа — дефицит режет buildDraftRows по приоритетам складов.
+    const skuCountByNm = new Map<number, number>();
+    for (const s of skus) {
+        if (s.is_newcomer || !s.nm_id) continue;
+        skuCountByNm.set(s.nm_id, (skuCountByNm.get(s.nm_id) || 0) + 1);
+    }
+    const remainingByNm = new Map<number, Record<string, number>>();
     const out: DraftSkuInput[] = [];
     for (const s of skus) {
         if (s.is_newcomer) continue; // новинки — отдельным засевом
         const avail = availabilityOf(s.nm_id, s.barcode);
-        if (sumRec(avail as Record<string, number>) <= 0) continue; // нечем отправить
-        const target = s.nm_id ? needByNm.get(s.nm_id) : undefined;
-        if (!target || Object.keys(target).length === 0) continue; // нет потребности → на хранение
+        const capacity = sumRec(avail as Record<string, number>);
+        if (capacity <= 0) continue; // нечем отправить
+        const fullNeed = s.nm_id ? needByNm.get(s.nm_id) : undefined;
+        if (!fullNeed || Object.keys(fullNeed).length === 0) continue; // нет потребности → на хранение
+        let target: Record<string, number>;
+        if ((skuCountByNm.get(s.nm_id) || 0) > 1) {
+            const remaining = remainingByNm.get(s.nm_id) ?? { ...fullNeed };
+            remainingByNm.set(s.nm_id, remaining);
+            target = carveNeedSlice(remaining, capacity, geom.priorityOf);
+            if (Object.keys(target).length === 0) continue; // потребность разобрана соседними баркодами
+        } else {
+            target = { ...fullNeed };
+        }
         out.push({
             nm_id: s.nm_id,
             barcode: s.barcode,
             vendor_code: s.vendor_code,
-            target: { ...target },
+            target,
             ffStock: { ...avail },
             ppb: geom.ppbOf(s.nm_id),
             box_size: geom.boxSizeOf(s.nm_id) ?? null,
@@ -131,6 +156,32 @@ export function buildDistributionSkus(
         });
     }
     return out;
+}
+
+/** Отрезать от остатка потребности nm ломоть под ёмкость баркода: склады в порядке
+ *  приоритета («схема воришек», затем большая потребность, затем имя) — тот же
+ *  порядок, в котором движок закрывает спрос при дефиците. Мутирует `remaining`;
+ *  Σ ломтей по баркодам == исходная потребность (спрос не дублируется). */
+function carveNeedSlice(
+    remaining: Record<string, number>,
+    capacity: number,
+    priorityOf?: (wh: string) => number,
+): Record<string, number> {
+    const slice: Record<string, number> = {};
+    let cap = capacity;
+    const whs = Object.keys(remaining)
+        .filter((wh) => (remaining[wh] || 0) > 0)
+        .sort((a, b) =>
+            (priorityOf ? (priorityOf(b) - priorityOf(a)) || (remaining[b] - remaining[a]) : remaining[b] - remaining[a])
+            || (a < b ? -1 : a > b ? 1 : 0));
+    for (const wh of whs) {
+        if (cap <= 0) break;
+        const take = Math.min(remaining[wh], cap);
+        slice[wh] = take;
+        remaining[wh] -= take;
+        cap -= take;
+    }
+    return slice;
 }
 
 /** Применить сплиты приёмки к базовым скусам (closed→open + тип упаковки per WB-склад).
@@ -231,6 +282,7 @@ export function finalizeDistribution(
         boxSizeOf: (nm) => boxSizeOf(nm) ?? null,
         overrides: palletOverrides,
         freeByNm: freeAfter(merged),
+        classOf: geom.classOf,
     };
     const norm = normalizeDraft(merged, ctx);
     return { rows: norm.rows, prebook: norm.dropped };

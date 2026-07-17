@@ -360,6 +360,11 @@ async def get_warehouse_need(
             if row.okrug:
                 okrug_map[row.srid] = row.okrug
 
+    # Дальше — WB API (rate-limit очередь может ждать минутами): отпускаем
+    # read-транзакцию/серверный коннект pgbouncer СЕЙЧАС, иначе параллельные
+    # расчёты потребности держат пул как idle-in-tx (клин локалки 2026-07-16).
+    await db.commit()
+
     if api_key:
         orders = await fetch_supplier_orders(api_key, trend_start.isoformat())
         for order in orders:

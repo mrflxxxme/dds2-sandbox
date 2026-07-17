@@ -11,3 +11,4 @@ export { default as PageHeader } from './PageHeader';
 export { default as FormModal } from './FormModal';
 export { default as Toast } from './Toast';
 export { default as PageGuard } from './PageGuard';
+export { default as ChangelogBell } from './ChangelogBell';

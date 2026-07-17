@@ -627,3 +627,95 @@ class TestGetAdTabData:
         # Should not raise
         result = await get_ad_tab_data(mock_db, PROJECT_ID, "2024-01-01", "2024-01-31", brand="BrandX")
         assert result == []
+
+
+class TestAdTabDrrInfinite:
+    """ДРР при расходе без заказов — None (∞), а не 0.
+
+    Регресс: drr=0 прятал худшие товары из «Высокого ДРР» (фильтр drr > порога).
+    """
+
+    @staticmethod
+    def _db_for_rows(rows):
+        results = iter(range(100))
+
+        funnel = MagicMock()
+        funnel.all.return_value = rows
+        empty_scalars = MagicMock()
+        empty_scalars.scalars.return_value.all.return_value = []
+        empty_all = MagicMock()
+        empty_all.all.return_value = []
+
+        call = {"n": 0}
+
+        async def mock_execute(query):
+            call["n"] += 1
+            if call["n"] == 1:
+                return funnel
+            if call["n"] in (2, 3):
+                return empty_scalars
+            return empty_all
+
+        db = AsyncMock()
+        db.execute = mock_execute
+        return db
+
+    @staticmethod
+    def _row(nm, adv_sum, orders_sum):
+        r = MagicMock()
+        r.nm_id = nm
+        r.vendor_code = "A"
+        r.subject = "S"
+        r.brand = "B"
+        r.adv_views = 100
+        r.adv_clicks = 10
+        r.adv_sum = Decimal(str(adv_sum))
+        r.orders_sum_rub = Decimal(str(orders_sum))
+        r.orders_count = 1 if orders_sum else 0
+        return r
+
+    @pytest.mark.asyncio
+    async def test_spend_without_orders_gives_none(self):
+        from backend.services.funnel.ad_campaigns_service import get_ad_tab_data
+
+        db = self._db_for_rows([self._row(1, 5000, 0)])
+        result = await get_ad_tab_data(db, PROJECT_ID, "2024-01-01", "2024-01-31")
+        assert result[0]["drr"] is None
+
+    @pytest.mark.asyncio
+    async def test_no_spend_no_orders_gives_zero(self):
+        from backend.services.funnel.ad_campaigns_service import get_ad_tab_data
+
+        db = self._db_for_rows([self._row(1, 0, 0)])
+        result = await get_ad_tab_data(db, PROJECT_ID, "2024-01-01", "2024-01-31")
+        assert result[0]["drr"] == 0
+
+    @pytest.mark.asyncio
+    async def test_normal_drr_still_number(self):
+        from backend.services.funnel.ad_campaigns_service import get_ad_tab_data
+
+        db = self._db_for_rows([self._row(1, 2500, 50000)])
+        result = await get_ad_tab_data(db, PROJECT_ID, "2024-01-01", "2024-01-31")
+        assert result[0]["drr"] == 5.0
+
+
+class TestAdTabGroupedDrrInfinite:
+    """Групповой ДРР: расход без заказов → None (∞), как и на уровне товара."""
+
+    @pytest.mark.asyncio
+    async def test_group_spend_without_orders_gives_none(self, monkeypatch):
+        from backend.services.funnel import ad_campaigns_service as m
+
+        base = TestAdTabDrrInfinite._row(1, 5000, 0)
+        monkeypatch.setattr(m, "get_ad_tab_data", AsyncMock(return_value=[{
+            "nm_id": 1, "vendor_code": "A", "subject": "S", "brand": "B",
+            "adv_views": 100, "adv_clicks": 10, "adv_sum": 5000.0,
+            "orders_sum_rub": 0.0, "orders_count": 0, "ctr": 10.0, "cpc": 500.0,
+            "cpm": 50000.0, "drr": None, "bdr_revenue": 0, "bdr_profit": 0,
+            "stock_qty": 0, "active_campaigns": 0, "campaigns": [],
+            "abc_revenue": "C", "abc_profit": "C",
+        }]))
+        db = AsyncMock()
+        rows = await m.get_ad_tab_grouped(db, PROJECT_ID, "2024-01-01", "2024-01-31", group_by="brand")
+        assert rows, "нет групп"
+        assert rows[0]["drr"] is None

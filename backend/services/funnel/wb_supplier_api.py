@@ -18,42 +18,84 @@ import httpx
 logger = logging.getLogger("dds.funnel")
 
 
-async def fetch_supplier_orders(api_key: str, date_from: str) -> list[dict]:
-    """Fetch supplier orders from WB Statistics API."""
+# WB /supplier/orders отдаёт максимум ~80k записей за запрос, отсортированных по
+# lastChangeDate ↑. Один запрос за широкое окно молча терял НОВЕЙШИЕ заказы
+# (обрезался на старейших 80k) → «не догружает свежие дни». Пагинируем по курсору.
+_ORDERS_PAGE_CAP = 80_000
+_ORDERS_MAX_PAGES = 60  # предохранитель от бесконечного цикла
+
+
+async def _fetch_orders_page(client: httpx.AsyncClient, api_key: str, date_from: str) -> list[dict] | None:
+    """Одна страница /supplier/orders. None — неустранимая ошибка (стоп пагинации)."""
     url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
     headers = {"Authorization": api_key}
     params = {"dateFrom": date_from}
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        for attempt in range(3):
-            try:
-                resp = await client.get(url, headers=headers, params=params)
-            except httpx.RequestError as e:
-                logger.error(f"WB supplier/orders request error: {e}")
-                if attempt < 2:
-                    await asyncio.sleep(5)
-                    continue
-                return []
-
-            if resp.status_code == 429:
-                wait = min(int(resp.headers.get("Retry-After", "60")), 120)
-                logger.warning(f"WB supplier/orders 429, waiting {wait}s (attempt {attempt+1})")
-                await asyncio.sleep(wait)
+    for attempt in range(3):
+        try:
+            resp = await client.get(url, headers=headers, params=params)
+        except httpx.RequestError as e:
+            logger.error(f"WB supplier/orders request error: {e}")
+            if attempt < 2:
+                await asyncio.sleep(5)
                 continue
+            return None
 
-            if resp.status_code != 200:
-                logger.error(f"WB supplier/orders API error {resp.status_code}: {resp.text[:200]}")
-                return []
+        if resp.status_code == 429:
+            wait = min(int(resp.headers.get("Retry-After", "60")), 120)
+            logger.warning(f"WB supplier/orders 429, waiting {wait}s (attempt {attempt+1})")
+            await asyncio.sleep(wait)
+            continue
 
-            data = resp.json()
-            if not isinstance(data, list):
-                logger.error(f"WB supplier/orders: unexpected response type {type(data)}")
-                return []
+        if resp.status_code != 200:
+            logger.error(f"WB supplier/orders API error {resp.status_code}: {resp.text[:200]}")
+            return None
 
-            logger.info(f"WB supplier/orders: got {len(data)} orders from {date_from}")
-            return data
+        data = resp.json()
+        if not isinstance(data, list):
+            logger.error(f"WB supplier/orders: unexpected response type {type(data)}")
+            return None
+        return data
 
-    return []
+    return None
+
+
+async def fetch_supplier_orders(api_key: str, date_from: str) -> list[dict]:
+    """Все заказы с lastChangeDate >= date_from (Statistics API, с пагинацией).
+
+    WB отдаёт максимум ~80k записей за запрос (сортировка по lastChangeDate ↑),
+    поэтому широкое окно в ОДИН запрос теряло новейшие заказы. Идём страницами:
+    следующий dateFrom = максимальный lastChangeDate предыдущей страницы, пока
+    страница не станет неполной. Соседние страницы повторяют записи на границе
+    lastChangeDate — дедуп по srid делает вызывающий (sync_wb_orders).
+    """
+    all_orders: list[dict] = []
+    cursor = date_from
+    pages = 0
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        for _ in range(_ORDERS_MAX_PAGES):
+            batch = await _fetch_orders_page(client, api_key, cursor)
+            pages += 1
+            if batch is None:
+                if not all_orders:
+                    return []  # ошибка первой страницы — как раньше
+                break  # ошибка последующей — отдаём собранное
+            all_orders.extend(batch)
+            if len(batch) < _ORDERS_PAGE_CAP:
+                break  # последняя (неполная) страница
+            candidates: list[str] = [
+                str(o.get("lastChangeDate")) for o in batch if o.get("lastChangeDate")
+            ]
+            next_cursor = max(candidates, default=None)
+            if not next_cursor or next_cursor == cursor:
+                # вся полная страница в одну метку — иначе бесконечный цикл
+                logger.warning("WB supplier/orders: курсор не сдвинулся на %s — стоп пагинации", cursor)
+                break
+            cursor = next_cursor
+
+    logger.info("WB supplier/orders: собрано %d заказов от %s (страниц: %d)", len(all_orders), date_from, pages)
+    return all_orders
 
 
 async def fetch_acceptance_coefficients(api_key: str) -> list[dict]:
