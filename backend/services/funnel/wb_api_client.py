@@ -56,6 +56,7 @@ from backend.services.funnel.wb_supplier_api import (
     fetch_wb_warehouses,
     fetch_acceptance_options,
     fetch_warehouse_stocks,
+    fetch_warehouse_remains,
 )
 
 __all__ = [
@@ -69,4 +70,5 @@ __all__ = [
     "fetch_wb_warehouses",
     "fetch_acceptance_options",
     "fetch_warehouse_stocks",
+    "fetch_warehouse_remains",
 ]

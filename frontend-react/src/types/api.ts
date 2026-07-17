@@ -1356,7 +1356,12 @@ export interface UnifiedStockRow {
   in_transit: number;
   reserved: number;
   total_own: number;
+  /** Физически на складах WB («Всего находится на складах» из отчёта кабинета) */
   total_wb: number;
+  /** WB: «В пути до получателей» — отдельная колонка, не входит в total_wb */
+  wb_in_way_to_client: number;
+  /** WB: «В пути возвраты на склад WB» — отдельная колонка, не входит в total_wb */
+  wb_in_way_from_client: number;
   total_defect: number;
   total: number;
   factory_qty: number;

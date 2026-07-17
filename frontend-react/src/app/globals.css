@@ -271,6 +271,16 @@ input[type="number"] {
     border-collapse: separate;
     border-spacing: 0;
     font-size: 14px;
+    /* Цифры фиксированной ширины — колонки чисел стоят ровно в столбик */
+    font-variant-numeric: tabular-nums;
+}
+
+/* Заголовок с подсказкой (native title): пунктир + курсор help */
+.data-table thead th[title] {
+    cursor: help;
+    text-decoration: underline dotted var(--color-text-dim);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
 }
 
 .data-table thead th {

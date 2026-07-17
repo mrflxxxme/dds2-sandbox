@@ -6,10 +6,13 @@ Handles:
 - fetch_wb_warehouses: ID → name mapping
 - fetch_acceptance_options: per-barcode warehouse availability
 - fetch_warehouse_stocks: per-warehouse stock levels
+- fetch_warehouse_remains: analytics report «Остатки на складах» (cabinet-accurate)
 """
 
 import logging
 import asyncio
+import time
+
 import httpx
 
 logger = logging.getLogger("dds.funnel")
@@ -262,3 +265,97 @@ async def fetch_warehouse_stocks(api_key: str) -> list[dict]:
             return data
 
     return []
+
+
+_REMAINS_BASE = "https://seller-analytics-api.wildberries.ru/api/v1/warehouse_remains"
+
+
+async def _remains_get(
+    client: httpx.AsyncClient, url: str, api_key: str, params: dict | None = None
+) -> dict | list | None:
+    """One GET to the warehouse_remains API with 429/error handling. Returns parsed JSON or None."""
+    for attempt in range(3):
+        try:
+            resp = await client.get(url, headers={"Authorization": api_key}, params=params)
+        except httpx.RequestError as e:
+            logger.error(f"WB warehouse_remains request error: {e}")
+            if attempt < 2:
+                await asyncio.sleep(5)
+                continue
+            return None
+
+        if resp.status_code == 429:
+            wait = min(int(resp.headers.get("Retry-After", "60")), 120)
+            logger.warning(f"WB warehouse_remains 429, waiting {wait}s (attempt {attempt + 1})")
+            await asyncio.sleep(wait)
+            continue
+
+        if resp.status_code == 204:  # download: report exists but has no data
+            return []
+
+        if resp.status_code != 200:
+            logger.error(f"WB warehouse_remains error {resp.status_code}: {resp.text[:200]}")
+            return None
+
+        parsed = resp.json()
+        return parsed if isinstance(parsed, (dict, list)) else None
+
+    return None
+
+
+async def fetch_warehouse_remains(api_key: str, max_wait_seconds: int = 300) -> list[dict]:
+    """Fetch the WB analytics report «Остатки на складах» (warehouse_remains).
+
+    Task-based flow: create task → poll status → download. Matches the seller
+    cabinet numbers 1:1 — includes goods being accepted and in transit between
+    WB warehouses, which statistics supplier/stocks does not see.
+
+    Returns rows like {brand, subjectName, vendorCode, nmId, barcode, techSize,
+    volume, warehouses: [{warehouseName, quantity}]} where warehouses includes
+    pseudo-rows «В пути до получателей», «В пути возвраты на склад WB»,
+    «Всего находится на складах» (total = sum of real warehouses).
+
+    Rate limits: create/download 1 req/min, status 1 req/5s — one call per
+    project per sync fits; polling every 10s stays well under the status limit.
+    """
+    params = {
+        "locale": "ru",
+        "groupByBrand": "true",
+        "groupBySubject": "true",
+        "groupBySa": "true",
+        "groupByNm": "true",
+        "groupByBarcode": "true",
+    }
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        created = await _remains_get(client, _REMAINS_BASE, api_key, params=params)
+        # `.get("data") or {}` — не `.get("data", {})`: WB может вернуть data=null (ключ
+        # есть, значение null) → .get с дефолтом отдаст None, а None.get() = AttributeError.
+        task_id = ((created or {}).get("data") or {}).get("taskId") if isinstance(created, dict) else None
+        if not task_id:
+            logger.error(f"WB warehouse_remains: no taskId in create response: {str(created)[:200]}")
+            return []
+
+        # Poll status until "done" (report generation is usually seconds)
+        deadline = time.monotonic() + max_wait_seconds
+        status = ""
+        while time.monotonic() < deadline:
+            await asyncio.sleep(10)
+            st = await _remains_get(client, f"{_REMAINS_BASE}/tasks/{task_id}/status", api_key)
+            status = ((st or {}).get("data") or {}).get("status", "") if isinstance(st, dict) else ""
+            if status == "done":
+                break
+            if status in ("error", "canceled"):
+                logger.error(f"WB warehouse_remains: task {task_id} failed with status={status}")
+                return []
+        if status != "done":
+            logger.error(f"WB warehouse_remains: task {task_id} not ready in {max_wait_seconds}s")
+            return []
+
+        data = await _remains_get(client, f"{_REMAINS_BASE}/tasks/{task_id}/download", api_key)
+        if not isinstance(data, list):
+            logger.error(f"WB warehouse_remains: unexpected download type {type(data)}")
+            return []
+
+        logger.info(f"WB warehouse_remains: got {len(data)} rows")
+        return data

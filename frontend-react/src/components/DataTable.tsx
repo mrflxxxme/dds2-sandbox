@@ -15,6 +15,10 @@ import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 export interface Column {
     key: string;
     label: string;
+    /** Подсказка при наведении на заголовок (native title) — что означает колонка */
+    headerTitle?: string;
+    /** Разрешить перенос длинного заголовка на 2 строки (узкая колонка вместо широкой) */
+    headerWrap?: boolean;
     align?: 'left' | 'right' | 'center';
     format?: 'number' | 'date' | 'badge' | 'money' | 'money-color';
     render?: (value: any, row: any, index: number) => React.ReactNode;
@@ -201,7 +205,7 @@ export default function DataTable({
                                             whiteSpace: col.sortable ? 'nowrap' : undefined,
                                         }}
                                         onClick={col.sortable ? () => toggleSort(col.key) : undefined}
-                                        title={col.sortable ? 'Сортировать' : undefined}
+                                        title={col.headerTitle || (col.sortable ? 'Сортировать' : undefined)}
                                         >
                                             {col.label}
                                             {col.sortable && (

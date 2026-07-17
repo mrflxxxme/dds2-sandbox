@@ -9,7 +9,8 @@
 | `SyncLog` (`sync_log`) | Лог синхронизаций | status: RUNNING/OK/ERROR/STALE/TIMEOUT |
 | `WbFunnelDaily` (`wb_funnel_daily`) | Ежедневная воронка по nmID | |
 | `WbCostOverride` (`wb_cost_override`) | Ручные себестоимости | |
-| `WbWarehouseStock` (`wb_warehouse_stocks`) | Остатки по складам WB | |
+| `WbWarehouseStock` (`wb_warehouse_stocks`) | Остатки WB «доступно к продаже» (statistics supplier/stocks) | не видит приёмку/межскладской транзит |
+| `WbWarehouseRemains` (`wb_warehouse_remains`) | Остатки WB как в кабинете (analytics warehouse_remains) | псевдо-склады «В пути…»/«Всего…» хранятся строками; «Всего находится на складах» = дубль суммы реальных складов — исключать из суммирования (`WB_REMAINS_TOTAL_ROW`) |
 | `WbFinanceRow` (`wb_finance_rows`) | Кэш финансового отчёта WB | |
 | `WbFinanceSyncLog` (`wb_finance_sync_log`) | Лог синхронизации финансов | |
 | `WbOrderCancelDaily` (`wb_order_cancel_daily`) | Ежедневная статистика отмен | |
@@ -33,6 +34,10 @@
 - Partial data: при ошибке mid-sync сохранять уже загруженные дни.
 - Все sync jobs **обязаны** ловить `asyncio.CancelledError` (не наследуется от `Exception`) — иначе `error_msg=null` в `sync_log`.
 - Monitoring: статус scheduler определяется по `sync_log` (не in-memory) — `/monitoring/overview` работает в api-контейнере.
+
+### Остатки WB: два источника
+- `supplier/stocks` (statistics) → `wb_warehouse_stocks`: только «доступно к продаже». Потребители: warehouse_need, stock_forecast, assembly_load_forecast, funnel stock_costs.
+- `warehouse_remains` (analytics, task-based: create → poll status → download; лимиты 1 req/min) → `wb_warehouse_remains`: цифры кабинета 1:1, включая приёмку и межскладской транзит. Потребитель: колонка «WB склады» в «Сводных остатках» (`get_unified_stock_summary`, join по barcode с fallback на nm_id; до первого синка — fallback на statistics-источник). Синк ежечасно в :20 MSK (`wb_remains_sync`), ручной — `POST /reports/stock_warehouses/sync-remains`.
 
 ### Расписание WB Finance (MSK, tue–sun)
 WB публикует финотчёт за прошлый день к 03–05 MSK. Прогоны: `05:00` (ранний, успевает к утреннему дайджесту), `08:00` (страховка от поздней публикации), `14:00` (добор), `catchup` на старте worker. `misfire_grace_time=3600` — задача не теряется при рестарте worker в пределах часа.
