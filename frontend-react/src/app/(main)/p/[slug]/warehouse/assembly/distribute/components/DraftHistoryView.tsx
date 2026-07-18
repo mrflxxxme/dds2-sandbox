@@ -15,6 +15,9 @@ interface Props {
 const EVENT_LABELS: Record<string, string> = {
     PREBOOK_TOPUP: '📦 Дозабор из предброни',
     MATRIX_WRITE: '✏️ Запись раскладки',
+    MATRIX_EDIT: '✏️ Правка раскладки',
+    AUTO_SYNC: '⟳ Авто-синк с расчётом',
+    ACCEPTANCE_SYNC: '🔄 Синхронизация с приёмкой WB',
     COMMIT_REQUEST: '🚚 Создание заявки',
 };
 const eventLabel = (t: string): string => EVENT_LABELS[t] ?? `🕘 ${t}`;

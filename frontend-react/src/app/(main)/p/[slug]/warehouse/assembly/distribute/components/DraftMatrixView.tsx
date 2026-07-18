@@ -1261,7 +1261,10 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
             const dist = cur.distribution;
             const curManual = new Set<number>(dist?.manual_nms ?? []);
             const guarded = new Set<number>(guardByNm.keys());
-            const plan = buildAutoSyncPlan(dist ?? {}, shipRows, effPrebook, guarded, curManual);
+            // Ячейки prebook_origin (дозабор/«Оставить так») — ручные решения уровня
+            // (nm × склад): синк их не откатывает (расчёт про них не знает).
+            const preserve = new Set<string>(dist?.prebook_origin ?? []);
+            const plan = buildAutoSyncPlan(dist ?? {}, shipRows, effPrebook, guarded, curManual, preserve);
             if (!plan) {
                 if (trigger === 'manual') showToast('План уже соответствует расчёту', 'success');
                 return;

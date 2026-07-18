@@ -1030,6 +1030,20 @@ def acceptance_env(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_coef_missing_snapshot_cached_short(acceptance_env):
+    """Коэффициенты не загрузились ([]) → пер-баркод снимок (can_X без meta) кэшируется
+    КОРОТКО (COEF_MISSING_CACHE_TTL_SECONDS), не на 10 мин: выпечка «can_box, дней 0»
+    демотировала на фронте целые черновики в предбронь (прод 2026-07-17)."""
+    svc, fake_redis = acceptance_env
+    await svc.check_acceptance_and_redistribute(
+        None, 42, [{"nm_id": 1, "barcode": "BC1", "distribution": {"Коледино": 5}}]
+    )
+    bc_keys = [k for k in fake_redis.ttls if "BC1" in k]
+    assert bc_keys, "пер-баркод кэш должен быть записан"
+    assert all(fake_redis.ttls[k] == svc.COEF_MISSING_CACHE_TTL_SECONDS for k in bc_keys)
+
+
+@pytest.mark.asyncio
 async def test_same_barcodes_second_call_is_pure_cache_hit(acceptance_env):
     """Смена количеств/распределения НЕ дёргает WB: флаги — уровня баркод×склад."""
     svc, _ = acceptance_env
@@ -1104,9 +1118,15 @@ async def test_unknown_barcode_negative_cached(acceptance_env):
 
 
 @pytest.mark.asyncio
-async def test_cache_ttl_is_10_minutes(acceptance_env):
-    """TTL пер-баркод кэша = 600с (обновление раз в 10 минут по требованию)."""
+async def test_cache_ttl_is_10_minutes(acceptance_env, monkeypatch):
+    """TTL пер-баркод кэша = 600с (обновление раз в 10 минут по требованию) —
+    при ЗАГРУЖЕННЫХ коэффициентах (иначе короткий TTL, см. coef_missing-тест)."""
     svc, fake_redis = acceptance_env
+
+    async def coef_ok(self):
+        return [{"warehouseID": 507, "boxTypeID": 2, "coefficient": 0, "allowUnload": True}]
+
+    monkeypatch.setattr(_FakeWBClient, "get_acceptance_coefficients", coef_ok)
     await svc.check_acceptance_and_redistribute(
         None, 42, [{"nm_id": 1, "barcode": "BC1", "distribution": {"Коледино": 5}}]
     )

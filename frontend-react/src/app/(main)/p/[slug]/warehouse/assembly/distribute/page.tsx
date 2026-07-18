@@ -356,7 +356,14 @@ export default function AssemblyDraftPage() {
                 setNmMeta(meta);
                 setGeomState('ready');
             })
-            .catch(() => { if (!cancelledRef?.current) setGeomState('error'); });
+            .catch(() => {
+                if (cancelledRef?.current) return;
+                // Сбой РЕФЕТЧА (фокус/возврат с «Кратности») при уже загруженных картах
+                // не роняет страницу в 'error': со stale-геометрией всё работает, а
+                // 'error' молча убивал кнопки предброни до следующего удачного фокуса
+                // (прод-кейс «Дозабить из Газпром не реагирует»). Первый лоад — честный error.
+                setGeomState(s => (s === 'ready' ? s : 'error'));
+            });
     }, []);
 
     useEffect(() => {
@@ -1028,8 +1035,16 @@ export default function AssemblyDraftPage() {
     const checkedPkgWbs = useMemo<Set<string>>(() => {
         const out = new Set<string>();
         for (const per of prebookAcceptance.values()) {
-            for (const wb of Object.keys(per.availability || {})) {
-                out.add(`BOX::${wb}`); out.add(`MONOPALLET::${wb}`); out.add(`SUPERSAFE::${wb}`);
+            for (const [wb, f] of Object.entries(per.availability || {})) {
+                // «Проверено» пер-упаковочно: закрыт (флаг false — окончательный ответ WB)
+                // ИЛИ открыт С коэффициентами (meta есть). can_X=true при meta=null =
+                // coefficients не загрузились (WB 429, квота 6/мин) — бэк запекал такой
+                // снимок в кэш на 10 мин, фронт видел «дней 0» и демотировал ВЕСЬ черновик
+                // в предбронь одним eventless PUT (прод-кейс 17.07: откат 40 дозаборов).
+                // Неоднозначные данные = «не проверено» → направление не трогаем.
+                if (!f.can_box || f.box_meta != null) out.add(`BOX::${wb}`);
+                if (!f.can_monopallet || f.mono_meta != null) out.add(`MONOPALLET::${wb}`);
+                if (!f.can_supersafe || f.super_meta != null) out.add(`SUPERSAFE::${wb}`);
             }
         }
         return out;
@@ -1156,23 +1171,9 @@ export default function AssemblyDraftPage() {
                 // паллеты в черновик молча, БЕЗ метки провенанса — по требованию юзера.
                 const targetNames = Array.from(new Set(newRows.flatMap(r => Object.keys(r.tgt))));
                 const sourceIds = Array.from(new Set(newRows.flatMap(r => Object.keys(r.src).map(Number).filter(n => Number.isFinite(n) && n > 0))));
-                let updated;
-                try {
-                    updated = await api.updateAssemblyDraft(draftId, {
-                        distribution: { ...buildDistribution(), rows: newRows, prebook: newPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames },
-                        base_updated_at: draftVersionRef.current || undefined,
-                    });
-                } catch (e) {
-                    if (isVersionConflict(e)) {
-                        // Черновик изменила другая вкладка (прод-кейс «воскрешение после
-                        // очистки»): наш расчёт от протухшего стейта — перечитываем и выходим.
-                        try { applyDraft(await api.getAssemblyDraft(draftId)); } catch { /* ignore */ }
-                        return;
-                    }
-                    throw e;
-                }
-                applyDraft(updated);
-                // Сводка перемещений по складам (дельта rows): + приехало в черновик, − уехало.
+                // Сводка перемещений по складам (дельта rows) — ДО PUT: она же уходит
+                // событием в историю. Раньше этот PUT был eventless — прод-диагностика
+                // отката дозаборов была слепа (updated_at менялся без строки в истории).
                 const sumBy = (rs: AssemblyDraftRow[]) => {
                     const m: Record<string, number> = {};
                     for (const r of rs) for (const [wb, q] of Object.entries(r.tgt)) m[wb] = (m[wb] || 0) + (q || 0);
@@ -1190,6 +1191,23 @@ export default function AssemblyDraftPage() {
                 if (toPrebookList.length) parts.push(`в ПРЕДБРОНЬ (хвосты / ⌛ / закрыто): ${toPrebookList.join(' · ')}`);
                 if (filledUpUnits > 0) parts.push(`хвосты добиты до целых коробов свободным ФФ (+${formatNumber(filledUpUnits, 0)} шт)`);
                 if (releasedUnits > 0) parts.push(`остатки меньше короба (добить нечем) возвращены на ФФ (−${formatNumber(releasedUnits, 0)} шт)`);
+                let updated;
+                try {
+                    updated = await api.updateAssemblyDraft(draftId, {
+                        distribution: { ...buildDistribution(), rows: newRows, prebook: newPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames },
+                        base_updated_at: draftVersionRef.current || undefined,
+                        event: { event_type: 'ACCEPTANCE_SYNC', summary: `Синхронизация с приёмкой WB — ${parts.join(' | ') || 'переупаковка без смены складов'}` },
+                    });
+                } catch (e) {
+                    if (isVersionConflict(e)) {
+                        // Черновик изменила другая вкладка (прод-кейс «воскрешение после
+                        // очистки»): наш расчёт от протухшего стейта — перечитываем и выходим.
+                        try { applyDraft(await api.getAssemblyDraft(draftId)); } catch { /* ignore */ }
+                        return;
+                    }
+                    throw e;
+                }
+                applyDraft(updated);
                 if (parts.length) showToast(`Синхронизация с приёмкой WB — ${parts.join(' | ')}`, 'success');
             } catch { /* best-effort — не критично */ }
             finally {
@@ -1402,7 +1420,15 @@ export default function AssemblyDraftPage() {
     // Собранные целые паллеты уходят в черновик; хвост исходной предброни остаётся.
     const [toppingUp, setToppingUp] = useState<string | null>(null);
     const handleTopUpDirection = useCallback(async (pkg: PackageType, wb: string, ffId: number, cls?: string) => {
-        if (!draftId || geomState !== 'ready') return;
+        if (!draftId) return;
+        // НИКАКИХ тихих выходов: клик без реакции неотличим от «сломалось» (прод-кейс
+        // «Дозабить из Газпром не реагирует» — геометрия молча упала в error).
+        if (geomState !== 'ready') {
+            showToast(geomState === 'error'
+                ? 'Кратности коробов не загрузились — нажмите «↻ Повторить загрузку» в красном баннере сверху'
+                : 'Кратности коробов ещё грузятся — подождите пару секунд и нажмите снова', 'error');
+            return;
+        }
         const chosenFf = ffId;
         const chosenKey = String(chosenFf);
         // Паллета собирается с ОДНОГО ФФ — работаем только с предбронью этого ФФ на wb.
@@ -1410,7 +1436,7 @@ export default function AssemblyDraftPage() {
         // порции и кандидаты только этого класса (ковёр не доложится пледами).
         const pbOnFf = prebook.filter(r => (r.package_type || 'BOX') === pkg && (r.tgt[wb] || 0) > 0 && (r.src[chosenKey] || 0) > 0
             && (!cls || classOf(r.nm_id) === cls));
-        if (pbOnFf.length === 0) return;
+        if (pbOnFf.length === 0) { showToast(`Предбронь «${wb}» уже изменилась (нет строк этого ФФ) — обновите страницу`, 'error'); return; }
         const key = `${pkg}::${wb}::${ffId}`;
         setToppingUp(key);
         try {
@@ -1532,6 +1558,9 @@ export default function AssemblyDraftPage() {
                 // ⌛: паллетизированный результат остаётся В ПРЕДБРОНИ (rows не трогаем) —
                 // авто-консолидация его не промотирует (направление не в readyPkgWbs),
                 // целые паллеты уходят кнопкой «📋 Создать предзаявку».
+                // Провенанс И для предброни: авто-синк матрицы заменил бы собранные
+                // паллеты хвостом расчёта — ячейка помечается как ручное решение.
+                for (const r of palletizedRows) prebookOriginRef.current.add(`${r.nm_id}::${wb}`);
                 const nextPrebook = mergeDraftRows([...strippedPrebook, ...palletizedRows, ...norm.dropped.filter(r => pbNm.has(r.nm_id))]);
                 const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook }, event: { event_type: 'PREBOOK_TOPUP', summary: `Дозабор ⌛-направления «${wb}» (в предбронь)` } });
                 healScopeRef.current = { ts: updated.updated_at, only: new Set() };
@@ -1828,6 +1857,9 @@ export default function AssemblyDraftPage() {
                 return { nm_id: pr.nmId, barcode: c.barcode, vendor_code: c.vendor_code, src: { [chosenKey]: pr.units }, tgt: { [wb]: pr.units }, package_type: 'MONOPALLET' as PackageType };
             });
             const addedUnits = additions.reduce((s, r) => s + (r.tgt[wb] || 0), 0);
+            // Провенанс: дозабранные моно-коробы — ручное решение, авто-синк матрицы
+            // не должен откатывать ячейку к хвосту расчёта.
+            for (const r of additions) prebookOriginRef.current.add(`${r.nm_id}::${wb}`);
             const nextPrebook = mergeDraftRows([...prebook, ...additions]);
             const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook }, event: { event_type: 'PREBOOK_TOPUP', summary: 'Дозабор из предброни' } });
             healScopeRef.current = { ts: updated.updated_at, only: new Set([directionKey('MONOPALLET', wb)]) };
@@ -2257,6 +2289,19 @@ export default function AssemblyDraftPage() {
                 onChange={setTab}
             />
 
+            {/* Баннер уровня СТРАНИЦЫ (не вкладки «Черновик»): без геометрии молча
+                мертвы и дозабор предброни, и самоочистка — юзер должен видеть причину
+                с любой вкладки (прод-кейс: «Дозабить» не реагировал без индикации). */}
+            {geomState === 'error' && (
+                <div className="glass-card" style={{ padding: 12, marginBottom: 12, borderLeft: '3px solid var(--color-danger)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    <span style={{ color: 'var(--color-danger)', fontWeight: 700 }}>⛔ Кратности коробов не загрузились</span>
+                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                        заполнение, дозабор предброни и самоочистка черновика заблокированы — без кратностей строки легли бы россыпью
+                    </span>
+                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => loadGeometry()}>↻ Повторить загрузку</button>
+                </div>
+            )}
+
             {catModalOpen && (
                 <CategoryDraftModal
                     articles={modalArticles}
@@ -2317,15 +2362,6 @@ export default function AssemblyDraftPage() {
                             </div>
                         );
                     })()}
-                    {geomState === 'error' && (
-                        <div className="glass-card" style={{ padding: 12, marginBottom: 12, borderLeft: '3px solid var(--color-danger)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                            <span style={{ color: 'var(--color-danger)', fontWeight: 700 }}>⛔ Кратности коробов не загрузились</span>
-                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                заполнение/добавление и самоочистка черновика заблокированы — без кратностей строки легли бы россыпью
-                            </span>
-                            <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => loadGeometry()}>↻ Повторить загрузку</button>
-                        </div>
-                    )}
                     {noPpbArticles.length > 0 && (
                         <div className="glass-card" style={{ padding: 12, marginBottom: 12 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
