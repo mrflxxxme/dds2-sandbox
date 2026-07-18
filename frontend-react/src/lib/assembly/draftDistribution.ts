@@ -215,6 +215,52 @@ export function allocSrcAcrossFf(
 export const keyOfDraftRow = (r: AssemblyDraftRow): string =>
     `${r.nm_id}::${r.barcode || ''}::${r.package_type || 'BOX'}::${r.as_is ? 1 : 0}`;
 
+/** Разрез строки по предикату ячеек tgt: carved = попавшие ячейки, rest — остальное.
+ *  src делится по allocatePairs (зеркало бэка) — порция каждого ФФ уходит вслед за
+ *  своей ячейкой, оба маргинала сохраняются. Полное попадание возвращает исходный
+ *  объект (стабильность сигнатур для сравнения «есть ли дельта»). */
+function carveRowByCells(
+    r: AssemblyDraftRow,
+    hit: (wb: string) => boolean,
+): { carved: AssemblyDraftRow | null; rest: AssemblyDraftRow | null } {
+    const wbs = Object.keys(r.tgt || {}).filter((wb) => (r.tgt[wb] || 0) > 0);
+    const hitWbs = wbs.filter(hit);
+    if (hitWbs.length === 0) return { carved: null, rest: r };
+    if (hitWbs.length === wbs.length) return { carved: r, rest: null };
+    const carvedTgt: Record<string, number> = {}; const carvedSrc: Record<string, number> = {};
+    const restTgt: Record<string, number> = {}; const restSrc: Record<string, number> = {};
+    for (const [pair, q] of allocatePairs(r.src || {}, r.tgt || {})) {
+        if ((q || 0) <= 0) continue;
+        const i = pair.indexOf('::');
+        const ff = pair.slice(0, i);
+        const wb = pair.slice(i + 2);
+        const [tgtAcc, srcAcc] = hit(wb) ? [carvedTgt, carvedSrc] : [restTgt, restSrc];
+        tgtAcc[wb] = (tgtAcc[wb] || 0) + q;
+        srcAcc[ff] = (srcAcc[ff] || 0) + q;
+    }
+    const mk = (tgt: Record<string, number>, src: Record<string, number>): AssemblyDraftRow | null =>
+        Object.keys(tgt).length > 0 ? { ...r, tgt, src } : null;
+    return { carved: mk(carvedTgt, carvedSrc), rest: mk(restTgt, restSrc) };
+}
+
+/** Слияние строк одной идентичности (keyOfDraftRow) суммированием src/tgt — карв
+ *  сохранённой ячейки + строка расчёта того же SKU не должны уезжать дублями:
+ *  бэкенд `_dedupe_rows` keep-first молча выкинул бы вторую. */
+function mergeRowsByIdentity(rows: AssemblyDraftRow[]): AssemblyDraftRow[] {
+    const by = new Map<string, AssemblyDraftRow>();
+    for (const r of rows) {
+        const k = keyOfDraftRow(r);
+        const cur = by.get(k);
+        if (!cur) { by.set(k, r); continue; }
+        const src = { ...cur.src };
+        for (const [ff, q] of Object.entries(r.src || {})) src[ff] = (src[ff] || 0) + (q || 0);
+        const tgt = { ...cur.tgt };
+        for (const [wb, q] of Object.entries(r.tgt || {})) tgt[wb] = (tgt[wb] || 0) + (q || 0);
+        by.set(k, { ...cur, src, tgt });
+    }
+    return [...by.values()];
+}
+
 /**
  * Итог «Пересчитать от потребности → в черновик» — ЗАМЕНА по SKU:
  * строки/предбронь SKU, которыми владеет расчёт (дал отгрузку ИЛИ предбронь),
@@ -228,14 +274,48 @@ export function buildWriteDistribution(
     shipRows: AssemblyDraftRow[],
     effPrebook: AssemblyDraftRow[],
     purgeNms: Set<number> = new Set(),
+    preserveCells: Set<string> = new Set(),
 ): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[]; source_warehouse_ids: number[]; target_warehouse_names: string[] } {
     // Владение — по nm ЦЕЛИКОМ (как обещают confirm и docstring): расчёт мог сменить
     // тип упаковки (вчера MONO, сегодня короб открыт) — старая MONO/as_is-строка SKU
     // при владении по ключу пережила бы замену и задвоила план.
     const ownedNms = new Set([...shipRows, ...effPrebook].map((r) => r.nm_id));
-    const keep = (r: AssemblyDraftRow) => !ownedNms.has(r.nm_id) && !purgeNms.has(r.nm_id);
-    const rows = [...(dist.rows ?? []).filter(keep), ...shipRows];
-    const prebook = [...(dist.prebook ?? []).filter(keep), ...effPrebook];
+    // Сохранённые ячейки `${nm}::${wb}` (distribution.prebook_origin): дозабор из
+    // предброни / «Оставить так» — явные решения человека, расчёт их не знает и
+    // раньше молча откатывал («вся предбронь вернулась» при входе в матрицу).
+    // Активны только ключи с живой ячейкой в текущем черновике — стейл-ключи
+    // (после коммита/удаления направления) не должны резать план расчёта.
+    const hasCell = (list: AssemblyDraftRow[] | null | undefined, nm: number, wb: string) =>
+        (list ?? []).some((r) => r.nm_id === nm && (r.tgt?.[wb] || 0) > 0);
+    const active = new Set([...preserveCells].filter((k) => {
+        const i = k.indexOf('::');
+        const nm = Number(k.slice(0, i));
+        const wb = k.slice(i + 2);
+        return hasCell(dist.rows, nm, wb) || hasCell(dist.prebook, nm, wb);
+    }));
+    const hitOf = (nm: number) => (wb: string) => active.has(`${nm}::${wb}`);
+    // Существующие строки: чужие — целиком; у заменяемых/вычищаемых выживает
+    // ТОЛЬКО сохранённая ячейка (в т.ч. у purge: явный клик сильнее гварда).
+    const splitExisting = (list: AssemblyDraftRow[] | null | undefined): AssemblyDraftRow[] => {
+        const kept: AssemblyDraftRow[] = [];
+        for (const r of list ?? []) {
+            if (!ownedNms.has(r.nm_id) && !purgeNms.has(r.nm_id)) { kept.push(r); continue; }
+            const { carved } = carveRowByCells(r, hitOf(r.nm_id));
+            if (carved) kept.push(carved);
+        }
+        return kept;
+    };
+    // Из расчёта сохранённые ячейки вырезаются — иначе задвоили бы ручное решение.
+    const stripCalc = (list: AssemblyDraftRow[]): AssemblyDraftRow[] =>
+        active.size === 0 ? list : list
+            .map((r) => carveRowByCells(r, hitOf(r.nm_id)).rest)
+            .filter((r): r is AssemblyDraftRow => r != null);
+    // При активных ячейках карв + строка расчёта одного SKU сливаются по идентичности
+    // (иначе бэкенд-дедуп keep-first выкинул бы строку расчёта).
+    const withMerge = (list: AssemblyDraftRow[]): AssemblyDraftRow[] =>
+        active.size === 0 ? list : mergeRowsByIdentity(list);
+    const rows = withMerge([...splitExisting(dist.rows), ...stripCalc(shipRows)]);
+    const prebook = withMerge([...splitExisting(dist.prebook), ...stripCalc(effPrebook)]);
     const srcIds = new Set<number>();
     const tgtNames = new Set<string>();
     for (const r of [...rows, ...prebook]) {
@@ -258,13 +338,18 @@ export function buildAutoSyncPlan(
     calcPrebook: AssemblyDraftRow[],
     guardedNms: Set<number>,
     manualNms: Set<number>,
+    preserveCells: Set<string> = new Set(),
 ): ReturnType<typeof buildWriteDistribution> | null {
     const autoShip = calcShipRows.filter((r) => !manualNms.has(r.nm_id));
     const autoPrebook = calcPrebook.filter((r) => !manualNms.has(r.nm_id));
     const purge = new Set([...guardedNms].filter((nm) => !manualNms.has(nm)));
-    const next = buildWriteDistribution(dist, autoShip, autoPrebook, purge);
+    const next = buildWriteDistribution(dist, autoShip, autoPrebook, purge, preserveCells);
+    // Подпись — с сортировкой ключей src/tgt: карв/слияние сохранённых ячеек пересобирает
+    // объекты, и без канонизации одинаковое содержимое давало бы ложную дельту (PUT-шум).
+    const canonRec = (rec: Record<string, number>) =>
+        Object.entries(rec).filter(([, q]) => (q || 0) > 0).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, q]) => `${k}:${q}`).join(',');
     const sig = (rows: AssemblyDraftRow[]) =>
-        rows.map((r) => `${keyOfDraftRow(r)}|${JSON.stringify(r.tgt)}|${JSON.stringify(r.src)}`).sort().join(';');
+        rows.map((r) => `${keyOfDraftRow(r)}|${canonRec(r.tgt)}|${canonRec(r.src)}`).sort().join(';');
     const same = sig(next.rows) === sig(dist.rows ?? []) && sig(next.prebook) === sig(dist.prebook ?? []);
     return same ? null : next;
 }

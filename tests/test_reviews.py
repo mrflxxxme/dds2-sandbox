@@ -419,12 +419,12 @@ async def test_reviews_breakdown_month(db_session, project):
     """Детальная таблица по месяцам: группы, распределение, итог, опции фильтров."""
     await _seed(db_session, project.id)
     res = await reviews_service.get_reviews_breakdown(db_session, project.id, group_by="month")
-    assert res.group_by == "month"
-    assert res.totals.total == 5
-    rows = {r.key: r for r in res.rows}
-    assert rows["2026-06"].total == 2 and rows["2026-06"].r5 == 1 and rows["2026-06"].r4 == 1
-    assert rows["2026-07"].total == 3
-    assert "Носки" in res.subjects and "БрендA" in res.brands
+    assert res["group_by"] == "month"
+    assert res["totals"]["total"] == 5
+    rows = {r["key"]: r for r in res["rows"]}
+    assert rows["2026-06"]["total"] == 2 and rows["2026-06"]["r5"] == 1 and rows["2026-06"]["r4"] == 1
+    assert rows["2026-07"]["total"] == 3
+    assert "Носки" in res["subjects"] and "БрендA" in res["brands"]
 
 
 async def test_reviews_breakdown_brand_with_subject_filter(db_session, project):
@@ -433,9 +433,9 @@ async def test_reviews_breakdown_brand_with_subject_filter(db_session, project):
     res = await reviews_service.get_reviews_breakdown(
         db_session, project.id, group_by="brand", subject="Носки"
     )
-    rows = {r.key: r for r in res.rows}
+    rows = {r["key"]: r for r in res["rows"]}
     assert set(rows) == {"БрендA"}  # только товары предмета «Носки» (nm 111)
-    assert rows["БрендA"].total == 2  # f1(5) + f2(4)
+    assert rows["БрендA"]["total"] == 2  # f1(5) + f2(4)
 
 
 async def test_complaint_reviews_by_term(db_session, project):

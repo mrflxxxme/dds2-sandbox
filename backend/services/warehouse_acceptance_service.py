@@ -81,6 +81,10 @@ def _is_spec_acceptance_wh(name: str | None) -> bool:
 logger = logging.getLogger("dds.warehouse_acceptance")
 
 CACHE_TTL_SECONDS = 600  # 10 min пер-баркод — WB rate limit 6 req/min, флаги меняются редко
+# Снимок без коэффициентов (429/сбой загрузки → meta=None у всех складов) — только
+# короткий кэш: 10-минутная выпечка «can_box=true, дней 0» демотировала на фронте
+# целые черновики в предбронь (откат ручных дозаборов, прод 2026-07-17).
+COEF_MISSING_CACHE_TTL_SECONDS = 60
 WAREHOUSE_NAMES_CACHE_TTL = 3600  # 1 hour — IDs are stable
 COEFFICIENTS_CACHE_TTL = 3600  # 1 hour — WB обновляет ~раз в день в 03:00 МСК
 
@@ -1114,8 +1118,12 @@ async def check_acceptance_and_redistribute(
 
     if redis is not None:
         try:
+            # Коэффициенты не загрузились (WB 429/сбой) → у флагов meta=None: кэшируем
+            # коротко, чтобы отравленный снимок не жил 10 минут (фронт по нему не
+            # демотирует — см. checkedPkgWbs, — но и бейджи «N дн» гаснуть не должны).
+            ttl = CACHE_TTL_SECONDS if raw_coefficients else COEF_MISSING_CACHE_TTL_SECONDS
             for bc, av in fetched.items():
-                await redis.setex(_barcode_cache_key(project_id, bc), CACHE_TTL_SECONDS, json.dumps(av))
+                await redis.setex(_barcode_cache_key(project_id, bc), ttl, json.dumps(av))
         except Exception as e:  # pragma: no cover
             logger.warning(f"acceptance.cache_set_failed: {e}")
 
