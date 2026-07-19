@@ -31,15 +31,24 @@ export interface UrgentShipRow {
     draftQty: number;
     /** Свободный остаток на ФФ — есть чем пополнить черновик. */
     ffFree: number;
+    /** Кратность короба (штук в коробе); null — ppbOf не передан или кратность не задана. */
+    ppb: number | null;
     bucket: UrgencyBucket;
 }
 
 export interface UrgentShipSummary {
     /** Срочные SKU, уже лежащие в черновике, — двигаем сборку. */
     inDraft: UrgentShipRow[];
-    /** Срочные SKU вне черновика со свободным ФФ-стоком — кандидаты на добавление. */
+    /** Срочные SKU вне черновика, из которых набирается ≥1 целый короб, — кандидаты на добавление. */
     missing: UrgentShipRow[];
+    /** Срочные SKU вне черновика, где свободного ФФ-стока меньше короба, — россыпь
+     *  (запрещена всегда, расчёт такое не берёт). Пуст, если ppbOf не передан. */
+    looseOnly: UrgentShipRow[];
+    /** Срочные SKU вне черновика без заданной кратности короба — «нет данных ≠ россыпь».
+     *  Пуст, если ppbOf не передан. */
+    noPpb: UrgentShipRow[];
     totalLoss: number;
+    /** Потери по ВСЕМ срочным вне черновика (missing + looseOnly + noPpb). */
     missingLoss: number;
     zeroCount: number;
     criticalCount: number;
@@ -66,11 +75,17 @@ export function buildUrgentShip(params: {
     leadDays: number;
     /** Окно, за которое собрана revenue_bdr (trend_days запроса). */
     trendDays?: number;
+    /** nm_id → кратность короба (штук в коробе). Если передан, «вне черновика»
+     *  делится на missing (≥1 целый короб) / looseOnly (россыпь) / noPpb (нет
+     *  кратности). Без него — прежнее поведение: всё в missing. */
+    ppbOf?: (nm: number) => number | null | undefined;
 }): UrgentShipSummary {
-    const { articles, draftQtyByNm, locPctByNm, leadDays, trendDays = 7 } = params;
+    const { articles, draftQtyByNm, locPctByNm, leadDays, trendDays = 7, ppbOf } = params;
 
     const inDraft: UrgentShipRow[] = [];
     const missing: UrgentShipRow[] = [];
+    const looseOnly: UrgentShipRow[] = [];
+    const noPpb: UrgentShipRow[] = [];
 
     for (const a of articles) {
         const bucket = classifyUrgency(a.days_left);
@@ -81,6 +96,10 @@ export function buildUrgentShip(params: {
         const gapDays = Math.max(0, leadDays - daysLeft);
         const draftQty = draftQtyByNm.get(a.nm_id) ?? 0;
         const ffFree = a.stocks_rf ?? 0;
+        // stocks_rf приходит уже за вычетом резерва других черновиков (вычитает
+        // вызывающий) — здесь ничего не вычитаем повторно.
+        const rawPpb = ppbOf?.(a.nm_id);
+        const ppb = rawPpb != null && rawPpb > 0 ? rawPpb : null;
         const row: UrgentShipRow = {
             nm_id: a.nm_id,
             vendor: a.vendor_code || `nm ${a.nm_id}`,
@@ -92,12 +111,18 @@ export function buildUrgentShip(params: {
             locPct: locPctByNm?.get(a.nm_id) ?? null,
             draftQty,
             ffFree,
+            ppb,
             bucket,
         };
 
         if (draftQty > 0) inDraft.push(row);
-        // Вне черновика показываем только то, что реально можно доложить (есть ФФ-сток).
-        else if (ffFree > 0) missing.push(row);
+        // Вне черновика показываем только то, по чему есть ФФ-сток.
+        else if (ffFree > 0) {
+            if (!ppbOf) missing.push(row); // обратная совместимость: без кратности — всё «добавляемое»
+            else if (ppb === null) noPpb.push(row); // кратность не задана: «нет данных ≠ россыпь»
+            else if (Math.floor(ffFree / ppb) >= 1) missing.push(row); // есть ≥1 целый короб — реально добавляемое
+            else looseOnly.push(row); // россыпь меньше короба — запрещена, расчёт такое не берёт
+        }
     }
 
     const byUrgency = (x: UrgentShipRow, y: UrgentShipRow) =>
@@ -106,12 +131,17 @@ export function buildUrgentShip(params: {
         || y.dailyRevenue - x.dailyRevenue;
     inDraft.sort(byUrgency);
     missing.sort(byUrgency);
+    looseOnly.sort(byUrgency);
+    noPpb.sort(byUrgency);
 
     return {
         inDraft,
         missing,
+        looseOnly,
+        noPpb,
         totalLoss: inDraft.reduce((s, r) => s + r.loss, 0),
-        missingLoss: missing.reduce((s, r) => s + r.loss, 0),
+        // «Всё срочное вне черновика»: добавляемые + россыпь + без кратности.
+        missingLoss: [...missing, ...looseOnly, ...noPpb].reduce((s, r) => s + r.loss, 0),
         zeroCount: inDraft.filter(r => r.bucket === 'zero').length,
         criticalCount: inDraft.filter(r => r.bucket === 'critical').length,
         dangerCount: inDraft.filter(r => r.bucket === 'danger').length,

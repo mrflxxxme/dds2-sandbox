@@ -361,15 +361,16 @@ export function buildWriteDistribution(
     // Сохранённые ячейки `${nm}::${wb}` (distribution.prebook_origin): дозабор из
     // предброни / «Оставить так» — явные решения человека, расчёт их не знает и
     // раньше молча откатывал («вся предбронь вернулась» при входе в матрицу).
-    // Активны только ключи с живой ячейкой в текущем черновике — стейл-ключи
-    // (после коммита/удаления направления) не должны резать план расчёта.
+    // Активны только ключи с живой ячейкой в СТРОКАХ текущего черновика: предбронь
+    // пересобирается расчётом целиком (решение юзера 2026-07-19 — ⌛-дозабор в
+    // предброни живёт до следующего синка, «дособрал → сразу предзаявку»); защита
+    // покрывает rows-ячейки, включая промотированный консолидацией топап. Стейл-ключи
+    // (после коммита/удаления направления) план расчёта не режут.
     const hasCell = (list: AssemblyDraftRow[] | null | undefined, nm: number, wb: string) =>
         (list ?? []).some((r) => r.nm_id === nm && (r.tgt?.[wb] || 0) > 0);
     const active = new Set([...preserveCells].filter((k) => {
         const i = k.indexOf('::');
-        const nm = Number(k.slice(0, i));
-        const wb = k.slice(i + 2);
-        return hasCell(dist.rows, nm, wb) || hasCell(dist.prebook, nm, wb);
+        return hasCell(dist.rows, Number(k.slice(0, i)), k.slice(i + 2));
     }));
     const hitOf = (nm: number) => (wb: string) => active.has(`${nm}::${wb}`);
     // Существующие строки: чужие — целиком; у заменяемых/вычищаемых выживает
@@ -393,7 +394,11 @@ export function buildWriteDistribution(
     const withMerge = (list: AssemblyDraftRow[]): AssemblyDraftRow[] =>
         active.size === 0 ? list : mergeRowsByIdentity(list);
     const rows = withMerge([...splitExisting(dist.rows), ...stripCalc(shipRows)]);
-    const prebook = withMerge([...splitExisting(dist.prebook), ...stripCalc(effPrebook)]);
+    // Предбронь: полная замена по владению nm, БЕЗ карва-защиты существующих строк
+    // («в предброни ручного нет»). stripCalc всё же режет активные rows-ячейки из
+    // расчётной предброни — иначе её хвост задвоил бы защищённую строку той же ячейки.
+    const keepPb = (r: AssemblyDraftRow) => !ownedNms.has(r.nm_id) && !purgeNms.has(r.nm_id);
+    const prebook = withMerge([...(dist.prebook ?? []).filter(keepPb), ...stripCalc(effPrebook)]);
     const srcIds = new Set<number>();
     const tgtNames = new Set<string>();
     for (const r of [...rows, ...prebook]) {

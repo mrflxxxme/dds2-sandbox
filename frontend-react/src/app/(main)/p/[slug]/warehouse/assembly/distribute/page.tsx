@@ -16,6 +16,7 @@ import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams'
 import { applyAcceptanceRedistToPrebook } from '@/lib/assembly/prebookRedistribute';
 import { buildCategoryOf, buildCompatClassOf, classLabelOf, inScopeOf } from '@/lib/assembly/categoryCompat';
 import { subtractReserveFromArticles, restrictArticlesToFf, reservedTotal, carveScopeFromDraft, type DraftReserveMap } from '@/lib/assembly/draftReserve';
+import { loadAutoSyncSharedData, runDraftAutoSync, WB_STOCKS_STALE_HOURS, type DraftSyncOutcome } from '@/lib/assembly/draftAutoSyncRunner';
 import { Toast } from '@/components';
 import TabLayout from '@/components/TabLayout';
 import DraftPreview from './components/DraftPreview';
@@ -457,6 +458,10 @@ export default function AssemblyDraftPage() {
     }, [stockNeed, draftsReserved, scopeFfId]);
     const reservedUnits = useMemo(() => reservedTotal(draftsReserved), [draftsReserved]);
 
+    // Кратность для «Срочно к отправке» — стабильная ссылка: инлайн-лямбда
+    // пересчитывала бы buildUrgentShip на каждом рендере страницы (ревью MEDIUM).
+    const urgentPpbOf = useCallback((nm: number) => nmPpb.get(nm), [nmPpb]);
+
     // Резерв других черновиков per nm (для «Срочно к отправке»: ffFree честный).
     // draftsReserved ключуется баркодом — мапим на nm через статьи потребности.
     const urgentReservedByNm = useMemo(() => {
@@ -485,6 +490,92 @@ export default function AssemblyDraftPage() {
         void api.getDraftsReserved(undefined)
             .then(r => setModalReserved(r.reserved || {}))
             .catch(() => { /* фолбэк — draftsReserved (без резерва текущего) */ });
+    }, []);
+
+    // ─── Страничный авто-синк ВСЕХ черновиков (заход + раз в час) ─────────
+    // Наполнение каждого черновика приводится к живому расчёту headless-раннером
+    // (та же цепочка, что у матрицы): категорийные по очереди (держат резерв) →
+    // главный от остатка. Ручные решения (✋, rows-ячейки prebook_origin) священны,
+    // предбронь пересобирается целиком. Гард свежести: остатки WB протухли →
+    // синк останавливается и говорит об этом, а не синкает к неправде.
+    const [pageSync, setPageSync] = useState<{ running: boolean; lastAt: number | null; note: string | null }>({ running: false, lastAt: null, note: null });
+    const pageSyncBusyRef = useRef(false);
+    const pageSyncLastRef = useRef(0);
+    const runAllDraftsSync = useCallback(async (trigger: 'load' | 'hourly' | 'focus') => {
+        if (pageSyncBusyRef.current) return;
+        // Часовой/фокусный тик пропускается, если недавно синкали (заход/руками).
+        if (trigger !== 'load' && Date.now() - pageSyncLastRef.current < 30 * 60_000) return;
+        if (document.visibilityState === 'hidden') return;
+        pageSyncBusyRef.current = true;
+        setPageSync((s) => ({ ...s, running: true }));
+        try {
+            const shared = await loadAutoSyncSharedData();
+            if (shared.wbStocksAgeHours != null && shared.wbStocksAgeHours > WB_STOCKS_STALE_HOURS) {
+                // Гейт повторов двигаем и на стоп-пути: иначе каждый focus заново
+                // качал бы shared-данные при устойчиво протухших остатках (ревью LOW).
+                pageSyncLastRef.current = Date.now();
+                setPageSync({ running: false, lastAt: Date.now(), note: `⚠ Остатки WB не обновлялись ~${formatNumber(shared.wbStocksAgeHours, 0)} ч — авто-синк остановлен (расчёт ехал бы по старым данным)` });
+                return;
+            }
+            const drafts = await api.listAssemblyDrafts();
+            const ordered = [
+                ...drafts.filter((d) => (d.distribution.category_scope?.length ?? 0) > 0),
+                ...drafts.filter((d) => (d.distribution.category_scope?.length ?? 0) === 0),
+            ];
+            const outcomes: DraftSyncOutcome[] = [];
+            for (const d of ordered) {
+                // Черновик, открытый в «Ручной раскладке», матрица синкает сама —
+                // не воюем с её локальным стейтом.
+                if (activeTab === 'matrix' && d.id === draftId) continue;
+                const o = await runDraftAutoSync(d, shared, categoryOf, classOf);
+                outcomes.push(o);
+                if (o.status === 'synced' && o.updated && o.draftId === draftId) {
+                    healScopeRef.current = { ts: o.updated.updated_at, only: new Set() };
+                    applyDraft(o.updated);
+                }
+            }
+            pageSyncLastRef.current = Date.now();
+            const synced = outcomes.filter((o) => o.status === 'synced');
+            const accFailed = outcomes.filter((o) => o.reason === 'acceptance-failed');
+            const errs = outcomes.filter((o) => o.reason === 'error');
+            setPageSync({
+                running: false,
+                lastAt: Date.now(),
+                note: accFailed.length > 0
+                    ? '⚠ Приёмка WB недоступна — часть черновиков не синкована (повтор через час)'
+                    : errs.length > 0
+                        ? `⚠ Синк не прошёл: ${errs.map((o) => `«${o.name}»`).join(', ')} (повтор через час)`
+                        : null,
+            });
+            if (synced.length > 0) {
+                showToast(`⟳ Авто-синк с потребностью: ${synced.map((o) => `«${o.name}» ${formatNumber(o.before ?? 0, 0)} → ${formatNumber(o.after ?? 0, 0)} шт`).join(' · ')}`, 'success');
+                void refreshReserved();
+            }
+        } catch (e) {
+            setPageSync({ running: false, lastAt: Date.now(), note: '⚠ Авто-синк не удался — повтор через час' });
+            void e;
+        } finally {
+            pageSyncBusyRef.current = false;
+            setPageSync((s) => ({ ...s, running: false }));
+        }
+    }, [activeTab, draftId, categoryOf, classOf, applyDraft, refreshReserved, showToast]);
+    // Заход на страницу: один запуск после готовности черновика и геометрии.
+    const pageSyncKickedRef = useRef(false);
+    useEffect(() => {
+        if (pageSyncKickedRef.current || loading || geomState !== 'ready' || !draftId) return;
+        pageSyncKickedRef.current = true;
+        void runAllDraftsSync('load');
+    }, [loading, geomState, draftId, runAllDraftsSync]);
+    // Часовой тик + догон при возврате фокуса (30-мин гейт внутри). Таймер живёт
+    // на ref: deps-версия пересоздавала интервал при каждой смене вкладки/черновика
+    // и отсчёт часа никогда не добегал (ревью MEDIUM).
+    const runAllDraftsSyncRef = useRef(runAllDraftsSync);
+    useEffect(() => { runAllDraftsSyncRef.current = runAllDraftsSync; }, [runAllDraftsSync]);
+    useEffect(() => {
+        const id = setInterval(() => { void runAllDraftsSyncRef.current('hourly'); }, 3_600_000);
+        const onFocus = () => { void runAllDraftsSyncRef.current('focus'); };
+        window.addEventListener('focus', onFocus);
+        return () => { clearInterval(id); window.removeEventListener('focus', onFocus); };
     }, []);
 
     // ─── Build current distribution snapshot ─────────────────────────────
@@ -2223,6 +2314,19 @@ export default function AssemblyDraftPage() {
                     {activeTab === 'draft' && (
                         <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{saving ? 'Сохранение…' : 'Автосохранение включено'}</span>
                     )}
+                    {/* Индикатор страничного авто-синка — виден с любой вкладки. */}
+                    {(pageSync.running || pageSync.note != null || pageSync.lastAt != null) && <span
+                        style={{ fontSize: 12, color: pageSync.note ? 'var(--color-warning)' : 'var(--color-text-muted)' }}
+                        title="Авто-синк всех черновиков с живой потребностью и лимитами приёмки: при заходе на страницу и раз в час, пока она открыта. Ручные решения (✋, дозаборы в строки) не трогает; предбронь пересобирается расчётом."
+                    >
+                        {pageSync.running
+                            ? '⟳ авто-синк…'
+                            : pageSync.note
+                                ? pageSync.note
+                                : pageSync.lastAt
+                                    ? `⟳ синк ${new Date(pageSync.lastAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })} ✓`
+                                    : ''}
+                    </span>}
                 </div>
             </div>
 
@@ -2436,6 +2540,7 @@ export default function AssemblyDraftPage() {
                     )}
                     <UrgentShipPanel slug={slug} rows={rows} prebook={prebook} stockNeed={stockNeed}
                         reservedByNm={urgentReservedByNm}
+                        ppbOf={urgentPpbOf}
                         inScope={isScoped ? inScope : undefined}
                         scopeLabel={isScoped ? (categoryScope || []).join(', ') : undefined}
                     />

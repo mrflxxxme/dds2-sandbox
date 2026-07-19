@@ -43,6 +43,7 @@ from backend.scheduler.jobs.funnel import (
     sync_funnel_hourly,
     sync_nomenclature_all_projects,
 )
+from backend.scheduler.jobs.draft_staleness_watch import check_all_projects_draft_staleness
 from backend.scheduler.jobs.health_check import health_monitor
 from backend.scheduler.jobs.heartbeat import heartbeat_ping
 from backend.scheduler.jobs.prewarm import prewarm_all_reports, prewarm_project  # noqa: F401
@@ -362,6 +363,18 @@ def start_scheduler():
         trigger=IntervalTrigger(hours=2),
         id="supply_discrepancy_notify",
         name="Supply discrepancy notify (every 2h)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=600,
+    )
+
+    # Сторож черновиков сборки → TG: every hour (черновик без синка/правки >6ч
+    # или остатки WB старше 6ч; анти-спам — не чаще 1 алерта в 12ч на объект).
+    _scheduler.add_job(
+        check_all_projects_draft_staleness,
+        trigger=IntervalTrigger(hours=1),
+        id="draft_staleness_watch",
+        name="Draft staleness watch (hourly)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=600,

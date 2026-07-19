@@ -5449,6 +5449,9 @@ export interface StockNeedSummary {
   localization_target?: number;
   /** Спрос гео-непривязанных заказов (СНГ и пр.): учтён в total_need, но НЕ локальный. */
   unmapped_demand_qty?: number;
+  /** Возраст зеркала остатков WB (max updated_at, ISO): инжектится РОУТЕРОМ мимо
+   *  кэша сервиса — гард свежести авто-синка (протухло → синк останавливается). */
+  wb_stocks_updated_at?: string | null;
 }
 
 export interface StockNeedResponse {

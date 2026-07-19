@@ -1279,6 +1279,9 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                     summary: `Авто-синк с расчётом: ${formatNumber(before, 0)} → ${formatNumber(after, 0)} шт` +
                         (curManual.size > 0 ? ` (✋ ручных не тронуто: ${curManual.size})` : ''),
                 },
+                // CAS от версии свежего GET: синк без версии молча перекрывал бы
+                // конкурентную запись (страничный раннер/вторая вкладка).
+                base_updated_at: cur.updated_at,
             });
             draftDistRef.current = d.distribution ?? null;
             setDraftRowsState(d.distribution?.rows ?? []);
@@ -1287,7 +1290,13 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
             showToast(`⟳ План синхронизирован с расчётом: ${formatNumber(before, 0)} → ${formatNumber(after, 0)} шт${curManual.size > 0 ? ` · ✋ ручных не тронуто: ${curManual.size}` : ''}`, 'success');
             onDraftChanged?.(d);
         } catch (e) {
-            showToast(e instanceof Error ? e.message : 'Ошибка синка с расчётом', 'error');
+            if (e instanceof Error && e.message.includes('DRAFT_VERSION_CONFLICT')) {
+                // Черновик записали между нашим GET и PUT — синк пересчитается на
+                // следующем заходе/тике; авто-триггер молчит, ручной — объясняет.
+                if (trigger === 'manual') showToast('Черновик изменился в другой вкладке — нажмите «⟳ Обновить сейчас» ещё раз', 'error');
+            } else {
+                showToast(e instanceof Error ? e.message : 'Ошибка синка с расчётом', 'error');
+            }
         } finally {
             setWriting(false);
         }
