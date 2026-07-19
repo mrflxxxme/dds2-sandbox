@@ -4,6 +4,7 @@ import {
     applyDraftCellEdit,
     applyDraftPrebookEdit,
     buildAutoSyncPlan,
+    mergeDraftDirection,
     buildDraftSkus,
     buildWriteDistribution,
     buildPinnedRowsFf,
@@ -477,6 +478,85 @@ describe('buildWriteDistribution — preserveCells (дозабор/«Остав�
         const out = buildWriteDistribution(dist, calc, [], new Set());
         expect(cellQty(out.rows, 1, 'СПБ Шушары')).toBe(0);
         expect(cellQty(out.rows, 1, 'Екатеринбург')).toBe(60);
+    });
+});
+
+describe('mergeDraftDirection — «слить склад A в склад B»', () => {
+    type Row = { nm_id: number; barcode: string; vendor_code: string; src: Record<string, number>; tgt: Record<string, number>; package_type: 'BOX' | 'MONOPALLET'; as_is?: boolean };
+    const row = (nm: number, tgt: Record<string, number>, src: Record<string, number>, extra: Partial<Row> = {}): Row =>
+        ({ nm_id: nm, barcode: `bc${nm}`, vendor_code: `art-${nm}`, src, tgt, package_type: 'BOX', ...extra });
+    const yes = () => true;
+    const cellQty = (rows: { nm_id: number; tgt: Record<string, number> }[], nm: number, wb: string) =>
+        rows.filter(r => r.nm_id === nm).reduce((s, r) => s + (r.tgt[wb] || 0), 0);
+
+    it('мульти-складовая строка: порция A переезжает в B, чужая ячейка C не тронута, маргиналы src целы', () => {
+        const out = mergeDraftDirection([row(1, { 'Владимир': 30, 'Казань': 20 }, { '5': 50 })], [], 'Владимир', 'Коледино', yes)!;
+        expect(cellQty(out.rows, 1, 'Владимир')).toBe(0);
+        expect(cellQty(out.rows, 1, 'Коледино')).toBe(30);
+        expect(cellQty(out.rows, 1, 'Казань')).toBe(20);
+        const srcSum = out.rows.reduce((s, r) => s + sumRec(r.src as Record<string, number>), 0);
+        const tgtSum = out.rows.reduce((s, r) => s + sumRec(r.tgt), 0);
+        expect(srcSum).toBe(50); expect(tgtSum).toBe(50);
+        expect(out.movedUnits).toBe(30);
+        expect([...out.movedNms]).toEqual([1]);
+    });
+
+    it('предбронь источника уходит в rows-ВХОД (нормализатор цели решит судьбу), прочая предбронь не тронута', () => {
+        const out = mergeDraftDirection(
+            [], [row(1, { 'Владимир': 12 }, { '5': 12 }), row(2, { 'Тула': 9 }, { '5': 9 })],
+            'Владимир', 'Коледино', yes)!;
+        expect(cellQty(out.rows, 1, 'Коледино')).toBe(12);   // предбронь → rows-вход
+        expect(out.prebook).toHaveLength(1);
+        expect(out.prebook[0].nm_id).toBe(2);                 // чужая предбронь байт-в-байт
+    });
+
+    it('гейт: недопущенный SKU остаётся на источнике и считается в skipped', () => {
+        const out = mergeDraftDirection(
+            [row(1, { 'Владимир': 30 }, { '5': 30 }), row(2, { 'Владимир': 10 }, { '5': 10 })], [],
+            'Владимир', 'Коледино', (nm) => nm !== 2)!;
+        expect(cellQty(out.rows, 1, 'Коледино')).toBe(30);
+        expect(cellQty(out.rows, 2, 'Владимир')).toBe(10);   // остался как был
+        expect(out.skippedUnits).toBe(10);
+        expect([...out.skippedNms]).toEqual([2]);
+    });
+
+    it('слияние идентичностей: на цели уже есть строка того же SKU → одна строка (бэкенд-дедуп не съест)', () => {
+        const out = mergeDraftDirection(
+            [row(1, { 'Владимир': 30 }, { '5': 30 }), row(1, { 'Коледино': 19 }, { '4': 19 })], [],
+            'Владимир', 'Коледино', yes)!;
+        const rows1 = out.rows.filter(r => r.nm_id === 1);
+        expect(rows1).toHaveLength(1);
+        expect(rows1[0].tgt).toEqual({ 'Коледино': 49 });
+        expect(rows1[0].src).toEqual({ '5': 30, '4': 19 });
+    });
+
+    it('упаковки независимы: BOX едет, MONOPALLET не допущен — остаётся', () => {
+        const out = mergeDraftDirection(
+            [row(1, { 'Владимир': 19 }, { '5': 19 }), row(2, { 'Владимир': 8 }, { '5': 8 }, { package_type: 'MONOPALLET' })], [],
+            'Владимир', 'Коледино', (_nm, pkg) => pkg === 'BOX')!;
+        expect(cellQty(out.rows, 1, 'Коледино')).toBe(19);
+        expect(cellQty(out.rows, 2, 'Владимир')).toBe(8);
+        expect(out.only).toEqual(new Set(['BOX::Коледино']));
+    });
+
+    it('as_is-строка переезжает с флагом (не сливается с обычной строкой цели)', () => {
+        const out = mergeDraftDirection(
+            [row(1, { 'Владимир': 19 }, { '5': 19 }, { as_is: true }), row(1, { 'Коледино': 38 }, { '4': 38 })], [],
+            'Владимир', 'Коледино', yes)!;
+        const asIs = out.rows.filter(r => r.as_is);
+        expect(asIs).toHaveLength(1);
+        expect(asIs[0].tgt).toEqual({ 'Коледино': 19 });
+        expect(cellQty(out.rows, 1, 'Коледино')).toBe(57);
+    });
+
+    it('переносить нечего → null; A === B → null', () => {
+        expect(mergeDraftDirection([row(1, { 'Тула': 5 }, { '5': 5 })], [], 'Владимир', 'Коледино', yes)).toBeNull();
+        expect(mergeDraftDirection([row(1, { 'Владимир': 5 }, { '5': 5 })], [], 'Владимир', 'Владимир', yes)).toBeNull();
+    });
+
+    it('идемпотентность: повторное слияние того же направления → null', () => {
+        const first = mergeDraftDirection([row(1, { 'Владимир': 30 }, { '5': 30 })], [], 'Владимир', 'Коледино', yes)!;
+        expect(mergeDraftDirection(first.rows, first.prebook, 'Владимир', 'Коледино', yes)).toBeNull();
     });
 });
 

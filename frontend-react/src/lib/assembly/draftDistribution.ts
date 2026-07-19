@@ -261,6 +261,84 @@ function mergeRowsByIdentity(rows: AssemblyDraftRow[]): AssemblyDraftRow[] {
     return [...by.values()];
 }
 
+/** Итог слияния направления: новое наполнение + учёт для ✋/истории/тоста. */
+export interface MergeDirectionResult {
+    rows: AssemblyDraftRow[];
+    prebook: AssemblyDraftRow[];
+    /** SKU, чья порция реально переехала (→ пометить ✋ и мигрировать prebook_origin). */
+    movedNms: Set<number>;
+    movedUnits: number;
+    /** SKU с ячейкой на источнике, которых гейт не пустил (остались как были). */
+    skippedNms: Set<number>;
+    skippedUnits: number;
+    /** Направления цели для суженного прохода scopedNormalizeDraft. */
+    only: Set<string>;
+}
+
+/**
+ * «Слить склад A в склад B»: порции tgt[fromWb] всех допущенных гейтом строк
+ * (rows И предбронь) ретаргетятся на toWb; недопущенные остаются на источнике
+ * байт-в-байт. src не меняется — физический ФФ-источник тот же (allocatePairs
+ * внутри carveRowByCells делит его вслед за ячейками, оба маргинала целы).
+ * Перенесённая ПРЕДБРОНЬ источника сознательно вливается в rows-вход: только
+ * нормализатор направления цели решает, что стало целой паллетой (rows), а что
+ * вернётся хвостом в предбронь — иначе собравшаяся из двух хвостов паллета
+ * навсегда застряла бы в предброни (scopedNormalizeDraft полный consolidate не
+ * зовёт). Допустимость per (nm × упаковка) решает call-site (гейт приёмки WB,
+ * handed-заморозка) — функция чистая. null — переносить нечего.
+ */
+export function mergeDraftDirection(
+    rows: AssemblyDraftRow[],
+    prebook: AssemblyDraftRow[],
+    fromWb: string,
+    toWb: string,
+    canMove: (nm: number, pkg: PackageType) => boolean,
+): MergeDirectionResult | null {
+    if (fromWb === toWb) return null;
+    const moved: AssemblyDraftRow[] = [];
+    const movedNms = new Set<number>();
+    const skippedNms = new Set<number>();
+    let movedUnits = 0;
+    let skippedUnits = 0;
+    const carveList = (list: AssemblyDraftRow[]): AssemblyDraftRow[] => {
+        const kept: AssemblyDraftRow[] = [];
+        for (const r of list) {
+            const cellQty = r.tgt?.[fromWb] || 0;
+            if (cellQty <= 0) { kept.push(r); continue; }
+            const pkg = (r.package_type || 'BOX') as PackageType;
+            if (!canMove(r.nm_id, pkg)) {
+                skippedNms.add(r.nm_id);
+                skippedUnits += cellQty;
+                kept.push(r);
+                continue;
+            }
+            const { carved, rest } = carveRowByCells(r, (wb) => wb === fromWb);
+            if (rest) kept.push(rest);
+            if (carved) {
+                const qty = carved.tgt[fromWb] || 0;
+                moved.push({ ...carved, tgt: { [toWb]: qty } });
+                movedNms.add(r.nm_id);
+                movedUnits += qty;
+            }
+        }
+        return kept;
+    };
+    const keptRows = carveList(rows);
+    const keptPrebook = carveList(prebook);
+    if (moved.length === 0) return null;
+    return {
+        // mergeRowsByIdentity: порция может слиться с уже существующей строкой цели
+        // той же идентичности — бэкенд-дедуп keep-first дубль молча выкинул бы.
+        rows: mergeRowsByIdentity([...keptRows, ...moved]),
+        prebook: keptPrebook,
+        movedNms,
+        movedUnits,
+        skippedNms,
+        skippedUnits,
+        only: new Set(moved.map((r) => `${r.package_type || 'BOX'}::${toWb}`)),
+    };
+}
+
 /**
  * Итог «Пересчитать от потребности → в черновик» — ЗАМЕНА по SKU:
  * строки/предбронь SKU, которыми владеет расчёт (дал отгрузку ИЛИ предбронь),
