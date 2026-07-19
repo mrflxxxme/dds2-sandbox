@@ -21,6 +21,7 @@ import {
     buildWriteDistribution,
     enrichArticles,
     finalizeDraftDistribution,
+    mergeDraftDirection,
     rowsToPreDistRows,
     sliceRowsByFf,
     splitByKratnost,
@@ -1305,6 +1306,145 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
         void runAutoSync('auto');
     }, [distRows, draftRows, runAutoSync, acceptanceNote]);
 
+    // ─── «⇄ Слить склад в склад»: весь план колонки-источника → в цель ───
+    // Гейт per (SKU × упаковка) — тот же, что у степпера: приём цели открыт И лимит
+    // (дни > 0); непрошедшие остаются на источнике байт-в-байт. Перенесённые SKU
+    // получают ✋ (иначе ближайший авто-синк вернул бы раскладку по расчёту),
+    // интент prebook_origin мигрирует на цель. Нормализация направлений цели:
+    // целые паллеты → строки, хвост → предбронь.
+    const [mergeMenuWb, setMergeMenuWb] = useState<string | null>(null);
+    const mergeWarehouse = useCallback(async (fromWb: string, toWb: string) => {
+        if (!draftId || writing) return;
+        setMergeMenuWb(null);
+        if (!geomReady) {
+            showToast('Кратности коробов ещё не загрузились — нормализация переноса невозможна, попробуйте через пару секунд', 'error');
+            return;
+        }
+        setWriting(true);
+        try {
+            // Дожать pending-правки степпера — контракт как у авто-синка.
+            if (saveTimerRef.current) {
+                clearTimeout(saveTimerRef.current);
+                saveTimerRef.current = null;
+            }
+            await flushDraftSave();
+            if (pendingSaveRef.current) {
+                showToast('Есть несохранённая правка степпера (сеть мигнула) — слияние отложено, повтори позже', 'error');
+                return;
+            }
+            // База — свежий GET: сливаем серверную правду, не локальный снимок.
+            const cur = await api.getAssemblyDraft(draftId);
+            const dist = cur.distribution ?? {};
+            const srcRows = dist.rows ?? [];
+            const srcPrebook = dist.prebook ?? [];
+            const srcSkus = new Map<number, string>();
+            for (const r of [...srcRows, ...srcPrebook]) {
+                if ((r.tgt?.[fromWb] || 0) > 0) srcSkus.set(r.nm_id, r.barcode);
+            }
+            if (srcSkus.size === 0) {
+                showToast(`На «${fromWb}» нет плана — переносить нечего`, 'error');
+                return;
+            }
+            // Приёмка цели: недостающие SKU — ОДНИМ non-force батчем (пер-баркод
+            // кэш бэка 10 мин; force-бюджет 6/мин не трогаем).
+            const acc = new Map(acceptanceByNm);
+            const missing = [...srcSkus].filter(([nm]) => !acc.get(nm)?.availability?.[toWb]);
+            if (missing.length > 0) {
+                try {
+                    const items = missing.map(([nm, barcode]) => ({ nm_id: nm, barcode, distribution: { [toWb]: nmPpb.get(nm) || 1 } }));
+                    const resp = await api.checkWbAcceptance({ items });
+                    for (const it of resp.items || []) {
+                        const prev = acc.get(it.nm_id);
+                        // Мерж availability, не замена — метки других складов не стираем.
+                        acc.set(it.nm_id, prev ? { ...prev, availability: { ...prev.availability, ...it.availability } } : it);
+                    }
+                    setAcceptanceByNm(new Map(acc));
+                } catch {
+                    showToast('WB ограничивает частоту проверок приёмки — подождите минуту и нажмите ещё раз', 'error');
+                    return;
+                }
+            }
+            const days = (m?: { free_days_14?: number; paid_days_14?: number } | null) => (m?.free_days_14 ?? 0) + (m?.paid_days_14 ?? 0);
+            const gate = (nm: number, pkg: PackageType): 'ok' | 'handed' | 'closed' | 'noLimit' | 'noData' => {
+                if (handedNms.has(nm)) return 'handed';
+                const f = acc.get(nm)?.availability?.[toWb];
+                if (!f) return 'noData';
+                const open = pkg === 'BOX' ? !!f.can_box : pkg === 'MONOPALLET' ? !!f.can_monopallet : !!f.can_supersafe;
+                const meta = pkg === 'BOX' ? f.box_meta : pkg === 'MONOPALLET' ? f.mono_meta : f.super_meta;
+                if (open && days(meta) > 0) return 'ok';
+                return open ? 'noLimit' : 'closed';
+            };
+            const stay: Record<'handed' | 'closed' | 'noLimit' | 'noData', number> = { handed: 0, closed: 0, noLimit: 0, noData: 0 };
+            for (const r of [...srcRows, ...srcPrebook]) {
+                const q = r.tgt?.[fromWb] || 0;
+                if (q <= 0) continue;
+                const g = gate(r.nm_id, (r.package_type || 'BOX') as PackageType);
+                if (g !== 'ok') stay[g] += q;
+            }
+            const merged = mergeDraftDirection(srcRows, srcPrebook, fromWb, toWb, (nm, pkg) => gate(nm, pkg) === 'ok');
+            if (!merged) {
+                showToast(`Ничего не переносится: «${toWb}» не принимает ни один SKU с «${fromWb}» (⛔ закрыт / ⌛ без лимита / ✋ заморожен)`, 'error');
+                return;
+            }
+            const stayTotal = stay.handed + stay.closed + stay.noLimit + stay.noData;
+            const stayParts = [
+                stay.closed ? `⛔ приём закрыт: ${formatNumber(stay.closed, 0)} шт` : '',
+                stay.noLimit ? `⌛ без лимита: ${formatNumber(stay.noLimit, 0)} шт` : '',
+                stay.noData ? `WB не предлагает склад: ${formatNumber(stay.noData, 0)} шт` : '',
+                stay.handed ? `✋ заморожены юнитами: ${formatNumber(stay.handed, 0)} шт` : '',
+            ].filter(Boolean).join(' · ');
+            if (!window.confirm(
+                `Слить «${fromWb}» → «${toWb}»?\n\n`
+                + `Переедет: ${formatNumber(merged.movedUnits, 0)} шт (${merged.movedNms.size} SKU) — целые паллеты встанут строками, хвосты уйдут в предбронь «${toWb}».\n`
+                + (stayTotal > 0 ? `Останется на «${fromWb}»: ${formatNumber(stayTotal, 0)} шт (${stayParts}).\n` : '')
+                + `Перенесённые SKU будут помечены ✋ — авто-синк их не тронет (↺ на строке вернёт в авто).`,
+            )) return;
+            let sendRows = merged.rows;
+            let sendPrebook = merged.prebook;
+            const norm = scopedNormalizeDraft(merged.rows, merged.prebook, buildNormCtx([...merged.rows, ...merged.prebook]), merged.only);
+            if (norm.changed) {
+                sendRows = norm.rows;
+                sendPrebook = norm.prebook;
+            }
+            const next = buildWriteDistribution({ rows: [], prebook: [] }, sendRows, sendPrebook);
+            const manual = Array.from(new Set([...(dist.manual_nms ?? []), ...merged.movedNms]));
+            // Интент ручных ячеек источника (дозабор/«Оставить так») едет вместе с планом.
+            const origin = new Set(dist.prebook_origin ?? []);
+            for (const nm of merged.movedNms) {
+                if (origin.delete(`${nm}::${fromWb}`)) origin.add(`${nm}::${toWb}`);
+            }
+            // Страховка ПОСЛЕ всех await (GET/приёмка/confirm): правка, успевшая
+            // встать в pending, перекрыла бы слияние своим отложенным flush'ем.
+            if (pendingSaveRef.current) {
+                showToast('Во время слияния появилась правка степпера — слияние отменено, нажмите ещё раз', 'error');
+                return;
+            }
+            const d = await api.updateAssemblyDraft(draftId, {
+                distribution: { ...dist, ...next, manual_nms: manual, prebook_origin: [...origin] },
+                event: { event_type: 'MATRIX_EDIT', summary: `⇄ Слияние складов: «${fromWb}» → «${toWb}» — ${formatNumber(merged.movedUnits, 0)} шт (${merged.movedNms.size} SKU)` },
+                base_updated_at: cur.updated_at,
+            });
+            draftDistRef.current = d.distribution ?? null;
+            setDraftRowsState(d.distribution?.rows ?? []);
+            setDraftPrebook(d.distribution?.prebook ?? []);
+            setManualNms(new Set(d.distribution?.manual_nms ?? []));
+            onDraftChanged?.(d);
+            showToast(
+                `⇄ «${fromWb}» → «${toWb}»: перенесено ${formatNumber(merged.movedUnits, 0)} шт (${merged.movedNms.size} SKU, помечены ✋)`
+                + (stayTotal > 0 ? ` · осталось ${formatNumber(stayTotal, 0)} шт (${stayParts})` : ''),
+                'success',
+            );
+        } catch (err) {
+            if (err instanceof Error && err.message.includes('DRAFT_VERSION_CONFLICT')) {
+                showToast('Черновик изменился в другой вкладке — обновите страницу и повторите слияние', 'error');
+            } else {
+                showToast(err instanceof Error ? err.message : 'Ошибка слияния складов', 'error');
+            }
+        } finally {
+            setWriting(false);
+        }
+    }, [draftId, writing, geomReady, flushDraftSave, acceptanceByNm, handedNms, nmPpb, buildNormCtx, onDraftChanged, showToast]);
+
     /** ↺ Вернуть SKU в авто: снять ✋ и сразу синкануть его к расчёту. */
     const returnToAuto = useCallback(async (nm: number) => {
         try {
@@ -1488,7 +1628,32 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('revenue')} title="Выручка за 14 дней (продажи − возвраты, окно тренда движка потребности)">₽ 14д{sortArrow('revenue')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('loc')} title="Индекс локализации артикула за 14 дней (доля локальных заказов; цвет — статус КТР)">Лок %{sortArrow('loc')}</th>
                                     {wbCols.map((c) => (
-                                        <th key={c.name} style={{ padding: '8px 8px', whiteSpace: 'nowrap', background: districtTint(c.district), ...sortableTh }} onClick={() => toggleSort(`wb:${c.name}`)} title={`Сортировать по отправке в «${c.name}»`}>{c.name}{sortArrow(`wb:${c.name}`)}</th>
+                                        <th key={c.name} style={{ padding: '8px 8px', whiteSpace: 'nowrap', background: districtTint(c.district), ...sortableTh }} onClick={() => toggleSort(`wb:${c.name}`)} title={`Сортировать по отправке в «${c.name}»`}>
+                                            {c.name}{sortArrow(`wb:${c.name}`)}
+                                            {/* «⇄» — слить весь план колонки в другой склад; клик не должен дёргать сортировку th. */}
+                                            {wbCols.length > 1 && <span style={{ position: 'relative', display: 'inline-block', marginLeft: 4 }} onClick={(ev) => ev.stopPropagation()}>
+                                                <button
+                                                    className="badge"
+                                                    style={{ cursor: 'pointer', fontSize: 10, padding: '1px 5px' }}
+                                                    disabled={writing}
+                                                    title={`Слить весь план «${c.name}» в другой склад — с проверкой приёмки цели; что не пройдёт, останется здесь`}
+                                                    onClick={() => setMergeMenuWb(mergeMenuWb === c.name ? null : c.name)}
+                                                >⇄</button>
+                                                {mergeMenuWb === c.name && (
+                                                    <>
+                                                        <div style={{ position: 'fixed', inset: 0, zIndex: 5 }} onClick={() => setMergeMenuWb(null)} />
+                                                        <div style={{ position: 'absolute', top: '100%', right: 0, zIndex: 6, minWidth: 230, maxHeight: 320, overflowY: 'auto', background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.3)', padding: 4, textAlign: 'left', fontWeight: 400 }}>
+                                                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', padding: '4px 8px' }}>⇄ Слить «{c.name}» в:</div>
+                                                            {wbCols.filter((t) => t.name !== c.name).map((t) => (
+                                                                <button key={t.name} className="btn btn-secondary btn-sm" style={{ display: 'block', width: '100%', textAlign: 'left', marginTop: 2 }} disabled={writing} onClick={() => mergeWarehouse(c.name, t.name)}>
+                                                                    {t.name}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    </>
+                                                )}
+                                            </span>}
+                                        </th>
                                     ))}
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('ship')} title="Сортировать по сумме отправки">Σ отпр.{sortArrow('ship')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('boxes')} title="Коробов к отправке">Мест{sortArrow('boxes')}</th>
@@ -1619,7 +1784,9 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                                                         transit={ctx?.transit ?? 0}
                                                         tint={pbPart > 0 ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : districtTint(c.district)}
                                                         mark={markFor(nm, c.name, cell?.pkg ?? null)}
-                                                        edit={rowEditable && ppb ? {
+                                                        edit={/* !writing: степпер заперт на время PUT слияния/авто-синка — клик в их
+                                                            async-окне ставил pending, чей отложенный flush молча откатывал операцию. */
+                                                        rowEditable && !writing && ppb ? {
                                                             boxes: boxesOf(cell?.qty ?? 0, ppb),
                                                             ppb,
                                                             onDelta: (d: number) => editDraftCell(a.barcode, nm, c.name, d),
