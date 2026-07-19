@@ -458,11 +458,19 @@ describe('buildWriteDistribution — preserveCells (дозабор/«Остав�
         expect(cellQty(out.rows, 2, 'СПБ Шушары')).toBe(45);   // ключ протух → расчёт владеет
     });
 
-    it('предбронь: сохранённая ⌛-ячейка предброни переживает замену', () => {
+    it('предбронь пересобирается расчётом ЦЕЛИКОМ — прежняя ⌛-защита снята (решение 2026-07-19)', () => {
         const dist = { rows: [], prebook: [row(3, { 'Казань': 57 }, { '5': 57 })] };
         const calcPb = [row(3, { 'Казань': 19 }, { '5': 19 })];
         const out = buildWriteDistribution(dist, [], calcPb, new Set(), new Set(['3::Казань']));
-        expect(cellQty(out.prebook, 3, 'Казань')).toBe(57);    // дозабранные паллеты, не хвост расчёта
+        expect(cellQty(out.prebook, 3, 'Казань')).toBe(19);    // хвост расчёта, ⌛-дозабор живёт до синка
+    });
+
+    it('rows-защита не задваивается хвостом расчётной предброни той же ячейки', () => {
+        const dist = { rows: [row(1, { 'СПБ Шушары': 30 }, { '5': 30 })], prebook: [] };
+        const calcPb = [row(1, { 'СПБ Шушары': 12 }, { '4': 12 })];
+        const out = buildWriteDistribution(dist, [], calcPb, new Set(), new Set(['1::СПБ Шушары']));
+        expect(cellQty(out.rows, 1, 'СПБ Шушары')).toBe(30);   // защищённая строка цела
+        expect(cellQty(out.prebook, 1, 'СПБ Шушары')).toBe(0); // хвост расчёта вырезан — не 30+12
     });
 
     it('purge guarded-новинки не убивает сохранённую ячейку (явный клик = решение человека)', () => {

@@ -26,6 +26,10 @@ interface Props {
     inScope?: (nm: number) => boolean;
     /** Подпись скоупа для заголовка (например «Панели стеновые»). */
     scopeLabel?: string;
+    /** nm → кратность короба (штук в коробе). С ним «вне черновика» делится на
+     *  добавляемые (≥1 целый короб) / россыпь меньше короба (запрещена, расчёт
+     *  не берёт) / без кратности. Без него — прежнее поведение (всё добавляемое). */
+    ppbOf?: (nm: number) => number | null | undefined;
 }
 
 /** Бейдж «Запас, дн» — палитра светофора Аналитики остатков. */
@@ -60,7 +64,7 @@ function LocPct({ pct, target }: { pct: number | null; target: number }) {
  *  сколько реализации теряем за каждый день промедления. Заменил панель
  *  «Добавить из потребности»: срочные SKU вне черновика показаны компактной
  *  строкой-предупреждением (добавляются через «Заполнить» или вкладку «Потребность»). */
-export default function UrgentShipPanel({ slug, rows, prebook, stockNeed, reservedByNm, inScope, scopeLabel }: Props) {
+export default function UrgentShipPanel({ slug, rows, prebook, stockNeed, reservedByNm, inScope, scopeLabel, ppbOf }: Props) {
     const [articles, setArticles] = useState<StockAnalyticsArticle[] | null>(null);
     const [locMap, setLocMap] = useState<Map<number, number>>(new Map());
     const [state, setState] = useState<'loading' | 'error' | 'ready'>('loading');
@@ -117,14 +121,16 @@ export default function UrgentShipPanel({ slug, rows, prebook, stockNeed, reserv
                     return res > 0 ? { ...a, stocks_rf: Math.max(0, (a.stocks_rf ?? 0) - res) } : a;
                 })
                 : scoped;
-            return buildUrgentShip({ articles: adjusted, draftQtyByNm, locPctByNm: locMap, leadDays, trendDays: TREND_DAYS });
+            return buildUrgentShip({ articles: adjusted, draftQtyByNm, locPctByNm: locMap, leadDays, trendDays: TREND_DAYS, ppbOf });
         },
-        [articles, draftQtyByNm, locMap, leadDays, inScope, reservedByNm],
+        [articles, draftQtyByNm, locMap, leadDays, inScope, reservedByNm, ppbOf],
     );
 
     const locTarget = stockNeed?.summary?.localization_target ?? 75;
     const visible = showAll ? summary.inDraft : summary.inDraft.slice(0, VISIBLE_ROWS);
     const hidden = summary.inDraft.length - visible.length;
+    /** Всё срочное вне черновика: добавляемые + россыпь + без кратности. */
+    const outOfDraftCount = summary.missing.length + summary.looseOnly.length + summary.noPpb.length;
 
     /* ── loading / error / empty ── */
     if (state === 'loading') {
@@ -143,7 +149,7 @@ export default function UrgentShipPanel({ slug, rows, prebook, stockNeed, reserv
             </div>
         );
     }
-    if (summary.inDraft.length === 0 && summary.missing.length === 0) {
+    if (summary.inDraft.length === 0 && outOfDraftCount === 0) {
         return (
             <div className="glass-card" style={{ padding: 14, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <span style={{ fontWeight: 700, color: 'var(--color-success)' }}>✅ Срочных SKU нет</span>
@@ -244,34 +250,86 @@ export default function UrgentShipPanel({ slug, rows, prebook, stockNeed, reserv
                 </div>
             )}
 
-            {/* Сегмент «вне черновика» — компактные чипы */}
-            {summary.missing.length > 0 && (
+            {/* Сегмент «вне черновика»: заголовок — по ВСЕМ срочным вне черновика,
+                чипы — только реально добавляемые (набирается ≥1 целый короб). */}
+            {outOfDraftCount > 0 && (
                 <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px dashed var(--color-border)' }}>
                     <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
                         <span style={{ fontWeight: 700, fontSize: 12.5, color: 'var(--color-warning)' }}>
-                            ⚠️ Срочные ВНЕ черновика — {formatNumber(summary.missing.length, 0)} арт. (~{formatNumber(summary.missingLoss, 0)} ₽)
+                            ⚠️ Срочные ВНЕ черновика — {formatNumber(outOfDraftCount, 0)} арт. (~{formatNumber(summary.missingLoss, 0)} ₽)
                         </span>
                         <span style={{ fontSize: 11.5, color: 'var(--color-text-muted)' }}>
-                            есть свободный сток на ФФ — добавьте «Заполнить черновик из потребности» или на вкладке «Потребность по складам»
+                            {summary.missing.length > 0
+                                ? 'есть свободный сток на ФФ — добавьте «Заполнить черновик из потребности» или на вкладке «Потребность по складам»'
+                                : 'добавляемых нет: весь свободный ФФ-сток — россыпь меньше короба или без кратности ↓'}
                         </span>
                     </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                        {summary.missing.slice(0, VISIBLE_CHIPS).map(r => (
-                            <span key={r.nm_id}
-                                title={`nm ${r.nm_id} · запас ${formatNumber(r.daysLeft, 0)} дн · свободно на ФФ ${formatNumber(r.ffFree, 0)} шт${r.loss > 0 ? ` · теряем ~${formatNumber(r.loss, 0)} ₽` : ''}`}
-                                style={{
-                                    fontSize: 11, padding: '2px 8px', borderRadius: 6,
-                                    background: r.bucket === 'zero' ? 'rgba(255,68,68,0.14)' : 'rgba(245,158,11,0.12)',
-                                    color: r.bucket === 'zero' ? 'var(--color-danger)' : 'var(--color-warning)',
-                                    fontWeight: 600,
-                                }}>
-                                {r.vendor} · {r.bucket === 'zero' ? '0 дн' : `${formatNumber(r.daysLeft, 0)} дн`}{r.loss > 0 ? ` · −${formatNumber(r.loss, 0)} ₽` : ''}
-                            </span>
-                        ))}
-                        {summary.missing.length > VISIBLE_CHIPS && (
-                            <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>…ещё {formatNumber(summary.missing.length - VISIBLE_CHIPS, 0)}</span>
-                        )}
-                    </div>
+                    {summary.missing.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {summary.missing.slice(0, VISIBLE_CHIPS).map(r => (
+                                <span key={r.nm_id}
+                                    title={`nm ${r.nm_id} · запас ${formatNumber(r.daysLeft, 0)} дн · свободно на ФФ ${formatNumber(r.ffFree, 0)} шт${r.loss > 0 ? ` · теряем ~${formatNumber(r.loss, 0)} ₽` : ''}`}
+                                    style={{
+                                        fontSize: 11, padding: '2px 8px', borderRadius: 6,
+                                        background: r.bucket === 'zero' ? 'rgba(255,68,68,0.14)' : 'rgba(245,158,11,0.12)',
+                                        color: r.bucket === 'zero' ? 'var(--color-danger)' : 'var(--color-warning)',
+                                        fontWeight: 600,
+                                    }}>
+                                    {r.vendor} · {r.bucket === 'zero' ? '0 дн' : `${formatNumber(r.daysLeft, 0)} дн`}{r.loss > 0 ? ` · −${formatNumber(r.loss, 0)} ₽` : ''}
+                                </span>
+                            ))}
+                            {summary.missing.length > VISIBLE_CHIPS && (
+                                <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>…ещё {formatNumber(summary.missing.length - VISIBLE_CHIPS, 0)}</span>
+                            )}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* Россыпь на ФФ: свободного стока меньше целого короба — россыпь запрещена,
+                расчёт такое не берёт; чипы информационные, не «добавьте». */}
+            {(summary.looseOnly.length > 0 || summary.noPpb.length > 0) && (
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px dashed var(--color-border)' }}>
+                    {summary.looseOnly.length > 0 && (
+                        <>
+                            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+                                <span style={{ fontWeight: 700, fontSize: 12.5, color: 'var(--color-text-muted)' }}>
+                                    📦 Россыпь на ФФ — меньше короба ({formatNumber(summary.looseOnly.length, 0)} арт.)
+                                </span>
+                                <span style={{ fontSize: 11.5, color: 'var(--color-text-dim)' }}>
+                                    россыпь запрещена — в расчёт не попадает, пока не наберётся целый короб
+                                </span>
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                {summary.looseOnly.slice(0, VISIBLE_CHIPS).map(r => {
+                                    const ppb = r.ppb ?? 0;
+                                    return (
+                                        <span key={r.nm_id}
+                                            title={`nm ${r.nm_id} · свободно на ФФ ${formatNumber(r.ffFree, 0)} шт из короба ${formatNumber(ppb, 0)} шт${r.loss > 0 ? ` · теряем ~${formatNumber(r.loss, 0)} ₽` : ''}`}
+                                            style={{
+                                                fontSize: 11, padding: '2px 8px', borderRadius: 6,
+                                                background: 'rgba(148,163,184,0.14)', color: 'var(--color-text-muted)',
+                                                fontWeight: 600,
+                                            }}>
+                                            {r.vendor} · {formatNumber(r.ffFree, 0)}/{formatNumber(ppb, 0)} — не хватает {formatNumber(ppb - r.ffFree, 0)} шт до короба · {r.bucket === 'zero' ? '0 дн' : `${formatNumber(r.daysLeft, 0)} дн`}
+                                        </span>
+                                    );
+                                })}
+                                {summary.looseOnly.length > VISIBLE_CHIPS && (
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>…ещё {formatNumber(summary.looseOnly.length - VISIBLE_CHIPS, 0)}</span>
+                                )}
+                            </div>
+                        </>
+                    )}
+                    {summary.noPpb.length > 0 && (
+                        <div
+                            style={{ fontSize: 11.5, color: 'var(--color-text-dim)', marginTop: summary.looseOnly.length > 0 ? 6 : 0 }}
+                            title={summary.noPpb.map(r => `nm ${r.nm_id} · ${r.vendor} · свободно ${formatNumber(r.ffFree, 0)} шт`).join('\n')}>
+                            ⚙️ Без кратности ({formatNumber(summary.noPpb.length, 0)}): {summary.noPpb.slice(0, 10).map(r => r.vendor).join(', ')}
+                            {summary.noPpb.length > 10 ? ` …ещё ${formatNumber(summary.noPpb.length - 10, 0)}` : ''}
+                            {' '}— нет данных ≠ россыпь, задай кратность на вкладке «Кратность»
+                        </div>
+                    )}
                 </div>
             )}
         </div>

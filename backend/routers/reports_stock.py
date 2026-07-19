@@ -5,6 +5,7 @@ Sub-router extracted from reports.py for maintainability.
 """
 
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy import select
@@ -29,8 +30,12 @@ router = APIRouter()
 _AUTO_SYNC_STALE_SECONDS = 3600
 
 
-async def _auto_sync_wb_stocks_if_stale(project_id: int, db: AsyncSession) -> bool:
-    """Check if WB stocks are stale (>1h) and trigger background sync. Returns True if sync started."""
+async def _wb_stocks_last_sync(project_id: int, db: AsyncSession) -> datetime | None:
+    """Max(updated_at) остатков WB проекта; None — синка ещё не было.
+
+    Возвращает сам timestamp (не bool): get_stock_need отдаёт его фронту как
+    summary.wb_stocks_updated_at — гард свежести расчёта потребности.
+    """
     from sqlalchemy import func as sqlfunc
 
     from backend.models.integrations import WbWarehouseStock
@@ -40,8 +45,11 @@ async def _auto_sync_wb_stocks_if_stale(project_id: int, db: AsyncSession) -> bo
             WbWarehouseStock.project_id == project_id,
         )
     )
-    last_sync = result.scalar()
+    return result.scalar()
 
+
+def _wb_stocks_stale(last_sync: datetime | None) -> bool:
+    """True — остатки WB старше порога (или их нет вовсе): пора фоновому синку."""
     return not (last_sync and (utcnow() - last_sync).total_seconds() < _AUTO_SYNC_STALE_SECONDS)
 
 
@@ -85,7 +93,7 @@ async def get_stock_analytics(
     db: AsyncSession = Depends(get_db),
 ):
     """Stock depletion forecast based on WB funnel sales data."""
-    if await _auto_sync_wb_stocks_if_stale(project.id, db):
+    if _wb_stocks_stale(await _wb_stocks_last_sync(project.id, db)):
         background_tasks.add_task(_bg_sync_wb_stocks, project.id)
 
     from backend.services import stock_analytics_service
@@ -168,7 +176,7 @@ async def get_warehouse_stocks(
     """Get warehouse stock levels grouped by warehouse with yesterday comparison."""
     from backend.services.warehouse_stock_service import get_warehouse_stocks as get_wh
 
-    if await _auto_sync_wb_stocks_if_stale(project.id, db):
+    if _wb_stocks_stale(await _wb_stocks_last_sync(project.id, db)):
         background_tasks.add_task(_bg_sync_wb_stocks, project.id)
 
     return await get_wh(db, project.id)
@@ -260,12 +268,13 @@ async def get_stock_need(
     db: AsyncSession = Depends(get_db),
 ):
     """Compute restocking need per warehouse per article."""
-    if await _auto_sync_wb_stocks_if_stale(project.id, db):
+    wb_stocks_updated_at = await _wb_stocks_last_sync(project.id, db)
+    if _wb_stocks_stale(wb_stocks_updated_at):
         background_tasks.add_task(_bg_sync_wb_stocks, project.id)
 
     from backend.services.warehouse_need_service import get_warehouse_need
 
-    return await get_warehouse_need(
+    result = await get_warehouse_need(
         db,
         project.id,
         supply_days,
@@ -277,6 +286,17 @@ async def get_stock_need(
         localization_target=localization_target,
         bootstrap_shape=bootstrap_shape,
     )
+
+    # Свежесть остатков WB — инжект строго НА УРОВНЕ РОУТЕРА, после сервиса:
+    # get_warehouse_need обёрнут @cached(ttl=300), timestamp, запечённый в кэш,
+    # протухал бы. Фронт по этому полю показывает гард «расчёт по старым данным».
+    summary = result.get("summary") if isinstance(result, dict) else None
+    if isinstance(summary, dict):
+        summary["wb_stocks_updated_at"] = (
+            wb_stocks_updated_at.isoformat() if wb_stocks_updated_at else None
+        )
+
+    return result
 
 
 @router.post("/stock_analytics/upload_order_cities", dependencies=[Depends(rate_limit_import)])

@@ -268,7 +268,11 @@ async def get_warehouse_need(
         fetch_supplier_orders,
         get_wb_key,
     )
-    from backend.services.warehouse_district import okrug_to_district
+    # warehouse_to_district нужен БЕЗУСЛОВНО: локальные импорты в условных ветках
+    # (only_available/bootstrap_shape/min_stock) делают имя local на весь скоуп
+    # функции — финальная аннотация district_key падала UnboundLocalError на
+    # дефолтном вызове (only_available=False) при непустых остатках WB.
+    from backend.services.warehouse_district import okrug_to_district, warehouse_to_district
     from backend.services.warehouse_geo import (
         WAREHOUSE_COORDS,
         find_nearest_warehouse,
