@@ -66,6 +66,15 @@ function DrrCell({ drr }: { drr: number | null }) {
     return <span style={{ color, fontWeight: color ? 600 : undefined }}>{fmtPct(drr)}</span>;
 }
 
+/** Метка «база — атрибуция рекламы»: пунктир снизу, объяснение по наведению.
+ *  Нужна, потому что заказы/ДРР кампании считаются не по той базе, что у товара выше:
+ *  у товара — все заказы (WbFunnelDaily), у кампании — только атрибутированные WB. */
+function AdAttr({ title, children }: { title: string; children: React.ReactNode }) {
+    return (
+        <span title={title} style={{ borderBottom: '1px dashed #c4c8ce', cursor: 'help' }}>{children}</span>
+    );
+}
+
 /** Карусель миниатюр артикулов склейки — как карточка-склейка в выдаче WB. */
 function GlueThumbs({ nmIds }: { nmIds: number[] }) {
     const shown = nmIds.slice(0, THUMBS_SHOWN);
@@ -398,14 +407,17 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
                                                         </td>
                                                         {cols.map(c => (
                                                             <td key={c.key} style={{ ...tdStyle, ...TD_PAD, borderLeft: c.blockStart ? BLOCK_DIVIDER : undefined }}>
-                                                                {c.key === 'spend' ? fmt(camp.spend)
+                                                                {c.key === 'spend' ? <AdAttr title="Расход этой кампании на этот товар (WB fullstats). Источник другой, чем у строки товара выше (отчёт воронки), — суммы кампаний могут не сойтись с расходом товара">{fmt(camp.spend)}</AdAttr>
                                                                     : c.key === 'views' ? fmt(camp.views)
                                                                         : c.key === 'clicks' ? fmt(camp.clicks)
                                                                             : c.key === 'ctr' ? fmtPct(camp.ctr)
                                                                                 : c.key === 'cpc' ? fmt(camp.cpc)
                                                                                     : c.key === 'budget' ? fmt(camp.budget)
                                                                                         : c.key === 'types' ? (camp.campaign_type || '').toUpperCase()
-                                                                                            : '—'}
+                                                                                            : c.key === 'orders' ? <AdAttr title="Заказы, атрибутированные этой кампании (WB), — не все заказы товара">{fmt(camp.orders)}</AdAttr>
+                                                                                                : c.key === 'orders_sum' ? <AdAttr title="Сумма заказов, атрибутированных этой кампании (WB)">{fmt(camp.orders_sum)}</AdAttr>
+                                                                                                    : c.key === 'drr' ? <AdAttr title="ДРР по атрибуции рекламы: затраты кампании / её атрибутированные заказы. База не та же, что у ДРР товара выше — цифры не складываются"><DrrCell drr={camp.drr_ad ?? null} /></AdAttr>
+                                                                                                        : '—'}
                                                             </td>
                                                         ))}
                                                     </tr>

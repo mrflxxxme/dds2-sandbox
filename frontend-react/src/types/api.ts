@@ -3591,12 +3591,18 @@ export interface AdCampaign {
   campaign_type: string | null;
   status: number;
   budget: number;
+  /** Метрики кампании В РАЗРЕЗЕ товара, под которым она показана, а не итог по всем её товарам */
   views?: number;
   clicks?: number;
   spend?: number;
+  /** Заказы, АТРИБУТИРОВАННЫЕ рекламе (WB fullstats) — не все заказы товара */
+  orders?: number;
+  orders_sum?: number;
   ctr?: number;
   cpc?: number;
   cpm?: number;
+  /** ДРР по атрибуции рекламы: spend / orders_sum. Не сходится с ДРР товара — другая база */
+  drr_ad?: number | null;
   events?: AdCampaignEvent[];
 }
 

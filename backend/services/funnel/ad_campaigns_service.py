@@ -27,6 +27,7 @@ from backend.models import WbAdCampaign, WbAdCampaignEvent, WbFunnelDaily
 from backend.models.integrations import (
     WbAdCampaignDaily,
     WbAdCampaignSnapshot,
+    WbAdNmDaily,
     WbWarehouseStock,
 )
 from backend.models.wb_finance import WbFinanceRow
@@ -762,37 +763,50 @@ async def get_ad_tab_data(
             }
         )
 
-    # Load per-campaign daily stats for the period
-    CD = WbAdCampaignDaily
-    camp_daily_q = (
+    # Статистика кампании В РАЗРЕЗЕ ТОВАРА (campaign × nm), а не итог кампании.
+    # Кампания живёт под конкретным артикулом, и её итог по всем товарам там врал: у кампании
+    # 36019399 итог 432 622 ₽ приходится на один артикул, а показывался бы под каждым из её
+    # шести. Побочно nm-разбивка ещё и полнее итогов (886 кампаний против 844).
+    ND = WbAdNmDaily
+    nm_daily_q = (
         select(
-            CD.campaign_id,
-            func.coalesce(func.sum(CD.views), 0).label("views"),
-            func.coalesce(func.sum(CD.clicks), 0).label("clicks"),
-            func.coalesce(func.sum(CD.spend), Decimal("0")).label("spend"),
+            ND.campaign_id,
+            ND.nm_id,
+            func.coalesce(func.sum(ND.views), 0).label("views"),
+            func.coalesce(func.sum(ND.clicks), 0).label("clicks"),
+            func.coalesce(func.sum(ND.spend), Decimal("0")).label("spend"),
+            func.coalesce(func.sum(ND.orders), 0).label("orders"),
+            func.coalesce(func.sum(ND.orders_sum), Decimal("0")).label("orders_sum"),
         )
-        .where(CD.project_id == project_id)
-        .where(CD.date >= date_type.fromisoformat(date_from))
-        .where(CD.date <= date_type.fromisoformat(date_to))
-        .group_by(CD.campaign_id)
+        .where(ND.project_id == project_id)
+        .where(ND.date >= date_type.fromisoformat(date_from))
+        .where(ND.date <= date_type.fromisoformat(date_to))
+        .group_by(ND.campaign_id, ND.nm_id)
     )
-    camp_daily_rows = (await db.execute(camp_daily_q)).all()
-    camp_stats: dict[int, dict] = {}
-    for cd in camp_daily_rows:
-        camp_stats[cd.campaign_id] = {
+    nm_daily_rows = (await db.execute(nm_daily_q)).all()
+    camp_stats: dict[tuple[int, int], dict] = {}
+    for cd in nm_daily_rows:
+        camp_stats[(cd.campaign_id, cd.nm_id)] = {
             "views": int(cd.views or 0),
             "clicks": int(cd.clicks or 0),
             "spend": float(cd.spend or 0),
+            "orders": int(cd.orders or 0),
+            "orders_sum": float(cd.orders_sum or 0),
         }
 
     # Build nm_id → campaigns mapping
     nm_campaigns: dict[int, list[dict]] = {}
     for c in campaigns:
-        cs = camp_stats.get(c.campaign_id, {})
-        c_views = cs.get("views", 0)
-        c_clicks = cs.get("clicks", 0)
-        c_spend = cs.get("spend", 0)
         for nm_id in c.nm_ids or []:
+            cs = camp_stats.get((c.campaign_id, nm_id), {})
+            c_views = cs.get("views", 0)
+            c_clicks = cs.get("clicks", 0)
+            c_spend = cs.get("spend", 0)
+            # ВНИМАНИЕ: заказы здесь — АТРИБУТИРОВАННЫЕ рекламе (WB fullstats), а не все заказы
+            # товара, как в строках выше (те из WbFunnelDaily по всем источникам). Поэтому и
+            # drr_ad назван отдельно: это ДРР по атрибуции, он не сходится с ДРР товара.
+            c_orders = cs.get("orders", 0)
+            c_orders_sum = cs.get("orders_sum", 0)
             if nm_id not in nm_campaigns:
                 nm_campaigns[nm_id] = []
             nm_campaigns[nm_id].append(
@@ -805,9 +819,14 @@ async def get_ad_tab_data(
                     "views": c_views,
                     "clicks": c_clicks,
                     "spend": round(c_spend, 2),
+                    "orders": c_orders,
+                    "orders_sum": round(c_orders_sum, 2),
                     "ctr": round((c_clicks / c_views * 100) if c_views else 0, 2),
                     "cpc": round((c_spend / c_clicks) if c_clicks else 0, 2),
                     "cpm": round((c_spend / c_views * 1000) if c_views else 0, 2),
+                    "drr_ad": round(c_spend / c_orders_sum * 100, 2)
+                    if c_orders_sum
+                    else (None if c_spend > 0 else 0),
                     "events": campaign_events.get(c.campaign_id, [])[:10],
                 }
             )
