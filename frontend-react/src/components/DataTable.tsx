@@ -30,6 +30,10 @@ export interface Column {
     exportValue?: (row: any) => any;
     width?: string;
     sortable?: boolean;
+    /** Доп. стиль ячеек колонки — для визуальной группировки соседних колонок (подложка, разделитель) */
+    cellStyle?: React.CSSProperties;
+    /** Доп. стиль заголовка колонки — обычно та же подложка, что и у cellStyle */
+    headerStyle?: React.CSSProperties;
 }
 
 interface DataTableProps {

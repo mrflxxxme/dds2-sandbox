@@ -99,7 +99,13 @@ function adaptColumns(cols: Column[]): ColumnDef<any, any>[] {
                 if (col.render) return col.render(value, row, index);
                 return formatCell(value, col.format);
             },
-            meta: { align: col.align || 'left', headerTitle: col.headerTitle, headerWrap: col.headerWrap },
+            meta: {
+                align: col.align || 'left',
+                headerTitle: col.headerTitle,
+                headerWrap: col.headerWrap,
+                cellStyle: col.cellStyle,
+                headerStyle: col.headerStyle,
+            },
         };
         if (col.getValue) {
             (def as any).accessorFn = col.getValue;
@@ -225,7 +231,11 @@ export default function TanStackDataTable({
                                                         cursor: canSort ? 'pointer' : undefined,
                                                         userSelect: canSort ? 'none' : undefined,
                                                         whiteSpace: meta?.headerWrap ? 'normal' : 'nowrap',
-                                                        ...(meta?.headerWrap ? { maxWidth: 120, lineHeight: 1.3, verticalAlign: 'bottom' } : {}),
+                                                        // verticalAlign задан в globals.css для th без rowspan —
+                                                        // инлайном не дублируем, иначе шапка идёт ступенькой:
+                                                        // переносимые заголовки прижаты к низу, однострочные — по центру.
+                                                        ...(meta?.headerWrap ? { maxWidth: 120, lineHeight: 1.3 } : {}),
+                                                        ...(meta?.headerStyle || {}),
                                                     }}
                                                     onClick={canSort ? header.column.getToggleSortingHandler() : undefined}
                                                 >
@@ -303,6 +313,7 @@ export default function TanStackDataTable({
                                                                 textAlign: meta?.align || 'left',
                                                                 // Числовые (right) ячейки не переносятся — столбик цифр ровный
                                                                 whiteSpace: meta?.align === 'right' ? 'nowrap' : undefined,
+                                                                ...(meta?.cellStyle || {}),
                                                             }}
                                                         >
                                                             {flexRender(cell.column.columnDef.cell, cell.getContext())}
