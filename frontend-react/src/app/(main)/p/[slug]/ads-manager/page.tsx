@@ -418,6 +418,17 @@ export default function AdsManagerPage() {
             return n;
         });
     };
+    // Выбор/снятие всей склейки разом — одним setState, а не N вызовами onProductClick:
+    // иначе каждый товар порождал бы свой рендер, а на склейке их бывает под три десятка.
+    const onToggleGlue = (nmIds: number[], select: boolean) => {
+        setSelectedNms(prev => {
+            const n = new Map(prev);
+            for (const nm of nmIds) {
+                if (select) n.set(nm, nmsWithCampaigns.has(nm)); else n.delete(nm);
+            }
+            return n;
+        });
+    };
     // Разбивка выбора: товары с кампаниями (в фильтр кампаний) и без (в создание).
     const selWithCamp = [...selectedNms].filter(([, has]) => has).map(([nm]) => nm);
     const selNoCamp = [...selectedNms].filter(([, has]) => !has).map(([nm]) => nm);
@@ -774,7 +785,7 @@ export default function AdsManagerPage() {
                     )}
                 </div>
 
-                {view !== 'campaigns' && view !== 'glue' && selectedNms.size > 0 && (
+                {view !== 'campaigns' && selectedNms.size > 0 && (
                     <div className="glass-card static" style={{ padding: '10px 16px', marginBottom: 12, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: '1px solid var(--color-accent)' }}>
                         <span style={{ fontSize: 13, fontWeight: 600, color: '#1e3a8a' }}>Выбрано товаров: {selectedNms.size}</span>
                         <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
@@ -968,7 +979,9 @@ export default function AdsManagerPage() {
                     )}
                 </div>
                 ) : view === 'glue' ? (
-                    <GlueTable slug={slug} dateFrom={dateFrom} dateTo={dateTo} brand={brand} subject={subject} article={article} />
+                    <GlueTable slug={slug} dateFrom={dateFrom} dateTo={dateTo} brand={brand} subject={subject} article={article}
+                        selectedNms={selectedNms} onProductClick={onProductClick} onToggleGlue={onToggleGlue}
+                        nmsWithCampaigns={nmsWithCampaigns} />
                 ) : (
                     <div className="glass-card static" style={{ padding: 0, overflow: 'hidden', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
                         <AdSections view={view} dateFrom={dateFrom} dateTo={dateTo} brand={brand} subject={subject} campNm={campNm}

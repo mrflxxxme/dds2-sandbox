@@ -54,7 +54,21 @@ function GlueThumbs({ nmIds }: { nmIds: number[] }) {
     );
 }
 
-export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, article }: {
+/** Чекбокс с третьим состоянием: часть товаров склейки выбрана. */
+function TriCheckbox({ checked, indeterminate, onChange, title }: {
+    checked: boolean; indeterminate: boolean; onChange: () => void; title: string;
+}) {
+    const ref = React.useRef<HTMLInputElement>(null);
+    // indeterminate выставляется только из JS — атрибута для него в HTML нет
+    useEffect(() => { if (ref.current) ref.current.indeterminate = indeterminate; }, [indeterminate]);
+    return (
+        <input ref={ref} type="checkbox" checked={checked} title={title}
+            onChange={onChange} onClick={e => e.stopPropagation()}
+            style={{ cursor: 'pointer', width: 14, height: 14 }} />
+    );
+}
+
+export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, article, selectedNms, onProductClick, onToggleGlue, nmsWithCampaigns }: {
     slug: string;
     dateFrom: string;
     dateTo: string;
@@ -62,6 +76,11 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
     subject: string;
     /** nm_id из фильтра «Артикул»: оставляем склейки, содержащие этот артикул */
     article: string;
+    /** nm_id → есть ли у товара незавершённая кампания; общий выбор на весь раздел */
+    selectedNms: Map<number, boolean>;
+    onProductClick: (nmId: number, hasCampaign: boolean) => void;
+    onToggleGlue: (nmIds: number[], select: boolean) => void;
+    nmsWithCampaigns: Set<number>;
 }) {
     const [rows, setRows] = useState<AdGlueRow[]>([]);
     const [loading, setLoading] = useState(false);
@@ -210,6 +229,7 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
                 <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                     <thead>
                         <tr>
+                            <th style={{ ...cThLeft, width: 30 }} title="Выбрать товары склейки — потом «К кампаниям»" />
                             <th style={{ ...cThLeft, width: 34 }} />
                             <th style={{ ...cThLeft, minWidth: 300 }}>Склейка</th>
                             {cols.map(c => (
@@ -221,23 +241,31 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
                     </thead>
                     <tbody>
                         {loading && (
-                            <tr><td colSpan={cols.length + 2} style={{ ...tdLeft, padding: 24, textAlign: 'center', color: 'var(--color-text-dim)' }}>Загрузка склеек…</td></tr>
+                            <tr><td colSpan={cols.length + 3} style={{ ...tdLeft, padding: 24, textAlign: 'center', color: 'var(--color-text-dim)' }}>Загрузка склеек…</td></tr>
                         )}
                         {!loading && error && (
-                            <tr><td colSpan={cols.length + 2} style={{ ...tdLeft, padding: 24, textAlign: 'center', color: 'var(--color-danger)' }}>⚠️ {error}</td></tr>
+                            <tr><td colSpan={cols.length + 3} style={{ ...tdLeft, padding: 24, textAlign: 'center', color: 'var(--color-danger)' }}>⚠️ {error}</td></tr>
                         )}
                         {!loading && !error && !filtered.length && (
-                            <tr><td colSpan={cols.length + 2} style={{ ...tdLeft, padding: 24, textAlign: 'center', color: 'var(--color-text-dim)' }}>
+                            <tr><td colSpan={cols.length + 3} style={{ ...tdLeft, padding: 24, textAlign: 'center', color: 'var(--color-text-dim)' }}>
                                 {rows.length ? 'Под фильтры ничего не подошло' : 'Нет данных за период'}
                             </td></tr>
                         )}
                         {!loading && !error && filtered.map(r => {
                             const key = glueKey(r);
                             const open = openGlue.has(key);
+                            const selCount = r.nm_ids.reduce((n, nm) => n + (selectedNms.has(nm) ? 1 : 0), 0);
+                            const allSel = selCount > 0 && selCount === r.nm_ids.length;
+                            const someSel = selCount > 0 && !allSel;
                             return (
                                 <React.Fragment key={key}>
                                     <tr onClick={() => setOpenGlue(prev => { const n = new Set(prev); if (n.has(key)) n.delete(key); else n.add(key); return n; })}
-                                        style={{ cursor: 'pointer', background: open ? '#f8fafc' : undefined }} className="menu-row">
+                                        style={{ cursor: 'pointer', background: selCount ? '#eff6ff' : open ? '#f8fafc' : undefined }} className="menu-row">
+                                        <td style={tdLeft}>
+                                            <TriCheckbox checked={allSel} indeterminate={someSel}
+                                                title={allSel ? 'Снять выбор со склейки' : `Выбрать все товары склейки (${r.product_count})`}
+                                                onChange={() => onToggleGlue(r.nm_ids, !allSel)} />
+                                        </td>
                                         <td style={{ ...tdLeft, color: '#9ca3af' }}>
                                             <span style={{ display: 'inline-block', transition: 'transform .15s', transform: open ? 'rotate(90deg)' : undefined }}>▶</span>
                                         </td>
@@ -266,7 +294,12 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
                                         return (
                                             <React.Fragment key={child.nm_id}>
                                                 <tr onClick={() => setOpenNm(prev => { const n = new Set(prev); if (n.has(child.nm_id)) n.delete(child.nm_id); else n.add(child.nm_id); return n; })}
-                                                    style={{ cursor: 'pointer', background: '#fcfcfd' }} className="menu-row">
+                                                    style={{ cursor: 'pointer', background: selectedNms.has(child.nm_id) ? '#eff6ff' : '#fcfcfd' }} className="menu-row">
+                                                    <td style={{ ...tdLeft, paddingLeft: 14 }}>
+                                                        <TriCheckbox checked={selectedNms.has(child.nm_id)} indeterminate={false}
+                                                            title={`Выбрать артикул ${child.nm_id}`}
+                                                            onChange={() => onProductClick(child.nm_id, nmsWithCampaigns.has(child.nm_id))} />
+                                                    </td>
                                                     <td style={{ ...tdLeft, color: '#c4c8ce', paddingLeft: 18 }}>
                                                         {camps.length > 0 && (
                                                             <span style={{ display: 'inline-block', fontSize: 10, transition: 'transform .15s', transform: nmOpen ? 'rotate(90deg)' : undefined }}>▶</span>
@@ -295,6 +328,7 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
 
                                                 {nmOpen && camps.map(camp => (
                                                     <tr key={camp.campaign_id} style={{ background: '#f9fafb' }}>
+                                                        <td style={tdLeft} />
                                                         <td style={tdLeft} />
                                                         <td style={{ ...tdLeft, paddingLeft: 56 }}>
                                                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
