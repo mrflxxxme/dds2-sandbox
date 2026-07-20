@@ -3624,6 +3624,40 @@ export interface AdTabProduct {
   campaigns: AdCampaign[];
 }
 
+/** Строка вкладки «Склейки»: карточка WB (imt_id) с артикулами-детьми. */
+export interface AdGlueRow {
+  /** null у товара вне склейки — тогда строка представляет один артикул */
+  imt_id: number | null;
+  is_glue: boolean;
+  /** Алиас склейки, иначе артикул продавца ведущего товара */
+  glue_name: string;
+  nm_ids: number[];
+  brand: string | null;
+  subject: string | null;
+  adv_views: number;
+  adv_clicks: number;
+  adv_sum: number;
+  orders_sum_rub: number;
+  orders_count: number;
+  ctr: number;
+  cpc: number;
+  cpm: number;
+  /** null = расход есть, заказов нет (ДРР бесконечен) */
+  drr: number | null;
+  abc_revenue: string;
+  abc_profit: string;
+  bdr_revenue: number;
+  bdr_profit: number;
+  stock_qty: number;
+  product_count: number;
+  /** Сумма остатков бюджета кампаний склейки, с дедупом по campaign_id */
+  budget_total: number;
+  campaign_count: number;
+  active_campaigns: number;
+  campaign_types: string[];
+  children: AdTabProduct[];
+}
+
 // ─── Кластеризатор рекламных запросов ───
 export type ClusterTier = 'HEAD' | 'EFFICIENT' | 'CONVERTS' | 'TRASH' | 'WASTE' | 'NOCONV';
 
