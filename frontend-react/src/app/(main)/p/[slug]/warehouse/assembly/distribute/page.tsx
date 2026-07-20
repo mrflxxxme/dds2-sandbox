@@ -17,6 +17,7 @@ import { applyAcceptanceRedistToPrebook } from '@/lib/assembly/prebookRedistribu
 import { buildCategoryOf, buildCompatClassOf, classLabelOf, inScopeOf } from '@/lib/assembly/categoryCompat';
 import { subtractReserveFromArticles, restrictArticlesToFf, reservedTotal, carveScopeFromDraft, type DraftReserveMap } from '@/lib/assembly/draftReserve';
 import { loadAutoSyncSharedData, runDraftAutoSync, getLastAutoSyncPassAt, markAutoSyncPass, WB_STOCKS_STALE_HOURS, type DraftSyncOutcome } from '@/lib/assembly/draftAutoSyncRunner';
+import { returnPalletToPrebook } from '@/lib/assembly/draftDistribution';
 import { Toast } from '@/components';
 import TabLayout from '@/components/TabLayout';
 import DraftPreview from './components/DraftPreview';
@@ -617,6 +618,37 @@ export default function AssemblyDraftPage() {
 
     // ─── Нормализатор инварианта «целые коробы + целые паллеты» ───────────
     // Контекст из текущего состояния страницы: геометрия (ppb/размер), округа,
+    // ─── «↩ Вернуть паллету в предбронь» (отмена «Дозабить»/«Оставить так») ──
+    const handleReturnPalletToPrebook = useCallback(async (args: { ffId: number; wb: string; pkg: PackageType; items: { nmId: number; units: number }[] }) => {
+        if (!draftId) return;
+        const res = returnPalletToPrebook(rows, prebook, args.ffId, args.wb, args.pkg, args.items);
+        if (!res) { showToast('Возвращать нечего — строки уже изменились, обновите страницу', 'error'); return; }
+        // Снимок провенанса: при упавшем PUT удалённые ключи возвращаются, иначе
+        // следующий успешный PUT персистил бы прун без самого возврата (ревью LOW).
+        const originSnap = new Set(prebookOriginRef.current);
+        try {
+            // Провенанс: ячейка без остатка в строках больше не «из предброни» —
+            // авто-синк снова владеет ею (вернётся в строки, только если расчёт
+            // сам соберёт целую паллету).
+            const hasCellLeft = (nm: number) => res.rows.some(r => r.nm_id === nm && (r.tgt?.[args.wb] || 0) > 0);
+            for (const it of args.items) {
+                if (!hasCellLeft(it.nmId)) prebookOriginRef.current.delete(`${it.nmId}::${args.wb}`);
+            }
+            const targetNames = Array.from(new Set(res.rows.flatMap(r => Object.keys(r.tgt))));
+            const sourceIds = Array.from(new Set(res.rows.flatMap(r => Object.keys(r.src).map(Number).filter(n => Number.isFinite(n) && n > 0))));
+            const updated = await api.updateAssemblyDraft(draftId, {
+                distribution: { ...buildDistribution(), rows: res.rows, prebook: res.prebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames },
+                event: { event_type: 'MATRIX_EDIT', summary: `↩ Паллета возвращена в предбронь: «${args.wb}» — ${formatNumber(res.returnedUnits, 0)} шт` },
+            });
+            healScopeRef.current = { ts: updated.updated_at, only: new Set() }; // вычитающая → self-heal no-op
+            applyDraft(updated);
+            showToast(`↩ Возвращено в предбронь: «${args.wb}» — ${formatNumber(res.returnedUnits, 0)} шт (коробы снова ждут в предброни)`, 'success');
+        } catch (e) {
+            prebookOriginRef.current = originSnap;
+            showToast(e instanceof Error ? e.message : 'Ошибка возврата в предбронь', 'error');
+        }
+    }, [draftId, rows, prebook, buildDistribution, applyDraft, showToast]);
+
     // свободный ФФ (доступно − уже в черновике) для добивки коробов вверх. Новинки
     // cold-start (ppb=null) — россыпь (исключение), их не палетизируем и не добиваем.
     const buildNormalizeCtx = useCallback((freshRows: AssemblyDraftRow[]): NormalizeDraftCtx => {
@@ -2587,6 +2619,7 @@ export default function AssemblyDraftPage() {
                         palletOverrides={palletOverrides}
                         geomReady={geomReady}
                         prebookOrigin={prebookOriginRef.current}
+                        onReturnPalletToPrebook={handleReturnPalletToPrebook}
                         ensureSaved={ensureSaved}
                         onToast={showToast}
                         onReloadDraft={reloadDraft}

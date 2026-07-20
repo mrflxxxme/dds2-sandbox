@@ -340,6 +340,62 @@ export function mergeDraftDirection(
 }
 
 /**
+ * «↩ Вернуть паллету в предбронь»: обратная операция к «Дозабить»/«Оставить так».
+ * Снимает со строк черновика порции состава паллеты (per nm, строго пара
+ * ff → wb данной упаковки, через allocatePairs) и кладёт их в предбронь
+ * ОБЫЧНЫМИ строками (as_is сбрасывается — «сознательно неполная» отменена).
+ * as_is-строки расходуются первыми (они и есть ручной перенос). Если строки
+ * уже изменились и порций меньше состава — возвращается сколько есть;
+ * нечего возвращать → null. Чистая.
+ */
+export function returnPalletToPrebook(
+    rows: AssemblyDraftRow[],
+    prebook: AssemblyDraftRow[],
+    ffId: number,
+    wb: string,
+    pkg: PackageType,
+    items: { nmId: number; units: number }[],
+): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[]; returnedUnits: number } | null {
+    const ffKey = String(ffId);
+    const want = new Map<number, number>();
+    for (const it of items) if (it.units > 0) want.set(it.nmId, (want.get(it.nmId) || 0) + it.units);
+    if (want.size === 0) return null;
+    const returned: AssemblyDraftRow[] = [];
+    let returnedUnits = 0;
+    // as_is первыми: «Оставить так» — самый явный кандидат на отмену.
+    const ordered = [...rows].sort((a, b) => (b.as_is ? 1 : 0) - (a.as_is ? 1 : 0));
+    const orderedNext = new Map<AssemblyDraftRow, AssemblyDraftRow | null>();
+    for (const r of ordered) {
+        const need = want.get(r.nm_id) || 0;
+        if (need <= 0 || (r.package_type || 'BOX') !== pkg || (r.tgt?.[wb] || 0) <= 0 || (r.src?.[ffKey] || 0) <= 0) continue;
+        const portion = allocatePairs(r.src, r.tgt).get(`${ffId}::${wb}`) || 0;
+        const take = Math.min(need, portion);
+        if (take <= 0) continue;
+        returned.push({ nm_id: r.nm_id, barcode: r.barcode, vendor_code: r.vendor_code, src: { [ffKey]: take }, tgt: { [wb]: take }, package_type: pkg });
+        returnedUnits += take;
+        want.set(r.nm_id, need - take);
+        const tgt = { ...r.tgt }; tgt[wb] = Math.max(0, (tgt[wb] || 0) - take); if (tgt[wb] <= 0) delete tgt[wb];
+        const src = { ...r.src }; src[ffKey] = Math.max(0, (src[ffKey] || 0) - take); if (src[ffKey] <= 0) delete src[ffKey];
+        orderedNext.set(r, Object.keys(tgt).length > 0 ? { ...r, tgt, src } : null);
+    }
+    if (returnedUnits <= 0) return null;
+    const nextRows: AssemblyDraftRow[] = [];
+    for (const r of rows) {
+        if (orderedNext.has(r)) {
+            const nr = orderedNext.get(r);
+            if (nr) nextRows.push(nr);
+        } else {
+            nextRows.push(r);
+        }
+    }
+    return {
+        rows: nextRows,
+        prebook: mergeRowsByIdentity([...prebook, ...returned]),
+        returnedUnits,
+    };
+}
+
+/**
  * Итог «Пересчитать от потребности → в черновик» — ЗАМЕНА по SKU:
  * строки/предбронь SKU, которыми владеет расчёт (дал отгрузку ИЛИ предбронь),
  * заменяются его результатом; SKU из `purgeNms` (новинки под гвардом пересорта —

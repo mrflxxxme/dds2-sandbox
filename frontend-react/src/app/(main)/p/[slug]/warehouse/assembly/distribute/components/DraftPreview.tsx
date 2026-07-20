@@ -103,6 +103,9 @@ interface DraftPreviewProps {
      *  без черновика. Когда задан — заменяет draft-commit и per-ФФ-commit; «Открыть →»
      *  (draft-подмаршрут склада) скрывается (у машины один ФФ-источник). */
     predist?: { commitAll: () => Promise<void> };
+    /** Draft-режим: «↩ Вернуть паллету в предбронь» — отмена «Дозабить»/«Оставить
+     *  так» для паллеты с бейджем «из предброни». Опц. (нет в predist). */
+    onReturnPalletToPrebook?: (args: { ffId: number; wb: string; pkg: PackageType; items: { nmId: number; units: number }[] }) => Promise<void>;
 }
 
 /** Предпросмотр заявок + commit. Показывает ВЕСЬ черновик (короб + моно + сейф)
@@ -111,10 +114,13 @@ export default function DraftPreview({
     slug, draftId, rows, newcomerNmIds, warehouses,
     nmPpb, nmPpbByWh, nmMeta, nmBoxSize, palletOverrides, geomReady, prebookOrigin,
     ensureSaved, onToast, onReloadDraft, predist, classOf, classLabel,
+    onReturnPalletToPrebook,
 }: DraftPreviewProps) {
     const router = useRouter();
 
     const [committing, setCommitting] = useState(false);
+    // Паллета в процессе возврата в предбронь (ключ ffId::wb::pkg::palletNo).
+    const [returningPallet, setReturningPallet] = useState<string | null>(null);
     // ФФ, по которому сейчас идёт частичный commit (для лейбла кнопки в его шапке).
     const [committingFfId, setCommittingFfId] = useState<number | null>(null);
     // Модалка «Созданные заявки» после коммита: список + занос WB/ФФ; закрытие
@@ -751,6 +757,23 @@ export default function DraftPreview({
                                                                     {fromPrebook && (
                                                                         <span className="badge badge-info" style={{ fontSize: 10 }} title="Эту паллету ты перенёс в черновик из предброни вручную (Оставить так / Дозабить / Перенести паллеты). Авто-консолидация по приёмке WB бейдж не ставит.">🅿️ из предброни</span>
                                                                     )}
+                                                                    {fromPrebook && !predist && onReturnPalletToPrebook && (() => {
+                                                                        const rKey = `${g.ffId}::${wb}::${pkg}::${p.palletNo}`;
+                                                                        return (
+                                                                            <button
+                                                                                className="btn btn-secondary btn-sm"
+                                                                                style={{ fontSize: 10, padding: '1px 8px' }}
+                                                                                disabled={returningPallet != null}
+                                                                                title="Вернуть содержимое паллеты обратно в предбронь — отмена «Дозабить»/«Оставить так». Строки уйдут из черновика, коробы снова будут ждать в предброни."
+                                                                                onClick={() => {
+                                                                                    if (returningPallet) return;
+                                                                                    setReturningPallet(rKey);
+                                                                                    void onReturnPalletToPrebook({ ffId: g.ffId, wb, pkg, items: p.items.map(it => ({ nmId: it.nmId, units: it.units })) })
+                                                                                        .finally(() => setReturningPallet(null));
+                                                                                }}
+                                                                            >{returningPallet === rKey ? '…' : '↩ В предбронь'}</button>
+                                                                        );
+                                                                    })()}
                                                                     <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{formatNumber(p.items.length, 0)} арт. · {formatNumber(palBoxes, 0)} кор · {formatNumber(palUnits, 0)} шт</span>
                                                                     <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: low ? 700 : 600, color: low ? 'var(--color-warning)' : 'var(--color-success)' }} title={low ? 'Паллета заполнена менее 60% — неполная' : 'Заполнение паллеты'}>
                                                                         {low && '⚠ '}{formatNumber(pct, 0)}%
