@@ -753,6 +753,22 @@ async def sync_supply_id(db: AsyncSession, project_id: int, assembly_id: int) ->
         link.sync_status = WbSupplySyncStatus.BOOKED.value
         link.last_error = None
         link.last_synced_at = utcnow()
+        # Сразу подтягиваем АВТОРИТЕТНЫЙ живой статус из кабинета (та же метка, что
+        # видит пользователь: «В сборке» и т.п.) + дату брони и текст ошибок. Иначе
+        # ответ синка несёт только sync_status=BOOKED, а `wb_supply_state`/`supply_date`
+        # остаются пустыми до фоновой джобы (30 мин) или перезагрузки страницы —
+        # из-за этого шапка вкладки и панель «застревали» на «нужна бронь даты».
+        # Best-effort: недоступность кабинета не должна ронять сам синк брони.
+        try:
+            meta = await _cabinet_status(client, supply_id)
+            if meta.name:
+                link.wb_supply_state = meta.name
+                link.wb_supply_state_id = meta.state_id
+            link.supply_date = meta.supply_date
+            link.reject_reason = meta.reject_reason
+            link.wb_state_synced_at = utcnow()
+        except (WbSessionExpired, WbPortalError, ValueError):
+            pass
         # Дата только что забронирована → сразу пробуем занести пропуск, если он
         # уже заполнен (например, машину назначили раньше брони).
         pushed = await try_autopush_pass(db, project_id, link, client=client)
