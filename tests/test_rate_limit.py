@@ -225,6 +225,6 @@ class TestRateLimiterUnit:
         assert rate_limit_import.window == 60
         assert rate_limit_import.action == "import"
 
-        assert rate_limit_write.limit == 30
+        assert rate_limit_write.limit == 60
         assert rate_limit_write.window == 60
         assert rate_limit_write.action == "write"
