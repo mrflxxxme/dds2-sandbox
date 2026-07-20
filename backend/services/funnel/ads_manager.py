@@ -302,10 +302,269 @@ async def get_campaign_history(
     return result
 
 
+# Порог смены НАШЕЙ цены, доля. Ниже — шум: у кампании на несколько товаров avg_price
+# это средняя по заказам дня, и она гуляет от того, каких цветов/размеров взяли больше.
+PRICE_EVENT_MIN_DELTA = 0.03
+# Порог смены СПП, п.п. ВБ шевелит скидку на 0.5–1.5 п.п. почти каждый день.
+SPP_EVENT_MIN_DELTA_PP = 3.0
+# Сколько дней усредняем с каждой стороны, чтобы отличить СДВИГ УРОВНЯ от однодневного
+# выброса. Без этого «33% → 30%» и назавтра «30% → 33%» давали два события подряд —
+# ВБ ничего не решал, просто день выбился. Медиана (а не среднее) не тянется за выбросом.
+LEVEL_WINDOW = 3
+
+
+def _level_shifts(
+    pts: Sequence[tuple[date, float]], min_delta: float, relative: bool,
+) -> list[tuple[date, float, float]]:
+    """Сдвиги уровня в ряду (день, значение) → [(день, уровень «до», уровень «после»)].
+
+    Сравниваем медиану LEVEL_WINDOW дней ДО дня с медианой LEVEL_WINDOW дней НАЧИНАЯ с
+    него. Событие — только если уровень действительно переехал и остался там; разовый
+    выброс медиану не сдвигает. После срабатывания пропускаем окно вперёд, иначе один
+    переезд дал бы событие на каждом дне окна.
+
+    relative=True — порог в долях (наша цена), иначе в абсолютных единицах (СПП, п.п.).
+    """
+    out: list[tuple[date, float, float]] = []
+    vals = [v for _, v in pts]
+    skip_until = -1
+    last_shift = -1  # индекс предыдущего зафиксированного сдвига — левая граница поиска
+    for k in range(1, len(pts)):
+        if k <= skip_until:
+            continue
+        back = _median(vals[max(0, k - LEVEL_WINDOW):k])
+        fwd = _median(vals[k:k + LEVEL_WINDOW])
+        if back is None or fwd is None or back <= 0:
+            continue
+        delta = abs(fwd - back) / back if relative else abs(fwd - back)
+        if delta >= min_delta:
+            # Медиана «вперёд» включает сам день k, поэтому срабатывание может опередить
+            # реальную смену на день-два (два новых значения из трёх уже перетянули
+            # медиану). Уточняем: событие принадлежит ПЕРВОМУ дню окна, который сам ближе
+            # к новому уровню, чем к старому, — иначе разделитель встанет не на ту границу.
+            # Ищем и НАЗАД в пределах окна: при цепочке смен подряд (цену снижали неделю
+            # шагами) окно пропуска после прошлого события съедает настоящий день перехода,
+            # и разделитель уезжает на сутки вперёд. Дальше прошлого сдвига не заходим.
+            lo = max(last_shift + 1, k - LEVEL_WINDOW + 1, 0)
+            shift = next(
+                (j for j in range(lo, min(k + LEVEL_WINDOW, len(pts)))
+                 if abs(vals[j] - fwd) < abs(vals[j] - back)),
+                k,
+            )
+            out.append((pts[shift][0], back, fwd))
+            last_shift = shift
+            skip_until = k + LEVEL_WINDOW - 1
+    return out
+
+
+def _price_change_events(
+    rows_asc: Sequence[tuple[date, float | None, float | None]],
+) -> list[dict]:
+    """События смены цены из ряда (день, наша цена, СПП %), отсортированного по возрастанию.
+
+    РАЗДЕЛЯЕМ ДВА ИСТОЧНИКА СКИДКИ — это разные управленческие ситуации:
+      • `price` — цену поменяли МЫ (уступили маржу, решение продавца);
+      • `spp`   — цену клиенту поменял ВБ своей скидкой (мы на неё не влияем, и завтра
+        ВБ может её убрать; строить на ней выводы о «работающей цене» опасно).
+    Оба ведут к одному — изменению цены клиенту, но реагировать на них надо по-разному,
+    поэтому в тексте события всегда есть и цена клиенту, и её источник.
+
+    Событие вешается на день, С КОТОРОГО держится новый уровень: цифры этого дня — уже
+    про новую цену. Дни без данных ряд не разрывают.
+    """
+    out: list[dict] = []
+
+    price_pts = [(d, p) for d, p, _ in rows_asc if p is not None and p > 0]
+    for d, was, now in _level_shifts(price_pts, PRICE_EVENT_MIN_DELTA, relative=True):
+        pct = (now - was) / was * 100
+        out.append({
+            "date": d.isoformat(), "kind": "price",
+            # short/value — подпись метки в ячейке даты (число красится по знаку отдельно),
+            # text — полная формулировка в подсказке
+            "short": "цена", "value": f"{pct:+.0f}%", "dir": 1 if pct > 0 else -1,
+            "text": f"наша цена {_rub(was)} → {_rub(now)} ({pct:+.0f}%)",
+        })
+
+    spp_pts = [(d, sp) for d, _, sp in rows_asc if sp is not None]
+    price_by_day = {d: p for d, p, _ in rows_asc if p is not None and p > 0}
+    for d, was, now in _level_shifts(spp_pts, SPP_EVENT_MIN_DELTA_PP, relative=False):
+        # Цену клиенту считаем от нашей цены ЭТОГО дня по обоим уровням СПП: показываем
+        # вклад именно скидки ВБ, не смешивая его с нашей правкой цены.
+        base = price_by_day.get(d) or next((p for dd, p in sorted(price_by_day.items()) if dd >= d), None)
+        tail = ""
+        if base:
+            tail = f" · клиенту {_rub(base * (1 - was / 100))} → {_rub(base * (1 - now / 100))}"
+        out.append({
+            "date": d.isoformat(), "kind": "spp",
+            "short": "СПП", "value": f"{now - was:+.0f} п.п.", "dir": 1 if now > was else -1,
+            "text": f"скидка ВБ (СПП) {was:.0f}% → {now:.0f}%{tail}",
+        })
+    return out
+
+
+def _rub(v: float) -> str:
+    """1234.5 → «1 235 ₽» (неразрывный пробел как разделитель разрядов)."""
+    return f"{v:,.0f}".replace(",", " ") + " ₽"
+
+
+def _msk_day_bounds(d: date) -> tuple[datetime, datetime]:
+    """Границы МСК-суток в naive UTC — в таком виде хранится created_at событий."""
+    start = MSK.localize(datetime.combine(d, datetime.min.time())).astimezone(pytz.UTC).replace(tzinfo=None)
+    end = MSK.localize(datetime.combine(d + timedelta(days=1), datetime.min.time())).astimezone(pytz.UTC).replace(tzinfo=None)
+    return start, end
+
+
+def _fmt_span(minutes: float) -> str:
+    """Длительность простоя в компактный вид: «40 мин», «2 ч», «3 ч 20 мин»."""
+    m = int(round(minutes))
+    if m < 60:
+        return f"{m} мин"
+    h, rest = divmod(m, 60)
+    return f"{h} ч" if rest < 10 else f"{h} ч {rest} мин"
+
+
+def _intraday_budget_gaps(
+    ev_rows: Sequence[WbAdCampaignEvent], skip_days: set[date],
+) -> dict[date, tuple[datetime, datetime]]:
+    """Дни, когда бюджет кончался, но его ДОЛИЛИ и кампания добрала день.
+
+    `_runout_by_day` такие дни намеренно не считает остановленными — день закончился с
+    бюджетом. Но кампания реально стояла от обнуления до долива, и в цифрах дня это
+    провал без объяснения. Возвращаем {день: (момент нуля, момент долива)}.
+
+    skip_days — дни, что и так закончились на нуле: там уже стоит метка «стоп», второй
+    значок про тот же бюджет только зашумит строку.
+    """
+    out: dict[date, tuple[datetime, datetime]] = {}
+    zero_at: dict[date, datetime] = {}
+    for ev in ev_rows:
+        v = _parse_num(ev.new_value)
+        if v is None:
+            continue
+        d = pytz.UTC.localize(ev.created_at).astimezone(MSK).date()
+        if d in skip_days:
+            continue
+        if v <= 0:
+            zero_at[d] = ev.created_at        # последнее обнуление дня
+            out.pop(d, None)                  # долив был раньше — он уже не в счёт
+        elif d in zero_at and d not in out:
+            out[d] = (zero_at[d], ev.created_at)
+    return out
+
+
+# День считается простоем, если показов практически нет: доля от медианы окна ниже этой.
+# Не ноль — WB досчитывает единичные показы даже у остановленной кампании.
+IDLE_VIEWS_SHARE = 0.05
+
+
+def _idle_days(views_by_day: Sequence[tuple[date, int]], skip: set[date]) -> set[date]:
+    """Дни, когда кампания практически не крутилась → метка «простой весь день».
+
+    Считаем по ФАКТУ показов, а НЕ по журналу статусов. Журнал ненадёжен: у живой
+    кампании divan_lightgrey он показывал «пауза» с 27.06 по 08.07, тогда как в эти дни
+    она откручивала 12–22 тыс. показов и тратила по 6–11 тыс. ₽ в день. Показы — то, что
+    видно в самой таблице, и они не расходятся с остальными её цифрами.
+
+    Порог — доля от МЕДИАНЫ окна: у кампаний разного масштаба «почти ноль» разный, а
+    медиана не тянется за выбросами вроде дня с тройным бюджетом.
+
+    skip — дни, у которых уже есть метка про бюджет: там причина названа точнее.
+    """
+    live = [v for _, v in views_by_day if v > 0]
+    if len(live) < 3:
+        return set()
+    med = _median([float(v) for v in live])
+    if not med:
+        return set()
+    limit = med * IDLE_VIEWS_SHARE
+    # Ровный ноль не метим: там вся строка нулевая, метка ничего не добавляет. Ценность —
+    # в днях, где показы ЕСТЬ, но их в разы меньше обычного: глазом такую строку не отличить
+    # от рабочей, а сравнивать её с остальными нельзя.
+    return {d for d, v in views_by_day if 0 < v <= limit and d not in skip}
+
+
+async def _campaign_day_events(
+    db: AsyncSession, project_id: int, campaign_id: int,
+    period_from: date, period_to: date,
+    price_by_date: Sequence[tuple[date, float | None, float | None]],
+    views_by_date: Sequence[tuple[date, int]],
+) -> list[dict]:
+    """События, объясняющие изломы в посуточных метриках кампании.
+
+    Каждое событие привязано к МСК-дню и рисуется меткой в ячейке даты:
+      • `price` / `spp` — цену подвинули мы или ВБ своей скидкой;
+      • `budget` — деньги кончились, и день ТАК И закончился на нуле;
+      • `gap`    — деньги кончились, но их долили: кампания стояла кусок дня;
+      • `idle`   — показов практически нет: кампания простояла день целиком.
+    Смена цены берётся из той же средней цены, что уже в строках (отдельного источника
+    нет); остальное — из журнала событий кампании.
+    """
+    events = _price_change_events(price_by_date)
+
+    # Окно событий берём с запасом в сутки по краям: created_at — UTC, а дни — МСК
+    win_from = datetime.combine(period_from, datetime.min.time()) - timedelta(days=1)
+    win_to = datetime.combine(period_to, datetime.min.time()) + timedelta(days=2)
+    ev_rows = (
+        await db.execute(
+            select(WbAdCampaignEvent)
+            .where(
+                WbAdCampaignEvent.project_id == project_id,
+                WbAdCampaignEvent.campaign_id == campaign_id,
+                WbAdCampaignEvent.event_type == "budget_change",
+                WbAdCampaignEvent.created_at >= win_from,
+                WbAdCampaignEvent.created_at <= win_to,
+            )
+            .order_by(WbAdCampaignEvent.created_at)
+            .limit(20000)
+        )
+    ).scalars().all()
+    budget_ev = list(ev_rows)
+
+    runout = {
+        d: t for d, t in _runout_by_day(budget_ev).get(campaign_id, {}).items()
+        if period_from <= d <= period_to
+    }
+    for d, stop_utc in runout.items():
+        msk = pytz.UTC.localize(stop_utc).astimezone(MSK)
+        events.append({
+            "date": d.isoformat(), "kind": "budget",
+            # Час идёт прямо в метку дня, а не в подсказку — так колонку дат можно
+            # просматривать сверху вниз и видеть, во сколько кампания вставала.
+            # dir=0 — у часа остановки нет направления, красить нечего
+            "short": "стоп", "value": f"{msk:%H:%M}", "dir": 0,
+            "text": f"бюджет кончился в {msk:%H:%M} — день неполный",
+        })
+
+    for d, (zero_utc, back_utc) in _intraday_budget_gaps(budget_ev, set(runout)).items():
+        if not (period_from <= d <= period_to):
+            continue
+        z = pytz.UTC.localize(zero_utc).astimezone(MSK)
+        b = pytz.UTC.localize(back_utc).astimezone(MSK)
+        span = _fmt_span((back_utc - zero_utc).total_seconds() / 60)
+        events.append({
+            "date": d.isoformat(), "kind": "gap",
+            "short": "простой", "value": span, "dir": 0,
+            "text": f"бюджет кончился в {z:%H:%M}, долили в {b:%H:%M} — кампания стояла {span}",
+        })
+
+    marked = set(runout) | {date.fromisoformat(e["date"]) for e in events if e["kind"] == "gap"}
+    for d in sorted(_idle_days(views_by_date, marked), reverse=True):
+        events.append({
+            "date": d.isoformat(), "kind": "idle",
+            "short": "простой", "value": "весь день", "dir": 0,
+            "text": "показов почти нет — кампания в этот день не крутилась",
+        })
+
+    # Порядок меток в строке: наше решение → решение ВБ → следствия
+    order = {"price": 0, "spp": 1, "budget": 2, "gap": 3, "idle": 4}
+    events.sort(key=lambda e: (e["date"], -order.get(e["kind"], 9)), reverse=True)
+    return events
+
+
 def _metric_row(
     label: str, views: int, clicks: int, spend: float,
     opens: int, carts: int, orders: int, orders_sum: float, price: float | None,
-    customer_price: float | None = None, spp: float = 0.0,
+    customer_price: float | None = None, spp: float | None = None, is_partial: bool = False,
 ) -> dict:
     """Сводит сырые агрегаты дня/периода в строку метрик (РК + воронка).
 
@@ -331,9 +590,12 @@ def _metric_row(
         "cpl": round(spend / carts, 2) if carts else None,  # стоимость 1 корзины
         "cpo": round(spend / orders, 2) if orders else None,  # стоимость 1 заказа
         "avg_price": round(price, 2) if price else 0.0,
-        "customer_price": round(customer_price, 2) if customer_price else 0.0,  # цена с СПП
-        "spp": round(spp, 1),  # средний СПП за день, % (для графика)
+        # None (а не 0) — «данных ещё нет»: отчёт «Заказы» приходит с лагом
+        "customer_price": round(customer_price, 2) if customer_price else None,
+        "spp": None if spp is None else round(spp, 1),  # средний СПП за день, %
         "drr": round(spend / orders_sum * 100, 2) if orders_sum else 0.0,
+        # День ещё идёт (сегодня по МСК): цифры неполные, сравнивать с прошлым нельзя
+        "is_partial": is_partial,
     }
 
 
@@ -752,14 +1014,21 @@ async def get_campaign_metrics(
 
     # Средний СПП кампании за день = среднее spp_rate по её товарам (из финотчёта, per (nm,дата)).
     # «Цена Клиенту» = цена дня × (1 − СПП). Нет карты СПП → 0 (customer_price = сама цена).
-    def _spp_for_day(d: date) -> float:
+    def _spp_for_day(d: date) -> float | None:
+        """Средний СПП кампании за день (доля) или None, если за день его ЕЩЁ НЕТ.
+
+        None ≠ 0%: отчёт «Заказы» приходит с лагом, и у сегодняшнего дня СПП обычно
+        неизвестен. Ноль здесь означал бы «ВБ не дал скидку» и подставлял в «Цену
+        Клиенту» полную цену — то есть врал бы ровно в ту сторону, ради которой
+        колонку и смотрят.
+        """
         if not bdr_rates_map or not nm_ids:
-            return 0.0
+            return None
         rates = [
             br.spp_rate for nm in nm_ids
             if (br := bdr_rates_map.get(int(nm), d)) is not None
         ]
-        return sum(rates) / len(rates) if rates else 0.0
+        return sum(rates) / len(rates) if rates else None
 
     rows: list[dict] = []
     tot = {"views": 0, "clicks": 0, "spend": 0.0, "opens": 0, "carts": 0, "orders": 0,
@@ -777,16 +1046,16 @@ async def get_campaign_metrics(
         orders = int(f.orders) if f else 0
         orders_sum = float(f.orders_sum) if f else 0.0
         price = float(f.avg_price) if f and f.avg_price else None
-        spp_frac = _spp_for_day(d)  # средний СПП кампании за день (доля)
-        customer_price = round(price * (1 - spp_frac), 2) if price else None
-        rows.append(_metric_row(d.isoformat(), views, clicks, spend, opens, carts, orders, orders_sum, price, customer_price, spp=spp_frac * 100))
+        spp_frac = _spp_for_day(d)  # средний СПП кампании за день (доля) | None — нет данных
+        customer_price = round(price * (1 - spp_frac), 2) if price and spp_frac is not None else None
+        rows.append(_metric_row(d.isoformat(), views, clicks, spend, opens, carts, orders, orders_sum, price, customer_price, spp=None if spp_frac is None else spp_frac * 100, is_partial=d == today_msk))
         tot["views"] += views; tot["clicks"] += clicks; tot["spend"] += spend
         tot["opens"] += opens; tot["carts"] += carts; tot["orders"] += orders; tot["orders_sum"] += orders_sum
         if price:
             tot["price_sum"] += price; tot["price_n"] += 1
         if customer_price:
             tot["cust_sum"] += customer_price; tot["cust_n"] += 1
-        if spp_frac > 0:
+        if spp_frac is not None:
             tot["spp_sum"] += spp_frac * 100; tot["spp_n"] += 1
 
     totals = _metric_row(
@@ -794,7 +1063,19 @@ async def get_campaign_metrics(
         int(tot["opens"]), int(tot["carts"]), int(tot["orders"]), tot["orders_sum"],
         tot["price_sum"] / tot["price_n"] if tot["price_n"] else None,
         tot["cust_sum"] / tot["cust_n"] if tot["cust_n"] else None,
-        spp=tot["spp_sum"] / tot["spp_n"] if tot["spp_n"] else 0.0,
+        spp=tot["spp_sum"] / tot["spp_n"] if tot["spp_n"] else None,
+    )
+
+    from backend.services.funnel.cluster_analysis_service import TARGET_DRR  # локально: цикл импорта
+
+    # Цена берётся из воронки товара и не зависит от зоны показов — событие о её смене
+    # одинаково верно для «Всего»/«Поиск»/«Рекомендации».
+    by_day = sorted(((date.fromisoformat(r["date"]), r) for r in rows), key=lambda p: p[0])
+    events = await _campaign_day_events(
+        db, project_id, campaign_id, period_from, period_to,
+        [(d, r["avg_price"] or None, r["spp"]) for d, r in by_day],
+        # Незакрытый день выкидываем: у него показов заведомо меньше, и он ложно попал бы в простой
+        [(d, int(r["views"])) for d, r in by_day if not r["is_partial"]],
     )
 
     return {
@@ -806,8 +1087,12 @@ async def get_campaign_metrics(
         "ad_by_nm": nm_id is not None,
         # Зона показов, по которой отфильтрована РК-часть (воронка остаётся по кампании)
         "zone": zone_applied,
+        # Целевой ДРР — порог светофора в колонке ДРР (менеджер переопределяет на фронте)
+        "target_drr": TARGET_DRR,
         "totals": totals,
         "rows": rows,
+        # Изломы, объясняющие цифры: смена цены / остановка по бюджету / пауза
+        "events": events,
     }
 
 

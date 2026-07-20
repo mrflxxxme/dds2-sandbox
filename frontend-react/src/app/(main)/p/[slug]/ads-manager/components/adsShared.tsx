@@ -17,6 +17,19 @@ export const tdStyle: React.CSSProperties = { textAlign: 'right', borderBottom: 
 export const tdLeft: React.CSSProperties = { ...tdStyle, textAlign: 'left' };
 
 // Статус кампании: активна — зелёный, приостановлена — красный, завершена — серый
+// Целевой ДРР менеджера — общий на весь раздел: задаётся в кластеризаторе, читается ещё и
+// светофором колонки ДРР в «По дням», чтобы порог был один и тот же на обеих вкладках.
+export const TARGET_DRR_KEY = 'ads_cluster_target_drr';
+
+/** Целевой ДРР: переопределение менеджера (localStorage) → значение кампании → 8. */
+export function readTargetDrr(fromCampaign?: number | null): number {
+    try {
+        const v = Number(localStorage.getItem(TARGET_DRR_KEY));
+        if (isFinite(v) && v > 0) return v;
+    } catch { /* SSR / приватный режим */ }
+    return fromCampaign && fromCampaign > 0 ? fromCampaign : 8;
+}
+
 export const STATUS_BADGE: Record<number, string> = { 9: 'badge-success', 11: 'badge-danger', 7: 'badge-secondary' };
 
 export function mskTime(isoStr: string | null): string {

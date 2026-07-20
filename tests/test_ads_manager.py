@@ -943,7 +943,8 @@ async def test_campaign_metrics_customer_price_applies_spp():
     camp_res.scalar_one_or_none.return_value = camp
     ad_row = MagicMock(date=d, views=1000, clicks=50, spend=Decimal("200"))
     f_row = MagicMock(date=d, opens=100, carts=10, orders=5, orders_sum=Decimal("5000"), avg_price=Decimal("1000"))
-    db = _db_seq(camp_res, _rows_result([ad_row]), _rows_result([f_row]))
+    # Четвёртый запрос — события кампании (разделители «цена/СПП/пауза»); тут их нет
+    db = _db_seq(camp_res, _rows_result([ad_row]), _rows_result([f_row]), _scalars_result([]))
 
     bdr = BdrRatesLookup({(111, d): BdrRates(to_pay_rate=0.6, spp_rate=0.2, buyout_pct=0.9)}, {})
     res = await get_campaign_metrics(db, PROJECT_ID, 999, date_from="2026-07-10", date_to="2026-07-10", bdr_rates_map=bdr)
@@ -955,8 +956,14 @@ async def test_campaign_metrics_customer_price_applies_spp():
 
 
 @pytest.mark.asyncio
-async def test_campaign_metrics_customer_price_zero_without_spp_map():
-    """Без карты СПП «Цена Клиенту» = сама цена (СПП 0)."""
+async def test_campaign_metrics_customer_price_empty_without_spp_map():
+    """Без карты СПП «Цена Клиенту» ПУСТАЯ, а не равна цене.
+
+    Раньше подставлялась сама цена (СПП считался нулём) — на проде это означало, что у
+    сегодняшнего дня, где отчёт «Заказы» ещё не пришёл, колонка показывала полную цену
+    вместо реальной со скидкой ВБ. То есть врала ровно в ту сторону, ради которой её
+    и смотрят.
+    """
     from datetime import date
 
     from backend.services.funnel.ads_manager import get_campaign_metrics
@@ -967,10 +974,12 @@ async def test_campaign_metrics_customer_price_zero_without_spp_map():
     camp_res.scalar_one_or_none.return_value = camp
     ad_row = MagicMock(date=d, views=1000, clicks=50, spend=Decimal("200"))
     f_row = MagicMock(date=d, opens=100, carts=10, orders=5, orders_sum=Decimal("5000"), avg_price=Decimal("1000"))
-    db = _db_seq(camp_res, _rows_result([ad_row]), _rows_result([f_row]))
+    db = _db_seq(camp_res, _rows_result([ad_row]), _rows_result([f_row]), _scalars_result([]))
 
     res = await get_campaign_metrics(db, PROJECT_ID, 999, date_from="2026-07-10", date_to="2026-07-10")
-    assert res["rows"][0]["customer_price"] == 1000.0  # СПП нет → цена как есть
+    assert res["rows"][0]["customer_price"] is None  # СПП неизвестен → показывать нечего
+    assert res["rows"][0]["spp"] is None
+    assert res["rows"][0]["avg_price"] == 1000.0     # наша цена известна и осталась
 
 
 # ─── create_campaign: точечный догруз вместо полного синка ───────────────────

@@ -193,7 +193,7 @@ export default function CampaignPage() {
     const zoneChartRows = useMemo<CampaignMetricRow[]>(() => (zoneMetrics?.rows ?? []).map(r => ({
         date: r.date, views: r.views, clicks: r.clicks, ctr: r.ctr, cpc: r.cpc, spend: r.spend,
         add_to_cart: r.atbs, orders: r.orders, cpo: r.cpo,
-        open_card: 0, cr1: 0, cr2: 0, orders_sum: 0, cpl: null, avg_price: 0, customer_price: 0, spp: 0, drr: 0,
+        open_card: 0, cr1: 0, cr2: 0, orders_sum: 0, cpl: null, avg_price: 0, customer_price: null, spp: null, drr: 0,
     })), [zoneMetrics]);
 
     // Селектор зоны показов — общий для «Графика» и таблицы «По дням»
@@ -334,13 +334,11 @@ export default function CampaignPage() {
         }
     }, [posNm, toast]);
 
-    // Единая ставка CPM: WB не даёт управлять кластерами по отдельности (400 на set-minus/set-bids),
-    // только у кампаний с ручной ставкой (по зонам). Гасим действия и объясняем причину.
+    // Единая ставка CPM: WB игнорирует пофразовые ставки (одна ставка правит всеми фразами) —
+    // молча гасим управление ставкой. Минус-фразы WB принимает и у единой ставки.
     const clusterUnified = ((data?.bid_mode ?? campaign?.bid_mode) || '') === 'unified';
-    const CLUSTER_UNIFIED_MSG = 'Единая ставка CPM: WB не даёт управлять кластерами по отдельности (исключать или менять ставки). Переключите кампанию на ручные ставки (по зонам) в кабинете WB.';
 
     const handleToggleMinus = async (c: SearchCluster) => {
-        if (clusterUnified) { setMinusError(CLUSTER_UNIFIED_MSG); return; }
         const action: 'add' | 'remove' = c.is_minused ? 'remove' : 'add';
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
         if (nmId == null) { setMinusError('Не удалось определить товар (nm_id) кампании'); return; }
@@ -363,7 +361,6 @@ export default function CampaignPage() {
 
     // Массовое добавление/возврат минус-фраз: одно подтверждение, затем последовательно по WB.
     const handleBulkMinus = async (list: SearchCluster[], action: 'add' | 'remove') => {
-        if (clusterUnified) { setMinusError(CLUSTER_UNIFIED_MSG); return; }
         const items = list.filter(c => !c.locked);
         if (items.length === 0) return;
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
@@ -421,7 +418,7 @@ export default function CampaignPage() {
 
     // meta — «паспорт» применения (колонка «Стоит»): источник + точка отсчёта ДРР/CPM/цель.
     const handleSetBid = async (c: SearchCluster, bid: number, meta?: { source?: string; targetDrr?: number | null }) => {
-        if (clusterUnified) { setBidError(CLUSTER_UNIFIED_MSG); return; }
+        if (clusterUnified) return;  // единая ставка — пофразовой ставки нет; UI уже погашен, молча выходим
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
         if (nmId == null) { setBidError('Не удалось определить товар (nm_id) кампании'); return; }
         // Подтверждение — встроенная кнопка ✓ в ячейке ставки (не блокирующий window.confirm)
@@ -461,7 +458,7 @@ export default function CampaignPage() {
     // Массовая ставка ОДНИМ запросом (WB normquery/bids батчевый — как Mkeeper): мгновенно, без
     // rate-limit 429, в отличие от прежнего N-поштучного цикла. bid=0 — сброс к ставке кампании.
     const handleBulkBid = async (items: { cluster: SearchCluster; bid: number }[], label: string, meta?: { source?: string; targetDrr?: number | null }) => {
-        if (clusterUnified) { setBidError(CLUSTER_UNIFIED_MSG); return; }
+        if (clusterUnified) return;  // единая ставка — пофразовой ставки нет; UI уже погашен, молча выходим
         if (items.length === 0) return;
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
         if (nmId == null) { setBidError('Не удалось определить товар (nm_id) кампании'); return; }
@@ -981,7 +978,7 @@ export default function CampaignPage() {
                                             defaultBid={data.default_bid}
                                             minBid={zones?.min_bids?.search ?? null}
                                             exportName={`clusters_${campaignId}_${dateFrom}_${dateTo}`}
-                                            clusterLock={clusterUnified ? CLUSTER_UNIFIED_MSG : null}
+                                            bidLocked={clusterUnified}
                                             minus={isCpm ? { pending, onToggle: handleToggleMinus, onBulk: handleBulkMinus, error: minusError } : undefined}
                                             bids={isCpm ? { pending: bidPending, onSetBid: handleSetBid, onBulkBid: handleBulkBid, error: bidError } : undefined}
                                             positions={positions}

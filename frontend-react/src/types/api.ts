@@ -3769,7 +3769,7 @@ export interface CampaignClustersResponse {
   campaign_id: number;
   name: string | null;
   campaign_type: string | null;
-  bid_mode?: string | null;  // 'unified' (единая) / 'manual' (ручная); при unified WB не даёт управлять кластерами
+  bid_mode?: string | null;  // 'unified' (единая) / 'manual' (ручная); при unified WB не даёт пофразовые ставки (минус-фразы работают)
   nm_ids: number[];
   subject: string | null;
   window: ClusterWindow;
@@ -3802,9 +3802,21 @@ export interface CampaignMetricRow {
   cpl: number | null;  // стоимость 1 корзины
   cpo: number | null;  // стоимость 1 заказа
   avg_price: number;
-  customer_price: number;  // цена клиенту с учётом СПП (avg_price × (1 − СПП))
-  spp: number;             // средний СПП за день, %
+  // null — данных ещё нет (отчёт «Заказы» приходит с лагом), НЕ «СПП равен нулю»
+  customer_price: number | null;  // цена клиенту с учётом СПП (avg_price × (1 − СПП))
+  spp: number | null;             // средний СПП за день, %
   drr: number;
+  is_partial?: boolean;    // день ещё идёт (сегодня по МСК) — цифры неполные
+}
+
+/** Излом в посуточных метриках: почему цифры дня отличаются от соседних. */
+export interface CampaignMetricEvent {
+  date: string;                       // МСК-день, к которому привязано событие
+  kind: 'price' | 'spp' | 'budget' | 'gap' | 'idle';
+  short: string;                      // «цена» / «СПП» / «стоп» — слово в метке дня
+  value: string;                      // «-20%» / «+4 п.п.» / «21:43» — число, красится по знаку
+  dir: -1 | 0 | 1;                    // направление: вниз / без знака / вверх
+  text: string;                       // полная формулировка — в подсказке при наведении
 }
 
 export interface CampaignMetricsResponse {
@@ -3813,8 +3825,10 @@ export interface CampaignMetricsResponse {
   window: ClusterWindow;
   nm_id?: number | null;
   ad_by_nm?: boolean;  // РК-метрики отфильтрованы по товару, а не по всей кампании
+  target_drr?: number;   // порог светофора в колонке ДРР (менеджер переопределяет локально)
   totals: CampaignMetricRow;
   rows: CampaignMetricRow[];
+  events?: CampaignMetricEvent[];
   error?: string;
 }
 
