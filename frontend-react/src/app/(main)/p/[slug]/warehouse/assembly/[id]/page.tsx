@@ -815,6 +815,7 @@ export default function AssemblyDetailPage() {
                     assemblyId={assembly.id}
                     items={assembly.items ?? []}
                     defaultPackageType={assembly.package_type}
+                    onStateChange={setWbState}
                 />
             )}
 

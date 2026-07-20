@@ -351,7 +351,29 @@ async def test_project_isolation(db_session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sync_supply_matches_preorder(db_session, monkeypatch):
-    client = FakeClient(supplies=[{"supplyId": 40699158, "preorders": [52670743]}])
+    client = FakeClient(
+        supplies=[{"supplyId": 40699158, "preorders": [52670743]}],
+        supply_status={"statusName": "В сборке", "statusId": 3, "supplyDate": "2026-07-25T00:00:00+03:00"},
+    )
+    await _patch_client(monkeypatch, client)
+    await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    link = await wb_supply_service.sync_supply_id(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.supply_id == 40699158
+    assert link.sync_status == WbSupplySyncStatus.BOOKED.value
+    # Синк брони сразу подтягивает АВТОРИТЕТНЫЙ живой статус кабинета + дату слота,
+    # иначе шапка вкладки «застревает» на «нужна бронь даты» до фонового синка.
+    assert link.wb_supply_state == "В сборке"
+    assert link.wb_supply_state_id == 3
+    assert link.supply_date is not None and link.supply_date.date().isoformat() == "2026-07-25"
+
+
+@pytest.mark.asyncio
+async def test_sync_supply_survives_cabinet_status_failure(db_session, monkeypatch):
+    # Недоступность кабинета при чтении статуса не должна ронять сам синк брони.
+    client = FakeClient(
+        supplies=[{"supplyId": 40699158, "preorders": [52670743]}],
+        details_expire=True,
+    )
     await _patch_client(monkeypatch, client)
     await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
     link = await wb_supply_service.sync_supply_id(db_session, PROJECT_ID, ASSEMBLY_ID)
@@ -416,11 +438,14 @@ async def test_sync_all_states_writes_cabinet_status(db_session, monkeypatch):
     # Связь с supply_id → listSupplies даёт АВТОРИТЕТНЫЙ кабинетный статус.
     client = FakeClient(
         supplies=[{"supplyId": 40699158, "preorders": [52670743], "statusId": 3, "statusName": "Отгрузка разрешена"}],
-        supply_status={"statusName": "Отгрузка разрешена", "statusId": 3},
+        supply_status={"statusName": "Запланировано", "statusId": 1},
     )
     await _patch_client(monkeypatch, client)
     await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    # sync_supply_id уже сохраняет статус на момент брони («Запланировано») —
+    # затем поставка уезжает дальше, и bulk-синк должен зафиксировать переход.
     await wb_supply_service.sync_supply_id(db_session, PROJECT_ID, ASSEMBLY_ID)
+    client.supply_status = {"statusName": "Отгрузка разрешена", "statusId": 3}
 
     res = await wb_supply_service.sync_all_states(db_session, PROJECT_ID)
     assert res["checked"] == 1

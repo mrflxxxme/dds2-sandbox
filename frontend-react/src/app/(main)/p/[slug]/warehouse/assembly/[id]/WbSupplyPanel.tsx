@@ -73,9 +73,12 @@ interface Props {
     assemblyId: number;
     items: AssemblyRequestItem[];
     defaultPackageType?: PackageType;
+    /** Сообщить родителю о новом состоянии поставки (шапка вкладки, баннеры
+     *  страницы читают устаревший снимок и без этого не обновляются до F5). */
+    onStateChange?: (state: WbSupplyState) => void;
 }
 
-export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }: Props) {
+export default function WbSupplyPanel({ assemblyId, items, defaultPackageType, onStateChange }: Props) {
     const [state, setState] = useState<WbSupplyState | null>(null);
     const [session, setSession] = useState<WbPortalStatus | null>(null);
     const [loading, setLoading] = useState(true);
@@ -135,13 +138,31 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
         load();
     }, [load]);
 
+    // Пробрасываем актуальное состояние наверх при любом его изменении (загрузка,
+    // синк брони, занос коробов/пропуска) — родитель обновляет шапку вкладки и
+    // баннеры. `onStateChange` (setWbState) стабилен, цикла нет.
+    useEffect(() => {
+        if (state) onStateChange?.(state);
+    }, [state, onStateChange]);
+
     const run = useCallback(
         async (key: string, fn: () => Promise<WbSupplyState>) => {
             setBusy(key);
             setError('');
             try {
                 const st = await fn();
-                setState(st);
+                // Ответ мутации НЕ несёт read-only зеркала машины заявки
+                // (`assembly_*` домешивается только в get_state) — сохраняем
+                // прежние значения, иначе префилл пропуска и подсветка
+                // расхождений пропадут до перезагрузки. Остальные поля —
+                // реальные колонки, берём из свежего ответа.
+                setState((prev) => (prev ? {
+                    ...st,
+                    assembly_vehicle_info: st.assembly_vehicle_info ?? prev.assembly_vehicle_info,
+                    assembly_vehicle_brand: st.assembly_vehicle_brand ?? prev.assembly_vehicle_brand,
+                    assembly_driver_phone: st.assembly_driver_phone ?? prev.assembly_driver_phone,
+                    assembly_pallets_count: st.assembly_pallets_count ?? prev.assembly_pallets_count,
+                } : st));
                 setBoxes(st.boxes ?? []);
             } catch (e: unknown) {
                 setError(e instanceof Error ? e.message : 'Ошибка');
