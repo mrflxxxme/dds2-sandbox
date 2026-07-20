@@ -1,7 +1,7 @@
 """
-Гард «единая ставка CPM»: у кампаний с bid_mode="unified" WB не даёт управлять
-кластерами по отдельности (минус-фразы/ставки) → отвечает 400. Ловим режим ДО вызова
-WB и возвращаем понятное сообщение, не дёргая кабинет. У "manual" — проходим к WB.
+Гард «единая ставка CPM»: у кампаний с bid_mode="unified" WB игнорирует ПОФРАЗОВЫЕ
+СТАВКИ (одна ставка правит всеми фразами) — ловим режим ДО вызова WB и объясняем
+причину. МИНУС-ФРАЗЫ при этом работают и у "unified" — их не гейтим.
 
 WB-вызовы (get/set-minus, set-bid) и резолвер ключа замоканы — реальной сети нет.
 """
@@ -44,14 +44,14 @@ def _patch_wb(monkeypatch, called):
     monkeypatch.setattr(cas, "set_normquery_bid", fake_set_bid)
 
 
-async def test_toggle_minus_unified_blocked_without_wb_call(db_session, project, monkeypatch):
+async def test_toggle_minus_unified_reaches_wb(db_session, project, monkeypatch):
+    """Минус-фразы у единой ставки РАЗРЕШЕНЫ: WB принимает исключение/возврат кластера."""
     await _seed(db_session, project.id, bid_mode="unified")
     called: set[str] = set()
     _patch_wb(monkeypatch, called)
     res = await cas.toggle_cluster_minus(db_session, project.id, CID, NM, "диван раскладной", "add")
-    assert res["ok"] is False
-    assert "единая" in res["error"].lower()
-    assert called == set()  # WB не дёргали — заведомо 400 не отправили
+    assert res["ok"] is True
+    assert "set_minus" in called
 
 
 async def test_set_bid_unified_blocked_without_wb_call(db_session, project, monkeypatch):
@@ -73,12 +73,11 @@ async def test_toggle_minus_manual_reaches_wb(db_session, project, monkeypatch):
     assert "set_minus" in called  # ручная ставка — доходим до кабинета
 
 
-async def test_product_minus_unified_blocked(db_session, project, monkeypatch):
-    """Артикульный минус делегирует в campaign-функцию → гард наследуется."""
+async def test_product_minus_unified_allowed(db_session, project, monkeypatch):
+    """Артикульный минус делегирует в campaign-функцию → тоже проходит у единой ставки."""
     await _seed(db_session, project.id, bid_mode="unified")
     called: set[str] = set()
     _patch_wb(monkeypatch, called)
     res = await cas.toggle_product_cluster_minus(db_session, project.id, NM, "диван раскладной", "add")
-    assert res["ok"] is False
-    assert "единая" in res["error"].lower()
-    assert called == set()
+    assert res["ok"] is True
+    assert "set_minus" in called

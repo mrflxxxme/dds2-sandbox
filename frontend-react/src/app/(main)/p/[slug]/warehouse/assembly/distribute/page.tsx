@@ -16,7 +16,7 @@ import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams'
 import { applyAcceptanceRedistToPrebook } from '@/lib/assembly/prebookRedistribute';
 import { buildCategoryOf, buildCompatClassOf, classLabelOf, inScopeOf } from '@/lib/assembly/categoryCompat';
 import { subtractReserveFromArticles, restrictArticlesToFf, reservedTotal, carveScopeFromDraft, type DraftReserveMap } from '@/lib/assembly/draftReserve';
-import { loadAutoSyncSharedData, runDraftAutoSync, WB_STOCKS_STALE_HOURS, type DraftSyncOutcome } from '@/lib/assembly/draftAutoSyncRunner';
+import { loadAutoSyncSharedData, runDraftAutoSync, getLastAutoSyncPassAt, markAutoSyncPass, WB_STOCKS_STALE_HOURS, type DraftSyncOutcome } from '@/lib/assembly/draftAutoSyncRunner';
 import { Toast } from '@/components';
 import TabLayout from '@/components/TabLayout';
 import DraftPreview from './components/DraftPreview';
@@ -500,20 +500,34 @@ export default function AssemblyDraftPage() {
     // синк останавливается и говорит об этом, а не синкает к неправде.
     const [pageSync, setPageSync] = useState<{ running: boolean; lastAt: number | null; note: string | null }>({ running: false, lastAt: null, note: null });
     const pageSyncBusyRef = useRef(false);
-    const pageSyncLastRef = useRef(0);
     const runAllDraftsSync = useCallback(async (trigger: 'load' | 'hourly' | 'focus') => {
         if (pageSyncBusyRef.current) return;
-        // Часовой/фокусный тик пропускается, если недавно синкали (заход/руками).
-        if (trigger !== 'load' && Date.now() - pageSyncLastRef.current < 30 * 60_000) return;
+        // Гейт повторов — МОДУЛЬНЫЙ маркер, действует и на «заход»: каждый вход на
+        // страницу запускал полный проход с PUT'ами по всем черновикам и выедал
+        // write-бакет — входной запрос страницы ловил 429 (прод 2026-07-20).
+        // Свежесинканное = актуальное; час/фокус догонят.
+        if (Date.now() - getLastAutoSyncPassAt() < 30 * 60_000) {
+            if (getLastAutoSyncPassAt() > 0) setPageSync((s) => ({ ...s, lastAt: s.lastAt ?? getLastAutoSyncPassAt() }));
+            return;
+        }
         if (document.visibilityState === 'hidden') return;
         pageSyncBusyRef.current = true;
         setPageSync((s) => ({ ...s, running: true }));
         try {
-            const shared = await loadAutoSyncSharedData();
+            // Заход: переиспользуем то, что страница уже загрузила (stockNeed +
+            // геометрия) — ноль дублей тяжёлых GET. Часовой тик: потребность свежая,
+            // геометрия страницы актуальна и так (рефетч на фокус).
+            const geomReuse = geomState === 'ready'
+                ? { nmPpb, nmPpbByWh, nmBoxSize, palletOverrides }
+                : null;
+            const shared = await loadAutoSyncSharedData({
+                stockNeed: trigger === 'load' ? stockNeed : null,
+                geometry: geomReuse,
+            });
             if (shared.wbStocksAgeHours != null && shared.wbStocksAgeHours > WB_STOCKS_STALE_HOURS) {
                 // Гейт повторов двигаем и на стоп-пути: иначе каждый focus заново
                 // качал бы shared-данные при устойчиво протухших остатках (ревью LOW).
-                pageSyncLastRef.current = Date.now();
+                markAutoSyncPass();
                 setPageSync({ running: false, lastAt: Date.now(), note: `⚠ Остатки WB не обновлялись ~${formatNumber(shared.wbStocksAgeHours, 0)} ч — авто-синк остановлен (расчёт ехал бы по старым данным)` });
                 return;
             }
@@ -533,8 +547,11 @@ export default function AssemblyDraftPage() {
                     healScopeRef.current = { ts: o.updated.updated_at, only: new Set() };
                     applyDraft(o.updated);
                 }
+                // Пейсинг write-бакета: пауза после реального PUT — серия по N
+                // черновикам не должна съедать лимит одним залпом.
+                if (o.status === 'synced') await new Promise((res) => setTimeout(res, 2000));
             }
-            pageSyncLastRef.current = Date.now();
+            markAutoSyncPass();
             const synced = outcomes.filter((o) => o.status === 'synced');
             const accFailed = outcomes.filter((o) => o.reason === 'acceptance-failed');
             const errs = outcomes.filter((o) => o.reason === 'error');
@@ -558,7 +575,7 @@ export default function AssemblyDraftPage() {
             pageSyncBusyRef.current = false;
             setPageSync((s) => ({ ...s, running: false }));
         }
-    }, [activeTab, draftId, categoryOf, classOf, applyDraft, refreshReserved, showToast]);
+    }, [activeTab, draftId, categoryOf, classOf, applyDraft, refreshReserved, showToast, stockNeed, geomState, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides]);
     // Заход на страницу: один запуск после готовности черновика и геометрии.
     const pageSyncKickedRef = useRef(false);
     useEffect(() => {

@@ -27,6 +27,9 @@ import {
     splitByKratnost,
 } from '@/lib/assembly/draftDistribution';
 import { subtractReserveFromArticles, restrictArticlesToFf } from '@/lib/assembly/draftReserve';
+import { inTransitMap, subtractInTransitFromRows } from '@/lib/assembly/reconcileInTransit';
+import { scopedNormalizeDraft } from '@/lib/utils/scopedNormalizeDraft';
+import type { NormalizeDraftCtx } from '@/lib/utils/normalizeDraft';
 import { inScopeOf, type CategoryOf } from '@/lib/assembly/categoryCompat';
 import { allocatePairs } from '@/lib/utils/assemblyPreview';
 import { parseBoxSize } from '@/lib/utils/boxPallet';
@@ -71,15 +74,36 @@ export interface DraftSyncOutcome {
     updated?: AssemblyDraft;
 }
 
+/** Маркер последнего ЗАВЕРШЁННОГО прохода — модульный: переживает навигацию по
+ *  SPA. Гейтит и «заход» (каждый вход на страницу = полный проход с PUT'ами
+ *  выедал write-бакет → 429 на входном запросе страницы, прод 2026-07-20). */
+let lastPassAt = 0;
+export const getLastAutoSyncPassAt = (): number => lastPassAt;
+export const markAutoSyncPass = (): void => { lastPassAt = Date.now(); };
+
+/** Данные, которые страница уже загрузила сама — раннер их НЕ перекачивает
+ *  (дубль тяжёлых GET на каждый заход тоже давил rate-limit). */
+export interface AutoSyncReuse {
+    stockNeed?: StockNeedResponse | null;
+    geometry?: {
+        nmPpb: Map<number, number | null>;
+        nmPpbByWh: Map<number, Record<number, number>>;
+        nmBoxSize: Map<number, string | null>;
+        palletOverrides: Record<string, number>;
+    } | null;
+}
+
 /** Загрузка общих данных прохода (зеркало load-эффекта матрицы, без display-only). */
-export async function loadAutoSyncSharedData(): Promise<AutoSyncSharedData> {
+export async function loadAutoSyncSharedData(reuse?: AutoSyncReuse): Promise<AutoSyncSharedData> {
     let csp: { minPack?: number; shipPct?: number; floor?: number } = {};
     try { csp = JSON.parse(localStorage.getItem('dds.coldStartParams') || '{}'); } catch { /* дефолты */ }
     const [need, cold, boxMult, palletOv] = await Promise.all([
-        api.getStockNeed(NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS, 'actual', true, true, 0) as Promise<StockNeedResponse>,
+        reuse?.stockNeed
+            ? Promise.resolve(reuse.stockNeed)
+            : api.getStockNeed(NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS, 'actual', true, true, 0) as Promise<StockNeedResponse>,
         api.getColdStartTable(14, csp.minPack ?? 5, csp.shipPct ?? 55, csp.floor ?? 50).catch(() => null),
-        api.getBoxMultiplicity().catch(() => null),
-        api.getPalletBoxesBySize().catch(() => ({} as Record<string, number>)),
+        reuse?.geometry ? Promise.resolve(null) : api.getBoxMultiplicity().catch(() => null),
+        reuse?.geometry ? Promise.resolve({} as Record<string, number>) : api.getPalletBoxesBySize().catch(() => ({} as Record<string, number>)),
     ]);
     const newcomerSet = new Set<number>();
     const newcomerAlloc = new Map<number, Record<string, number>>();
@@ -117,17 +141,86 @@ export async function loadAutoSyncSharedData(): Promise<AutoSyncSharedData> {
         nmPpb.set(r.nm_id, ppb);
         nmBoxSize.set(r.nm_id, boxSize);
     }
+    if (reuse?.geometry) {
+        // Карты страницы уже готовы (loadGeometry) — не дублируем разбор.
+        for (const [k, v] of reuse.geometry.nmPpb) nmPpb.set(k, v);
+        for (const [k, v] of reuse.geometry.nmPpbByWh) nmPpbByWh.set(k, v);
+        for (const [k, v] of reuse.geometry.nmBoxSize) nmBoxSize.set(k, v);
+    }
     const stampRaw = need.summary?.wb_stocks_updated_at ?? null;
     let wbStocksAgeHours: number | null = null;
     if (stampRaw) {
         const t = Date.parse(stampRaw.endsWith('Z') || stampRaw.includes('+') ? stampRaw : `${stampRaw}Z`);
         if (Number.isFinite(t)) wbStocksAgeHours = Math.max(0, (Date.now() - t) / 3_600_000);
     }
-    return { stockNeed: need, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides: palletOv || {}, newcomerSet, newcomerAlloc, guardedNms, wbStocksAgeHours };
+    return { stockNeed: need, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides: reuse?.geometry ? reuse.geometry.palletOverrides : (palletOv || {}), newcomerSet, newcomerAlloc, guardedNms, wbStocksAgeHours };
 }
 
 const sumUnits = (rows: AssemblyDraftRow[]): number =>
     rows.reduce((s, r) => s + Object.values(r.tgt || {}).reduce((a, v) => a + (v || 0), 0), 0);
+
+/** Геометрия для нормализации плана (карты раннера/матрицы). */
+export interface PlanGeometry {
+    nmPpb: Map<number, number | null>;
+    nmPpbByWh: Map<number, Record<number, number>>;
+    nmBoxSize: Map<number, string | null>;
+    palletOverrides: Record<string, number>;
+}
+
+/**
+ * «Один мир» для плана синка: вычесть из расчёта то, что УЖЕ едет активными
+ * заявками (per nm × склад), и пересобрать целые паллеты (хвосты → предбронь).
+ * Без этого план дублировал уже едущее: серверный транзит-гейт резал фантомный
+ * прирост и демотировал направление ЦЕЛИКОМ в предбронь — «6 целых паллет в
+ * предброни» и вечная качель 9.9k↔17.6k на каждом проходе (прод 2026-07-20).
+ * Best-effort: сбой запроса транзита → план без вычета (сервер подстрахует
+ * гейтом, но с демоцией — поэтому вычет здесь первичен).
+ */
+export async function netOutInTransit(
+    rows: AssemblyDraftRow[],
+    prebook: AssemblyDraftRow[],
+    articles: StockNeedArticle[],
+    geom: PlanGeometry,
+    classOf: (nm: number) => string,
+): Promise<{ rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] }> {
+    try {
+        const nmIds = [...new Set([...rows, ...prebook].map((r) => r.nm_id))];
+        if (nmIds.length === 0) return { rows, prebook };
+        const transitResp = await api.getAssemblyInTransit(nmIds);
+        const transit = inTransitMap(transitResp.items || []);
+        if (transit.size === 0) return { rows, prebook };
+        const recRows = subtractInTransitFromRows(rows, transit);
+        const recPb = subtractInTransitFromRows(prebook, recRows.remainingTransit);
+        if (!recRows.changed && !recPb.changed) return { rows, prebook };
+        // Вычет разбил целые паллеты — нормализуем заново: целые → rows, хвост → prebook.
+        const inDraft: Record<number, Record<number, number>> = {};
+        for (const r of [...recRows.rows, ...recPb.rows]) {
+            const m = (inDraft[r.nm_id] ??= {});
+            for (const [ff, q] of Object.entries(r.src || {})) m[Number(ff)] = (m[Number(ff)] || 0) + (q || 0);
+        }
+        const freeByNm: Record<number, Record<number, number>> = {};
+        for (const a of articles) {
+            const pool: Record<number, number> = {};
+            for (const [ff, st] of Object.entries(a.rf_stocks || {})) {
+                const free = (st.available || 0) - (inDraft[a.nm_id]?.[Number(ff)] || 0);
+                if (free > 0) pool[Number(ff)] = free;
+            }
+            if (Object.keys(pool).length) freeByNm[a.nm_id] = pool;
+        }
+        const ctx: NormalizeDraftCtx = {
+            ppbOf: (nm) => geom.nmPpb.get(nm),
+            ppbAt: (nm, ffId) => geom.nmPpbByWh.get(nm)?.[ffId] ?? null,
+            boxSizeOf: (nm) => geom.nmBoxSize.get(nm) ?? null,
+            overrides: geom.palletOverrides,
+            freeByNm,
+            classOf,
+        };
+        const norm = scopedNormalizeDraft(recRows.rows, recPb.rows, ctx, undefined);
+        return { rows: norm.rows, prebook: norm.prebook };
+    } catch {
+        return { rows, prebook };
+    }
+}
 
 /**
  * Синк ОДНОГО черновика к живому расчёту. Резерв других черновиков читается
@@ -205,13 +298,17 @@ export async function runDraftAutoSync(
                 effPrebook.push({ nm_id: r.nm_id, barcode: r.barcode, vendor_code: r.vendor_code, src: { [ff]: q }, tgt: { [wb]: q }, package_type: pkg });
             }
         }
+        // «Один мир»: вычесть уже едущее и пересобрать целые паллеты ДО плана.
+        const netted = await netOutInTransit(whole.rows, effPrebook, articles, {
+            nmPpb: shared.nmPpb, nmPpbByWh: shared.nmPpbByWh, nmBoxSize: shared.nmBoxSize, palletOverrides: shared.palletOverrides,
+        }, classOf);
         // База плана — СВЕЖИЙ GET (не снапшот вызова): между расчётом и записью
         // черновик могли тронуть; CAS ниже отсекает и эту гонку.
         const cur = await api.getAssemblyDraft(draft.id);
         const dist = cur.distribution ?? {};
         const curManual = new Set<number>(dist.manual_nms ?? []);
         const preserve = new Set<string>(dist.prebook_origin ?? []);
-        const plan = buildAutoSyncPlan(dist, whole.rows, effPrebook, shared.guardedNms, curManual, preserve);
+        const plan = buildAutoSyncPlan(dist, netted.rows, netted.prebook, shared.guardedNms, curManual, preserve);
         if (!plan) return { ...base, status: 'no-delta' };
         const before = sumUnits(dist.rows ?? []) + sumUnits(dist.prebook ?? []);
         const after = sumUnits(plan.rows) + sumUnits(plan.prebook);

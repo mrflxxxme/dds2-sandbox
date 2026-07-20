@@ -25,8 +25,15 @@ export function useFitViewport(minHeight = 160, bottomGap = 12) {
         window.addEventListener('scroll', recalc, { passive: true });
         // Верх контейнера сдвигают и соседние блоки (свернули хедер, сменили вкладку) —
         // одних resize/scroll мало, следим за высотой страницы.
+        //
+        // Одного body мало: наш контейнер ограничен maxHeight и прокручивается ВНУТРИ, из-за
+        // чего сворачивание блока над ним не меняет высоту страницы — body молчит, а верх
+        // контейнера уже уехал вверх. Тогда таблица залипала на минимальной высоте (три
+        // строки), пока не тронешь окно. Родитель такой развязки не имеет: в нём лежат и
+        // соседний блок, и сам контейнер, так что его высота реагирует на оба.
         const ro = new ResizeObserver(recalc);
         ro.observe(document.body);
+        if (ref.current?.parentElement) ro.observe(ref.current.parentElement);
         return () => {
             window.removeEventListener('resize', recalc);
             window.removeEventListener('scroll', recalc);

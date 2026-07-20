@@ -1057,3 +1057,67 @@ class TestGetAdGlueData:
         assert rows[0]["glue_name"] == "Диван тёмно-серый"
         assert rows[0]["imt_id"] == 900
         assert rows[0]["is_glue"] is True
+
+
+# ─── Отметка времени последнего синка ────────────────────────────────────────
+
+
+class TestLastSyncAt:
+    """get_last_sync_at: читает ads_last_sync_at и нормализует к UTC-строке с Z.
+
+    Отметка живёт в project_settings (не в in-memory _sync_progress), чтобы переживать
+    рестарт бэкенда и быть видимой из API-процесса, когда синк прошёл в воркере.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_never_synced(self):
+        from backend.services.funnel import ad_campaigns_service as svc
+
+        with patch("backend.services.settings_service.get_setting", AsyncMock(return_value=None)):
+            assert await svc.get_last_sync_at(MagicMock(), PROJECT_ID) is None
+
+    @pytest.mark.asyncio
+    async def test_naive_iso_gets_z_suffix(self):
+        """Наивное UTC-время из настроек без Z фронт распарсил бы как локальное."""
+        from backend.services.funnel import ad_campaigns_service as svc
+
+        with patch(
+            "backend.services.settings_service.get_setting",
+            AsyncMock(return_value="2026-07-20T09:15:00"),
+        ):
+            assert await svc.get_last_sync_at(MagicMock(), PROJECT_ID) == "2026-07-20T09:15:00Z"
+
+    @pytest.mark.asyncio
+    async def test_already_aware_value_kept_as_is(self):
+        from backend.services.funnel import ad_campaigns_service as svc
+
+        with patch(
+            "backend.services.settings_service.get_setting",
+            AsyncMock(return_value="2026-07-20T09:15:00+00:00"),
+        ):
+            assert await svc.get_last_sync_at(MagicMock(), PROJECT_ID) == "2026-07-20T09:15:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_mark_synced_writes_setting(self):
+        from backend.services.funnel import ad_campaigns_service as svc
+
+        set_mock = AsyncMock()
+        with patch("backend.services.settings_service.set_setting", set_mock):
+            await svc._mark_synced(MagicMock(), PROJECT_ID)
+
+        assert set_mock.await_count == 1
+        _, project_id, key, value = set_mock.await_args.args
+        assert (project_id, key) == (PROJECT_ID, svc.ADS_LAST_SYNC_KEY)
+        assert value.startswith("20")  # ISO
+
+    @pytest.mark.asyncio
+    async def test_mark_synced_swallows_errors(self):
+        """Отметка вторична: её падение не должно ронять сам синк."""
+        from backend.services.funnel import ad_campaigns_service as svc
+
+        db = MagicMock(rollback=AsyncMock())
+        with patch("backend.services.settings_service.set_setting", AsyncMock(side_effect=RuntimeError("db"))):
+            await svc._mark_synced(db, PROJECT_ID)  # не бросает
+
+        # и откатывает сессию — иначе следующий запрос по ней падает PendingRollbackError
+        db.rollback.assert_awaited_once()

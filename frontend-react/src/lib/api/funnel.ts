@@ -286,7 +286,8 @@ export function addFunnelMethods(api: ApiClient) {
             });
         },
         getSyncCampaignsProgress() {
-            return api.request<{ status: string; campaigns_total?: number; budgets_done?: number; budgets_total?: number; error?: string }>('GET', '/api/v1/funnel/sync_campaigns_progress');
+            // last_sync_at — ISO UTC (с Z) момента последнего успешного синка, null если не было
+            return api.request<{ status: string; campaigns_total?: number; budgets_done?: number; budgets_total?: number; error?: string; last_sync_at?: string | null }>('GET', '/api/v1/funnel/sync_campaigns_progress');
         },
         syncFunnelBg(dateFrom: string, dateTo: string) {
             return api.request<{ status: string }>('POST', `/api/v1/funnel/sync_funnel_bg?date_from=${dateFrom}&date_to=${dateTo}`);

@@ -4,6 +4,7 @@ import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import type { SearchCluster, ClusterDailyPoint } from '@/types/api';
 import { cpmForTargetCpc } from './clusterBid';
 import { effectiveDrr, campaignEffAverages, recommendBid, recommendProjectedBid } from './clusterEff';
+import { TARGET_DRR_KEY } from './adsShared';
 import Tooltip from './Tooltip';
 
 // ─── Форматтеры (Decimal-поля бэка приходят строкой → Number() перед formatNumber) ───
@@ -176,7 +177,7 @@ export interface BidControls {
  *  Своей ставки у кластера может не быть — тогда показываем ставку кампании (по ней он и крутится).
  *  Набравшие ≥100 показов (не locked) помечены синей чертой слева: WB уже даёт по ним ставку.
  */
-function BidCell({ cluster, bids, defaultBid, clusterLock }: { cluster: SearchCluster; bids?: BidControls; defaultBid?: number | null; clusterLock?: string | null }) {
+function BidCell({ cluster, bids, defaultBid, bidLocked }: { cluster: SearchCluster; bids?: BidControls; defaultBid?: number | null; bidLocked?: boolean }) {
     const own = cluster.bid == null ? null : Number(cluster.bid);
     const current = own ?? (defaultBid ?? null);
     const [val, setVal] = useState<string>(current == null ? '' : String(current));
@@ -185,8 +186,8 @@ function BidCell({ cluster, bids, defaultBid, clusterLock }: { cluster: SearchCl
 
     if (!bids) return <span>{current == null ? '—' : clMoney(current)}</span>;
     // Единая ставка CPM — WB не даёт менять ставку по кластеру: показываем значение только для чтения.
-    if (clusterLock) {
-        return <Tooltip text={clusterLock}><span style={{ color: '#9ca3af' }}>{current == null ? '—' : clMoney(current)}</span></Tooltip>;
+    if (bidLocked) {
+        return <span style={{ color: '#9ca3af' }}>{current == null ? '—' : clMoney(current)}</span>;
     }
     if (cluster.locked) {
         return <Tooltip text="<100 показов — WB не даёт ставку"><span style={{ color: '#9ca3af', fontSize: 10.5, fontStyle: 'italic' }}>сбор данных</span></Tooltip>;
@@ -321,14 +322,14 @@ function BidPopover({ targets, onApply, onClose }: {
  * Сортируемая таблица кластеров: сегмент релевантности + пер-колоночные фильтры,
  * перестановка колонок (drag), ячейки выбора + массовые действия.
  */
-export default function ClusterTable({ clusters, targetDrr, exportName, minus, bids, defaultBid, minBid, aov = 0, positions, onCollectPositions, onStopPositions, collecting, onCollectOne, collectingOne, clusterLock = null }: {
+export default function ClusterTable({ clusters, targetDrr, exportName, minus, bids, defaultBid, minBid, aov = 0, positions, onCollectPositions, onStopPositions, collecting, onCollectOne, collectingOne, bidLocked = false }: {
     clusters: SearchCluster[];
     targetDrr: number;
     exportName: string;
     minus?: MinusControls;
     bids?: BidControls;
-    /** Причина блокировки управления кластерами (единая ставка CPM) — гасит минус/ставки. */
-    clusterLock?: string | null;
+    /** Пофразовые ставки недоступны (единая ставка CPM) — гасим только их, минус-фразы работают. */
+    bidLocked?: boolean;
     defaultBid?: number | null;  // ставка кампании для фраз без своей
     minBid?: number | null;      // реальный аукционный пол зоны «Поиск» (живой пробник) — кламп рекомендаций
     aov?: number;                // средний чек — нужен для итогового ДРР
@@ -358,13 +359,13 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
     const [drrOverride, setDrrOverride] = useState<number | null>(null);
     const [drrInput, setDrrInput] = useState<string | null>(null);  // черновик ввода цели ДРР (свободный ввод)
     useEffect(() => {
-        try { const s = localStorage.getItem('ads_cluster_target_drr'); const v = s == null ? NaN : Number(s); if (isFinite(v) && v > 0) setDrrOverride(v); } catch { /* SSR */ }
+        try { const s = localStorage.getItem(TARGET_DRR_KEY); const v = s == null ? NaN : Number(s); if (isFinite(v) && v > 0) setDrrOverride(v); } catch { /* SSR */ }
     }, []);
     const setDrrTarget = (raw: string) => {
         const v = Math.round(Number(raw.replace(',', '.')));
-        if (!isFinite(v) || v <= 0) { setDrrOverride(null); try { localStorage.removeItem('ads_cluster_target_drr'); } catch { /* SSR */ } return; }
+        if (!isFinite(v) || v <= 0) { setDrrOverride(null); try { localStorage.removeItem(TARGET_DRR_KEY); } catch { /* SSR */ } return; }
         setDrrOverride(v);
-        try { localStorage.setItem('ads_cluster_target_drr', String(v)); } catch { /* SSR */ }
+        try { localStorage.setItem(TARGET_DRR_KEY, String(v)); } catch { /* SSR */ }
     };
     // Действующий целевой ДРР: переопределение менеджера → иначе из кампании → иначе 8
     const drrTarget = drrOverride != null && drrOverride > 0 ? drrOverride : (targetDrr > 0 ? targetDrr : 8);
@@ -723,7 +724,7 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                     }}>{c.norm_query}</a>
             );
-            case 'bid': return <BidCell cluster={c} bids={bids} defaultBid={defaultBid} clusterLock={clusterLock} />;
+            case 'bid': return <BidCell cluster={c} bids={bids} defaultBid={defaultBid} bidLocked={bidLocked} />;
             // «Стоит N дн»: с какого дня стоит текущая ставка. Зелёным — созрела (≥7 дн, данных
             // достаточно для пересмотра), серым — ещё собирает. «—» — паспорта нет.
             case 'bid_since': {
@@ -986,12 +987,7 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                 <Tooltip text="Выгрузить в Excel"><button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={doExport} disabled={filtered.length === 0}>Excel</button></Tooltip>
             </div>
 
-            {clusterLock && (
-                <div style={{ color: '#92400e', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: '8px 12px', fontSize: 12, marginBottom: 8 }}>
-                    ⓘ {clusterLock}
-                </div>
-            )}
-            {minus?.error && <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 8 }}>⚠️ {minus.error}</div>}
+            {minus?.error &&<div style={{ color: '#ef4444', fontSize: 12, marginBottom: 8 }}>⚠️ {minus.error}</div>}
             {bids?.error && <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 8 }}>⚠️ {bids.error}</div>}
 
             {filtered.length === 0 ? (
@@ -1146,22 +1142,22 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                     {minus?.onBulk && (
                         <>
                             <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }}
-                                disabled={toReturn.length === 0 || !!clusterLock}
+                                disabled={toReturn.length === 0}
                                 onClick={() => setConfirmAsk({ text: `Вернуть ${toReturn.length} фраз(ы) в кампанию?`, run: () => minus.onBulk!(toReturn, 'remove') })}
-                                title={clusterLock ?? 'Вернуть фразы в кампанию (убрать из минус-фраз)'}>Включить {toReturn.length}</button>
+                                title="Вернуть фразы в кампанию (убрать из минус-фраз)">Включить {toReturn.length}</button>
                             <button className="btn btn-danger btn-sm" style={{ fontSize: 12 }}
-                                disabled={toMinus.length === 0 || !!clusterLock}
+                                disabled={toMinus.length === 0}
                                 onClick={() => setConfirmAsk({ text: `Отключить ${toMinus.length} фраз(ы) — добавить в минус?`, run: () => minus.onBulk!(toMinus, 'add') })}
-                                title={clusterLock ?? 'Отключить фразы (добавить в минус-фразы)'}>Отключить {toMinus.length}</button>
+                                title="Отключить фразы (добавить в минус-фразы)">Отключить {toMinus.length}</button>
                         </>
                     )}
 
                     {bids?.onBulkBid && (
                         <div style={{ position: 'relative' }}>
                             <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }}
-                                disabled={biddable.length === 0 || !!clusterLock}
+                                disabled={biddable.length === 0 || bidLocked}
                                 onClick={() => setBidPopover(v => !v)}
-                                title={clusterLock ?? (biddable.length === 0 ? 'У выбранных фраз <100 показов — WB не примет ставку' : 'Задать ставку выбранным фразам')}>
+                                title={biddable.length === 0 ? 'У выбранных фраз <100 показов — WB не примет ставку' : 'Задать ставку выбранным фразам'}>
                                 Изменить ставку
                             </button>
                             {bidPopover && (
@@ -1176,12 +1172,12 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
 
                     {bids?.onBulkBid && (
                         <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }}
-                            disabled={biddable.length === 0 || !!clusterLock}
+                            disabled={biddable.length === 0 || bidLocked}
                             onClick={() => setConfirmAsk({
                                 text: `Сбросить ставку у ${biddable.length} фраз(ы) — вернуть ставку кампании?`,
                                 run: () => bids.onBulkBid!(biddable.map(c => ({ cluster: c, bid: 0 })), 'сброс к ставке кампании', { source: 'manual' }),
                             })}
-                            title={clusterLock ?? 'Убрать свою ставку — фраза вернётся на ставку кампании'}>Сбросить ставку</button>
+                            title="Убрать свою ставку — фраза вернётся на ставку кампании">Сбросить ставку</button>
                     )}
 
                     {/* Рекомендованные ставки только по ВЫБРАННЫМ строкам (часть руками, часть массово) */}
