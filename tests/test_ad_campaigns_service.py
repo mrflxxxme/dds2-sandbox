@@ -467,6 +467,51 @@ class TestEventDetection:
 # ─── get_ad_tab_data structure ────────────────────────────────────────────────
 
 
+def _ad_row(nm_id, *, views=0, clicks=0, spend=0):
+    """Строка рекламной статистики по товару (WbAdNmDaily, сгруппировано по nm_id)."""
+    return SimpleNamespace(nm_id=nm_id, views=views, clicks=clicks, spend=Decimal(str(spend)))
+
+
+def _funnel_row(nm_id, *, vendor_code="ART-001", subject="Ковры", brand="BrandX", orders_sum=0, orders_count=0):
+    """Строка воронки: паспорт товара и заказы по всем источникам (без рекламных метрик)."""
+    return SimpleNamespace(
+        nm_id=nm_id, vendor_code=vendor_code, subject=subject, brand=brand,
+        orders_sum_rub=Decimal(str(orders_sum)), orders_count=orders_count,
+    )
+
+
+def _ad_tab_db(*, ad_rows=(), funnel_rows=(), campaigns=(), events=(), bdr=(), stock=(), camp_nm=()):
+    """AsyncMock БД под get_ad_tab_data.
+
+    Порядок execute в сервисе: 1) реклама по товарам 2) воронка 3) кампании 4) события
+    5) БДР 6) остатки 7) реклама по (кампания, товар). Держим его одним местом, иначе
+    каждый тест ломается от любой новой выборки.
+    """
+    def rows_result(rows):
+        m = MagicMock()
+        m.all.return_value = list(rows)
+        return m
+
+    def scalars_result(rows):
+        m = MagicMock()
+        m.scalars.return_value.all.return_value = list(rows)
+        return m
+
+    stages = [
+        rows_result(ad_rows), rows_result(funnel_rows), scalars_result(campaigns),
+        scalars_result(events), rows_result(bdr), rows_result(stock), rows_result(camp_nm),
+    ]
+    call = {"n": 0}
+
+    async def mock_execute(query):
+        call["n"] += 1
+        return stages[call["n"] - 1] if call["n"] <= len(stages) else rows_result([])
+
+    db = AsyncMock()
+    db.execute = mock_execute
+    return db
+
+
 class TestGetAdTabData:
     """get_ad_tab_data: returns list with expected fields, ABC is applied."""
 
@@ -475,56 +520,10 @@ class TestGetAdTabData:
         """Result items have all required fields including abc_revenue, abc_profit, campaigns."""
         from backend.services.funnel.ad_campaigns_service import get_ad_tab_data
 
-        # Mock funnel row
-        funnel_row = MagicMock()
-        funnel_row.nm_id = 111
-        funnel_row.vendor_code = "ART-001"
-        funnel_row.subject = "Ковры"
-        funnel_row.brand = "BrandX"
-        funnel_row.adv_views = 1000
-        funnel_row.adv_clicks = 50
-        funnel_row.adv_sum = Decimal("2500")
-        funnel_row.orders_sum_rub = Decimal("50000")
-        funnel_row.orders_count = 10
-
-        mock_funnel_result = MagicMock()
-        mock_funnel_result.all.return_value = [funnel_row]
-
-        mock_campaigns_result = MagicMock()
-        mock_campaigns_result.scalars.return_value.all.return_value = []
-
-        mock_events_result = MagicMock()
-        mock_events_result.scalars.return_value.all.return_value = []
-
-        mock_bdr_result = MagicMock()
-        mock_bdr_result.all.return_value = []
-
-        mock_stock_result = MagicMock()
-        mock_stock_result.all.return_value = []
-
-        mock_daily_result = MagicMock()
-        mock_daily_result.all.return_value = []
-
-        call_count = 0
-
-        async def mock_execute(query):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return mock_funnel_result
-            elif call_count == 2:
-                return mock_campaigns_result
-            elif call_count == 3:
-                return mock_events_result
-            elif call_count == 4:
-                return mock_bdr_result
-            elif call_count == 5:
-                return mock_stock_result
-            else:
-                return mock_daily_result
-
-        mock_db = AsyncMock()
-        mock_db.execute = mock_execute
+        mock_db = _ad_tab_db(
+            ad_rows=[_ad_row(111, views=1000, clicks=50, spend=2500)],
+            funnel_rows=[_funnel_row(111, orders_sum=50000, orders_count=10)],
+        )
 
         result = await get_ad_tab_data(mock_db, PROJECT_ID, "2024-01-01", "2024-01-31")
 
@@ -561,46 +560,7 @@ class TestGetAdTabData:
         """No funnel rows → empty list returned."""
         from backend.services.funnel.ad_campaigns_service import get_ad_tab_data
 
-        mock_funnel_result = MagicMock()
-        mock_funnel_result.all.return_value = []
-
-        mock_campaigns_result = MagicMock()
-        mock_campaigns_result.scalars.return_value.all.return_value = []
-
-        mock_events_result = MagicMock()
-        mock_events_result.scalars.return_value.all.return_value = []
-
-        mock_bdr_result = MagicMock()
-        mock_bdr_result.all.return_value = []
-
-        mock_stock_result = MagicMock()
-        mock_stock_result.all.return_value = []
-
-        mock_daily_result = MagicMock()
-        mock_daily_result.all.return_value = []
-
-        call_count = 0
-
-        async def mock_execute(query):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return mock_funnel_result
-            elif call_count == 2:
-                return mock_campaigns_result
-            elif call_count == 3:
-                return mock_events_result
-            elif call_count == 4:
-                return mock_bdr_result
-            elif call_count == 5:
-                return mock_stock_result
-            else:
-                return mock_daily_result
-
-        mock_db = AsyncMock()
-        mock_db.execute = mock_execute
-
-        result = await get_ad_tab_data(mock_db, PROJECT_ID, "2024-01-01", "2024-01-31")
+        result = await get_ad_tab_data(_ad_tab_db(), PROJECT_ID, "2024-01-01", "2024-01-31")
 
         assert result == []
 
@@ -609,25 +569,8 @@ class TestGetAdTabData:
         """Brand filter is passed into query (no exception raised)."""
         from backend.services.funnel.ad_campaigns_service import get_ad_tab_data
 
-        mock_result = MagicMock()
-        mock_result.all.return_value = []
-        mock_scalar_result = MagicMock()
-        mock_scalar_result.scalars.return_value.all.return_value = []
-
-        mock_db = AsyncMock()
-        mock_db.execute = AsyncMock(
-            side_effect=[
-                mock_result,
-                mock_scalar_result,
-                mock_scalar_result,
-                mock_result,
-                mock_result,
-                mock_result,
-            ]
-        )
-
         # Should not raise
-        result = await get_ad_tab_data(mock_db, PROJECT_ID, "2024-01-01", "2024-01-31", brand="BrandX")
+        result = await get_ad_tab_data(_ad_tab_db(), PROJECT_ID, "2024-01-01", "2024-01-31", brand="BrandX")
         assert result == []
 
 
@@ -638,67 +581,47 @@ class TestAdTabDrrInfinite:
     """
 
     @staticmethod
-    def _db_for_rows(rows):
-        results = iter(range(100))
-
-        funnel = MagicMock()
-        funnel.all.return_value = rows
-        empty_scalars = MagicMock()
-        empty_scalars.scalars.return_value.all.return_value = []
-        empty_all = MagicMock()
-        empty_all.all.return_value = []
-
-        call = {"n": 0}
-
-        async def mock_execute(query):
-            call["n"] += 1
-            if call["n"] == 1:
-                return funnel
-            if call["n"] in (2, 3):
-                return empty_scalars
-            return empty_all
-
-        db = AsyncMock()
-        db.execute = mock_execute
-        return db
-
-    @staticmethod
-    def _row(nm, adv_sum, orders_sum):
-        r = MagicMock()
-        r.nm_id = nm
-        r.vendor_code = "A"
-        r.subject = "S"
-        r.brand = "B"
-        r.adv_views = 100
-        r.adv_clicks = 10
-        r.adv_sum = Decimal(str(adv_sum))
-        r.orders_sum_rub = Decimal(str(orders_sum))
-        r.orders_count = 1 if orders_sum else 0
-        return r
+    def _db(adv_sum, orders_sum):
+        """Расход — из рекламной статистики, заказы — из воронки (разные источники)."""
+        return _ad_tab_db(
+            ad_rows=[_ad_row(1, views=100, clicks=10, spend=adv_sum)],
+            funnel_rows=[_funnel_row(1, vendor_code="A", subject="S", brand="B",
+                                     orders_sum=orders_sum, orders_count=1 if orders_sum else 0)],
+        )
 
     @pytest.mark.asyncio
     async def test_spend_without_orders_gives_none(self):
         from backend.services.funnel.ad_campaigns_service import get_ad_tab_data
 
-        db = self._db_for_rows([self._row(1, 5000, 0)])
-        result = await get_ad_tab_data(db, PROJECT_ID, "2024-01-01", "2024-01-31")
+        result = await get_ad_tab_data(self._db(5000, 0), PROJECT_ID, "2024-01-01", "2024-01-31")
         assert result[0]["drr"] is None
 
     @pytest.mark.asyncio
     async def test_no_spend_no_orders_gives_zero(self):
         from backend.services.funnel.ad_campaigns_service import get_ad_tab_data
 
-        db = self._db_for_rows([self._row(1, 0, 0)])
-        result = await get_ad_tab_data(db, PROJECT_ID, "2024-01-01", "2024-01-31")
+        # include_no_ads=True: без расхода строка иначе отсеивается как «реклама не крутилась»
+        result = await get_ad_tab_data(
+            self._db(0, 0), PROJECT_ID, "2024-01-01", "2024-01-31", include_no_ads=True
+        )
         assert result[0]["drr"] == 0
 
     @pytest.mark.asyncio
     async def test_normal_drr_still_number(self):
         from backend.services.funnel.ad_campaigns_service import get_ad_tab_data
 
-        db = self._db_for_rows([self._row(1, 2500, 50000)])
-        result = await get_ad_tab_data(db, PROJECT_ID, "2024-01-01", "2024-01-31")
+        result = await get_ad_tab_data(self._db(2500, 50000), PROJECT_ID, "2024-01-01", "2024-01-31")
         assert result[0]["drr"] == 5.0
+
+    @pytest.mark.asyncio
+    async def test_spend_comes_from_ad_stats_not_funnel(self):
+        """Расход берётся из рекламной статистики WB, а не из колонок воронки."""
+        from backend.services.funnel.ad_campaigns_service import get_ad_tab_data
+
+        result = await get_ad_tab_data(self._db(7777, 100000), PROJECT_ID, "2024-01-01", "2024-01-31")
+        assert result[0]["adv_sum"] == 7777.0
+        assert result[0]["adv_views"] == 100
+        assert result[0]["adv_clicks"] == 10
 
 
 class TestAdTabGroupedDrrInfinite:
@@ -708,7 +631,6 @@ class TestAdTabGroupedDrrInfinite:
     async def test_group_spend_without_orders_gives_none(self, monkeypatch):
         from backend.services.funnel import ad_campaigns_service as m
 
-        base = TestAdTabDrrInfinite._row(1, 5000, 0)
         monkeypatch.setattr(m, "get_ad_tab_data", AsyncMock(return_value=[{
             "nm_id": 1, "vendor_code": "A", "subject": "S", "brand": "B",
             "adv_views": 100, "adv_clicks": 10, "adv_sum": 5000.0,

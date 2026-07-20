@@ -40,6 +40,9 @@ from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.funnel")
 
+# Страховочный потолок выборки товаров из воронки (одна строка на nm_id за период)
+_FUNNEL_ROWS_CAP = 20000
+
 MSK = pytz.timezone("Europe/Moscow")
 
 # Лимит времени на догрузку бюджетов (N+1 к WB, ~0.7с на кампанию). Строго МЕНЬШЕ
@@ -655,15 +658,38 @@ async def get_ad_tab_data(
     """
     F = WbFunnelDaily
 
+    # Расход/показы/клики берём из РЕКЛАМНОЙ статистики WB (adv/v3/fullstats), а не из
+    # рекламных колонок отчёта воронки: воронка их сильно недосчитывает. Замер на проде
+    # за 1–20.07: воронка 5.0 млн ₽ против 11.5 млн ₽ у fullstats при фактических списаниях
+    # 13.2 млн ₽ — у 485 товаров расхождение, у 37 в воронке ноль при реальном расходе.
+    # Из воронки остаются ЗАКАЗЫ: там они по всем источникам трафика, а ДРР считается
+    # от всей выручки товара, не только от рекламной атрибуции.
+    ND = WbAdNmDaily
+    nm_ad_q = (
+        select(
+            ND.nm_id,
+            func.coalesce(func.sum(ND.views), 0).label("views"),
+            func.coalesce(func.sum(ND.clicks), 0).label("clicks"),
+            func.coalesce(func.sum(ND.spend), Decimal("0")).label("spend"),
+        )
+        .where(ND.project_id == project_id)
+        .where(ND.date >= date_type.fromisoformat(date_from))
+        .where(ND.date <= date_type.fromisoformat(date_to))
+        .group_by(ND.nm_id)
+    )
+    nm_ad: dict[int, dict] = {
+        r.nm_id: {"views": int(r.views or 0), "clicks": int(r.clicks or 0), "spend": float(r.spend or 0)}
+        for r in (await db.execute(nm_ad_q)).all()
+    }
+
+    # Воронка задаёт состав строк и несёт паспорт товара + заказы. Товаров с расходом, но
+    # без строки в воронке, не бывает (проверено на проде) — состав от этого не страдает.
     query = (
         select(
             F.nm_id,
             func.max(F.vendor_code).label("vendor_code"),
             func.max(F.subject).label("subject"),
             func.max(F.brand).label("brand"),
-            func.coalesce(func.sum(F.adv_views), 0).label("adv_views"),
-            func.coalesce(func.sum(F.adv_clicks), 0).label("adv_clicks"),
-            func.coalesce(func.sum(F.adv_sum), Decimal("0")).label("adv_sum"),
             func.coalesce(
                 func.sum(F.orders_sum_rub),
                 Decimal("0"),
@@ -680,13 +706,16 @@ async def get_ad_tab_data(
     if subject:
         query = query.where(F.subject == subject)
 
-    query = query.group_by(F.nm_id)
-    if not include_no_ads:
-        query = query.having(func.sum(F.adv_sum) > 0)
-    # Вторичная сортировка по nm_id: без неё усечение лимитом недетерминированно на нулевых расходах
-    query = query.order_by(func.sum(F.adv_sum).desc(), F.nm_id).limit(limit)
+    # Одна строка на товар, поэтому выборка ограничена каталогом проекта; страховочный
+    # потолок — от разрастания каталога, реальный limit применяется после сортировки
+    query = query.group_by(F.nm_id).order_by(F.nm_id).limit(_FUNNEL_ROWS_CAP)
 
     rows = (await db.execute(query)).all()
+    # Отсечка «была реклама» и сортировка по расходу переехали из SQL сюда: расход теперь
+    # в другой таблице. nm_id вторичным ключом — иначе усечение лимитом недетерминированно
+    if not include_no_ads:
+        rows = [r for r in rows if nm_ad.get(r.nm_id, {}).get("spend", 0) > 0]
+    rows = sorted(rows, key=lambda r: (-nm_ad.get(r.nm_id, {}).get("spend", 0), r.nm_id))[:limit]
 
     # Load all campaigns for project
     campaigns_q = (
@@ -833,9 +862,10 @@ async def get_ad_tab_data(
 
     result = []
     for r in rows:
-        views = int(r.adv_views or 0)
-        clicks = int(r.adv_clicks or 0)
-        adv_sum = float(r.adv_sum or 0)
+        ad = nm_ad.get(r.nm_id, {})
+        views = ad.get("views", 0)
+        clicks = ad.get("clicks", 0)
+        adv_sum = ad.get("spend", 0.0)
         orders_sum = float(r.orders_sum_rub or 0)
 
         ctr = (clicks / views * 100) if views else 0
