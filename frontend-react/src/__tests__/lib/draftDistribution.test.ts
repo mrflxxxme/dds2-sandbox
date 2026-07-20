@@ -5,6 +5,7 @@ import {
     applyDraftPrebookEdit,
     buildAutoSyncPlan,
     mergeDraftDirection,
+    returnPalletToPrebook,
     buildDraftSkus,
     buildWriteDistribution,
     buildPinnedRowsFf,
@@ -565,6 +566,56 @@ describe('mergeDraftDirection — «слить склад A в склад B»', 
     it('идемпотентность: повторное слияние того же направления → null', () => {
         const first = mergeDraftDirection([row(1, { 'Владимир': 30 }, { '5': 30 })], [], 'Владимир', 'Коледино', yes)!;
         expect(mergeDraftDirection(first.rows, first.prebook, 'Владимир', 'Коледино', yes)).toBeNull();
+    });
+});
+
+describe('returnPalletToPrebook — «↩ Вернуть паллету в предбронь»', () => {
+    type Row = { nm_id: number; barcode: string; vendor_code: string; src: Record<string, number>; tgt: Record<string, number>; package_type: 'BOX' | 'MONOPALLET'; as_is?: boolean };
+    const row = (nm: number, tgt: Record<string, number>, src: Record<string, number>, extra: Partial<Row> = {}): Row =>
+        ({ nm_id: nm, barcode: `bc${nm}`, vendor_code: `art-${nm}`, src, tgt, package_type: 'BOX', ...extra });
+    const cellQty = (rows: { nm_id: number; tgt: Record<string, number> }[], nm: number, wb: string) =>
+        rows.filter(r => r.nm_id === nm).reduce((s, r) => s + (r.tgt[wb] || 0), 0);
+
+    it('порция паллеты уходит из rows в предбронь, остальное в строке цело', () => {
+        const out = returnPalletToPrebook(
+            [row(1, { 'Рязань': 60, 'Тула': 20 }, { '1': 80 })], [], 1, 'Рязань', 'BOX', [{ nmId: 1, units: 60 }])!;
+        expect(cellQty(out.rows, 1, 'Рязань')).toBe(0);
+        expect(cellQty(out.rows, 1, 'Тула')).toBe(20);
+        expect(cellQty(out.prebook, 1, 'Рязань')).toBe(60);
+        expect(out.returnedUnits).toBe(60);
+    });
+
+    it('as_is-строка («Оставить так») расходуется первой и возвращается БЕЗ as_is', () => {
+        const out = returnPalletToPrebook(
+            [row(1, { 'Рязань': 19 }, { '1': 19 }, { as_is: true }), row(1, { 'Рязань': 38 }, { '1': 38 })],
+            [], 1, 'Рязань', 'BOX', [{ nmId: 1, units: 19 }])!;
+        expect(out.rows.filter(r => r.as_is)).toHaveLength(0);        // as_is ушла целиком
+        expect(cellQty(out.rows, 1, 'Рязань')).toBe(38);              // обычная строка цела
+        expect(out.prebook.every(r => !r.as_is)).toBe(true);          // вернулась обычной
+        expect(cellQty(out.prebook, 1, 'Рязань')).toBe(19);
+    });
+
+    it('слияние с существующей предбронью той же идентичности (без дублей)', () => {
+        const out = returnPalletToPrebook(
+            [row(1, { 'Рязань': 40 }, { '1': 40 })], [row(1, { 'Рязань': 15 }, { '1': 15 })],
+            1, 'Рязань', 'BOX', [{ nmId: 1, units: 40 }])!;
+        const pb1 = out.prebook.filter(r => r.nm_id === 1);
+        expect(pb1).toHaveLength(1);
+        expect(pb1[0].tgt['Рязань']).toBe(55);
+    });
+
+    it('чужой ФФ/упаковка/склад не трогаются; состав больше строк → возвращается сколько есть', () => {
+        const out = returnPalletToPrebook(
+            [row(1, { 'Рязань': 20 }, { '1': 20 }), row(2, { 'Рязань': 10 }, { '2': 10 }), row(3, { 'Рязань': 8 }, { '1': 8 }, { package_type: 'MONOPALLET' })],
+            [], 1, 'Рязань', 'BOX', [{ nmId: 1, units: 35 }, { nmId: 2, units: 10 }, { nmId: 3, units: 8 }])!;
+        expect(out.returnedUnits).toBe(20);                            // только BOX с ФФ 1
+        expect(cellQty(out.rows, 2, 'Рязань')).toBe(10);               // чужой ФФ цел
+        expect(cellQty(out.rows, 3, 'Рязань')).toBe(8);                // моно цело
+    });
+
+    it('нечего возвращать → null', () => {
+        expect(returnPalletToPrebook([row(1, { 'Тула': 20 }, { '1': 20 })], [], 1, 'Рязань', 'BOX', [{ nmId: 1, units: 20 }])).toBeNull();
+        expect(returnPalletToPrebook([], [], 1, 'Рязань', 'BOX', [])).toBeNull();
     });
 });
 
