@@ -1345,6 +1345,16 @@ export interface TrendPeriodData {
   date_to: string;    // ISO YYYY-MM-DD — last day of the trend window (= yesterday, inclusive)
 }
 
+/** Строка разбивки «В сборке на ФФ»: сколько данного товара держит конкретная заявка */
+export interface ReservedAssemblyDetail {
+  request_id: number;
+  number: string;
+  status: AssemblyStatus;
+  warehouse_id: number;
+  warehouse_name: string;
+  quantity: number;
+}
+
 export interface UnifiedStockRow {
   nomenclature_id: number;
   barcode: string;
@@ -1355,6 +1365,8 @@ export interface UnifiedStockRow {
   wb_stocks: Record<string, number>;
   in_transit: number;
   reserved: number;
+  /** Разбивка резерва по заявкам на сборку — раскрывается кликом по «В сборке на ФФ» */
+  reserved_details?: ReservedAssemblyDetail[];
   total_own: number;
   /** Физически на складах WB («Всего находится на складах» из отчёта кабинета) */
   total_wb: number;

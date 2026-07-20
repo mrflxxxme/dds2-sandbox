@@ -11,6 +11,7 @@ import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
 import type { AssemblyBulkStatus, AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, FfLinkInfo, SourceVehicleOption, Warehouse, WbSupplySyncStatus } from '@/types/api';
 import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
+import { ASSEMBLY_STATUS_MAP } from '@/lib/assembly-status';
 import CreatedRequestsModal, { type CreatedRequestRow } from './distribute/components/CreatedRequestsModal';
 
 // ─── Status config ──────────────────────────────────────────────────────────
@@ -43,19 +44,8 @@ function jointTitle(row: AssemblyRequest): string {
     return `Совместная WB-поставка · ещё: ${parts.join(', ')}`;
 }
 
-const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> = {
-    // PENDING — legacy: больше не используется при создании, но может встретиться в истории.
-    PENDING:          { label: 'В сборке',          className: 'badge-info' },
-    PRE_DISTRIBUTED:  { label: 'Распределено',      className: 'badge-secondary' },
-    IN_PROGRESS:      { label: 'В сборке',          className: 'badge-info' },
-    READY:            { label: 'Готово',             className: 'badge-success' },
-    VEHICLE_ASSIGNED: { label: 'Машина назначена',   className: 'badge-info' },
-    SHIPPED:          { label: 'Отгружена',          className: 'badge-success' },
-    DELIVERED:        { label: 'Принята WB',         className: 'badge-success' },
-    RETURNED:         { label: 'Возврат на склад',   className: 'badge-warning' },
-    CLOSED:           { label: 'Закрыт',             className: 'badge-warning' },
-    CANCELLED:        { label: 'Отменена',           className: 'badge-secondary' },
-};
+// Единый словарь статусов — src/lib/assembly-status.ts (был копией на каждой странице раздела)
+const STATUS_MAP = ASSEMBLY_STATUS_MAP;
 
 // Занос заявки в кабинет WB (колонка «WB»): фолбэк-подпись, когда живой статус
 // кабинета (wb_supply_state) ещё не подтянут.
@@ -499,6 +489,43 @@ export default function AssemblyListPage() {
     // | `draft:<draft_id>` (заявки конкретного черновика).
     const [sourceFilter, setSourceFilter] = useState<string>('');
     const [sourceVehicles, setSourceVehicles] = useState<SourceVehicleOption[]>([]);
+
+    // ─── Персист фильтров ───────────────────────────────────────────────
+    // Заход в заявку — это router.push на отдельную страницу, обратно возвращает
+    // <Link>: список размонтируется и весь useState умирает. Поэтому храним набор
+    // фильтров в localStorage (на проект) и восстанавливаем после монтирования.
+    // localStorage недоступен на SSR → только внутри useEffect, всё в try/catch.
+    const FILTERS_KEY = `assembly_filters_${slug}`;
+    const filtersRestored = useRef(false);
+    const sourceFromDeeplink = useRef(false);
+    const [filtersReady, setFiltersReady] = useState(false);
+
+    useEffect(() => {
+        try {
+            const raw = localStorage.getItem(FILTERS_KEY);
+            const f = (raw ? JSON.parse(raw) : {}) as Record<string, unknown>;
+            // Ветка else обязательна: смена проекта (/p/a/... → /p/b/...) не размонтирует
+            // страницу, и без явного сброса фильтры проекта A утекли бы в проект B —
+            // а save-эффект тут же записал бы их под новым ключом.
+            setWarehouseId(typeof f.warehouseId === 'number' ? f.warehouseId : '');
+            setStatusFilter(typeof f.statusFilter === 'string' ? f.statusFilter : '');
+            setView(f.view === 'archived' || f.view === 'all' ? f.view : 'active');
+            setDateFrom(typeof f.dateFrom === 'string' ? f.dateFrom : '');
+            setDateTo(typeof f.dateTo === 'string' ? f.dateTo : '');
+            const s = typeof f.search === 'string' ? f.search : '';
+            setSearch(s);
+            setSearchInput(s);
+            setBrandFilter(typeof f.brandFilter === 'string' ? f.brandFilter : '');
+            setFfLinkFilter(f.ffLinkFilter === 'none' || f.ffLinkFilter === 'linked' ? f.ffLinkFilter : '');
+            setJointOnly(f.jointOnly === true);
+            setSourceFilter(typeof f.sourceFilter === 'string' ? f.sourceFilter : '');
+        } catch { /* SSR / битый JSON — просто стартуем с дефолтов */ }
+        // Диплинк прошлого проекта не должен глушить персист нового.
+        sourceFromDeeplink.current = false;
+        filtersRestored.current = true;
+        setFiltersReady(true);
+    }, [FILTERS_KEY]);
+
     // Диплинк на фильтр «Источник» (модалка созданных заявок / внешние ссылки):
     // ?src_draft=<id> → заявки черновика, ?src_vehicle=<id> → заявки машины.
     useEffect(() => {
@@ -506,6 +533,10 @@ export default function AssemblyListPage() {
         const v = Number(searchParams.get('src_vehicle'));
         if (d > 0) setSourceFilter(`draft:${d}`);
         else if (v > 0) setSourceFilter(`veh:${v}`);
+        // Диплинк — разовый переход, а не выбор пользователя: не персистим его,
+        // иначе следующий заход БЕЗ query покажет заявки того же черновика без
+        // видимой причины. Ref снимается, как только юзер сам трогает «Источник».
+        if (d > 0 || v > 0) sourceFromDeeplink.current = true;
     }, [searchParams]);
     // Монотонный счётчик запросов списка — отбрасываем устаревшие ответы (см. load)
     const loadSeq = useRef(0);
@@ -583,7 +614,44 @@ export default function AssemblyListPage() {
         }
     }, [warehouseId, statusFilter, view, search, dateFrom, dateTo, brandFilter, ffLinkFilter, jointOnly, sourceFilter]);
 
-    useEffect(() => { load(); }, [load]);
+    // Не грузим до восстановления фильтров — иначе первый запрос уйдёт с дефолтами
+    // и список моргнёт «все заявки» → «отфильтрованные».
+    useEffect(() => { if (filtersReady) load(); }, [load, filtersReady]);
+
+    // Сохраняем фильтры после каждого изменения (но не до восстановления —
+    // иначе дефолты затрут сохранённый набор).
+    useEffect(() => {
+        if (!filtersRestored.current) return;
+        try {
+            localStorage.setItem(FILTERS_KEY, JSON.stringify({
+                warehouseId, statusFilter, view, dateFrom, dateTo,
+                search, brandFilter, ffLinkFilter, jointOnly,
+                sourceFilter: sourceFromDeeplink.current ? '' : sourceFilter,
+            }));
+        } catch { /* приватный режим / переполнение quota — не критично */ }
+    }, [FILTERS_KEY, warehouseId, statusFilter, view, dateFrom, dateTo,
+        search, brandFilter, ffLinkFilter, jointOnly, sourceFilter]);
+
+    /** Активен ли хоть один фильтр (view='active' — дефолт, не считается) */
+    const hasActiveFilters = warehouseId !== '' || statusFilter !== '' || view !== 'active'
+        || dateFrom !== '' || dateTo !== '' || search !== '' || brandFilter !== ''
+        || ffLinkFilter !== '' || jointOnly || sourceFilter !== '';
+
+    const resetFilters = useCallback(() => {
+        setWarehouseId('');
+        setStatusFilter('');
+        setView('active');
+        setDateFrom('');
+        setDateTo('');
+        setSearchInput('');
+        setSearch('');
+        setBrandFilter('');
+        setFfLinkFilter('');
+        setJointOnly(false);
+        sourceFromDeeplink.current = false;
+        setSourceFilter('');
+        // Ключ не чистим: save-эффект тут же перезапишет его дефолтами.
+    }, []);
 
     // Автопоиск: применяем ввод через 350 мс после остановки набора — как
     // выпадающие фильтры (мгновенно), без обязательного Enter. Enter всё ещё
@@ -1403,7 +1471,7 @@ export default function AssemblyListPage() {
                         <select
                             className="form-input"
                             value={sourceFilter}
-                            onChange={e => { setSourceFilter(e.target.value); }}
+                            onChange={e => { sourceFromDeeplink.current = false; setSourceFilter(e.target.value); }}
                             title="Происхождение заявки: из предраспределения машины (все или конкретная), из предброни (предзаявка) или обычная"
                         >
                             <option value="">Источник: все</option>
@@ -1447,6 +1515,17 @@ export default function AssemblyListPage() {
                             placeholder="Дата до"
                         />
                     </div>
+                    {hasActiveFilters && (
+                        <div className="form-group">
+                            <button
+                                className="btn btn-secondary"
+                                onClick={resetFilters}
+                                title="Сбросить все фильтры и вернуться к виду «Активные»"
+                            >
+                                ✕ Сбросить
+                            </button>
+                        </div>
+                    )}
                 </div>
             </div>
 

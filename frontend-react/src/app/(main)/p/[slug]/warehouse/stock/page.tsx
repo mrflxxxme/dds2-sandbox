@@ -1,11 +1,13 @@
 'use client';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import TabLayout from '@/components/TabLayout';
 import type { Warehouse, StockSummaryRow, UnifiedStockRow, TrendPeriodData } from '@/types/api';
 import type { Column } from '@/components/DataTable';
+import { ASSEMBLY_STATUS_MAP } from '@/lib/assembly-status';
 
 function StockCell({ qty, reserved }: { qty: number; reserved: number }) {
     if (!qty && !reserved) return <span style={{ color: 'var(--color-text-muted)' }}>{'\u2014'}</span>;
@@ -183,6 +185,43 @@ function WbDetailRow({ row, wbWarehouses, mode }: { row: UnifiedStockRow; wbWare
     );
 }
 
+/** Разбивка «В сборке на ФФ»: в каких заявках лежит остаток. Зеркало WbDetailRow. */
+function ReservedDetailRow({ row }: { row: UnifiedStockRow }) {
+    const slug = useParams().slug as string;
+    const details = row.reserved_details || [];
+    if (details.length === 0) {
+        return (
+            <div style={{ padding: '8px 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                Нет активных заявок
+            </div>
+        );
+    }
+    return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '8px 0' }}>
+            {details.map(d => (
+                <a
+                    key={d.request_id}
+                    href={`/p/${slug}/warehouse/assembly/${d.request_id}`}
+                    onClick={e => e.stopPropagation()}
+                    style={{
+                        display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end',
+                        fontSize: 12, whiteSpace: 'nowrap', textDecoration: 'none',
+                        color: 'var(--color-text)',
+                    }}
+                    title={`Открыть заявку ${d.number} — склад «${d.warehouse_name}»`}
+                >
+                    <span style={{ color: 'var(--color-accent)', fontWeight: 500 }}>{d.number}</span>
+                    <span className={`badge ${ASSEMBLY_STATUS_MAP[d.status]?.className || 'badge-secondary'}`}>
+                        {ASSEMBLY_STATUS_MAP[d.status]?.label || d.status}
+                    </span>
+                    <span style={{ color: 'var(--color-text-muted)' }}>{d.warehouse_name}</span>
+                    <strong style={{ color: 'var(--color-warning)' }}>{formatNumber(d.quantity, 0)}</strong>
+                </a>
+            ))}
+        </div>
+    );
+}
+
 function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandChange, isLoading, includeForecast, onForecastChange }: {
     data: UnifiedStockRow[];
     onRefresh: () => void;
@@ -196,6 +235,9 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
 }) {
     const [search, setSearch] = useState('');
     const [expanded, setExpanded] = useState<Set<number>>(new Set());
+    // Раскрытые ячейки «В сборке на ФФ» — отдельный набор от WB-разбивки,
+    // чтобы обе детали можно было держать открытыми одновременно.
+    const [expandedReserved, setExpandedReserved] = useState<Set<number>>(new Set());
     const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
     const [expandedSubGroups, setExpandedSubGroups] = useState<Set<string>>(new Set());
     const [syncing, setSyncing] = useState(false);
@@ -243,6 +285,14 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
 
     const toggleExpand = (nomId: number) => {
         setExpanded(prev => {
+            const next = new Set(prev);
+            if (next.has(nomId)) next.delete(nomId); else next.add(nomId);
+            return next;
+        });
+    };
+
+    const toggleReserved = (nomId: number) => {
+        setExpandedReserved(prev => {
             const next = new Set(prev);
             if (next.has(nomId)) next.delete(nomId); else next.add(nomId);
             return next;
@@ -478,6 +528,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         let factoryTotal = 0, vehicleFormingTotal = 0, vehicleTransitTotal = 0;
         let factoryMoney = 0, vehicleFormingMoney = 0, vehicleTransitMoney = 0;
         let variantTotal = 0, variantMoney = 0;
+        let reservedTotal = 0, reservedMoney = 0;
         let trendDailySum = 0, bdrRevenueSum = 0, bdrProfitSum = 0, defectSum = 0, defectMoney = 0;
         for (const row of filtered) {
             let multiplier = 0;
@@ -494,6 +545,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             defectSum += row.total_defect || 0;
             defectMoney += (row.total_defect || 0) * multiplier;
             ownTotal += row.total_own || 0;
+            reservedTotal += row.reserved || 0;
             wbTotal += row.total_wb || 0;
             wbToClient += row.wb_in_way_to_client || 0;
             wbFromClient += row.wb_in_way_from_client || 0;
@@ -507,6 +559,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 // «В пути до получателей» исключён из Итого (см. getVariantTotal)
                 const wbAll = (row.total_wb || 0) + (row.wb_in_way_from_client || 0);
                 ownMoney += (row.total_own || 0) * multiplier;
+                reservedMoney += (row.reserved || 0) * multiplier;
                 wbMoney += (row.total_wb || 0) * multiplier;
                 wbToClientMoney += (row.wb_in_way_to_client || 0) * multiplier;
                 wbFromClientMoney += (row.wb_in_way_from_client || 0) * multiplier;
@@ -533,6 +586,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             ownTotal, wbTotal, inTransit, total,
             wbToClient, wbFromClient, wbToClientMoney, wbFromClientMoney,
             ownMoney, wbMoney, transitMoney, totalMoney,
+            reservedTotal, reservedMoney,
             factoryTotal, vehicleFormingTotal, vehicleTransitTotal,
             factoryMoney, vehicleFormingMoney, vehicleTransitMoney,
             variantTotal, variantMoney,
@@ -748,12 +802,58 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 c.push({
                     key: `own_${wh}`,
                     label: `${wh}`,
-                    headerTitle: `Товар физически на складе «${wh}» (наш/фулфилмент), включая резерв под заявки`,
+                    headerTitle: `Товар физически на складе «${wh}» (наш/фулфилмент), включая то, что уже разобрано в заявки на сборку — см. колонку «В сборке на ФФ»`,
                     align: 'right',
                     getValue: (row: UnifiedStockRow) => getSortVal(row.warehouses[wh] || 0, row),
                     render: (_: unknown, row: UnifiedStockRow) => fmtVal(row.warehouses[wh] || 0, row),
                 });
             }
+
+            // Разбивка физического ФФ-остатка: сколько уже занято заявками на сборку
+            // и сколько реально свободно. Обе колонки — часть total_own, поэтому
+            // «Итого» они не меняют (иначе был бы двойной счёт).
+            c.push({
+                key: 'reserved',
+                label: 'В сборке на ФФ',
+                headerTitle: 'Лежит на наших складах, но уже разобрано в активные заявки на сборку (черновик / в работе / готова / машина назначена). Входит в колонки складов и в «Итого» — это не отдельный товар, а часть остатка ФФ. Клик по цифре — в каких заявках лежит',
+                headerWrap: true,
+                align: 'right',
+                sortable: true,
+                getValue: (row: UnifiedStockRow) => getSortVal(row.reserved || 0, row),
+                render: (_: unknown, row: UnifiedStockRow) => {
+                    const v = row.reserved || 0;
+                    if (v <= 0) return DASH;
+                    const isOpen = expandedReserved.has(row.nomenclature_id);
+                    return (
+                        <div>
+                            <span
+                                onClick={(e) => { e.stopPropagation(); toggleReserved(row.nomenclature_id); }}
+                                style={{ color: 'var(--color-warning)', fontWeight: 500, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                            >
+                                {fmtVal(v, row)} {isOpen ? '▾' : '▸'}
+                            </span>
+                            {isOpen && <ReservedDetailRow row={row} />}
+                        </div>
+                    );
+                },
+            });
+            c.push({
+                key: 'own_free',
+                label: 'Свободно на ФФ',
+                headerTitle: 'Наши склады минус то, что уже в заявках на сборку — реально доступно под новые заявки. Минус означает, что заявки держат больше, чем есть на остатке',
+                headerWrap: true,
+                align: 'right',
+                sortable: true,
+                getValue: (row: UnifiedStockRow) =>
+                    getSortVal((row.total_own || 0) - (row.reserved || 0), row),
+                render: (_: unknown, row: UnifiedStockRow) => {
+                    // Не зажимаем в ноль: отрицательное «свободно» — реальная
+                    // аномалия (перебронь), её надо видеть, а не прятать.
+                    const v = (row.total_own || 0) - (row.reserved || 0);
+                    if (v >= 0) return fmtVal(v, row);
+                    return <span style={{ color: 'var(--color-danger)' }} title="Заявки держат больше, чем есть на остатке">{fmtVal(v, row)}</span>;
+                },
+            });
         }
 
         // WB stocks — always shown
@@ -864,7 +964,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         }
 
         return c;
-    }, [ownWarehouses, wbWarehouses, expanded, mode, fmtVal, getSortVal, isGrouped, groupBy, getTrendData, getVariantTotal, showOwn, showFactory, showVehicles]);
+    }, [ownWarehouses, wbWarehouses, expanded, expandedReserved, mode, fmtVal, getSortVal, isGrouped, groupBy, getTrendData, getVariantTotal, showOwn, showFactory, showVehicles]);
 
     // Helper: factory cell content (always ≈ in cost mode, using cost_factory_unit)
     const fmtFactoryCell = useCallback((fq: number, row: UnifiedStockRow): React.ReactNode => {
@@ -945,6 +1045,12 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 {showOwn && (
                     <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(row.total_own || 0, cost, row)}</td>
                 )}
+                {showOwn && (
+                    <td style={{ textAlign: 'right', whiteSpace: 'nowrap', color: 'var(--color-warning)' }}>{fmtGroupVal(row.reserved || 0, cost, row)}</td>
+                )}
+                {showOwn && (
+                    <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(((row.total_own || 0) - (row.reserved || 0)), cost, row)}</td>
+                )}
                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(row.total_wb || 0, cost, row)}</td>
                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(row.wb_in_way_to_client || 0, cost, row)}</td>
                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(row.wb_in_way_from_client || 0, cost, row)}</td>
@@ -977,7 +1083,9 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                             <th title="Прибыль ÷ реализация за выбранный период" style={{ textAlign: 'right' }}>Маржа %</th>
                             <th title="На сколько дней хватит остатка при текущем темпе заказов (Итого ÷ тренд шт/д)" style={{ textAlign: 'right' }}>Запас дн</th>
                             <th title="Суммарный остаток по выбранному виду" style={{ textAlign: 'right' }}>Итого</th>
-                            {showOwn && <th title="Товар физически на наших/фулфилмент складах" style={{ textAlign: 'right' }}>Свои</th>}
+                            {showOwn && <th title="Товар физически на наших/фулфилмент складах (включая то, что уже разобрано в заявки на сборку)" style={{ textAlign: 'right' }}>Свои</th>}
+                            {showOwn && <th title="Часть «Своих», уже разобранная в активные заявки на сборку (черновик / в работе / готова / машина назначена)" style={{ textAlign: 'right' }}>В сборке на ФФ</th>}
+                            {showOwn && <th title="«Свои» минус «В сборке на ФФ» — реально свободно под новые заявки" style={{ textAlign: 'right' }}>Свободно на ФФ</th>}
                             <th title="Физически на складах WB — как «Всего находится на складах» в кабинете" style={{ textAlign: 'right' }}>WB</th>
                             <th title="Заказы едут от склада WB к покупателям. Невыкупленное вернётся на склад WB" style={{ textAlign: 'right' }}>В пути до получателей</th>
                             <th title="Возвраты от покупателей — едут обратно на склад WB" style={{ textAlign: 'right' }}>Возвраты на склад WB</th>
@@ -1003,6 +1111,18 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                             {showOwn && (
                                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                     {mode === 'qty' ? formatNumber(totals.ownTotal, 0) : formatNumber(totals.ownMoney) + '\u00A0\u20BD'}
+                                </td>
+                            )}
+                            {showOwn && (
+                                <td style={{ textAlign: 'right', whiteSpace: 'nowrap', color: 'var(--color-warning)' }}>
+                                    {mode === 'qty' ? formatNumber(totals.reservedTotal, 0) : formatNumber(totals.reservedMoney) + '\u00A0\u20BD'}
+                                </td>
+                            )}
+                            {showOwn && (
+                                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                    {mode === 'qty'
+                                        ? formatNumber((totals.ownTotal - totals.reservedTotal), 0)
+                                        : formatNumber((totals.ownMoney - totals.reservedMoney)) + '\u00A0\u20BD'}
                                 </td>
                             )}
                             <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
@@ -1100,6 +1220,12 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                                         {showOwn && (
                                             <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(group.total_own || 0, cost, group as UnifiedStockRow)}</td>
                                         )}
+                                        {showOwn && (
+                                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap', color: 'var(--color-warning)' }}>{fmtGroupVal(group.reserved || 0, cost, group as UnifiedStockRow)}</td>
+                                        )}
+                                        {showOwn && (
+                                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(((group.total_own || 0) - (group.reserved || 0)), cost, group as UnifiedStockRow)}</td>
+                                        )}
                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(group.total_wb || 0, cost, group as UnifiedStockRow)}</td>
                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(group.wb_in_way_to_client || 0, cost, group as UnifiedStockRow)}</td>
                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(group.wb_in_way_from_client || 0, cost, group as UnifiedStockRow)}</td>
@@ -1174,6 +1300,12 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                                                         </td>
                                                         {showOwn && (
                                                             <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(child.total_own || 0, childCost, child as UnifiedStockRow)}</td>
+                                                        )}
+                                                        {showOwn && (
+                                                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap', color: 'var(--color-warning)' }}>{fmtGroupVal(child.reserved || 0, childCost, child as UnifiedStockRow)}</td>
+                                                        )}
+                                                        {showOwn && (
+                                                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(((child.total_own || 0) - (child.reserved || 0)), childCost, child as UnifiedStockRow)}</td>
                                                         )}
                                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(child.total_wb || 0, childCost, child as UnifiedStockRow)}</td>
                                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(child.wb_in_way_to_client || 0, childCost, child as UnifiedStockRow)}</td>
@@ -1640,6 +1772,18 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                                     </td>
                                 );
                             })}
+                            {showOwn && (
+                                <td style={{ textAlign: 'right', whiteSpace: 'nowrap', color: 'var(--color-warning)' }}>
+                                    {mode === 'qty' ? formatNumber(totals.reservedTotal, 0) : formatNumber(totals.reservedMoney) + '\u00A0\u20BD'}
+                                </td>
+                            )}
+                            {showOwn && (
+                                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                    {mode === 'qty'
+                                        ? formatNumber((totals.ownTotal - totals.reservedTotal), 0)
+                                        : formatNumber((totals.ownMoney - totals.reservedMoney)) + '\u00A0\u20BD'}
+                                </td>
+                            )}
                             <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                 {mode === 'qty' ? formatNumber(totals.wbTotal, 0) : formatNumber(totals.wbMoney) + '\u00A0\u20BD'}
                             </td>
