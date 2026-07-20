@@ -386,7 +386,7 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
                                                         <td style={{ ...tdLeft, ...TD_PAD, paddingLeft: 52 }}>
                                                             <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                                                                 <Link href={`/p/${slug}/ads-manager/campaign/${camp.campaign_id}`}
-                                                                    style={{ fontSize: 12, color: 'var(--color-accent)', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                                    style={{ fontWeight: 600, fontSize: 12, color: 'var(--color-accent)', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                                                     {camp.name || `#${camp.campaign_id}`}
                                                                 </Link>
                                                                 <span className={`badge ${STATUS_BADGE[camp.status] || 'badge-secondary'}`}
@@ -397,7 +397,7 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
                                                             </span>
                                                         </td>
                                                         {cols.map(c => (
-                                                            <td key={c.key} style={{ ...tdStyle, ...TD_PAD, borderLeft: c.blockStart ? BLOCK_DIVIDER : undefined, color: '#6b7280' }}>
+                                                            <td key={c.key} style={{ ...tdStyle, ...TD_PAD, borderLeft: c.blockStart ? BLOCK_DIVIDER : undefined }}>
                                                                 {c.key === 'spend' ? fmt(camp.spend)
                                                                     : c.key === 'views' ? fmt(camp.views)
                                                                         : c.key === 'clicks' ? fmt(camp.clicks)
