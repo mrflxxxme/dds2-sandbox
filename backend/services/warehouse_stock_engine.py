@@ -264,6 +264,70 @@ async def _get_reserved_map_batch(
     return all_reserved
 
 
+async def _get_reserved_detail_batch(
+    db: AsyncSession, project_id: int, warehouse_ids: set[int]
+) -> dict[int, list[dict]]:
+    """Резерв с сохранением ЗАЯВКИ: {nomenclature_id: [{request_id, number, status,
+    warehouse_id, quantity}]}.
+
+    Зеркало _get_reserved_map_batch (тот же join, тот же фильтр статусов, тот же
+    намеренно исключённый PRE_DISTRIBUTED), но без схлопывания по заявке — питает
+    раскрывающуюся колонку «В сборке на ФФ» на «Единых остатках». Агрегат резерва
+    вызывающий код получает суммированием этих же строк, вторым запросом ходить
+    не нужно.
+    """
+    if not warehouse_ids:
+        return {}
+    result = await db.execute(
+        select(
+            AssemblyRequest.id,
+            AssemblyRequest.number,
+            AssemblyRequest.status,
+            AssemblyRequest.warehouse_id,
+            AssemblyRequestItem.nomenclature_id,
+            func.sum(AssemblyRequestItem.quantity).label("quantity"),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.warehouse_id.in_(warehouse_ids),
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.status.in_(
+                [
+                    AssemblyStatus.PENDING,
+                    AssemblyStatus.IN_PROGRESS,
+                    AssemblyStatus.READY,
+                    AssemblyStatus.VEHICLE_ASSIGNED,
+                ]
+            ),
+        )
+        .group_by(
+            AssemblyRequest.id,
+            AssemblyRequest.number,
+            AssemblyRequest.status,
+            AssemblyRequest.warehouse_id,
+            AssemblyRequestItem.nomenclature_id,
+        )
+        # Лимита здесь СОЗНАТЕЛЬНО нет: из этих же строк выводится агрегат
+        # «В сборке на ФФ», и усечение молча занизило бы саму цифру (а без
+        # ORDER BY — ещё и недетерминированно). Зеркалит _get_reserved_map_batch,
+        # который тоже без лимита. Выборка узкая: только активные статусы —
+        # на реальных данных это сотни строк, не тысячи.
+    )
+    details: dict[int, list[dict]] = {}
+    for row in result.all():
+        details.setdefault(row.nomenclature_id, []).append(
+            {
+                "request_id": row.id,
+                "number": row.number,
+                "status": row.status.value if hasattr(row.status, "value") else str(row.status),
+                "warehouse_id": row.warehouse_id,
+                "quantity": int(row.quantity or 0),
+            }
+        )
+    return details
+
+
 async def get_warehouse_stock(db: AsyncSession, project_id: int, warehouse_id: int) -> list[dict]:
     """Get current stock for a warehouse, enriched with reserved/available."""
     result = await db.execute(
@@ -1494,11 +1558,10 @@ async def get_unified_stock_summary(
 
     # 5. Reserved from active assembly requests (all warehouses)
     wh_ids = {row.warehouse_id for row in own_rows}
-    batch_reserved = await _get_reserved_map_batch(db, project_id, wh_ids)
-    all_reserved: dict[int, int] = {}  # nomenclature_id -> total reserved
-    for wh_map in batch_reserved.values():
-        for nom_id, qty in wh_map.items():
-            all_reserved[nom_id] = all_reserved.get(nom_id, 0) + qty
+    reserved_details = await _get_reserved_detail_batch(db, project_id, wh_ids)
+    all_reserved: dict[int, int] = {  # nomenclature_id -> total reserved
+        nom_id: sum(d["quantity"] for d in rows) for nom_id, rows in reserved_details.items()
+    }
 
     # 6. Nomenclature details (include article_wb for BDR nm_id mapping)
     all_nom_ids: set[int] = set()
@@ -1648,6 +1711,7 @@ async def get_unified_stock_summary(
                 "wb_stocks": {},
                 "in_transit": 0,
                 "reserved": 0,
+                "reserved_details": [],
                 "total_own": 0,
                 "total_wb": 0,
                 "wb_in_way_to_client": 0,
@@ -1714,10 +1778,18 @@ async def get_unified_stock_summary(
         entry = _ensure(nom_id)
         entry["in_transit"] = qty
 
-    # Reserved
+    # Reserved (+ разбивка по заявкам для раскрывающейся ячейки)
     for nom_id, qty in all_reserved.items():
         if nom_id in unified:
             unified[nom_id]["reserved"] = qty
+            unified[nom_id]["reserved_details"] = sorted(
+                (
+                    {**d, "warehouse_name": wh_name_map.get(d["warehouse_id"], str(d["warehouse_id"]))}
+                    for d in reserved_details.get(nom_id, ())
+                ),
+                key=lambda d: d["quantity"],
+                reverse=True,
+            )
 
     # Factory orders (remaining)
     for nom_id, qty in factory_map.items():
@@ -1821,6 +1893,8 @@ async def _group_unified(
             "wb_in_way_to_client": 0,
             "wb_in_way_from_client": 0,
             "in_transit": 0,
+            "reserved": 0,
+            "reserved_details": [],
             "total": 0,
             "factory_qty": 0,
             "vehicle_forming_qty": 0,
@@ -1854,6 +1928,7 @@ async def _group_unified(
             "wb_in_way_to_client",
             "wb_in_way_from_client",
             "in_transit",
+            "reserved",
             "total",
             "factory_qty",
             "vehicle_forming_qty",
@@ -1886,8 +1961,21 @@ async def _group_unified(
             g["warehouses"][wh_name] = g["warehouses"].get(wh_name, 0) + qty
         for wh_name, qty in row.get("wb_stocks", {}).items():
             g["wb_stocks"][wh_name] = g["wb_stocks"].get(wh_name, 0) + qty
+        # Одна заявка держит несколько SKU группы — склеиваем по заявке, иначе
+        # в раскрытой ячейке один и тот же ASM-номер повторится N раз.
+        for d in row.get("reserved_details", ()):
+            g["_reserved_by_request"] = g.get("_reserved_by_request", {})
+            acc = g["_reserved_by_request"].get(d["request_id"])
+            if acc is None:
+                g["_reserved_by_request"][d["request_id"]] = {**d}
+            else:
+                acc["quantity"] += d["quantity"]
 
     def _finalize(g: dict) -> None:
+        by_request = g.pop("_reserved_by_request", {})
+        g["reserved_details"] = sorted(
+            by_request.values(), key=lambda d: d["quantity"], reverse=True
+        )
         for field, s, w in [
             ("avg_cost", "_cost_sum", "_cost_weight"),
             ("avg_price", "_price_sum", "_price_weight"),
