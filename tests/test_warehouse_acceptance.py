@@ -244,6 +244,59 @@ class TestRedistributeBlockedQty:
         assert "Подольск" not in new_dist
         assert moves[0]["to_warehouse"] == "Коледино"
 
+    def test_excluded_receiver_skipped_next_open_chosen(self):
+        """excluded_warehouses («Настройки складов») режут ПОЛУЧАТЕЛЕЙ: крупнейший
+        открытый ЦФО-склад исключён → qty закрытого едет в следующий открытый.
+        Сам excluded-склад из плана юзера при этом НЕ вычищается."""
+        dist = {"Коледино": 50, "Электросталь": 20, "Подольск": 10}
+        avail = {
+            "Коледино": {"can_box": True, "can_monopallet": True},
+            "Электросталь": {"can_box": True, "can_monopallet": True},
+            "Подольск": {"can_box": False, "can_monopallet": False},
+        }
+        new_dist, moves = redistribute_blocked_qty(dist, avail, "BOX", excluded={"Коледино"})
+        assert new_dist == {"Коледино": 50, "Электросталь": 30}
+        assert moves[0]["to_warehouse"] == "Электросталь"
+
+    def test_excluded_district_anchor_falls_back_to_center(self):
+        """Единственный открытый сосед по ФО исключён → консолидация в центр,
+        а НЕ на исключённый якорь округа."""
+        dist = {"Электросталь": 5, "Краснодар": 7}
+        avail = {
+            "Электросталь": {"can_box": False, "can_monopallet": True},
+            "Краснодар": {"can_box": False, "can_monopallet": False},
+            "Невинномысск": {"can_box": False, "can_monopallet": True},  # open в Юге, но excluded
+        }
+        new_dist, moves = redistribute_blocked_qty(dist, avail, "MONOPALLET", excluded={"Невинномысск"})
+        assert new_dist == {"Электросталь": 12}
+        assert moves[0]["to_warehouse"] == "Электросталь"
+        assert moves[0]["reason"] == "consolidated_to_center"
+
+    def test_all_receivers_excluded_drops_qty(self):
+        """Все открытые получатели исключены → qty закрытого дропается (to=None),
+        НЕ едет на excluded; открытый excluded-склад из плана юзера остаётся."""
+        dist = {"Коледино": 10, "Подольск": 5}
+        avail = {
+            "Коледино": {"can_box": True, "can_monopallet": True},
+            "Подольск": {"can_box": False, "can_monopallet": False},
+        }
+        new_dist, moves = redistribute_blocked_qty(dist, avail, "BOX", excluded={"Коледино"})
+        assert new_dist == {"Коледино": 10}
+        assert moves[0]["to_warehouse"] is None
+        assert moves[0]["reason"] == "closed_no_open_anywhere"
+
+    def test_excluded_matched_canonically(self):
+        """Excluded-имена матчатся в каноне (_normalize_acceptance_wh): сырое
+        WB-имя «Склад Владивосток» в настройках исключает канон «Владивосток»."""
+        dist = {"Подольск": 5}
+        avail = {
+            "Подольск": {"can_box": False, "can_monopallet": False},
+            "Владивосток": {"can_box": True, "can_monopallet": True},
+        }
+        new_dist, moves = redistribute_blocked_qty(dist, avail, "BOX", excluded={"Склад Владивосток"})
+        assert new_dist == {}
+        assert moves[0]["to_warehouse"] is None
+
 
 class TestNoLimitWhitelistRedistribution:
     """⌛ (нет лимита приёмки) + whitelist предзаявки: товар на ⌛-склад НЕ из
@@ -571,6 +624,34 @@ class TestSplitDistributionByPackageType:
         dist = {"Подольск": 5}
         avail = {"Подольск": {"can_box": False, "can_monopallet": False, "can_supersafe": False}}
         splits, moves = _split_distribution_by_package_type(dist, avail)
+        assert splits == []
+        assert moves[0]["to_warehouse"] is None
+        assert moves[0]["reason"] == "closed_no_open_anywhere"
+
+    def test_excluded_not_in_consolidation_pools(self):
+        """excluded_warehouses не попадают в open_central/open_globally: закрытый
+        склад консолидируется в НЕ-исключённый центральный, а excluded-склад из
+        плана юзера остаётся в своём split'е нетронутым."""
+        dist = {"Электросталь": 5, "Подольск": 3}
+        avail = {
+            "Электросталь": {"can_box": True, "can_monopallet": False, "can_supersafe": False},
+            "Коледино": {"can_box": True, "can_monopallet": False, "can_supersafe": False},
+            "Подольск": {"can_box": False, "can_monopallet": False, "can_supersafe": False},
+        }
+        splits, moves = _split_distribution_by_package_type(dist, avail, excluded={"Электросталь"})
+        box_split = next(s for s in splits if s["package_type"] == "BOX")
+        assert box_split["distribution"] == {"Электросталь": 5, "Коледино": 3}
+        assert any(m["from_warehouse"] == "Подольск" and m["to_warehouse"] == "Коледино" for m in moves)
+
+    def test_all_consolidation_targets_excluded_drops(self):
+        """Все открытые склады исключены → qty закрытого дропается (to=None),
+        НЕ едет на excluded."""
+        dist = {"Подольск": 3}
+        avail = {
+            "Электросталь": {"can_box": True, "can_monopallet": False, "can_supersafe": False},
+            "Подольск": {"can_box": False, "can_monopallet": False, "can_supersafe": False},
+        }
+        splits, moves = _split_distribution_by_package_type(dist, avail, excluded={"Электросталь"})
         assert splits == []
         assert moves[0]["to_warehouse"] is None
         assert moves[0]["reason"] == "closed_no_open_anywhere"
@@ -1030,6 +1111,20 @@ def acceptance_env(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_coef_missing_snapshot_cached_short(acceptance_env):
+    """Коэффициенты не загрузились ([]) → пер-баркод снимок (can_X без meta) кэшируется
+    КОРОТКО (COEF_MISSING_CACHE_TTL_SECONDS), не на 10 мин: выпечка «can_box, дней 0»
+    демотировала на фронте целые черновики в предбронь (прод 2026-07-17)."""
+    svc, fake_redis = acceptance_env
+    await svc.check_acceptance_and_redistribute(
+        None, 42, [{"nm_id": 1, "barcode": "BC1", "distribution": {"Коледино": 5}}]
+    )
+    bc_keys = [k for k in fake_redis.ttls if "BC1" in k]
+    assert bc_keys, "пер-баркод кэш должен быть записан"
+    assert all(fake_redis.ttls[k] == svc.COEF_MISSING_CACHE_TTL_SECONDS for k in bc_keys)
+
+
+@pytest.mark.asyncio
 async def test_same_barcodes_second_call_is_pure_cache_hit(acceptance_env):
     """Смена количеств/распределения НЕ дёргает WB: флаги — уровня баркод×склад."""
     svc, _ = acceptance_env
@@ -1088,6 +1183,60 @@ async def test_force_refetches_all_and_rewarms_cache(acceptance_env):
 
 
 @pytest.mark.asyncio
+async def test_excluded_warehouse_never_receives_redistributed_qty(acceptance_env, monkeypatch):
+    """Перераспределение НЕ шлёт на склад из excluded_warehouses («Настройки
+    складов»): закрытый Подольск едет в Коледино, а не в исключённую (но
+    открытую по WB) Электросталь. Работает и на живом вызове, и на cache-hit."""
+    svc, _ = acceptance_env
+
+    async def fbw_two(self):
+        return [{"ID": 507, "name": "Коледино"}, {"ID": 120, "name": "Электросталь"}]
+
+    async def options_two(self, items):
+        self.options_calls.append(items)
+        return {
+            "result": [
+                {
+                    "barcode": it["barcode"],
+                    "warehouses": [
+                        {"warehouseID": 507, "canBox": True, "canMonopallet": False, "canSupersafe": False},
+                        {"warehouseID": 120, "canBox": True, "canMonopallet": False, "canSupersafe": False},
+                    ],
+                }
+                for it in items
+            ]
+        }
+
+    monkeypatch.setattr(_FakeWBClient, "get_fbw_warehouses", fbw_two)
+    monkeypatch.setattr(_FakeWBClient, "get_acceptance_options", options_two)
+
+    import backend.services.settings_service as settings_service
+
+    async def fake_excluded(db, project_id):
+        return ["Электросталь"]
+
+    monkeypatch.setattr(settings_service, "get_excluded_warehouses", fake_excluded)
+
+    class _FakeDB:
+        """db нужен не-None, чтобы сработала загрузка excluded; commit — no-op."""
+
+        async def commit(self):
+            return None
+
+    items = [{"nm_id": 1, "barcode": "BC-EXCL", "distribution": {"Подольск": 5}}]
+    r1 = await svc.check_acceptance_and_redistribute(_FakeDB(), 42, items)
+    move = r1["moves"][0]
+    assert move["from_warehouse"] == "Подольск"
+    assert move["to_warehouse"] == "Коледино"  # НЕ excluded Электросталь
+    assert "Электросталь" not in r1["items"][0]["distribution"]
+
+    # Cache-hit путь обязан фильтровать так же.
+    r2 = await svc.check_acceptance_and_redistribute(_FakeDB(), 42, items)
+    assert r2["cache_hit"] is True
+    assert r2["moves"][0]["to_warehouse"] == "Коледино"
+
+
+@pytest.mark.asyncio
 async def test_unknown_barcode_negative_cached(acceptance_env):
     """WB не вернул баркод (новинка без карточки) → кэшируем пустую доступность,
     повторные проверки НЕ дёргают WB, warning сохраняется."""
@@ -1104,9 +1253,15 @@ async def test_unknown_barcode_negative_cached(acceptance_env):
 
 
 @pytest.mark.asyncio
-async def test_cache_ttl_is_10_minutes(acceptance_env):
-    """TTL пер-баркод кэша = 600с (обновление раз в 10 минут по требованию)."""
+async def test_cache_ttl_is_10_minutes(acceptance_env, monkeypatch):
+    """TTL пер-баркод кэша = 600с (обновление раз в 10 минут по требованию) —
+    при ЗАГРУЖЕННЫХ коэффициентах (иначе короткий TTL, см. coef_missing-тест)."""
     svc, fake_redis = acceptance_env
+
+    async def coef_ok(self):
+        return [{"warehouseID": 507, "boxTypeID": 2, "coefficient": 0, "allowUnload": True}]
+
+    monkeypatch.setattr(_FakeWBClient, "get_acceptance_coefficients", coef_ok)
     await svc.check_acceptance_and_redistribute(
         None, 42, [{"nm_id": 1, "barcode": "BC1", "distribution": {"Коледино": 5}}]
     )

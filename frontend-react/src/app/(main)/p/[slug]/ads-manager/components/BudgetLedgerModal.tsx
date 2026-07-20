@@ -15,7 +15,7 @@ const KIND_LABEL: Record<BudgetLedgerEntry['kind'], string> = {
 
 /** Модалка «История бюджета»: две вкладки — «Пополнения» (+) и «Списания» (−) из данных, парсимых
  *  из WB (рост бюджета кампании, пополнения счёта кабинета, списания). По кампании или по всем сразу. */
-export default function AutopayLogModal({ campaign, onClose }: {
+export default function BudgetLedgerModal({ campaign, onClose }: {
     campaign: AdsManagerCampaign;
     onClose: () => void;
 }) {

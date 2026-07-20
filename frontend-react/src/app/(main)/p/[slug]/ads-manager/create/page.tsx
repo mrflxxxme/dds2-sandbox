@@ -5,10 +5,10 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
-import type { AdsAutopaySetting } from '@/types/api';
+import type { AdsScheduleSetting } from '@/types/api';
 import { IcX } from '../components/icons';
-import { DEFAULT_AUTOPAY, buildAutoCampaignName } from '../components/adsShared';
-import AutopaySettingsModal from '../components/AutopaySettingsModal';
+import { DEFAULT_SCHEDULE, scheduleLabel, buildAutoCampaignName } from '../components/adsShared';
+import ScheduleModal from '../components/ScheduleModal';
 import AddProductsModal from '../components/AddProductsModal';
 import BulkCreate from '../components/BulkCreate';
 import EditableName from '../components/EditableName';
@@ -28,7 +28,7 @@ function defaultName(): string {
 }
 
 /** Раздел создания рекламной кампании (по кабинету WB Продвижение).
- *  Один вызов save-ad создаёт кампанию; бюджет и автопополнение применяются следом. */
+ *  Один вызов save-ad создаёт кампанию; бюджет и пауза по расписанию применяются следом. */
 export default function CreateCampaignPage() {
     const routeParams = useParams();
     const router = useRouter();
@@ -50,8 +50,8 @@ export default function CreateCampaignPage() {
     const [bidSearch, setBidSearch] = useState('150');
     const [bidRec, setBidRec] = useState('150');
     const [budget, setBudget] = useState('3000');
-    const [autopay, setAutopay] = useState<AdsAutopaySetting | null>(null);
-    const [autopayOpen, setAutopayOpen] = useState(false);
+    const [schedule, setSchedule] = useState<AdsScheduleSetting | null>(null);
+    const [scheduleOpen, setScheduleOpen] = useState(false);
 
     // Товары
     const [pickerOpen, setPickerOpen] = useState(false);
@@ -132,9 +132,9 @@ export default function CreateCampaignPage() {
                 }
             } catch { stepErrors.push('ставки зон не применились'); }
 
-            // 4. Автопополнение
-            try { if (autopay?.enabled) await api.setCampaignAutopay(id, autopay); }
-            catch { stepErrors.push('автопополнение не настроилось'); }
+            // 4. Пауза по расписанию
+            try { if (schedule?.enabled) await api.setCampaignSchedule(id, schedule); }
+            catch { stepErrors.push('пауза по расписанию не настроилась'); }
 
             if (stepErrors.length) toast.warning(`Кампания создана, но: ${stepErrors.join('; ')}. Донастройте на странице кампании.`);
             else toast.success('Кампания создана');
@@ -172,7 +172,7 @@ export default function CreateCampaignPage() {
                     </div>
                 </div>
 
-                {/* Бюджет + автопополнение */}
+                {/* Бюджет + пауза по расписанию */}
                 <div style={card}>
                     <h2 style={h2}>Бюджет</h2>
                     <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start', flexWrap: 'wrap' }}>
@@ -184,10 +184,10 @@ export default function CreateCampaignPage() {
                         </div>
                         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 9, marginTop: 22 }}>
                             {/* Тумблер переключает: выкл (сброс настройки) ↔ вкл (через модалку). Текст всегда открывает модалку. */}
-                            <Switch on={!!autopay?.enabled} ariaLabel="Автопополнение вкл/выкл"
-                                onClick={() => autopay?.enabled ? setAutopay(null) : setAutopayOpen(true)} />
-                            <button onClick={() => setAutopayOpen(true)} style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 14, color: 'var(--color-accent)' }}>
-                                Автопополнение бюджета{autopay?.enabled ? ` · ${formatNumber(autopay.amount, 0)} ₽` : ''}
+                            <Switch on={!!schedule?.enabled} ariaLabel="Пауза по расписанию вкл/выкл"
+                                onClick={() => schedule?.enabled ? setSchedule(null) : setScheduleOpen(true)} />
+                            <button onClick={() => setScheduleOpen(true)} style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 14, color: 'var(--color-accent)' }}>
+                                Пауза по расписанию{schedule?.enabled ? ` · ${scheduleLabel(schedule)} МСК` : ''}
                             </button>
                         </div>
                     </div>
@@ -262,11 +262,11 @@ export default function CreateCampaignPage() {
                     <Link href={`/p/${slug}/ads-manager`} className="btn btn-secondary" style={{ fontSize: 14 }}>Отмена</Link>
                 </div>
 
-                {autopayOpen && (
-                    <AutopaySettingsModal
-                        initial={autopay ?? { ...DEFAULT_AUTOPAY, amount: Math.max(MIN_BUDGET, budgetNum) }}
-                        onClose={() => setAutopayOpen(false)}
-                        onSave={s => { setAutopay(s); setAutopayOpen(false); }}
+                {scheduleOpen && (
+                    <ScheduleModal
+                        initial={schedule ?? DEFAULT_SCHEDULE}
+                        onClose={() => setScheduleOpen(false)}
+                        onSave={s => { setSchedule(s); setScheduleOpen(false); }}
                     />
                 )}
                 {pickerOpen && (

@@ -118,7 +118,7 @@ class DraftEventLog(BaseModel):
     `AssemblyDraftEvent` для отката. PUT без события не логируется. COMMIT логируется
     отдельно в `commit_draft` (не через этот путь)."""
 
-    event_type: Literal["PREBOOK_TOPUP", "MATRIX_WRITE", "MATRIX_EDIT", "AUTO_SYNC"]
+    event_type: Literal["PREBOOK_TOPUP", "MATRIX_WRITE", "MATRIX_EDIT", "AUTO_SYNC", "ACCEPTANCE_SYNC"]
     summary: str | None = None
 
 

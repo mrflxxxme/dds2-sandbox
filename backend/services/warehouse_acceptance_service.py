@@ -81,6 +81,10 @@ def _is_spec_acceptance_wh(name: str | None) -> bool:
 logger = logging.getLogger("dds.warehouse_acceptance")
 
 CACHE_TTL_SECONDS = 600  # 10 min пер-баркод — WB rate limit 6 req/min, флаги меняются редко
+# Снимок без коэффициентов (429/сбой загрузки → meta=None у всех складов) — только
+# короткий кэш: 10-минутная выпечка «can_box=true, дней 0» демотировала на фронте
+# целые черновики в предбронь (откат ручных дозаборов, прод 2026-07-17).
+COEF_MISSING_CACHE_TTL_SECONDS = 60
 WAREHOUSE_NAMES_CACHE_TTL = 3600  # 1 hour — IDs are stable
 COEFFICIENTS_CACHE_TTL = 3600  # 1 hour — WB обновляет ~раз в день в 03:00 МСК
 
@@ -428,6 +432,7 @@ def _split_distribution_by_package_type(
     *,
     min_pack: int = 5,
     preorder_allowed: set[str] | None = None,
+    excluded: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[list[dict], list[dict]]:
     """Split a single SKU distribution into per-package-type sub-assemblies.
 
@@ -471,17 +476,22 @@ def _split_distribution_by_package_type(
         by_type[pkg][wh] = qty
 
     # Шаг 2: закрытые → consolidate-to-center (ЦФО), package_type выбирается
-    # по тому, что поддерживает склад-получатель.
+    # по тому, что поддерживает склад-получатель. Excluded-склады юзера
+    # («Настройки складов») в пулы получателей не попадают (см.
+    # redistribute_blocked_qty — та же семантика: только получатели).
+    excluded_canon = {_normalize_acceptance_wh(w) for w in excluded if w}
     open_central = [
         wh
         for wh in availability
         if warehouse_to_district(wh) == "central"
+        and _normalize_acceptance_wh(wh) not in excluded_canon
         and _best_package_type_for_wh(availability.get(wh), preorder_allowed, wh) is not None
     ]
     open_globally = [
         wh
         for wh in availability
-        if _best_package_type_for_wh(availability.get(wh), preorder_allowed, wh) is not None
+        if _normalize_acceptance_wh(wh) not in excluded_canon
+        and _best_package_type_for_wh(availability.get(wh), preorder_allowed, wh) is not None
     ]
     moves: list[dict] = []
     if closed:
@@ -538,6 +548,7 @@ def _split_distribution_by_package_type(
             pkg,
             min_pack=min_pack,
             preorder_allowed=preorder_allowed,
+            excluded=excluded_canon,
         )
         # Накапливаем move'ы из под-redistribute (обычно пусто — это safety-net)
         moves.extend(sub_moves)
@@ -565,8 +576,14 @@ def redistribute_blocked_qty(
     mode: str = "consolidate_to_center",
     min_pack: int = 5,
     preorder_allowed: set[str] | None = None,
+    excluded: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[dict[str, int], list[dict]]:
     """Move qty away from warehouses that don't accept this package_type.
+
+    `excluded` — исключённые юзером склады («Настройки складов» →
+    excluded_warehouses): режут только ПОЛУЧАТЕЛЕЙ перераспределения. Склад из
+    `distribution` — план юзера, его не трогаем, даже если он в excluded.
+    Матч имён — в каноне `_normalize_acceptance_wh`.
 
     Modes:
       "consolidate_to_center" (default): qty закрытого склада идёт в крупнейший
@@ -601,12 +618,17 @@ def redistribute_blocked_qty(
     new_dist = {w: q for w, q in distribution.items() if w in open_set}
     moves: list[dict] = []
 
+    # Получатели = открытые минус excluded (fail-open: пусто → to=None/drop ниже,
+    # qty НЕ едет на исключённый склад).
+    excluded_canon = {_normalize_acceptance_wh(w) for w in excluded if w}
+    recipients = {w for w in open_set if _normalize_acceptance_wh(w) not in excluded_canon}
+
     # Indexed by district for O(1) destination lookup
     open_by_district: dict[str, list[str]] = defaultdict(list)
-    for w in open_set:
+    for w in recipients:
         open_by_district[warehouse_to_district(w)].append(w)
 
-    open_globally = sorted(open_set, key=lambda w: -new_dist.get(w, 0))
+    open_globally = sorted(recipients, key=lambda w: -new_dist.get(w, 0))
 
     # Для consolidate_to_center нам нужны открытые склады ЦФО (central).
     # Если их нет — fallback на open_globally.
@@ -1040,7 +1062,7 @@ async def check_acceptance_and_redistribute(
     # Whitelist «⌛ предзаявка без лимита»: склады, куда можно слать без публичного
     # лимита приёмки. Товар на ⌛-склад НЕ из whitelist перераспределяется на
     # свободный/whitelist склад по приоритету (см. _is_open_for / _pick_destination).
-    from backend.services.settings_service import get_preorder_allowed_warehouses
+    from backend.services.settings_service import get_excluded_warehouses, get_preorder_allowed_warehouses
 
     try:
         _allowed_raw = await get_preorder_allowed_warehouses(db, project_id)
@@ -1051,6 +1073,19 @@ async def check_acceptance_and_redistribute(
         # значило бы увести товар, который юзер, возможно, хотел предзаявить.
         logger.warning(f"acceptance.preorder_whitelist_load_failed: {e}")
         preorder_allowed = None
+
+    # Исключённые склады юзера («Настройки складов» → excluded_warehouses):
+    # перераспределение НЕ выбирает их получателями. Грузим строго ДО db.commit()
+    # ниже — он отпускает транзакцию ради pgbouncer-пула. db=None — юнит-тесты
+    # без БД; сбой загрузки → пустой set (как раньше, без фильтра), не ошибка
+    # всей проверки.
+    excluded_set: frozenset[str] = frozenset()
+    if db is not None:
+        try:
+            _excluded_raw = await get_excluded_warehouses(db, project_id)
+            excluded_set = frozenset(_normalize_acceptance_wh(w) for w in _excluded_raw if w)
+        except Exception as e:  # pragma: no cover — graceful degradation (settings load)
+            logger.warning(f"acceptance.excluded_warehouses_load_failed: {e}")
 
     redis = await get_redis() if _redis_client is None else _redis_client
 
@@ -1071,7 +1106,11 @@ async def check_acceptance_and_redistribute(
         # Distribution пересчитываем по СВЕЖИМ количествам запроса — кэш хранит
         # только availability.
         return _apply_distribution(
-            items, availability_per_barcode, cache_hit=True, preorder_allowed=preorder_allowed
+            items,
+            availability_per_barcode,
+            cache_hit=True,
+            preorder_allowed=preorder_allowed,
+            excluded=excluded_set,
         )
 
     # Live WB API call — только missing (при force=true это все баркоды батча).
@@ -1114,13 +1153,21 @@ async def check_acceptance_and_redistribute(
 
     if redis is not None:
         try:
+            # Коэффициенты не загрузились (WB 429/сбой) → у флагов meta=None: кэшируем
+            # коротко, чтобы отравленный снимок не жил 10 минут (фронт по нему не
+            # демотирует — см. checkedPkgWbs, — но и бейджи «N дн» гаснуть не должны).
+            ttl = CACHE_TTL_SECONDS if raw_coefficients else COEF_MISSING_CACHE_TTL_SECONDS
             for bc, av in fetched.items():
-                await redis.setex(_barcode_cache_key(project_id, bc), CACHE_TTL_SECONDS, json.dumps(av))
+                await redis.setex(_barcode_cache_key(project_id, bc), ttl, json.dumps(av))
         except Exception as e:  # pragma: no cover
             logger.warning(f"acceptance.cache_set_failed: {e}")
 
     return _apply_distribution(
-        items, availability_per_barcode, cache_hit=False, preorder_allowed=preorder_allowed
+        items,
+        availability_per_barcode,
+        cache_hit=False,
+        preorder_allowed=preorder_allowed,
+        excluded=excluded_set,
     )
 
 
@@ -1130,6 +1177,7 @@ def _apply_distribution(
     *,
     cache_hit: bool,
     preorder_allowed: set[str] | None = None,
+    excluded: frozenset[str] = frozenset(),
 ) -> dict:
     """Run pure split + redistribute over per-item distributions.
 
@@ -1163,7 +1211,7 @@ def _apply_distribution(
             continue
 
         splits, moves = _split_distribution_by_package_type(
-            distribution, availability, preorder_allowed=preorder_allowed
+            distribution, availability, preorder_allowed=preorder_allowed, excluded=excluded
         )
 
         for m in moves:

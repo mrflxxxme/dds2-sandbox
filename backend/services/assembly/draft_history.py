@@ -45,6 +45,7 @@ _SNAPSHOT_EVENTS: tuple[DraftEventType | str, ...] = (
     DraftEventType.MATRIX_WRITE,
     "MATRIX_EDIT",
     "AUTO_SYNC",
+    "ACCEPTANCE_SYNC",
     "REMOVE_ROWS",
 )
 _HISTORY_LIMIT = 200

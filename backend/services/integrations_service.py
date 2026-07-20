@@ -67,8 +67,10 @@ async def add_key(
     Returns dict with key info.
     Raises ValueError on validation failure.
     """
-    if service not in ("wb", "wb_advert", "wb_content", "ozon"):
-        raise ValueError(f"Unsupported service: {service}. Use 'wb', 'wb_advert', 'wb_content' or 'ozon'.")
+    if service not in ("wb", "wb_advert", "wb_content", "wb_feedbacks", "ozon"):
+        raise ValueError(
+            f"Unsupported service: {service}. Use 'wb', 'wb_advert', 'wb_content', 'wb_feedbacks' or 'ozon'."
+        )
 
     # Test connection before saving — different scope, different endpoint.
     if service == "wb":
@@ -100,16 +102,49 @@ async def add_key(
                 "Ключ без доступа «Контент». "
                 "Проверьте, что токен выпущен с категорией «Контент» и правом записи."
             )
+    elif service == "wb_feedbacks":
+        from backend.integrations.wb_api import check_feedbacks_scope
 
+        # Отдельный токен «Вопросы и отзывы» — резолвер отзывов берёт его первым.
+        # "unknown" (429/5xx/сеть) не блокирует сохранение — зеркало прочих проверок.
+        scope = await check_feedbacks_scope(api_key)
+        if scope == "no_scope":
+            raise ValueError(
+                "Ключ без доступа «Вопросы и отзывы». "
+                "Проверьте, что токен выпущен с категорией «Вопросы и отзывы»."
+            )
+
+    resolved_label = label or service.upper()
     encrypted = _encrypt(api_key)
-    key = IntegrationKey(
-        project_id=project_id,
-        service=service,
-        label=label or service.upper(),
-        encrypted_key=encrypted,
-        is_active=True,
-    )
-    db.add(key)
+
+    # UNIQUE (project_id, service, label) НЕ учитывает is_deleted → мягко-удалённая
+    # строка занимает слот. Ищем ВКЛЮЧАЯ удалённые и восстанавливаем/обновляем,
+    # иначе повторное добавление того же типа ключа падает IntegrityError (learnings).
+    existing = (
+        await db.execute(
+            select(IntegrationKey).where(
+                IntegrationKey.project_id == project_id,
+                IntegrationKey.service == service,
+                IntegrationKey.label == resolved_label,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if existing is not None:
+        existing.encrypted_key = encrypted
+        existing.is_active = True
+        if existing.is_deleted:
+            existing.restore()
+        key = existing
+    else:
+        key = IntegrationKey(
+            project_id=project_id,
+            service=service,
+            label=resolved_label,
+            encrypted_key=encrypted,
+            is_active=True,
+        )
+        db.add(key)
     await db.commit()
     await db.refresh(key)
 

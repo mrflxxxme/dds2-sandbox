@@ -31,7 +31,7 @@ from backend.scheduler.jobs.fulfillment_sync import sync_all_fulfillment_warehou
 from backend.scheduler.jobs.funnel import (
     ad_anomaly_check,
     ad_nm_backfill_tick,
-    ads_autopay_tick,
+    ads_schedule_tick,
     fast_backfill_tick,
     snapshot_ad_intraday_all_projects,
     sync_ad_campaigns_all_projects,
@@ -43,6 +43,7 @@ from backend.scheduler.jobs.funnel import (
     sync_funnel_hourly,
     sync_nomenclature_all_projects,
 )
+from backend.scheduler.jobs.draft_staleness_watch import check_all_projects_draft_staleness
 from backend.scheduler.jobs.health_check import health_monitor
 from backend.scheduler.jobs.heartbeat import heartbeat_ping
 from backend.scheduler.jobs.prewarm import prewarm_all_reports, prewarm_project  # noqa: F401
@@ -55,6 +56,7 @@ from backend.scheduler.jobs.wb_finance import (
 from backend.scheduler.jobs.cbr_bic_sync import sync_cbr_bic_directory
 from backend.scheduler.jobs.faktura_statement_sync import sync_all_projects_faktura_statements
 from backend.scheduler.jobs.wb_goods_returns_sync import sync_all_projects_wb_returns
+from backend.scheduler.jobs.wb_reviews_sync import sync_all_projects_wb_feedbacks
 from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
 from backend.scheduler.jobs.wb_prices_sync import sync_all_projects_wb_prices
 from backend.scheduler.jobs.measurements_digest import send_measurement_digests
@@ -147,12 +149,13 @@ def start_scheduler():
         misfire_grace_time=120,
     )
 
-    # Ads autopay: every 15 min — реальное пополнение бюджетов по настройкам
+    # Ads schedule: every 15 min — пауза/запуск кампаний по расписанию.
+    # Тик в :01 — сразу после штатного долива бюджетов ВБ в 00:00 МСК.
     _scheduler.add_job(
-        ads_autopay_tick,
+        ads_schedule_tick,
         trigger=CronTrigger(minute="1,16,31,46", timezone=MSK),
-        id="ads_autopay",
-        name="WB Ads Autopay (every 15min)",
+        id="ads_schedule",
+        name="WB Ads Schedule pause/start (every 15min)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=300,
@@ -365,6 +368,18 @@ def start_scheduler():
         misfire_grace_time=600,
     )
 
+    # Сторож черновиков сборки → TG: every hour (черновик без синка/правки >6ч
+    # или остатки WB старше 6ч; анти-спам — не чаще 1 алерта в 12ч на объект).
+    _scheduler.add_job(
+        check_all_projects_draft_staleness,
+        trigger=IntervalTrigger(hours=1),
+        id="draft_staleness_watch",
+        name="Draft staleness watch (hourly)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=600,
+    )
+
     # WB warehouse stocks snapshot: daily at 00:00 MSK
     _scheduler.add_job(
         sync_all_projects_wb_stocks,
@@ -439,6 +454,18 @@ def start_scheduler():
         trigger=CronTrigger(hour="8,20", minute=0, timezone=MSK),
         id="wb_goods_returns_sync",
         name="WB goods returns sync (08:00 + 20:00 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # WB customer feedbacks (отзывы): ночной прогон 03:15 MSK. Первый проход для
+    # проекта делает full backfill (тянет и архив WB), дальше — только активные.
+    _scheduler.add_job(
+        sync_all_projects_wb_feedbacks,
+        trigger=CronTrigger(hour=3, minute=15, timezone=MSK),
+        id="wb_feedbacks_sync",
+        name="WB feedbacks sync (03:15 MSK)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=3600,

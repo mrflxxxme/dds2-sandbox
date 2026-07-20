@@ -43,6 +43,7 @@ from backend.models.mixins import SoftDeleteMixin
 | Курсы валют | `services/fx_service.py` (`FxRate`) |
 | Мониторинг и health | `services/monitoring_service.py`, `health_check_service.py` |
 | География заказов | `services/order_geography_service.py` |
+| Вайбкодинг (телеметрия репозитория) | `services/vibe_service.py`, `routers/vibe.py`, `models/vibe.py` — БЕЗ `project_id` намеренно; доступ по строке в `vibe_authors`, ингест зовёт CI по SSH (не HTTP) |
 
 ## Ключевые модели
 | Модель | Файл | Назначение |

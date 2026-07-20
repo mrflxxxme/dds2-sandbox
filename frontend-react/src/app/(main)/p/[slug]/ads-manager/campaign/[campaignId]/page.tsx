@@ -5,7 +5,7 @@ import { formatNumber } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import type { AdsManagerCampaign, AdsAutopaySetting, CampaignClustersResponse, CampaignMetricRow, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionSnapshot, CampaignZones, SearchCluster } from '@/types/api';
+import type { AdsManagerCampaign, AdsScheduleSetting, CampaignClustersResponse, CampaignMetricRow, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionSnapshot, CampaignZones, SearchCluster } from '@/types/api';
 import { IcChart, IcClusters, IcCalendar, IcRefresh, IcPause, IcPlay, IcExternal, IcClock, IcGear, IcHistory, IcCopy } from '../../components/icons';
 import ClusterTable from '../../components/ClusterTable';
 import CampaignMetricsTable from '../../components/CampaignMetricsTable';
@@ -13,15 +13,15 @@ import CampaignZoneMetricsTable from '../../components/CampaignZoneMetricsTable'
 import CampaignHourlyChart from '../../components/CampaignHourlyChart';
 import CampaignIntradayChart from '../../components/CampaignIntradayChart';
 import CampaignMetricsChart, { DEFAULT_CHART_METRICS, type MetricKey } from '../../components/CampaignMetricsChart';
-import AutopayModal from '../../components/AutopayModal';
-import AutopayLogModal from '../../components/AutopayLogModal';
+import ScheduleModal from '../../components/ScheduleModal';
+import BudgetLedgerModal from '../../components/BudgetLedgerModal';
 import WbThumb from '../../components/WbThumb';
 import AdsPeriodPicker from '../../components/AdsPeriodPicker';
 import Tooltip from '../../components/Tooltip';
 import EditableName from '../../components/EditableName';
 import { useToast } from '../../components/Toasts';
 import ZonesPanel, { ZONES, zoneRuleText } from '../../components/ZonesPanel';
-import { fmt, iso, STATUS_BADGE, adTypeLabel, wbCampaignUrl, autopayLabel, humanizeAdsError } from '../../components/adsShared';
+import { fmt, iso, STATUS_BADGE, adTypeLabel, wbCampaignUrl, scheduleLabel, humanizeAdsError } from '../../components/adsShared';
 
 type CatalogEntry = { vendor_code: string; subject: string; brand: string };
 
@@ -37,14 +37,14 @@ export default function CampaignPage() {
     const [dateTo, setDateTo] = useState(iso(new Date()));
     const [reloadKey, setReloadKey] = useState(0);
 
-    // Кампания и её автопополнение — из общего списка (отдельного эндпоинта нет)
+    // Кампания и её расписание паузы — из общего списка (отдельного эндпоинта нет)
     const [campaign, setCampaign] = useState<AdsManagerCampaign | null>(null);
     const [campLoading, setCampLoading] = useState(true);
     const [campError, setCampError] = useState('');
-    const [autopay, setAutopay] = useState<Record<string, AdsAutopaySetting>>({});
+    const [schedule, setSchedule] = useState<Record<string, AdsScheduleSetting>>({});
     const [headerCollapsed, setHeaderCollapsed] = useState(false);
-    const [autopayModal, setAutopayModal] = useState(false);
-    const [autopayLogModal, setAutopayLogModal] = useState(false);
+    const [scheduleModal, setScheduleModal] = useState(false);
+    const [budgetLogModal, setBudgetLogModal] = useState(false);
     const [stateBusy, setStateBusy] = useState(false);
     const [refreshing, setRefreshing] = useState(false);  // живой догруз кампании из WB по «Обновить»
 
@@ -54,10 +54,10 @@ export default function CampaignPage() {
         if (!silent) setCampLoading(true);
         if (!silent) setCampError('');
         try {
-            const [list, ap] = await Promise.all([api.getAdCampaignsList(), api.getCampaignsAutopay().catch(() => ({}))]);
+            const [list, sched] = await Promise.all([api.getAdCampaignsList(), api.getCampaignsSchedule().catch(() => ({}))]);
             const found = list.find(c => c.campaign_id === campaignId) ?? null;
             setCampaign(found);
-            setAutopay(ap);
+            setSchedule(sched);
             if (!found && !silent) setCampError('Кампания не найдена. Возможно, она ещё не синхронизирована.');
         } catch (e) {
             if (!silent) setCampError(e instanceof Error ? e.message : 'Ошибка загрузки кампании');
@@ -521,14 +521,10 @@ export default function CampaignPage() {
         finally { setStateBusy(false); }
     };
 
-    const saveAutopay = async (s: AdsAutopaySetting) => {
-        const res = await api.setCampaignAutopay(campaignId, s);
-        setAutopay(res.settings);  // значение автопея (шестерёнка) — мгновенно из эхо-мапы
-        if (s.enabled) {
-            // включение автопея могло активировать кампанию из паузы — отразим статус сразу
-            if (res.activation?.ok) setCampaign(prev => prev ? { ...prev, status: res.activation!.status ?? 9, status_label: 'Активна' } : prev);
-            loadCampaign(true);  // тихая сверка
-        }
+    const saveSchedule = async (s: AdsScheduleSetting) => {
+        // Сейв только пишет настройку: паузу/запуск делает scheduler-тик (раз в 15 минут)
+        const res = await api.setCampaignSchedule(campaignId, s);
+        setSchedule(res.settings);  // значение расписания (кнопка) — мгновенно из эхо-мапы
     };
 
     // ─── Управление кампанией (завершить / переименовать / удалить) ───
@@ -603,7 +599,7 @@ export default function CampaignPage() {
             .catch(() => toast.error('Не удалось скопировать — буфер обмена недоступен'));
     };
 
-    const ap = autopay[String(campaignId)];
+    const sc = schedule[String(campaignId)];
     const typeInfo = useMemo(() => (campaign ? adTypeLabel(campaign) : null), [campaign]);
 
     return (
@@ -730,7 +726,7 @@ export default function CampaignPage() {
                                     </div>
                                 </div>
 
-                                {/* Остаток бюджета + автопополнение + пополнение — карточки одной высоты, метки на одном уровне */}
+                                {/* Остаток бюджета + расписание паузы + пополнение — карточки одной высоты, метки на одном уровне */}
                                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'stretch' }}>
                                     <div style={{ minWidth: 140, padding: '10px 14px', border: '1px solid #d1d5db', borderRadius: 12, background: '#f9fafb', display: 'flex', flexDirection: 'column', gap: 6 }}>
                                         <div style={{ fontSize: 12, color: '#4b5563', fontWeight: 600 }}>Остаток бюджета</div>
@@ -738,12 +734,12 @@ export default function CampaignPage() {
                                         <div style={{ fontSize: 12, color: '#6b7280', marginTop: 'auto' }}>Расход сегодня: {fmt(campaign.spend_today)} ₽</div>
                                     </div>
                                     <div style={{ minWidth: 160, padding: '10px 14px', border: '1px solid #d1d5db', borderRadius: 12, background: '#f9fafb', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                                        <div style={{ fontSize: 12, color: '#4b5563', fontWeight: 600 }}>Автопополнение</div>
-                                        <button onClick={() => setAutopayModal(true)} className="btn btn-secondary btn-sm"
-                                            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: ap?.enabled ? '#10b981' : '#6b7280', fontWeight: ap?.enabled ? 600 : 500 }}>
-                                            {ap?.enabled ? <><IcClock size={14} />{autopayLabel(ap)}</> : <><IcGear size={14} />Настроить</>}
+                                        <div style={{ fontSize: 12, color: '#4b5563', fontWeight: 600 }}>Пауза по расписанию</div>
+                                        <button onClick={() => setScheduleModal(true)} className="btn btn-secondary btn-sm"
+                                            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: sc?.enabled ? '#10b981' : '#6b7280', fontWeight: sc?.enabled ? 600 : 500 }}>
+                                            {sc?.enabled ? <><IcClock size={14} />{scheduleLabel(sc)}</> : <><IcGear size={14} />Настроить</>}
                                         </button>
-                                        <button onClick={() => setAutopayLogModal(true)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#3b82f6', fontSize: 12.5, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, marginTop: 'auto' }}>
+                                        <button onClick={() => setBudgetLogModal(true)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#3b82f6', fontSize: 12.5, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, marginTop: 'auto' }}>
                                             <IcHistory size={13} />История бюджета
                                         </button>
                                     </div>
@@ -1028,11 +1024,11 @@ export default function CampaignPage() {
                             </div>
                         )}
 
-                        {autopayModal && (
-                            <AutopayModal campaign={campaign} initial={ap} onClose={() => setAutopayModal(false)} onSave={saveAutopay} />
+                        {scheduleModal && (
+                            <ScheduleModal campaign={campaign} initial={sc} onClose={() => setScheduleModal(false)} onSave={saveSchedule} />
                         )}
-                        {autopayLogModal && (
-                            <AutopayLogModal campaign={campaign} onClose={() => setAutopayLogModal(false)} />
+                        {budgetLogModal && (
+                            <BudgetLedgerModal campaign={campaign} onClose={() => setBudgetLogModal(false)} />
                         )}
                     </>
                 )}

@@ -4,6 +4,7 @@ import {
     applyDraftCellEdit,
     applyDraftPrebookEdit,
     buildAutoSyncPlan,
+    mergeDraftDirection,
     buildDraftSkus,
     buildWriteDistribution,
     buildPinnedRowsFf,
@@ -399,6 +400,196 @@ describe('buildWriteDistribution — владение по nm целиком', (
         const calcBox = { nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 20 }, tgt: { 'Казань': 20 }, package_type: 'BOX' as const };
         const out = buildWriteDistribution({ rows: [oldMono], prebook: [] }, [calcBox], [], new Set());
         expect(out.rows).toEqual([calcBox]); // MONO того же nm вычищена, суммы не задвоены
+    });
+});
+
+describe('buildWriteDistribution — preserveCells (дозабор/«Оставить так» переживают авто-синк)', () => {
+    type Row = { nm_id: number; barcode: string; vendor_code: string; src: Record<string, number>; tgt: Record<string, number>; package_type: 'BOX'; as_is?: boolean };
+    const row = (nm: number, tgt: Record<string, number>, src: Record<string, number>, extra: Partial<Row> = {}): Row =>
+        ({ nm_id: nm, barcode: `bc${nm}`, vendor_code: `art-${nm}`, src, tgt, package_type: 'BOX', ...extra });
+    /** Σ tgt[wb] по всем строкам nm. */
+    const cellQty = (rows: { nm_id: number; tgt: Record<string, number> }[], nm: number, wb: string) =>
+        rows.filter(r => r.nm_id === nm).reduce((s, r) => s + (r.tgt[wb] || 0), 0);
+
+    it('дозабранная ячейка переживает замену по nm, расчёт добавляется без потери', () => {
+        const dist = { rows: [row(1, { 'СПБ Шушары': 30 }, { '5': 30 })], prebook: [] };
+        const calc = [row(1, { 'Екатеринбург': 60 }, { '4': 60 })];
+        const out = buildWriteDistribution(dist, calc, [], new Set(), new Set(['1::СПБ Шушары']));
+        expect(cellQty(out.rows, 1, 'СПБ Шушары')).toBe(30);   // до фикса: 0 (владение по nm целиком)
+        expect(cellQty(out.rows, 1, 'Екатеринбург')).toBe(60);
+        // Источники сохранены: дозабор с ФФ 5, расчёт с ФФ 4.
+        const srcSum: Record<string, number> = {};
+        for (const r of out.rows) for (const [ff, q] of Object.entries(r.src)) srcSum[ff] = (srcSum[ff] || 0) + q;
+        expect(srcSum).toEqual({ '4': 60, '5': 30 });
+    });
+
+    it('ячейка расчёта на сохранённый (nm, wb) вырезается — нет задвоения', () => {
+        const dist = { rows: [row(1, { 'СПБ Шушары': 30 }, { '5': 30 })], prebook: [] };
+        const calc = [row(1, { 'Екатеринбург': 60, 'СПБ Шушары': 45 }, { '4': 105 })];
+        const out = buildWriteDistribution(dist, calc, [], new Set(), new Set(['1::СПБ Шушары']));
+        expect(cellQty(out.rows, 1, 'СПБ Шушары')).toBe(30);   // ручное решение, не 30+45
+        expect(cellQty(out.rows, 1, 'Екатеринбург')).toBe(60);
+        const total = out.rows.reduce((s, r) => s + sumRec(r.tgt), 0);
+        expect(total).toBe(90);
+    });
+
+    it('смешанная строка: сохранённая ячейка карвится, остальные ячейки заменяются расчётом', () => {
+        const dist = { rows: [row(1, { 'Казань': 15, 'СПБ Шушары': 30 }, { '5': 45 })], prebook: [] };
+        const calc = [row(1, { 'Казань': 40 }, { '5': 40 })];
+        const out = buildWriteDistribution(dist, calc, [], new Set(), new Set(['1::СПБ Шушары']));
+        expect(cellQty(out.rows, 1, 'СПБ Шушары')).toBe(30);
+        expect(cellQty(out.rows, 1, 'Казань')).toBe(40);       // старые 15 заменены расчётом
+    });
+
+    it('as_is-строка («Оставить так») с сохранённой ячейкой переживает', () => {
+        const dist = { rows: [row(1, { 'СПБ Шушары': 19 }, { '5': 19 }, { as_is: true })], prebook: [] };
+        const calc = [row(1, { 'Екатеринбург': 38 }, { '4': 38 })];
+        const out = buildWriteDistribution(dist, calc, [], new Set(), new Set(['1::СПБ Шушары']));
+        const asIs = out.rows.filter(r => r.as_is);
+        expect(asIs).toHaveLength(1);
+        expect(asIs[0].tgt).toEqual({ 'СПБ Шушары': 19 });
+        expect(cellQty(out.rows, 1, 'Екатеринбург')).toBe(38);
+    });
+
+    it('стейл-ключ (ячейки нет в черновике) не режет план расчёта', () => {
+        const dist = { rows: [], prebook: [] };
+        const calc = [row(2, { 'СПБ Шушары': 45 }, { '4': 45 })];
+        const out = buildWriteDistribution(dist, calc, [], new Set(), new Set(['2::СПБ Шушары']));
+        expect(cellQty(out.rows, 2, 'СПБ Шушары')).toBe(45);   // ключ протух → расчёт владеет
+    });
+
+    it('предбронь пересобирается расчётом ЦЕЛИКОМ — прежняя ⌛-защита снята (решение 2026-07-19)', () => {
+        const dist = { rows: [], prebook: [row(3, { 'Казань': 57 }, { '5': 57 })] };
+        const calcPb = [row(3, { 'Казань': 19 }, { '5': 19 })];
+        const out = buildWriteDistribution(dist, [], calcPb, new Set(), new Set(['3::Казань']));
+        expect(cellQty(out.prebook, 3, 'Казань')).toBe(19);    // хвост расчёта, ⌛-дозабор живёт до синка
+    });
+
+    it('rows-защита не задваивается хвостом расчётной предброни той же ячейки', () => {
+        const dist = { rows: [row(1, { 'СПБ Шушары': 30 }, { '5': 30 })], prebook: [] };
+        const calcPb = [row(1, { 'СПБ Шушары': 12 }, { '4': 12 })];
+        const out = buildWriteDistribution(dist, [], calcPb, new Set(), new Set(['1::СПБ Шушары']));
+        expect(cellQty(out.rows, 1, 'СПБ Шушары')).toBe(30);   // защищённая строка цела
+        expect(cellQty(out.prebook, 1, 'СПБ Шушары')).toBe(0); // хвост расчёта вырезан — не 30+12
+    });
+
+    it('purge guarded-новинки не убивает сохранённую ячейку (явный клик = решение человека)', () => {
+        const dist = { rows: [row(1, { 'Екатеринбург': 20, 'СПБ Шушары': 30 }, { '5': 50 })], prebook: [] };
+        const out = buildWriteDistribution(dist, [], [], new Set([1]), new Set(['1::СПБ Шушары']));
+        expect(cellQty(out.rows, 1, 'СПБ Шушары')).toBe(30);
+        expect(cellQty(out.rows, 1, 'Екатеринбург')).toBe(0);  // остальное guarded-вычищено
+    });
+
+    it('без preserveCells поведение прежнее — замена по nm целиком', () => {
+        const dist = { rows: [row(1, { 'СПБ Шушары': 30 }, { '5': 30 })], prebook: [] };
+        const calc = [row(1, { 'Екатеринбург': 60 }, { '4': 60 })];
+        const out = buildWriteDistribution(dist, calc, [], new Set());
+        expect(cellQty(out.rows, 1, 'СПБ Шушары')).toBe(0);
+        expect(cellQty(out.rows, 1, 'Екатеринбург')).toBe(60);
+    });
+});
+
+describe('mergeDraftDirection — «слить склад A в склад B»', () => {
+    type Row = { nm_id: number; barcode: string; vendor_code: string; src: Record<string, number>; tgt: Record<string, number>; package_type: 'BOX' | 'MONOPALLET'; as_is?: boolean };
+    const row = (nm: number, tgt: Record<string, number>, src: Record<string, number>, extra: Partial<Row> = {}): Row =>
+        ({ nm_id: nm, barcode: `bc${nm}`, vendor_code: `art-${nm}`, src, tgt, package_type: 'BOX', ...extra });
+    const yes = () => true;
+    const cellQty = (rows: { nm_id: number; tgt: Record<string, number> }[], nm: number, wb: string) =>
+        rows.filter(r => r.nm_id === nm).reduce((s, r) => s + (r.tgt[wb] || 0), 0);
+
+    it('мульти-складовая строка: порция A переезжает в B, чужая ячейка C не тронута, маргиналы src целы', () => {
+        const out = mergeDraftDirection([row(1, { 'Владимир': 30, 'Казань': 20 }, { '5': 50 })], [], 'Владимир', 'Коледино', yes)!;
+        expect(cellQty(out.rows, 1, 'Владимир')).toBe(0);
+        expect(cellQty(out.rows, 1, 'Коледино')).toBe(30);
+        expect(cellQty(out.rows, 1, 'Казань')).toBe(20);
+        const srcSum = out.rows.reduce((s, r) => s + sumRec(r.src as Record<string, number>), 0);
+        const tgtSum = out.rows.reduce((s, r) => s + sumRec(r.tgt), 0);
+        expect(srcSum).toBe(50); expect(tgtSum).toBe(50);
+        expect(out.movedUnits).toBe(30);
+        expect([...out.movedNms]).toEqual([1]);
+    });
+
+    it('предбронь источника уходит в rows-ВХОД (нормализатор цели решит судьбу), прочая предбронь не тронута', () => {
+        const out = mergeDraftDirection(
+            [], [row(1, { 'Владимир': 12 }, { '5': 12 }), row(2, { 'Тула': 9 }, { '5': 9 })],
+            'Владимир', 'Коледино', yes)!;
+        expect(cellQty(out.rows, 1, 'Коледино')).toBe(12);   // предбронь → rows-вход
+        expect(out.prebook).toHaveLength(1);
+        expect(out.prebook[0].nm_id).toBe(2);                 // чужая предбронь байт-в-байт
+    });
+
+    it('гейт: недопущенный SKU остаётся на источнике и считается в skipped', () => {
+        const out = mergeDraftDirection(
+            [row(1, { 'Владимир': 30 }, { '5': 30 }), row(2, { 'Владимир': 10 }, { '5': 10 })], [],
+            'Владимир', 'Коледино', (nm) => nm !== 2)!;
+        expect(cellQty(out.rows, 1, 'Коледино')).toBe(30);
+        expect(cellQty(out.rows, 2, 'Владимир')).toBe(10);   // остался как был
+        expect(out.skippedUnits).toBe(10);
+        expect([...out.skippedNms]).toEqual([2]);
+    });
+
+    it('слияние идентичностей: на цели уже есть строка того же SKU → одна строка (бэкенд-дедуп не съест)', () => {
+        const out = mergeDraftDirection(
+            [row(1, { 'Владимир': 30 }, { '5': 30 }), row(1, { 'Коледино': 19 }, { '4': 19 })], [],
+            'Владимир', 'Коледино', yes)!;
+        const rows1 = out.rows.filter(r => r.nm_id === 1);
+        expect(rows1).toHaveLength(1);
+        expect(rows1[0].tgt).toEqual({ 'Коледино': 49 });
+        expect(rows1[0].src).toEqual({ '5': 30, '4': 19 });
+    });
+
+    it('упаковки независимы: BOX едет, MONOPALLET не допущен — остаётся', () => {
+        const out = mergeDraftDirection(
+            [row(1, { 'Владимир': 19 }, { '5': 19 }), row(2, { 'Владимир': 8 }, { '5': 8 }, { package_type: 'MONOPALLET' })], [],
+            'Владимир', 'Коледино', (_nm, pkg) => pkg === 'BOX')!;
+        expect(cellQty(out.rows, 1, 'Коледино')).toBe(19);
+        expect(cellQty(out.rows, 2, 'Владимир')).toBe(8);
+        expect(out.only).toEqual(new Set(['BOX::Коледино']));
+    });
+
+    it('as_is-строка переезжает с флагом (не сливается с обычной строкой цели)', () => {
+        const out = mergeDraftDirection(
+            [row(1, { 'Владимир': 19 }, { '5': 19 }, { as_is: true }), row(1, { 'Коледино': 38 }, { '4': 38 })], [],
+            'Владимир', 'Коледино', yes)!;
+        const asIs = out.rows.filter(r => r.as_is);
+        expect(asIs).toHaveLength(1);
+        expect(asIs[0].tgt).toEqual({ 'Коледино': 19 });
+        expect(cellQty(out.rows, 1, 'Коледино')).toBe(57);
+    });
+
+    it('переносить нечего → null; A === B → null', () => {
+        expect(mergeDraftDirection([row(1, { 'Тула': 5 }, { '5': 5 })], [], 'Владимир', 'Коледино', yes)).toBeNull();
+        expect(mergeDraftDirection([row(1, { 'Владимир': 5 }, { '5': 5 })], [], 'Владимир', 'Владимир', yes)).toBeNull();
+    });
+
+    it('идемпотентность: повторное слияние того же направления → null', () => {
+        const first = mergeDraftDirection([row(1, { 'Владимир': 30 }, { '5': 30 })], [], 'Владимир', 'Коледино', yes)!;
+        expect(mergeDraftDirection(first.rows, first.prebook, 'Владимир', 'Коледино', yes)).toBeNull();
+    });
+});
+
+describe('buildAutoSyncPlan — preserveCells', () => {
+    type Row = { nm_id: number; barcode: string; vendor_code: string; src: Record<string, number>; tgt: Record<string, number>; package_type: 'BOX' };
+    const row = (nm: number, tgt: Record<string, number>, src: Record<string, number>): Row =>
+        ({ nm_id: nm, barcode: `bc${nm}`, vendor_code: `art-${nm}`, src, tgt, package_type: 'BOX' });
+
+    it('дозабранная ячейка не откатывается авто-синком', () => {
+        const dist = { rows: [row(1, { 'СПБ Шушары': 30 }, { '5': 30 })], prebook: [] };
+        const calc = [row(1, { 'Екатеринбург': 60 }, { '4': 60 })];
+        const out = buildAutoSyncPlan(dist, calc, [], new Set(), new Set(), new Set(['1::СПБ Шушары']));
+        expect(out).not.toBeNull();
+        const spb = out!.rows.reduce((s, r) => s + (r.nm_id === 1 ? (r.tgt['СПБ Шушары'] || 0) : 0), 0);
+        expect(spb).toBe(30);
+    });
+
+    it('фикс-поинт: повторный прогон от собственного результата → null (нет PUT-цикла)', () => {
+        const dist = { rows: [row(1, { 'СПБ Шушары': 30 }, { '5': 30 })], prebook: [] };
+        const calc = [row(1, { 'Екатеринбург': 60 }, { '4': 60 })];
+        const preserve = new Set(['1::СПБ Шушары']);
+        const first = buildAutoSyncPlan(dist, calc, [], new Set(), new Set(), preserve);
+        expect(first).not.toBeNull();
+        const second = buildAutoSyncPlan({ rows: first!.rows, prebook: first!.prebook }, calc, [], new Set(), new Set(), preserve);
+        expect(second).toBeNull();
     });
 });
 
