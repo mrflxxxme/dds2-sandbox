@@ -1274,6 +1274,19 @@ export default function AssemblyDraftPage() {
                         + Object.entries(r.tgt).filter(([, q]) => (q || 0) > 0).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, q]) => `${k}:${q}`).join(','))
                     .sort().join(';');
                 if (canon(newRows) === canon(rows) && canon(newPrebook) === canon(prebook)) return;
+                // Косметическая перетасовка ФФ-источника (tgt-склады и штуки те же,
+                // меняется только src) — НЕ пишем: allocatePairs/normalizeDraft каждый
+                // прогон переназначают ФФ по-новому, canon (с src) их не гасит →
+                // applyDraft перезапускает эффект → 5 PUT «переупаковка без смены
+                // складов» подряд, забивающих историю и ломающих LIFO-откат
+                // (прод 2026-07-20, черновик 51). Скипаем, если по (nm×pkg×as_is×
+                // склад×штуки) ничего не сдвинулось и ничего не добито/освобождено.
+                const canonTgt = (rs: AssemblyDraftRow[]) => rs
+                    .map(r => `${r.nm_id}|${r.barcode}|${r.package_type || 'BOX'}|${r.as_is ? 1 : 0}|`
+                        + Object.entries(r.tgt).filter(([, q]) => (q || 0) > 0).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, q]) => `${k}:${q}`).join(','))
+                    .sort().join(';');
+                if (filledUpUnits === 0 && releasedUnits === 0
+                    && canonTgt(newRows) === canonTgt(rows) && canonTgt(newPrebook) === canonTgt(prebook)) return;
                 // Бейдж «из предброни» = ТОЛЬКО ручной перенос (Дозабить / Оставить так /
                 // Перенести паллеты). Авто-консолидация по приёмке WB поднимает целые
                 // паллеты в черновик молча, БЕЗ метки провенанса — по требованию юзера.
