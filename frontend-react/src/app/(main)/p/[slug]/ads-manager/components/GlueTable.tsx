@@ -30,6 +30,31 @@ const COLS: Col[] = [
 ];
 const BLOCK_DIVIDER = '1px solid rgba(17,24,39,0.08)';
 
+type SortDir = 'asc' | 'desc';
+type SortState = { key: string; dir: SortDir } | null;
+
+/** Числовое значение строки (склейки или артикула) для сортировки по ключу колонки. */
+function sortVal(r: AdGlueRow | AdTabProduct, key: string): number {
+    const g = r as AdGlueRow;
+    switch (key) {
+        case 'spend': return r.adv_sum;
+        case 'views': return r.adv_views;
+        case 'ctr': return r.ctr;
+        case 'clicks': return r.adv_clicks;
+        case 'orders': return r.orders_count;
+        case 'orders_sum': return r.orders_sum_rub;
+        // ДРР null = расход без заказов, то есть бесконечный: по убыванию такие идут первыми
+        case 'drr': return r.drr == null ? Number.POSITIVE_INFINITY : r.drr;
+        case 'cpc': return r.cpc;
+        case 'stock': return r.stock_qty;
+        case 'budget': return g.budget_total ?? 0;
+        case 'camps': return g.campaign_count ?? (r as AdTabProduct).campaigns?.length ?? 0;
+        case 'types': return g.campaign_types?.length ?? 0;
+        case 'name': return g.product_count ?? 1;
+        default: return 0;
+    }
+}
+
 /** ДРР: null от бэка = расход без заказов, показываем «∞» и красим тревожно. */
 function DrrCell({ drr }: { drr: number | null }) {
     if (drr == null) return <span style={{ color: 'var(--color-danger)', fontWeight: 700 }} title="Расход есть, заказов нет">∞</span>;
@@ -89,6 +114,9 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
     // Раскрытие: ключ склейки → развёрнута; отдельно раскрытые артикулы (третий уровень)
     const [openGlue, setOpenGlue] = useState<Set<string>>(() => new Set());
     const [openNm, setOpenNm] = useState<Set<number>>(() => new Set());
+    // Первый клик по колонке — сразу по убыванию (сценарий «где больше всего тратим»),
+    // второй — по возрастанию, третий — снимает сортировку (порядок бэка: по затратам)
+    const [sort, setSort] = useState<SortState>(null);
     const [colsMenu, setColsMenu] = useState(false);
     const [visibleCols, setVisibleCols] = useState<Set<string>>(() => new Set(COLS.map(c => c.key)));
 
@@ -131,14 +159,24 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
     const filtered = useMemo(() => {
         const q = search.trim().toLowerCase();
         const nm = article ? Number(article) : 0;
-        return rows.filter(r => {
+        const hits = rows.filter(r => {
             if (nm && !r.nm_ids.includes(nm)) return false;
             if (!q) return true;
             if (r.glue_name.toLowerCase().includes(q)) return true;
             if (String(r.imt_id ?? '').includes(q)) return true;
             return r.children.some(c => String(c.nm_id).includes(q) || (c.vendor_code || '').toLowerCase().includes(q));
         });
-    }, [rows, search, article]);
+        if (!sort) return hits;
+        const k = sort.dir === 'desc' ? -1 : 1;
+        // Сортируем и состав склейки тем же ключом — иначе внутри остаётся порядок по затратам
+        // и раскрытая склейка противоречит колонке, по которой отсортирована таблица
+        return hits
+            .map(r => ({ ...r, children: [...r.children].sort((a, b) => k * (sortVal(a, sort.key) - sortVal(b, sort.key))) }))
+            .sort((a, b) => {
+                if (sort.key === 'name') return k * a.glue_name.localeCompare(b.glue_name, 'ru');
+                return k * (sortVal(a, sort.key) - sortVal(b, sort.key));
+            });
+    }, [rows, search, article, sort]);
 
     const totals = useMemo(() => ({
         spend: filtered.reduce((s, r) => s + r.adv_sum, 0),
@@ -169,6 +207,11 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
     }, [filtered]);
 
     const cols = COLS.filter(c => visibleCols.has(c.key));
+
+    const onSort = useCallback((key: string) => {
+        setSort(prev => (prev?.key !== key ? { key, dir: 'desc' } : prev.dir === 'desc' ? { key, dir: 'asc' } : null));
+    }, []);
+    const sortMark = (key: string) => (sort?.key !== key ? '' : sort.dir === 'desc' ? ' ↓' : ' ↑');
 
     /** Ячейка метрики — общая для склейки и артикула (у артикула нет бюджета/типов). */
     const metricCell = (key: string, src: AdGlueRow | AdTabProduct, isGlue: boolean) => {
@@ -231,10 +274,14 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
                         <tr>
                             <th style={{ ...cThLeft, width: 30 }} title="Выбрать товары склейки — потом «К кампаниям»" />
                             <th style={{ ...cThLeft, width: 34 }} />
-                            <th style={{ ...cThLeft, minWidth: 300 }}>Склейка</th>
+                            <th style={{ ...cThLeft, minWidth: 300, cursor: 'pointer', userSelect: 'none' }}
+                                onClick={() => onSort('name')} title="Сортировать по названию склейки">
+                                Склейка{sortMark('name')}
+                            </th>
                             {cols.map(c => (
-                                <th key={c.key} style={{ ...cThStyle, width: c.w, borderLeft: c.blockStart ? BLOCK_DIVIDER : undefined }}>
-                                    {c.title ? <Tooltip text={c.title}><span>{c.label}</span></Tooltip> : c.label}
+                                <th key={c.key} onClick={() => onSort(c.key)}
+                                    style={{ ...cThStyle, width: c.w, borderLeft: c.blockStart ? BLOCK_DIVIDER : undefined, cursor: 'pointer', userSelect: 'none', color: sort?.key === c.key ? '#fff' : undefined }}>
+                                    {c.title ? <Tooltip text={c.title}><span>{c.label}</span></Tooltip> : c.label}{sortMark(c.key)}
                                 </th>
                             ))}
                         </tr>
