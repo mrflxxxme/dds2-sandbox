@@ -71,15 +71,36 @@ export interface DraftSyncOutcome {
     updated?: AssemblyDraft;
 }
 
+/** Маркер последнего ЗАВЕРШЁННОГО прохода — модульный: переживает навигацию по
+ *  SPA. Гейтит и «заход» (каждый вход на страницу = полный проход с PUT'ами
+ *  выедал write-бакет → 429 на входном запросе страницы, прод 2026-07-20). */
+let lastPassAt = 0;
+export const getLastAutoSyncPassAt = (): number => lastPassAt;
+export const markAutoSyncPass = (): void => { lastPassAt = Date.now(); };
+
+/** Данные, которые страница уже загрузила сама — раннер их НЕ перекачивает
+ *  (дубль тяжёлых GET на каждый заход тоже давил rate-limit). */
+export interface AutoSyncReuse {
+    stockNeed?: StockNeedResponse | null;
+    geometry?: {
+        nmPpb: Map<number, number | null>;
+        nmPpbByWh: Map<number, Record<number, number>>;
+        nmBoxSize: Map<number, string | null>;
+        palletOverrides: Record<string, number>;
+    } | null;
+}
+
 /** Загрузка общих данных прохода (зеркало load-эффекта матрицы, без display-only). */
-export async function loadAutoSyncSharedData(): Promise<AutoSyncSharedData> {
+export async function loadAutoSyncSharedData(reuse?: AutoSyncReuse): Promise<AutoSyncSharedData> {
     let csp: { minPack?: number; shipPct?: number; floor?: number } = {};
     try { csp = JSON.parse(localStorage.getItem('dds.coldStartParams') || '{}'); } catch { /* дефолты */ }
     const [need, cold, boxMult, palletOv] = await Promise.all([
-        api.getStockNeed(NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS, 'actual', true, true, 0) as Promise<StockNeedResponse>,
+        reuse?.stockNeed
+            ? Promise.resolve(reuse.stockNeed)
+            : api.getStockNeed(NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS, 'actual', true, true, 0) as Promise<StockNeedResponse>,
         api.getColdStartTable(14, csp.minPack ?? 5, csp.shipPct ?? 55, csp.floor ?? 50).catch(() => null),
-        api.getBoxMultiplicity().catch(() => null),
-        api.getPalletBoxesBySize().catch(() => ({} as Record<string, number>)),
+        reuse?.geometry ? Promise.resolve(null) : api.getBoxMultiplicity().catch(() => null),
+        reuse?.geometry ? Promise.resolve({} as Record<string, number>) : api.getPalletBoxesBySize().catch(() => ({} as Record<string, number>)),
     ]);
     const newcomerSet = new Set<number>();
     const newcomerAlloc = new Map<number, Record<string, number>>();
@@ -117,13 +138,19 @@ export async function loadAutoSyncSharedData(): Promise<AutoSyncSharedData> {
         nmPpb.set(r.nm_id, ppb);
         nmBoxSize.set(r.nm_id, boxSize);
     }
+    if (reuse?.geometry) {
+        // Карты страницы уже готовы (loadGeometry) — не дублируем разбор.
+        for (const [k, v] of reuse.geometry.nmPpb) nmPpb.set(k, v);
+        for (const [k, v] of reuse.geometry.nmPpbByWh) nmPpbByWh.set(k, v);
+        for (const [k, v] of reuse.geometry.nmBoxSize) nmBoxSize.set(k, v);
+    }
     const stampRaw = need.summary?.wb_stocks_updated_at ?? null;
     let wbStocksAgeHours: number | null = null;
     if (stampRaw) {
         const t = Date.parse(stampRaw.endsWith('Z') || stampRaw.includes('+') ? stampRaw : `${stampRaw}Z`);
         if (Number.isFinite(t)) wbStocksAgeHours = Math.max(0, (Date.now() - t) / 3_600_000);
     }
-    return { stockNeed: need, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides: palletOv || {}, newcomerSet, newcomerAlloc, guardedNms, wbStocksAgeHours };
+    return { stockNeed: need, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides: reuse?.geometry ? reuse.geometry.palletOverrides : (palletOv || {}), newcomerSet, newcomerAlloc, guardedNms, wbStocksAgeHours };
 }
 
 const sumUnits = (rows: AssemblyDraftRow[]): number =>
