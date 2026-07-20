@@ -56,7 +56,11 @@ class Nomenclature(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
-    __table_args__ = (UniqueConstraint("project_id", "barcode", name="uq_nomenclature_project_barcode"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "barcode", name="uq_nomenclature_project_barcode"),
+        # Группировка по склейкам (реклама/цены/склад/БДР) — всегда с `imt_id IS NOT NULL`
+        Index("ix_nomenclature_project_imt", "project_id", "imt_id", postgresql_where=text("imt_id IS NOT NULL")),
+    )
 
 
 class BoxQtyPerWarehouse(Base):

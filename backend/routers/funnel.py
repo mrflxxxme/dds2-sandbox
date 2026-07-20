@@ -724,6 +724,21 @@ async def get_ad_tab(
     return await get_ad_tab_data(db, project.id, date_from, date_to, brand, subject)
 
 
+@router.get("/ad_glue")
+async def get_ad_glue(
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    brand: str = Query(""),
+    subject: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+):
+    """Реклама в разрезе склеек WB: строка = карточка (imt_id), дети = её артикулы."""
+    from backend.services.funnel.ad_campaigns_service import get_ad_glue_data
+
+    return await get_ad_glue_data(db, project.id, date_from, date_to, brand, subject)
+
+
 @router.get("/campaigns")
 async def get_ad_campaigns_list(
     date_from: str | None = Query(None),

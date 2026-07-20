@@ -27,6 +27,7 @@ from backend.models import WbAdCampaign, WbAdCampaignEvent, WbFunnelDaily
 from backend.models.integrations import (
     WbAdCampaignDaily,
     WbAdCampaignSnapshot,
+    WbAdNmDaily,
     WbWarehouseStock,
 )
 from backend.models.wb_finance import WbFinanceRow
@@ -38,6 +39,9 @@ from backend.services.funnel.wb_api_client import get_wb_key
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.funnel")
+
+# Страховочный потолок выборки товаров из воронки (одна строка на nm_id за период)
+_FUNNEL_ROWS_CAP = 20000
 
 MSK = pytz.timezone("Europe/Moscow")
 
@@ -644,19 +648,48 @@ async def get_ad_tab_data(
     date_to: str,
     brand: str = "",
     subject: str = "",
+    include_no_ads: bool = False,
+    limit: int = 500,
 ) -> list[dict]:
-    """Get advertising data grouped by product with linked campaigns."""
+    """Get advertising data grouped by product with linked campaigns.
+
+    include_no_ads=True снимает отсечку «был расход» — товар без рекламы приезжает с нулями
+    (нужно вкладке «Склейки»: склейка показывается целиком, а не только её рекламируемой частью).
+    """
     F = WbFunnelDaily
 
+    # Расход/показы/клики берём из РЕКЛАМНОЙ статистики WB (adv/v3/fullstats), а не из
+    # рекламных колонок отчёта воронки: воронка их сильно недосчитывает. Замер на проде
+    # за 1–20.07: воронка 5.0 млн ₽ против 11.5 млн ₽ у fullstats при фактических списаниях
+    # 13.2 млн ₽ — у 485 товаров расхождение, у 37 в воронке ноль при реальном расходе.
+    # Из воронки остаются ЗАКАЗЫ: там они по всем источникам трафика, а ДРР считается
+    # от всей выручки товара, не только от рекламной атрибуции.
+    ND = WbAdNmDaily
+    nm_ad_q = (
+        select(
+            ND.nm_id,
+            func.coalesce(func.sum(ND.views), 0).label("views"),
+            func.coalesce(func.sum(ND.clicks), 0).label("clicks"),
+            func.coalesce(func.sum(ND.spend), Decimal("0")).label("spend"),
+        )
+        .where(ND.project_id == project_id)
+        .where(ND.date >= date_type.fromisoformat(date_from))
+        .where(ND.date <= date_type.fromisoformat(date_to))
+        .group_by(ND.nm_id)
+    )
+    nm_ad: dict[int, dict] = {
+        r.nm_id: {"views": int(r.views or 0), "clicks": int(r.clicks or 0), "spend": float(r.spend or 0)}
+        for r in (await db.execute(nm_ad_q)).all()
+    }
+
+    # Воронка задаёт состав строк и несёт паспорт товара + заказы. Товаров с расходом, но
+    # без строки в воронке, не бывает (проверено на проде) — состав от этого не страдает.
     query = (
         select(
             F.nm_id,
             func.max(F.vendor_code).label("vendor_code"),
             func.max(F.subject).label("subject"),
             func.max(F.brand).label("brand"),
-            func.coalesce(func.sum(F.adv_views), 0).label("adv_views"),
-            func.coalesce(func.sum(F.adv_clicks), 0).label("adv_clicks"),
-            func.coalesce(func.sum(F.adv_sum), Decimal("0")).label("adv_sum"),
             func.coalesce(
                 func.sum(F.orders_sum_rub),
                 Decimal("0"),
@@ -673,9 +706,16 @@ async def get_ad_tab_data(
     if subject:
         query = query.where(F.subject == subject)
 
-    query = query.group_by(F.nm_id).having(func.sum(F.adv_sum) > 0).order_by(func.sum(F.adv_sum).desc()).limit(500)
+    # Одна строка на товар, поэтому выборка ограничена каталогом проекта; страховочный
+    # потолок — от разрастания каталога, реальный limit применяется после сортировки
+    query = query.group_by(F.nm_id).order_by(F.nm_id).limit(_FUNNEL_ROWS_CAP)
 
     rows = (await db.execute(query)).all()
+    # Отсечка «была реклама» и сортировка по расходу переехали из SQL сюда: расход теперь
+    # в другой таблице. nm_id вторичным ключом — иначе усечение лимитом недетерминированно
+    if not include_no_ads:
+        rows = [r for r in rows if nm_ad.get(r.nm_id, {}).get("spend", 0) > 0]
+    rows = sorted(rows, key=lambda r: (-nm_ad.get(r.nm_id, {}).get("spend", 0), r.nm_id))[:limit]
 
     # Load all campaigns for project
     campaigns_q = (
@@ -752,37 +792,50 @@ async def get_ad_tab_data(
             }
         )
 
-    # Load per-campaign daily stats for the period
-    CD = WbAdCampaignDaily
-    camp_daily_q = (
+    # Статистика кампании В РАЗРЕЗЕ ТОВАРА (campaign × nm), а не итог кампании.
+    # Кампания живёт под конкретным артикулом, и её итог по всем товарам там врал: у кампании
+    # 36019399 итог 432 622 ₽ приходится на один артикул, а показывался бы под каждым из её
+    # шести. Побочно nm-разбивка ещё и полнее итогов (886 кампаний против 844).
+    ND = WbAdNmDaily
+    nm_daily_q = (
         select(
-            CD.campaign_id,
-            func.coalesce(func.sum(CD.views), 0).label("views"),
-            func.coalesce(func.sum(CD.clicks), 0).label("clicks"),
-            func.coalesce(func.sum(CD.spend), Decimal("0")).label("spend"),
+            ND.campaign_id,
+            ND.nm_id,
+            func.coalesce(func.sum(ND.views), 0).label("views"),
+            func.coalesce(func.sum(ND.clicks), 0).label("clicks"),
+            func.coalesce(func.sum(ND.spend), Decimal("0")).label("spend"),
+            func.coalesce(func.sum(ND.orders), 0).label("orders"),
+            func.coalesce(func.sum(ND.orders_sum), Decimal("0")).label("orders_sum"),
         )
-        .where(CD.project_id == project_id)
-        .where(CD.date >= date_type.fromisoformat(date_from))
-        .where(CD.date <= date_type.fromisoformat(date_to))
-        .group_by(CD.campaign_id)
+        .where(ND.project_id == project_id)
+        .where(ND.date >= date_type.fromisoformat(date_from))
+        .where(ND.date <= date_type.fromisoformat(date_to))
+        .group_by(ND.campaign_id, ND.nm_id)
     )
-    camp_daily_rows = (await db.execute(camp_daily_q)).all()
-    camp_stats: dict[int, dict] = {}
-    for cd in camp_daily_rows:
-        camp_stats[cd.campaign_id] = {
+    nm_daily_rows = (await db.execute(nm_daily_q)).all()
+    camp_stats: dict[tuple[int, int], dict] = {}
+    for cd in nm_daily_rows:
+        camp_stats[(cd.campaign_id, cd.nm_id)] = {
             "views": int(cd.views or 0),
             "clicks": int(cd.clicks or 0),
             "spend": float(cd.spend or 0),
+            "orders": int(cd.orders or 0),
+            "orders_sum": float(cd.orders_sum or 0),
         }
 
     # Build nm_id → campaigns mapping
     nm_campaigns: dict[int, list[dict]] = {}
     for c in campaigns:
-        cs = camp_stats.get(c.campaign_id, {})
-        c_views = cs.get("views", 0)
-        c_clicks = cs.get("clicks", 0)
-        c_spend = cs.get("spend", 0)
         for nm_id in c.nm_ids or []:
+            cs = camp_stats.get((c.campaign_id, nm_id), {})
+            c_views = cs.get("views", 0)
+            c_clicks = cs.get("clicks", 0)
+            c_spend = cs.get("spend", 0)
+            # ВНИМАНИЕ: заказы здесь — АТРИБУТИРОВАННЫЕ рекламе (WB fullstats), а не все заказы
+            # товара, как в строках выше (те из WbFunnelDaily по всем источникам). Поэтому и
+            # drr_ad назван отдельно: это ДРР по атрибуции, он не сходится с ДРР товара.
+            c_orders = cs.get("orders", 0)
+            c_orders_sum = cs.get("orders_sum", 0)
             if nm_id not in nm_campaigns:
                 nm_campaigns[nm_id] = []
             nm_campaigns[nm_id].append(
@@ -795,18 +848,24 @@ async def get_ad_tab_data(
                     "views": c_views,
                     "clicks": c_clicks,
                     "spend": round(c_spend, 2),
+                    "orders": c_orders,
+                    "orders_sum": round(c_orders_sum, 2),
                     "ctr": round((c_clicks / c_views * 100) if c_views else 0, 2),
                     "cpc": round((c_spend / c_clicks) if c_clicks else 0, 2),
                     "cpm": round((c_spend / c_views * 1000) if c_views else 0, 2),
+                    "drr_ad": round(c_spend / c_orders_sum * 100, 2)
+                    if c_orders_sum
+                    else (None if c_spend > 0 else 0),
                     "events": campaign_events.get(c.campaign_id, [])[:10],
                 }
             )
 
     result = []
     for r in rows:
-        views = int(r.adv_views or 0)
-        clicks = int(r.adv_clicks or 0)
-        adv_sum = float(r.adv_sum or 0)
+        ad = nm_ad.get(r.nm_id, {})
+        views = ad.get("views", 0)
+        clicks = ad.get("clicks", 0)
+        adv_sum = ad.get("spend", 0.0)
         orders_sum = float(r.orders_sum_rub or 0)
 
         ctr = (clicks / views * 100) if views else 0
@@ -956,6 +1015,104 @@ async def get_ad_tab_grouped(
         )
 
     # ABC on grouped rows
+    _assign_abc(result, "bdr_revenue", "abc_revenue")
+    _assign_abc(result, "bdr_profit", "abc_profit")
+
+    result.sort(key=lambda x: x["adv_sum"], reverse=True)
+    return result
+
+
+# Потолок строк для вкладки «Склейки»: тянем и товары без рекламы, поэтому выборка шире,
+# чем у обычного ad_tab (500). Склейка обязана приезжать целиком — усечение посреди
+# склейки исказило бы её сумму.
+GLUE_SKU_LIMIT = 5000
+
+
+async def get_ad_glue_data(
+    db: AsyncSession,
+    project_id: int,
+    date_from: str,
+    date_to: str,
+    brand: str = "",
+    subject: str = "",
+) -> list[dict]:
+    """Реклама в разрезе склеек WB: строка = карточка (imt_id), дети = её артикулы.
+
+    Товар без склейки — строка-одиночка (is_glue=False), товар без рекламы — с нулями.
+    Метрики-отношения (CTR/CPC/CPM/ДРР) считаются от сумм склейки, не усредняются по детям.
+    """
+    from backend.models.cost import Nomenclature
+    from backend.models.refs import ImtAlias
+
+    sku_data = await get_ad_tab_data(
+        db, project_id, date_from, date_to, brand, subject, include_no_ads=True, limit=GLUE_SKU_LIMIT
+    )
+
+    nom_result = await db.execute(
+        select(Nomenclature.article_wb, Nomenclature.imt_id).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.imt_id.isnot(None),
+        )
+    )
+    nm_to_imt: dict[int, int] = {row.article_wb: row.imt_id for row in nom_result if row.article_wb and row.imt_id}
+
+    alias_result = await db.execute(select(ImtAlias.imt_id, ImtAlias.name).where(ImtAlias.project_id == project_id))
+    imt_aliases: dict[int, str] = {r.imt_id: r.name for r in alias_result}
+
+    # Ключ группы: imt_id склейки либо («одиночка», nm_id) — товары без склейки НЕ схлопываются
+    groups: dict[tuple[bool, int], list[dict]] = {}
+    for item in sku_data:
+        imt_id = nm_to_imt.get(item["nm_id"])
+        key = (True, imt_id) if imt_id else (False, item["nm_id"])
+        groups.setdefault(key, []).append(item)
+
+    result = []
+    for (is_glue, key_id), children in groups.items():
+        children.sort(key=lambda x: x["adv_sum"], reverse=True)
+        views = sum(c["adv_views"] for c in children)
+        clicks = sum(c["adv_clicks"] for c in children)
+        adv_sum = sum(c["adv_sum"] for c in children)
+        orders_sum = sum(c["orders_sum_rub"] for c in children)
+
+        # Кампания, накрывающая несколько артикулов одной склейки, приходит в каждом ребёнке —
+        # без дедупа по campaign_id её бюджет сложился бы столько раз, сколько у неё товаров
+        camps: dict[int, dict] = {}
+        for child in children:
+            for camp in child.get("campaigns", []):
+                camps[camp["campaign_id"]] = camp
+
+        head = children[0]
+        result.append(
+            {
+                "imt_id": key_id if is_glue else None,
+                "is_glue": is_glue,
+                "glue_name": (imt_aliases.get(key_id) or head.get("vendor_code") or f"#{key_id}")
+                if is_glue
+                else (head.get("vendor_code") or f"#{head['nm_id']}"),
+                "nm_ids": [c["nm_id"] for c in children],
+                "brand": head.get("brand"),
+                "subject": head.get("subject"),
+                "adv_views": views,
+                "adv_clicks": clicks,
+                "adv_sum": round(adv_sum, 2),
+                "orders_sum_rub": round(orders_sum, 2),
+                "orders_count": sum(c["orders_count"] for c in children),
+                "ctr": round((clicks / views * 100) if views else 0, 2),
+                "cpc": round((adv_sum / clicks) if clicks else 0, 2),
+                "cpm": round((adv_sum / views * 1000) if views else 0, 2),
+                "drr": round(adv_sum / orders_sum * 100, 2) if orders_sum else (None if adv_sum > 0 else 0),
+                "bdr_revenue": round(sum(c.get("bdr_revenue", 0) for c in children), 2),
+                "bdr_profit": round(sum(c.get("bdr_profit", 0) for c in children), 2),
+                "stock_qty": sum(c.get("stock_qty", 0) for c in children),
+                "product_count": len(children),
+                "budget_total": round(sum(c["budget"] for c in camps.values()), 2),
+                "campaign_count": len(camps),
+                "active_campaigns": sum(1 for c in camps.values() if c.get("status") == 9),
+                "campaign_types": sorted({c["campaign_type"] for c in camps.values() if c.get("campaign_type")}),
+                "children": children,
+            }
+        )
+
     _assign_abc(result, "bdr_revenue", "abc_revenue")
     _assign_abc(result, "bdr_profit", "abc_profit")
 

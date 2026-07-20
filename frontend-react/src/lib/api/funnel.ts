@@ -1,7 +1,7 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
 import type {
-    AdSubject, AdNmCard, CreateCampaignResult, FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsScheduleSetting, AdsScheduleLogEntry, AdsWbAutopayStatus, BudgetLedgerEntry, AdsCampaignStateResult, AdsScheduleSaveResult, AdsBudgetGap, AdsBudgetGapHistory, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionsResponse, PositionsProgress, CollectPositionsResult, CollectOneResult, CampaignZones,
+    AdSubject, AdNmCard, CreateCampaignResult, FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdGlueRow, AdsManagerCampaign, AdsScheduleSetting, AdsScheduleLogEntry, AdsWbAutopayStatus, BudgetLedgerEntry, AdsCampaignStateResult, AdsScheduleSaveResult, AdsBudgetGap, AdsBudgetGapHistory, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionsResponse, PositionsProgress, CollectPositionsResult, CollectOneResult, CampaignZones,
     CampaignZonesUpdate, ClusterMinusResult, ClusterBidResult, ClusterBidBulkResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
@@ -114,6 +114,12 @@ export function addFunnelMethods(api: ApiClient) {
             if (params.subject) q.set('subject', params.subject);
             if (params.group_by) q.set('group_by', params.group_by);
             return api.request<AdTabProduct[]>('GET', `/api/v1/funnel/ad_tab?${q.toString()}`);
+        },
+        getAdGlue(params: { date_from: string; date_to: string; brand?: string; subject?: string }) {
+            const q = new URLSearchParams({ date_from: params.date_from, date_to: params.date_to });
+            if (params.brand) q.set('brand', params.brand);
+            if (params.subject) q.set('subject', params.subject);
+            return api.request<AdGlueRow[]>('GET', `/api/v1/funnel/ad_glue?${q.toString()}`);
         },
         getAdCampaignsList(dateFrom?: string, dateTo?: string) {
             const q = new URLSearchParams();
