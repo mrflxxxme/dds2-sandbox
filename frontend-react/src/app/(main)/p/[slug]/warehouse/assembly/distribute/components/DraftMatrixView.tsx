@@ -11,6 +11,7 @@ import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams'
 import { subtractReserveFromArticles, restrictArticlesToFf, reservedForBarcode, type DraftReserveMap } from '@/lib/assembly/draftReserve';
 import { inScopeOf } from '@/lib/assembly/categoryCompat';
 import { scopedNormalizeDraft } from '@/lib/utils/scopedNormalizeDraft';
+import { netOutInTransit } from '@/lib/assembly/draftAutoSyncRunner';
 import type { NormalizeDraftCtx } from '@/lib/utils/normalizeDraft';
 import {
     applyAcceptanceSplits,
@@ -1265,7 +1266,10 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
             // Ячейки prebook_origin (дозабор/«Оставить так») — ручные решения уровня
             // (nm × склад): синк их не откатывает (расчёт про них не знает).
             const preserve = new Set<string>(dist?.prebook_origin ?? []);
-            const plan = buildAutoSyncPlan(dist ?? {}, shipRows, effPrebook, guarded, curManual, preserve);
+            // «Один мир»: план не дублирует уже едущее — иначе серверный транзит-гейт
+            // резал прирост и демотировал направления целиком в предбронь (качель).
+            const netted = await netOutInTransit(shipRows, effPrebook, articles, { nmPpb, nmPpbByWh, nmBoxSize, palletOverrides }, classOf ?? (() => '*'));
+            const plan = buildAutoSyncPlan(dist ?? {}, netted.rows, netted.prebook, guarded, curManual, preserve);
             if (!plan) {
                 if (trigger === 'manual') showToast('План уже соответствует расчёту', 'success');
                 return;
@@ -1300,7 +1304,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
         } finally {
             setWriting(false);
         }
-    }, [writing, distRows, draftId, guardByNm, shipRows, effPrebook, flushDraftSave, showToast, onDraftChanged]);
+    }, [writing, distRows, draftId, guardByNm, shipRows, effPrebook, articles, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides, classOf, flushDraftSave, showToast, onDraftChanged]);
 
     // Авто-запуск синка: один раз за заход, когда готовы И расчёт, И черновик.
     const autoSyncDoneRef = useRef(false);
