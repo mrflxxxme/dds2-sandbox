@@ -1441,11 +1441,16 @@ async def sync_campaigns(
 @router.get("/sync_campaigns_progress")
 async def sync_campaigns_progress(
     project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Get progress of background ad campaigns sync."""
-    from backend.services.funnel.ad_campaigns_service import get_sync_progress
+    """Прогресс фонового синка кампаний + время последнего успешного синка.
 
-    return get_sync_progress(project.id)
+    ``last_sync_at`` отдаётся всегда (в т.ч. при status=idle): страница рекламы дёргает
+    этот же endpoint при загрузке, чтобы показать актуальность данных под кнопкой синка.
+    """
+    from backend.services.funnel.ad_campaigns_service import get_last_sync_at, get_sync_progress
+
+    return {**get_sync_progress(project.id), "last_sync_at": await get_last_sync_at(db, project.id)}
 
 
 @router.post("/sync_funnel_bg", dependencies=[Depends(rate_limit_write)])

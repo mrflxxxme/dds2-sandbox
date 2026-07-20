@@ -59,10 +59,38 @@ BUDGET_ONLY_TIME_BUDGET = 420  # 7 мин
 # In-memory progress tracker: {project_id: {status, campaigns_total, budgets_done, budgets_total, error}}
 _sync_progress: dict[int, dict[str, Any]] = {}
 
+# Момент последнего успешного синка кампаний — в project_settings, а НЕ в _sync_progress:
+# словарь прогресса живёт в памяти процесса (умирает с рестартом и не виден из воркера,
+# где крутится плановый синк), а на странице рекламы отметка нужна при обычной загрузке.
+ADS_LAST_SYNC_KEY = "ads_last_sync_at"
+
 
 def get_sync_progress(project_id: int) -> dict:
     """Get current sync progress for a project."""
     return _sync_progress.get(project_id, {"status": "idle"})
+
+
+async def get_last_sync_at(db: AsyncSession, project_id: int) -> str | None:
+    """ISO-время (UTC, с суффиксом Z) последнего успешного синка кампаний или None."""
+    from backend.services.settings_service import get_setting
+
+    raw = await get_setting(db, project_id, ADS_LAST_SYNC_KEY)
+    if not raw:
+        return None
+    return raw if raw.endswith("Z") or "+" in raw[10:] else f"{raw}Z"
+
+
+async def _mark_synced(db: AsyncSession, project_id: int) -> None:
+    """Записать отметку об успешном синке. Не роняем синк из-за неё."""
+    from backend.services.settings_service import set_setting
+
+    try:
+        await set_setting(db, project_id, ADS_LAST_SYNC_KEY, utcnow().isoformat())
+    except Exception as e:  # noqa: BLE001 — отметка вторична к самому синку
+        # Откат обязателен: после провалившегося flush сессия остаётся в PendingRollback
+        # и любой следующий запрос по ней падает уже не по своей вине.
+        await db.rollback()
+        logger.warning("Не удалось записать %s для проекта %s: %s", ADS_LAST_SYNC_KEY, project_id, e)
 
 
 async def _sort_campaigns_by_spend(
@@ -309,6 +337,7 @@ async def sync_ad_campaigns(
         )
         await db.execute(stmt)
         await db.commit()
+        await _mark_synced(db, project_id)
 
     _sync_progress[project_id] = {
         "status": "done",

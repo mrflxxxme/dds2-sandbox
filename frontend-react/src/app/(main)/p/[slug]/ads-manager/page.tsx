@@ -142,6 +142,8 @@ export default function AdsManagerPage() {
     const [campSort, setCampSort] = useState<{ field: keyof AdsManagerCampaign; dir: SortDir } | null>(null);
     const [syncing, setSyncing] = useState(false);
     const [syncProgress, setSyncProgress] = useState('');  // «N/M» бюджетов во время синка
+    const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);  // ISO UTC последнего успешного синка
+    const [nowTs, setNowTs] = useState(() => Date.now());  // тикает раз в минуту для «N мин назад»
     const [schedule, setSchedule] = useState<Record<string, AdsScheduleSetting>>({});
     const [scheduleModal, setScheduleModal] = useState<AdsManagerCampaign | null>(null);
     const [createMenuOpen, setCreateMenuOpen] = useState(false);
@@ -268,6 +270,18 @@ export default function AdsManagerPage() {
     }, []);
 
     useEffect(() => { loadCatalog(); }, [loadCatalog]);  // каталог — один раз
+
+    // Время последнего синка: тот же endpoint прогресса, но при обычной загрузке страницы
+    // (бэк отдаёт last_sync_at и при status=idle).
+    const refreshLastSync = useCallback(async () => {
+        try {
+            const p = await api.getSyncCampaignsProgress();
+            setLastSyncAt(p.last_sync_at ?? null);
+        } catch { /* отметка не критична — просто не покажем «обновлено» */ }
+    }, []);
+    useEffect(() => { refreshLastSync(); }, [refreshLastSync]);
+    // Тик раз в минуту, чтобы «5 мин назад» не застывало на открытой вкладке
+    useEffect(() => { const t = setInterval(() => setNowTs(Date.now()), 60_000); return () => clearInterval(t); }, []);
     // Список кампаний — при входе и при смене периода календаря (метрики за выбранный день/диапазон)
     useEffect(() => { loadCampaigns(dateFrom, dateTo); }, [periodFrom, periodTo]);  // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -380,8 +394,25 @@ export default function AdsManagerPage() {
             // на бэкенд-дефолт (7 дней), а календарь продолжал показывать выбранный диапазон
             await loadCampaigns(dateFrom, dateTo);
         } catch (e) { setError(e instanceof Error ? e.message : 'Ошибка синхронизации'); }
-        finally { setSyncing(false); setSyncProgress(''); }
+        finally { setSyncing(false); setSyncProgress(''); setNowTs(Date.now()); refreshLastSync(); }
     };
+
+    // «Обновлено N мин назад» рядом с кнопкой синка — чтобы понимать актуальность цифр.
+    // Свежесть считаем от nowTs (тикает раз в минуту), точное время — в подсказке, МСК.
+    const lastSyncLabel = (() => {
+        if (!lastSyncAt) return null;
+        const ts = new Date(lastSyncAt).getTime();
+        if (Number.isNaN(ts)) return null;
+        const mins = Math.max(0, Math.floor((nowTs - ts) / 60000));
+        const rel = mins < 1 ? 'только что'
+            : mins < 60 ? `${mins} мин назад`
+            : mins < 60 * 24 ? `${Math.floor(mins / 60)} ч назад`
+            : `${Math.floor(mins / 1440)} дн назад`;
+        const exact = new Date(ts).toLocaleString('ru-RU', {
+            day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow',
+        });
+        return { rel, exact, stale: mins >= 60 * 3 };
+    })();
 
     // Поиск по ID / названию кампании / nm_id её товаров
     const q = search.trim().toLowerCase();
@@ -858,6 +889,13 @@ export default function AdsManagerPage() {
                         <button onClick={handleSync} disabled={syncing} className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
                             <IcRefresh />{syncing ? (syncProgress ? `Синхронизация ${syncProgress}` : 'Синхронизация…') : 'Синхронизировать'}
                         </button>
+                        {lastSyncLabel && !syncing && (
+                            <Tooltip text={`Кампании и бюджеты обновлялись ${lastSyncLabel.exact} (МСК)`}>
+                                <span style={{ fontSize: 12, color: lastSyncLabel.stale ? '#b45309' : 'var(--color-text-dim)', whiteSpace: 'nowrap', cursor: 'default' }}>
+                                    Обновлено {lastSyncLabel.rel}
+                                </span>
+                            </Tooltip>
+                        )}
                         <Tooltip text="Выгрузить таблицу в Excel (с учётом фильтров)"><button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }} onClick={exportCampaigns} disabled={visibleCampaigns.length === 0}>
                             <IcDownload />Excel
                         </button></Tooltip>
