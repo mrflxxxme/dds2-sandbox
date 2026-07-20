@@ -371,10 +371,11 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
                                                         <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                                                             <WbThumb nmId={child.nm_id} size={26} rounded={5} />
                                                             <span style={{ minWidth: 0, lineHeight: 1.25 }}>
-                                                                <Link href={`/p/${slug}/ads-manager/product/${child.nm_id}`} onClick={e => e.stopPropagation()}
-                                                                    style={{ display: 'block', fontWeight: 600, fontSize: 12, color: 'var(--color-accent)', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                                {/* Не ссылка: страница «Кластеры артикула» — legacy, вся работа идёт внутри
+                                                                    кампаний. Клик по строке раскрывает кампании этого артикула. */}
+                                                                <span style={{ display: 'block', fontWeight: 600, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                                                     {child.vendor_code || `#${child.nm_id}`}
-                                                                </Link>
+                                                                </span>
                                                                 <span style={{ display: 'block', fontSize: 10, color: '#9ca3af' }}>
                                                                     {child.nm_id}{camps.length ? ` · ${camps.length} камп.` : ' · без рекламы'}
                                                                 </span>
