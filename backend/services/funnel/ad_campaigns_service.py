@@ -644,8 +644,14 @@ async def get_ad_tab_data(
     date_to: str,
     brand: str = "",
     subject: str = "",
+    include_no_ads: bool = False,
+    limit: int = 500,
 ) -> list[dict]:
-    """Get advertising data grouped by product with linked campaigns."""
+    """Get advertising data grouped by product with linked campaigns.
+
+    include_no_ads=True снимает отсечку «был расход» — товар без рекламы приезжает с нулями
+    (нужно вкладке «Склейки»: склейка показывается целиком, а не только её рекламируемой частью).
+    """
     F = WbFunnelDaily
 
     query = (
@@ -673,7 +679,11 @@ async def get_ad_tab_data(
     if subject:
         query = query.where(F.subject == subject)
 
-    query = query.group_by(F.nm_id).having(func.sum(F.adv_sum) > 0).order_by(func.sum(F.adv_sum).desc()).limit(500)
+    query = query.group_by(F.nm_id)
+    if not include_no_ads:
+        query = query.having(func.sum(F.adv_sum) > 0)
+    # Вторичная сортировка по nm_id: без неё усечение лимитом недетерминированно на нулевых расходах
+    query = query.order_by(func.sum(F.adv_sum).desc(), F.nm_id).limit(limit)
 
     rows = (await db.execute(query)).all()
 
@@ -956,6 +966,104 @@ async def get_ad_tab_grouped(
         )
 
     # ABC on grouped rows
+    _assign_abc(result, "bdr_revenue", "abc_revenue")
+    _assign_abc(result, "bdr_profit", "abc_profit")
+
+    result.sort(key=lambda x: x["adv_sum"], reverse=True)
+    return result
+
+
+# Потолок строк для вкладки «Склейки»: тянем и товары без рекламы, поэтому выборка шире,
+# чем у обычного ad_tab (500). Склейка обязана приезжать целиком — усечение посреди
+# склейки исказило бы её сумму.
+GLUE_SKU_LIMIT = 5000
+
+
+async def get_ad_glue_data(
+    db: AsyncSession,
+    project_id: int,
+    date_from: str,
+    date_to: str,
+    brand: str = "",
+    subject: str = "",
+) -> list[dict]:
+    """Реклама в разрезе склеек WB: строка = карточка (imt_id), дети = её артикулы.
+
+    Товар без склейки — строка-одиночка (is_glue=False), товар без рекламы — с нулями.
+    Метрики-отношения (CTR/CPC/CPM/ДРР) считаются от сумм склейки, не усредняются по детям.
+    """
+    from backend.models.cost import Nomenclature
+    from backend.models.refs import ImtAlias
+
+    sku_data = await get_ad_tab_data(
+        db, project_id, date_from, date_to, brand, subject, include_no_ads=True, limit=GLUE_SKU_LIMIT
+    )
+
+    nom_result = await db.execute(
+        select(Nomenclature.article_wb, Nomenclature.imt_id).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.imt_id.isnot(None),
+        )
+    )
+    nm_to_imt: dict[int, int] = {row.article_wb: row.imt_id for row in nom_result if row.article_wb and row.imt_id}
+
+    alias_result = await db.execute(select(ImtAlias.imt_id, ImtAlias.name).where(ImtAlias.project_id == project_id))
+    imt_aliases: dict[int, str] = {r.imt_id: r.name for r in alias_result}
+
+    # Ключ группы: imt_id склейки либо («одиночка», nm_id) — товары без склейки НЕ схлопываются
+    groups: dict[tuple[bool, int], list[dict]] = {}
+    for item in sku_data:
+        imt_id = nm_to_imt.get(item["nm_id"])
+        key = (True, imt_id) if imt_id else (False, item["nm_id"])
+        groups.setdefault(key, []).append(item)
+
+    result = []
+    for (is_glue, key_id), children in groups.items():
+        children.sort(key=lambda x: x["adv_sum"], reverse=True)
+        views = sum(c["adv_views"] for c in children)
+        clicks = sum(c["adv_clicks"] for c in children)
+        adv_sum = sum(c["adv_sum"] for c in children)
+        orders_sum = sum(c["orders_sum_rub"] for c in children)
+
+        # Кампания, накрывающая несколько артикулов одной склейки, приходит в каждом ребёнке —
+        # без дедупа по campaign_id её бюджет сложился бы столько раз, сколько у неё товаров
+        camps: dict[int, dict] = {}
+        for child in children:
+            for camp in child.get("campaigns", []):
+                camps[camp["campaign_id"]] = camp
+
+        head = children[0]
+        result.append(
+            {
+                "imt_id": key_id if is_glue else None,
+                "is_glue": is_glue,
+                "glue_name": (imt_aliases.get(key_id) or head.get("vendor_code") or f"#{key_id}")
+                if is_glue
+                else (head.get("vendor_code") or f"#{head['nm_id']}"),
+                "nm_ids": [c["nm_id"] for c in children],
+                "brand": head.get("brand"),
+                "subject": head.get("subject"),
+                "adv_views": views,
+                "adv_clicks": clicks,
+                "adv_sum": round(adv_sum, 2),
+                "orders_sum_rub": round(orders_sum, 2),
+                "orders_count": sum(c["orders_count"] for c in children),
+                "ctr": round((clicks / views * 100) if views else 0, 2),
+                "cpc": round((adv_sum / clicks) if clicks else 0, 2),
+                "cpm": round((adv_sum / views * 1000) if views else 0, 2),
+                "drr": round(adv_sum / orders_sum * 100, 2) if orders_sum else (None if adv_sum > 0 else 0),
+                "bdr_revenue": round(sum(c.get("bdr_revenue", 0) for c in children), 2),
+                "bdr_profit": round(sum(c.get("bdr_profit", 0) for c in children), 2),
+                "stock_qty": sum(c.get("stock_qty", 0) for c in children),
+                "product_count": len(children),
+                "budget_total": round(sum(c["budget"] for c in camps.values()), 2),
+                "campaign_count": len(camps),
+                "active_campaigns": sum(1 for c in camps.values() if c.get("status") == 9),
+                "campaign_types": sorted({c["campaign_type"] for c in camps.values() if c.get("campaign_type")}),
+                "children": children,
+            }
+        )
+
     _assign_abc(result, "bdr_revenue", "abc_revenue")
     _assign_abc(result, "bdr_profit", "abc_profit")
 

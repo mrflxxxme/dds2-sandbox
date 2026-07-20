@@ -10,6 +10,7 @@ Covers:
 """
 
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1007,3 +1008,130 @@ class TestScheduledSyncSkipsBudgets:
             await sync_ad_campaigns_all_projects()
 
         assert seen.get("fetch_budgets") is False
+
+
+# ─── get_ad_glue_data ─────────────────────────────────────────────────────────
+
+
+def _sku(nm_id, *, adv_sum=0.0, views=0, clicks=0, orders_sum=0.0, campaigns=None):
+    """Строка get_ad_tab_data в минимальном виде, достаточном для агрегации склеек."""
+    return {
+        "nm_id": nm_id,
+        "vendor_code": f"ART-{nm_id}",
+        "subject": "Ковры",
+        "brand": "BrandX",
+        "adv_views": views,
+        "adv_clicks": clicks,
+        "adv_sum": adv_sum,
+        "orders_sum_rub": orders_sum,
+        "orders_count": 0,
+        "bdr_revenue": 0,
+        "bdr_profit": 0,
+        "stock_qty": 0,
+        "campaigns": campaigns or [],
+    }
+
+
+def _glue_db(nm_to_imt: dict[int, int], aliases: dict[int, str] | None = None):
+    """AsyncMock БД: 1-й execute — nomenclature (nm→imt), 2-й — алиасы склеек."""
+    # SimpleNamespace, а не MagicMock: kwarg `name=` у MagicMock задаёт ИМЯ мока, не атрибут
+    nom_rows = [SimpleNamespace(article_wb=nm, imt_id=imt) for nm, imt in nm_to_imt.items()]
+    alias_rows = [SimpleNamespace(imt_id=imt, name=name) for imt, name in (aliases or {}).items()]
+
+    calls = 0
+
+    async def mock_execute(query):
+        nonlocal calls
+        calls += 1
+        return nom_rows if calls == 1 else alias_rows
+
+    db = AsyncMock()
+    db.execute = mock_execute
+    return db
+
+
+class TestGetAdGlueData:
+    """get_ad_glue_data: склейка = строка, артикулы = дети, метрики от сумм."""
+
+    @pytest.mark.asyncio
+    async def test_campaign_budget_deduped_across_articles(self):
+        """Одна кампания на двух артикулах склейки — её бюджет считается ОДИН раз."""
+        from backend.services.funnel import ad_campaigns_service as svc
+
+        camp = {"campaign_id": 55, "campaign_type": "cpm", "status": 9, "budget": 500.0}
+        sku = [
+            _sku(111, adv_sum=100.0, views=1000, clicks=50, orders_sum=1000.0, campaigns=[camp]),
+            _sku(112, campaigns=[camp]),
+        ]
+
+        with patch.object(svc, "get_ad_tab_data", new=AsyncMock(return_value=sku)):
+            rows = await svc.get_ad_glue_data(_glue_db({111: 900, 112: 900}), PROJECT_ID, "2024-01-01", "2024-01-31")
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["budget_total"] == 500.0  # не 1000 — дедуп по campaign_id
+        assert row["campaign_count"] == 1
+        assert row["active_campaigns"] == 1
+        assert row["campaign_types"] == ["cpm"]
+
+    @pytest.mark.asyncio
+    async def test_articles_without_ads_included_with_zeros(self):
+        """Артикул без расхода остаётся в составе склейки, а не выпадает из неё."""
+        from backend.services.funnel import ad_campaigns_service as svc
+
+        sku = [_sku(111, adv_sum=100.0, views=1000, clicks=50), _sku(112)]
+
+        with patch.object(svc, "get_ad_tab_data", new=AsyncMock(return_value=sku)):
+            rows = await svc.get_ad_glue_data(_glue_db({111: 900, 112: 900}), PROJECT_ID, "2024-01-01", "2024-01-31")
+
+        assert rows[0]["product_count"] == 2
+        assert rows[0]["nm_ids"] == [111, 112]
+        assert [c["adv_sum"] for c in rows[0]["children"]] == [100.0, 0.0]
+
+    @pytest.mark.asyncio
+    async def test_products_without_glue_stay_separate_rows(self):
+        """Товары без imt_id не схлопываются в одну кучу «Без склейки»."""
+        from backend.services.funnel import ad_campaigns_service as svc
+
+        sku = [_sku(111, adv_sum=100.0), _sku(222, adv_sum=50.0)]
+
+        with patch.object(svc, "get_ad_tab_data", new=AsyncMock(return_value=sku)):
+            rows = await svc.get_ad_glue_data(_glue_db({}), PROJECT_ID, "2024-01-01", "2024-01-31")
+
+        assert len(rows) == 2
+        assert all(r["is_glue"] is False and r["imt_id"] is None and r["product_count"] == 1 for r in rows)
+
+    @pytest.mark.asyncio
+    async def test_ratio_metrics_computed_from_sums(self):
+        """CTR/ДРР склейки считаются от сумм, а не усредняются по артикулам."""
+        from backend.services.funnel import ad_campaigns_service as svc
+
+        # Средний CTR детей = (10% + 1%)/2 = 5.5%, но от сумм: 110/2000 = 5.5%... берём асимметрию:
+        # ребёнок A: 100 показов, 10 кликов (10%); ребёнок B: 1900 показов, 19 кликов (1%)
+        # наивное среднее = 5.5%, верное = 29/2000 = 1.45%
+        sku = [
+            _sku(111, views=100, clicks=10, adv_sum=100.0, orders_sum=1000.0),
+            _sku(112, views=1900, clicks=19, adv_sum=100.0, orders_sum=1000.0),
+        ]
+
+        with patch.object(svc, "get_ad_tab_data", new=AsyncMock(return_value=sku)):
+            rows = await svc.get_ad_glue_data(_glue_db({111: 900, 112: 900}), PROJECT_ID, "2024-01-01", "2024-01-31")
+
+        assert rows[0]["ctr"] == 1.45
+        assert rows[0]["drr"] == 10.0  # 200 расход / 2000 заказов
+
+    @pytest.mark.asyncio
+    async def test_alias_wins_over_vendor_code_as_name(self):
+        """Название склейки — пользовательский алиас, если он задан."""
+        from backend.services.funnel import ad_campaigns_service as svc
+
+        sku = [_sku(111, adv_sum=100.0)]
+
+        with patch.object(svc, "get_ad_tab_data", new=AsyncMock(return_value=sku)):
+            rows = await svc.get_ad_glue_data(
+                _glue_db({111: 900}, {900: "Диван тёмно-серый"}), PROJECT_ID, "2024-01-01", "2024-01-31"
+            )
+
+        assert rows[0]["glue_name"] == "Диван тёмно-серый"
+        assert rows[0]["imt_id"] == 900
+        assert rows[0]["is_glue"] is True
