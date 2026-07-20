@@ -5,13 +5,14 @@ import { api } from '@/lib/api';
 import { exportToExcel } from '@/lib/utils';
 import type { AdGlueRow, AdTabProduct, AdCampaign } from '@/types/api';
 import WbThumb from './WbThumb';
-import Tooltip from './Tooltip';
+import InfoTip from './InfoTip';
 import { IcColumns, IcDownload, IcSearch } from './icons';
 import { fmt, fmtPct, tdStyle, tdLeft, cThStyle, cThLeft, STATUS_BADGE } from './adsShared';
 
 const COLS_LS_KEY = 'ads_glue_cols';
-// Сколько миниатюр показываем в строке склейки до «+N» — дальше карусель не влезает в 260px
-const THUMBS_SHOWN = 6;
+// Миниатюр в карусели: 4×28px ≈ 125px, чтобы под название осталось ~200px — столько же,
+// сколько под название кампании в соседней вкладке
+const THUMBS_SHOWN = 4;
 
 type Col = { key: string; label: string; title?: string; w: number; blockStart?: boolean };
 const COLS: Col[] = [
@@ -29,6 +30,9 @@ const COLS: Col[] = [
     { key: 'stock', label: 'Остаток шт', blockStart: true, w: 82 },
 ];
 const BLOCK_DIVIDER = '1px solid rgba(17,24,39,0.08)';
+// Геометрия ячеек — один в один с таблицей кампаний (page.tsx)
+const TH_PAD = { padding: '5px 5px', whiteSpace: 'normal' as const, lineHeight: 1.15 };
+const TD_PAD = { padding: '3px 5px', overflow: 'hidden' as const, textOverflow: 'ellipsis' as const };
 
 type SortDir = 'asc' | 'desc';
 type SortState = { key: string; dir: SortDir } | null;
@@ -68,10 +72,10 @@ function GlueThumbs({ nmIds }: { nmIds: number[] }) {
     const rest = nmIds.length - shown.length;
     return (
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, flexShrink: 0 }}>
-            {shown.map(nm => <WbThumb key={nm} nmId={nm} size={28} rounded={6} />)}
+            {shown.map(nm => <WbThumb key={nm} nmId={nm} size={36} rounded={6} />)}
             {rest > 0 && (
                 <span title={`Ещё ${rest} артикулов в склейке`}
-                    style={{ fontSize: 11, fontWeight: 600, color: '#6b7280', background: '#f3f4f6', border: '1px solid #e5e7eb', borderRadius: 6, padding: '0 5px', lineHeight: '28px', height: 28 }}>
+                    style={{ fontSize: 11, fontWeight: 600, color: '#6b7280', background: '#f3f4f6', border: '1px solid #e5e7eb', borderRadius: 6, padding: '0 5px', lineHeight: '36px', height: 36 }}>
                     +{rest}
                 </span>
             )}
@@ -269,19 +273,21 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
             </div>
 
             <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                {/* Класс data-table и геометрия — те же, что у таблицы кампаний: КАПС в шапке,
+                    моноширинные цифры (tabular-nums), фиксированный layout */}
+                <table className="data-table" style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>
                     <thead>
                         <tr>
-                            <th style={{ ...cThLeft, width: 30 }} title="Выбрать товары склейки — потом «К кампаниям»" />
-                            <th style={{ ...cThLeft, width: 34 }} />
-                            <th style={{ ...cThLeft, minWidth: 300, cursor: 'pointer', userSelect: 'none' }}
-                                onClick={() => onSort('name')} title="Сортировать по названию склейки">
+                            <th style={{ ...cThLeft, ...TH_PAD, width: 28 }} />
+                            <th style={{ ...cThLeft, ...TH_PAD, width: 26 }} />
+                            <th style={{ ...cThLeft, ...TH_PAD, width: 340, cursor: 'pointer', userSelect: 'none' }}
+                                onClick={() => onSort('name')}>
                                 Склейка{sortMark('name')}
                             </th>
                             {cols.map(c => (
                                 <th key={c.key} onClick={() => onSort(c.key)}
-                                    style={{ ...cThStyle, width: c.w, borderLeft: c.blockStart ? BLOCK_DIVIDER : undefined, cursor: 'pointer', userSelect: 'none', color: sort?.key === c.key ? '#fff' : undefined }}>
-                                    {c.title ? <Tooltip text={c.title}><span>{c.label}</span></Tooltip> : c.label}{sortMark(c.key)}
+                                    style={{ ...cThStyle, ...TH_PAD, width: c.w, borderLeft: c.blockStart ? BLOCK_DIVIDER : undefined, cursor: 'pointer', userSelect: 'none' }}>
+                                    {c.title ? <InfoTip text={c.title}>{c.label}</InfoTip> : c.label}{sortMark(c.key)}
                                 </th>
                             ))}
                         </tr>
@@ -308,20 +314,20 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
                                 <React.Fragment key={key}>
                                     <tr onClick={() => setOpenGlue(prev => { const n = new Set(prev); if (n.has(key)) n.delete(key); else n.add(key); return n; })}
                                         style={{ cursor: 'pointer', background: selCount ? '#eff6ff' : open ? '#f8fafc' : undefined }} className="menu-row">
-                                        <td style={tdLeft}>
+                                        <td style={{ ...tdLeft, ...TD_PAD }}>
                                             <TriCheckbox checked={allSel} indeterminate={someSel}
                                                 title={allSel ? 'Снять выбор со склейки' : `Выбрать все товары склейки (${r.product_count})`}
                                                 onChange={() => onToggleGlue(r.nm_ids, !allSel)} />
                                         </td>
-                                        <td style={{ ...tdLeft, color: '#9ca3af' }}>
+                                        <td style={{ ...tdLeft, ...TD_PAD, color: '#9ca3af' }}>
                                             <span style={{ display: 'inline-block', transition: 'transform .15s', transform: open ? 'rotate(90deg)' : undefined }}>▶</span>
                                         </td>
-                                        <td style={tdLeft}>
-                                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                                        <td style={{ ...tdLeft, ...TD_PAD }}>
+                                            <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                                                 <GlueThumbs nmIds={r.nm_ids} />
-                                                <span style={{ minWidth: 0 }}>
-                                                    <span style={{ fontWeight: 600, fontSize: 12.5 }}>{r.glue_name}</span>
-                                                    <span style={{ display: 'block', fontSize: 11, color: 'var(--color-text-dim)' }}>
+                                                <span style={{ minWidth: 0, lineHeight: 1.25 }}>
+                                                    <span style={{ display: 'block', fontWeight: 600, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.glue_name}</span>
+                                                    <span style={{ display: 'block', fontSize: 10, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                                         {r.is_glue ? `Склейка ${r.imt_id} · ${r.product_count} арт.` : `Артикул ${r.nm_ids[0]} · вне склейки`}
                                                         {r.brand ? ` · ${r.brand}` : ''}
                                                     </span>
@@ -329,7 +335,7 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
                                             </span>
                                         </td>
                                         {cols.map(c => (
-                                            <td key={c.key} style={{ ...tdStyle, borderLeft: c.blockStart ? BLOCK_DIVIDER : undefined, fontWeight: 600 }}>
+                                            <td key={c.key} style={{ ...tdStyle, ...TD_PAD, borderLeft: c.blockStart ? BLOCK_DIVIDER : undefined }}>
                                                 {metricCell(c.key, r, true)}
                                             </td>
                                         ))}
@@ -342,32 +348,32 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
                                             <React.Fragment key={child.nm_id}>
                                                 <tr onClick={() => setOpenNm(prev => { const n = new Set(prev); if (n.has(child.nm_id)) n.delete(child.nm_id); else n.add(child.nm_id); return n; })}
                                                     style={{ cursor: 'pointer', background: selectedNms.has(child.nm_id) ? '#eff6ff' : '#fcfcfd' }} className="menu-row">
-                                                    <td style={{ ...tdLeft, paddingLeft: 14 }}>
+                                                    <td style={{ ...tdLeft, ...TD_PAD, paddingLeft: 14 }}>
                                                         <TriCheckbox checked={selectedNms.has(child.nm_id)} indeterminate={false}
                                                             title={`Выбрать артикул ${child.nm_id}`}
                                                             onChange={() => onProductClick(child.nm_id, nmsWithCampaigns.has(child.nm_id))} />
                                                     </td>
-                                                    <td style={{ ...tdLeft, color: '#c4c8ce', paddingLeft: 18 }}>
+                                                    <td style={{ ...tdLeft, ...TD_PAD, color: '#c4c8ce' }}>
                                                         {camps.length > 0 && (
                                                             <span style={{ display: 'inline-block', fontSize: 10, transition: 'transform .15s', transform: nmOpen ? 'rotate(90deg)' : undefined }}>▶</span>
                                                         )}
                                                     </td>
-                                                    <td style={{ ...tdLeft, paddingLeft: 24 }}>
-                                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                                                            <WbThumb nmId={child.nm_id} size={24} rounded={5} />
-                                                            <span>
+                                                    <td style={{ ...tdLeft, ...TD_PAD, paddingLeft: 22 }}>
+                                                        <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                                                            <WbThumb nmId={child.nm_id} size={26} rounded={5} />
+                                                            <span style={{ minWidth: 0, lineHeight: 1.25 }}>
                                                                 <Link href={`/p/${slug}/ads-manager/product/${child.nm_id}`} onClick={e => e.stopPropagation()}
-                                                                    style={{ fontSize: 12, color: 'var(--color-accent)', textDecoration: 'none' }}>
+                                                                    style={{ display: 'block', fontWeight: 600, fontSize: 12, color: 'var(--color-accent)', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                                                     {child.vendor_code || `#${child.nm_id}`}
                                                                 </Link>
-                                                                <span style={{ display: 'block', fontSize: 10.5, color: 'var(--color-text-dim)' }}>
+                                                                <span style={{ display: 'block', fontSize: 10, color: '#9ca3af' }}>
                                                                     {child.nm_id}{camps.length ? ` · ${camps.length} камп.` : ' · без рекламы'}
                                                                 </span>
                                                             </span>
                                                         </span>
                                                     </td>
                                                     {cols.map(c => (
-                                                        <td key={c.key} style={{ ...tdStyle, borderLeft: c.blockStart ? BLOCK_DIVIDER : undefined, color: '#4b5563' }}>
+                                                        <td key={c.key} style={{ ...tdStyle, ...TD_PAD, borderLeft: c.blockStart ? BLOCK_DIVIDER : undefined }}>
                                                             {metricCell(c.key, child, false)}
                                                         </td>
                                                     ))}
@@ -375,22 +381,23 @@ export default function GlueTable({ slug, dateFrom, dateTo, brand, subject, arti
 
                                                 {nmOpen && camps.map(camp => (
                                                     <tr key={camp.campaign_id} style={{ background: '#f9fafb' }}>
-                                                        <td style={tdLeft} />
-                                                        <td style={tdLeft} />
-                                                        <td style={{ ...tdLeft, paddingLeft: 56 }}>
-                                                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                                                        <td style={{ ...tdLeft, ...TD_PAD }} />
+                                                        <td style={{ ...tdLeft, ...TD_PAD }} />
+                                                        <td style={{ ...tdLeft, ...TD_PAD, paddingLeft: 52 }}>
+                                                            <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                                                                 <Link href={`/p/${slug}/ads-manager/campaign/${camp.campaign_id}`}
-                                                                    style={{ fontSize: 12, color: 'var(--color-accent)', textDecoration: 'none' }}>
+                                                                    style={{ fontSize: 12, color: 'var(--color-accent)', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                                                     {camp.name || `#${camp.campaign_id}`}
                                                                 </Link>
-                                                                <span className={`badge ${STATUS_BADGE[camp.status] || 'badge-secondary'}`} style={{ fontSize: 10 }}>
+                                                                <span className={`badge ${STATUS_BADGE[camp.status] || 'badge-secondary'}`}
+                                                                    style={{ fontSize: 10, padding: '2px 6px', flexShrink: 0 }}>
                                                                     {camp.status === 9 ? 'активна' : camp.status === 11 ? 'пауза' : camp.status === 7 ? 'завершена' : camp.status}
                                                                 </span>
-                                                                <span style={{ fontSize: 10.5, color: 'var(--color-text-dim)', textTransform: 'uppercase' }}>{camp.campaign_type}</span>
+                                                                <span style={{ fontSize: 10, color: '#9ca3af', textTransform: 'uppercase', flexShrink: 0 }}>{camp.campaign_type}</span>
                                                             </span>
                                                         </td>
                                                         {cols.map(c => (
-                                                            <td key={c.key} style={{ ...tdStyle, borderLeft: c.blockStart ? BLOCK_DIVIDER : undefined, color: '#6b7280', fontSize: 11.5 }}>
+                                                            <td key={c.key} style={{ ...tdStyle, ...TD_PAD, borderLeft: c.blockStart ? BLOCK_DIVIDER : undefined, color: '#6b7280' }}>
                                                                 {c.key === 'spend' ? fmt(camp.spend)
                                                                     : c.key === 'views' ? fmt(camp.views)
                                                                         : c.key === 'clicks' ? fmt(camp.clicks)
