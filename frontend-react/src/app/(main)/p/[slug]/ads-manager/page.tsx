@@ -291,6 +291,10 @@ export default function AdsManagerPage() {
             if (typeof f.periodTo === 'string') setPeriodTo(f.periodTo);
             if (f.campSort === null || (f.campSort && typeof f.campSort === 'object')) setCampSort(f.campSort);
             if (f.view === 'glue' || AD_VIEWS.some(v => v.key === f.view)) setView(f.view);
+            // Фильтр «по выбранным товарам» (приходит со вкладки «Склейки») — тоже часть
+            // состояния списка: без него возврат из кампании ронял отбор по склейке,
+            // оставляя только предмет/бренд
+            if (Array.isArray(f.campNmFilter)) setCampNmFilter(f.campNmFilter.filter((n: unknown) => typeof n === 'number'));
         } catch { /* битый JSON / SSR — игнор */ }
     }, []);
 
@@ -301,10 +305,10 @@ export default function AdsManagerPage() {
         if (filtersFirstRun.current) { filtersFirstRun.current = false; return; }
         try {
             sessionStorage.setItem(ADS_FILTERS_SS_KEY, JSON.stringify(
-                { brand, subject, article, search, campaignType, bidMode, statusFilter, page, periodFrom, periodTo, campSort, view },
+                { brand, subject, article, search, campaignType, bidMode, statusFilter, page, periodFrom, periodTo, campSort, view, campNmFilter },
             ));
         } catch { /* SSR / quota — игнор */ }
-    }, [brand, subject, article, search, campaignType, bidMode, statusFilter, page, periodFrom, periodTo, campSort, view]);
+    }, [brand, subject, article, search, campaignType, bidMode, statusFilter, page, periodFrom, periodTo, campSort, view, campNmFilter]);
 
     // Видимость колонок — переживает перезагрузку
     useEffect(() => {
@@ -473,7 +477,9 @@ export default function AdsManagerPage() {
         setBrand(v);
         if (article) { const t = advTuples.find(x => String(x.nm_id) === article); if (t && v && t.brand !== v) setArticle(''); }
     };
-    const resetFilters = () => { setBrand(''); setSubject(''); setArticle(''); setSearch(''); setCampaignType(''); setBidMode(''); };
+    // campNmFilter тоже снимаем: он переживает уход в кампанию, и без этого «Сбросить»
+    // оставлял бы список молча отфильтрованным по товарам склейки
+    const resetFilters = () => { setBrand(''); setSubject(''); setArticle(''); setSearch(''); setCampaignType(''); setBidMode(''); setCampNmFilter([]); };
 
     // Кампании: бренд/предмет — по товарам кампании; артикул — по nm_id (клиентский фильтр)
     const visibleCampaigns = campaigns
@@ -780,7 +786,7 @@ export default function AdsManagerPage() {
                         <AdsPeriodPicker from={periodFrom} to={periodTo} placeholder="календарь" minWidth={230} align="right"
                             onApply={(f, t) => { setPeriodFrom(f); setPeriodTo(t); }} />
                     </span>
-                    {(brand || subject || article || search || campaignType || bidMode) && (
+                    {(brand || subject || article || search || campaignType || bidMode || campNmFilter.length > 0) && (
                         <button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12 }} onClick={resetFilters}><IcX size={13} />Сбросить</button>
                     )}
                 </div>
