@@ -1711,6 +1711,7 @@ async def get_unified_stock_summary(
                 "wb_stocks": {},
                 "in_transit": 0,
                 "reserved": 0,
+                "reserved_by_warehouse": {},
                 "reserved_details": [],
                 "total_own": 0,
                 "total_wb": 0,
@@ -1778,17 +1779,21 @@ async def get_unified_stock_summary(
         entry = _ensure(nom_id)
         entry["in_transit"] = qty
 
-    # Reserved (+ разбивка по заявкам для раскрывающейся ячейки)
+    # Reserved (+ разбивка по заявкам для раскрывающейся ячейки и по складам,
+    # чтобы колонка каждого ФФ показывала «свободно / в сборке», а не сырой остаток)
     for nom_id, qty in all_reserved.items():
         if nom_id in unified:
+            named = [
+                {**d, "warehouse_name": wh_name_map.get(d["warehouse_id"], str(d["warehouse_id"]))}
+                for d in reserved_details.get(nom_id, ())
+            ]
+            by_wh: dict[str, int] = {}
+            for d in named:
+                by_wh[d["warehouse_name"]] = by_wh.get(d["warehouse_name"], 0) + d["quantity"]
             unified[nom_id]["reserved"] = qty
+            unified[nom_id]["reserved_by_warehouse"] = by_wh
             unified[nom_id]["reserved_details"] = sorted(
-                (
-                    {**d, "warehouse_name": wh_name_map.get(d["warehouse_id"], str(d["warehouse_id"]))}
-                    for d in reserved_details.get(nom_id, ())
-                ),
-                key=lambda d: d["quantity"],
-                reverse=True,
+                named, key=lambda d: d["quantity"], reverse=True
             )
 
     # Factory orders (remaining)
@@ -1894,6 +1899,7 @@ async def _group_unified(
             "wb_in_way_from_client": 0,
             "in_transit": 0,
             "reserved": 0,
+            "reserved_by_warehouse": {},
             "reserved_details": [],
             "total": 0,
             "factory_qty": 0,
@@ -1961,6 +1967,8 @@ async def _group_unified(
             g["warehouses"][wh_name] = g["warehouses"].get(wh_name, 0) + qty
         for wh_name, qty in row.get("wb_stocks", {}).items():
             g["wb_stocks"][wh_name] = g["wb_stocks"].get(wh_name, 0) + qty
+        for wh_name, qty in row.get("reserved_by_warehouse", {}).items():
+            g["reserved_by_warehouse"][wh_name] = g["reserved_by_warehouse"].get(wh_name, 0) + qty
         # Одна заявка держит несколько SKU группы — склеиваем по заявке, иначе
         # в раскрытой ячейке один и тот же ASM-номер повторится N раз.
         for d in row.get("reserved_details", ()):

@@ -383,6 +383,24 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         return rows;
     }, [data, search, isGrouped, stockDaysFilter, stockDaysFor]);
 
+    // Наборы складов должны быть объявлены ДО rowsForTable: он предвычисляет
+    // ключ сортировки на каждый ФФ и читает ownWarehouses в теле useMemo.
+    const { ownWarehouses, wbWarehouses } = useMemo(() => {
+        const ownSet = new Set<string>();
+        const wbSet = new Set<string>();
+        for (const row of data) {
+            for (const k of Object.keys(row.warehouses)) ownSet.add(k);
+            // Склад, полностью разобранный в заявки, строки остатка не имеет —
+            // без этого он выпал бы из таблицы, но остался в блоке «В сборке на ФФ».
+            for (const k of Object.keys(row.reserved_by_warehouse || {})) ownSet.add(k);
+            for (const k of Object.keys(row.wb_stocks)) wbSet.add(k);
+        }
+        return {
+            ownWarehouses: Array.from(ownSet).sort(),
+            wbWarehouses: Array.from(wbSet).sort(),
+        };
+    }, [data]);
+
     // Предвычисленные ЧИСЛОВЫЕ ключи сортировки для метрик-колонок. Сортировка по
     // готовому полю (а не по замыканию, считающему на каждое сравнение) — надёжна
     // и повторяет проверенный порядок. Товары без продаж уезжают в конец при обеих
@@ -393,15 +411,24 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             const vt = getVariantTotal(r);
             const daily = t?.avg_daily_qty || 0;
             const rev = t?.revenue || 0;
+            // Свободный остаток каждого ФФ — тоже вычисляемая величина, поэтому
+            // предвычисляем: замыкание в getValue не сортируется в рантайме.
+            // Отдельным ключом на склад, т.к. колонок столько же, сколько складов.
+            const ownFree: Record<string, number> = {};
+            for (const wh of ownWarehouses) {
+                ownFree[`_sortOwn_${wh}`] = (r.warehouses[wh] || 0) - (r.reserved_by_warehouse?.[wh] || 0);
+            }
             return {
                 ...r,
+                ...ownFree,
                 _sortTrend: daily,
                 _sortRevenue: rev,
                 _sortMargin: rev > 0 ? ((t?.profit || 0) / rev) * 100 : -1,
                 _sortStockDays: daily > 0 ? vt / daily : Number.MAX_SAFE_INTEGER,
+                _sortOwnFree: (r.total_own || 0) - (r.reserved || 0),
             };
         });
-    }, [filtered, getTrendData, getVariantTotal]);
+    }, [filtered, getTrendData, getVariantTotal, ownWarehouses]);
 
     // «Новинки» KPI — aggregates SKUs flagged as novelties by the backend
     // (no sales recorded in the last 60 days). Counts ALL current and incoming
@@ -508,18 +535,6 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         return Array.from(set).sort((a, b) => a.localeCompare(b, 'ru'));
     }, [data]);
 
-    const { ownWarehouses, wbWarehouses } = useMemo(() => {
-        const ownSet = new Set<string>();
-        const wbSet = new Set<string>();
-        for (const row of data) {
-            for (const k of Object.keys(row.warehouses)) ownSet.add(k);
-            for (const k of Object.keys(row.wb_stocks)) wbSet.add(k);
-        }
-        return {
-            ownWarehouses: Array.from(ownSet).sort(),
-            wbWarehouses: Array.from(wbSet).sort(),
-        };
-    }, [data]);
 
     const totals = useMemo(() => {
         let ownTotal = 0, wbTotal = 0, inTransit = 0, total = 0;
@@ -604,6 +619,22 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         if (mode === 'profit') return qty * (row.avg_profit || 0);
         return qty;
     }, [mode]);
+
+    // Те же множители, но БЕЗ зажима «<= 0 → 0». Нужны там, где отрицательное
+    // значение осмысленно: свободный остаток уходит в минус при переброни, и
+    // getSortVal/fmtVal превратили бы её в ноль и в прочерк — то есть спрятали
+    // ровно ту аномалию, ради которой колонка и заведена.
+    const getSignedVal = useCallback((qty: number, row: UnifiedStockRow): number => {
+        if (mode === 'cost') return qty * (row.avg_cost || 0);
+        if (mode === 'revenue') return qty * (row.avg_price || 0);
+        if (mode === 'profit') return qty * (row.avg_profit || 0);
+        return qty;
+    }, [mode]);
+
+    const fmtSigned = useCallback((qty: number, row: UnifiedStockRow) => {
+        const v = getSignedVal(qty, row);
+        return mode === 'qty' ? formatNumber(v, 0) : formatNumber(v) + ' ₽';
+    }, [mode, getSignedVal]);
 
     const fmtVal = useCallback((qty: number, row: UnifiedStockRow) => {
         if (qty <= 0) return DASH;
@@ -799,13 +830,61 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         // Own warehouse columns (only for variant 2/3)
         if (showOwn) {
             for (const wh of ownWarehouses) {
+                // Пара колонок на склад: остаток и его резерв рядом. Обе на общей
+                // подложке с разделителем слева — визуально читаются как один блок
+                // склада, а не как две независимые колонки среди прочих.
+                const pairBg = 'var(--color-bg)';
                 c.push({
                     key: `own_${wh}`,
-                    label: `${wh}`,
-                    headerTitle: `Товар физически на складе «${wh}» (наш/фулфилмент), включая то, что уже разобрано в заявки на сборку — см. колонку «В сборке на ФФ»`,
+                    label: wh,
+                    headerTitle: `Склад «${wh}» (наш/фулфилмент): свободный остаток — за вычетом того, что уже разобрано в заявки на сборку`,
                     align: 'right',
-                    getValue: (row: UnifiedStockRow) => getSortVal(row.warehouses[wh] || 0, row),
-                    render: (_: unknown, row: UnifiedStockRow) => fmtVal(row.warehouses[wh] || 0, row),
+                    sortingFn: 'basic',
+                    // Замыкание в getValue в рантайме не сортируется — берём
+                    // предвычисленный ключ. В деньгах показывается стоимость, по ней
+                    // и сортируем, иначе колонка сортировалась бы не по видимому.
+                    getValue: (row: UnifiedStockRow) =>
+                        mode === 'qty'
+                            ? (row as UnifiedStockRow & Record<string, number>)[`_sortOwn_${wh}`] ?? 0
+                            : getSignedVal((row.warehouses[wh] || 0) - (row.reserved_by_warehouse?.[wh] || 0), row),
+                    // Через getSignedVal: getSortVal зажал бы переброню в ноль, и в
+                    // Excel она стала бы неотличима от пустого склада.
+                    exportValue: (row: UnifiedStockRow) =>
+                        getSignedVal((row.warehouses[wh] || 0) - (row.reserved_by_warehouse?.[wh] || 0), row),
+                    cellStyle: { background: pairBg, borderLeft: '1px solid var(--color-border)' },
+                    headerStyle: { background: pairBg, borderLeft: '1px solid var(--color-border)' },
+                    render: (_: unknown, row: UnifiedStockRow) => {
+                        const qty = row.warehouses[wh] || 0;
+                        const res = row.reserved_by_warehouse?.[wh] || 0;
+                        if (!qty && !res) return DASH;
+                        const free = qty - res;
+                        // Минус = заявки держат больше, чем лежит на складе. Показываем,
+                        // а не зажимаем в ноль — иначе аномалия невидима.
+                        if (free < 0) {
+                            return (
+                                <span style={{ color: 'var(--color-danger)', fontWeight: 600 }} title={`На складе ${formatNumber(qty, 0)}, в заявках ${formatNumber(res, 0)}`}>
+                                    {fmtSigned(free, row)}
+                                </span>
+                            );
+                        }
+                        return fmtVal(free, row);
+                    },
+                });
+                c.push({
+                    key: `own_${wh}_reserved`,
+                    label: 'в сборке',
+                    headerTitle: `Склад «${wh}»: занято активными заявками на сборку (черновик / в работе / готова / машина назначена). Физически лежит на складе`,
+                    align: 'right',
+                    sortingFn: 'basic',
+                    getValue: (row: UnifiedStockRow) => getSortVal(row.reserved_by_warehouse?.[wh] || 0, row),
+                    exportValue: (row: UnifiedStockRow) => getSortVal(row.reserved_by_warehouse?.[wh] || 0, row),
+                    cellStyle: { background: pairBg, borderRight: '1px solid var(--color-border)' },
+                    headerStyle: { background: pairBg, borderRight: '1px solid var(--color-border)' },
+                    render: (_: unknown, row: UnifiedStockRow) => {
+                        const res = row.reserved_by_warehouse?.[wh] || 0;
+                        if (res <= 0) return DASH;
+                        return <span style={{ color: 'var(--color-warning)', fontWeight: 500 }}>{fmtVal(res, row)}</span>;
+                    },
                 });
             }
 
@@ -844,14 +923,27 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 headerWrap: true,
                 align: 'right',
                 sortable: true,
+                // В штуках — через предвычисленный ключ, а не getSortVal: тот
+                // схлопывает всё <= 0 в ноль, и перебронь (-300) стала бы
+                // неотличима от нуля, хотя сортировка по возрастанию нужна именно
+                // чтобы найти худшую. В деньгах показывается стоимость — по ней и
+                // сортируем/выгружаем, иначе колонка ушла бы в Excel штуками
+                // рядом с рублёвыми соседями.
+                sortingFn: 'basic',
                 getValue: (row: UnifiedStockRow) =>
-                    getSortVal((row.total_own || 0) - (row.reserved || 0), row),
+                    mode === 'qty'
+                        ? (row as UnifiedStockRow & { _sortOwnFree?: number })._sortOwnFree ?? 0
+                        : getSignedVal((row.total_own || 0) - (row.reserved || 0), row),
+                exportValue: (row: UnifiedStockRow) =>
+                    getSignedVal((row.total_own || 0) - (row.reserved || 0), row),
                 render: (_: unknown, row: UnifiedStockRow) => {
                     // Не зажимаем в ноль: отрицательное «свободно» — реальная
-                    // аномалия (перебронь), её надо видеть, а не прятать.
+                    // аномалия (перебронь), её надо видеть, а не прятать. Поэтому
+                    // fmtSigned, а не fmtVal — последний отдаёт прочерк на <= 0.
                     const v = (row.total_own || 0) - (row.reserved || 0);
-                    if (v >= 0) return fmtVal(v, row);
-                    return <span style={{ color: 'var(--color-danger)' }} title="Заявки держат больше, чем есть на остатке">{fmtVal(v, row)}</span>;
+                    if (v > 0) return fmtVal(v, row);
+                    if (v === 0) return DASH;
+                    return <span style={{ color: 'var(--color-danger)', fontWeight: 600 }} title="Заявки держат больше, чем есть на остатке">{fmtSigned(v, row)}</span>;
                 },
             });
         }
@@ -963,7 +1055,20 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             });
         }
 
-        return c;
+        // Единая ширина и перенос заголовков для ВСЕХ числовых колонок. Иначе
+        // ширина определяется содержимым: колонка с длинным названием склада или
+        // с семизначной суммой раздувается, соседняя схлопывается — шапка «рваная».
+        // width — подсказка (table-layout: auto), поэтому по-настоящему широкое
+        // содержимое всё равно поместится, но пустые колонки не схлопнутся.
+        // Ширину задаём через headerStyle, а не через поле width: последнее в
+        // TanStackDataTable к разметке не применяется, и «починка» этого поля
+        // оживила бы давно забытые ширины на других страницах.
+        // headerStyle сливаем, а не перетираем — у пар колонок склада там подложка.
+        return c.map(col =>
+            col.align === 'right'
+                ? { headerWrap: true, ...col, headerStyle: { width: '92px', ...(col.headerStyle || {}) } }
+                : col
+        );
     }, [ownWarehouses, wbWarehouses, expanded, expandedReserved, mode, fmtVal, getSortVal, isGrouped, groupBy, getTrendData, getVariantTotal, showOwn, showFactory, showVehicles]);
 
     // Helper: factory cell content (always ≈ in cost mode, using cost_factory_unit)
@@ -1759,18 +1864,27 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                             <td style={{ textAlign: 'right', color: 'var(--color-accent)', whiteSpace: 'nowrap' }}>
                                 {mode === 'qty' ? formatNumber(totals.variantTotal, 0) : formatNumber(totals.variantMoney) + '\u00A0\u20BD'}
                             </td>
-                            {showOwn && ownWarehouses.map(wh => {
+                            {showOwn && ownWarehouses.flatMap(wh => {
+                                // Две ячейки на склад — ровно как пара колонок выше:
+                                // свободный остаток и его резерв, на общей подложке.
                                 const qty = filtered.reduce((s, r) => s + (r.warehouses[wh] || 0), 0);
-                                const money = filtered.reduce((s, r) => {
-                                    const q = r.warehouses[wh] || 0;
-                                    const m = mode === 'cost' ? r.avg_cost : mode === 'revenue' ? r.avg_price : mode === 'profit' ? r.avg_profit : 0;
-                                    return s + q * (m || 0);
-                                }, 0);
-                                return (
-                                    <td key={wh} style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                        {mode === 'qty' ? formatNumber(qty, 0) : formatNumber(money) + '\u00A0\u20BD'}
-                                    </td>
-                                );
+                                const res = filtered.reduce((s, r) => s + (r.reserved_by_warehouse?.[wh] || 0), 0);
+                                const mul = (r: UnifiedStockRow) =>
+                                    mode === 'cost' ? (r.avg_cost || 0) : mode === 'revenue' ? (r.avg_price || 0) : mode === 'profit' ? (r.avg_profit || 0) : 0;
+                                const freeMoney = filtered.reduce((s, r) => s + ((r.warehouses[wh] || 0) - (r.reserved_by_warehouse?.[wh] || 0)) * mul(r), 0);
+                                const resMoney = filtered.reduce((s, r) => s + (r.reserved_by_warehouse?.[wh] || 0) * mul(r), 0);
+                                const free = qty - res;
+                                const pair = { background: 'var(--color-bg)' };
+                                return [
+                                    <td key={`${wh}-free`} style={{ textAlign: 'right', whiteSpace: 'nowrap', ...pair, borderLeft: '1px solid var(--color-border)' }}>
+                                        <span style={free < 0 ? { color: 'var(--color-danger)', fontWeight: 600 } : undefined}>
+                                            {mode === 'qty' ? formatNumber(free, 0) : formatNumber(freeMoney) + '\u00A0\u20BD'}
+                                        </span>
+                                    </td>,
+                                    <td key={`${wh}-res`} style={{ textAlign: 'right', whiteSpace: 'nowrap', color: 'var(--color-warning)', ...pair, borderRight: '1px solid var(--color-border)' }}>
+                                        {res > 0 ? (mode === 'qty' ? formatNumber(res, 0) : formatNumber(resMoney) + '\u00A0\u20BD') : DASH}
+                                    </td>,
+                                ];
                             })}
                             {showOwn && (
                                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap', color: 'var(--color-warning)' }}>

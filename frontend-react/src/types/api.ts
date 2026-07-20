@@ -1365,6 +1365,8 @@ export interface UnifiedStockRow {
   wb_stocks: Record<string, number>;
   in_transit: number;
   reserved: number;
+  /** Резерв в разрезе наших складов: {название склада: шт} — колонка склада показывает «свободно / в сборке» */
+  reserved_by_warehouse?: Record<string, number>;
   /** Разбивка резерва по заявкам на сборку — раскрывается кликом по «В сборке на ФФ» */
   reserved_details?: ReservedAssemblyDetail[];
   total_own: number;

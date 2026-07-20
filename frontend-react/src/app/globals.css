@@ -300,6 +300,13 @@ input[type="number"] {
     z-index: 10;
 }
 
+/* Заголовки по нижнему краю: иначе однострочные встают по центру, а переносимые
+   (в 2 строки) — ниже, и шапка идёт ступенькой. Двухрядные шапки с rowspan
+   (cost-dna, ads-manager) намеренно центрируют заголовок — их исключаем. */
+.data-table thead th:not([rowspan]) {
+    vertical-align: bottom;
+}
+
 .data-table tbody tr {
     transition: background-color 0.2s ease;
 }

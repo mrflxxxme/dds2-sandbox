@@ -16,10 +16,19 @@ import pytest
 from backend.services.warehouse_stock_engine import _group_unified
 
 
-def _row(nom_id: int, brand: str, *, total_own: int, reserved: int, details: list | None = None) -> dict:
+def _row(
+    nom_id: int,
+    brand: str,
+    *,
+    total_own: int,
+    reserved: int,
+    details: list | None = None,
+    by_wh: dict | None = None,
+) -> dict:
     """Минимальная строка unified в форме, которую отдаёт _ensure()."""
     return {
         "reserved_details": details if details is not None else [],
+        "reserved_by_warehouse": by_wh if by_wh is not None else ({"ФФ": reserved} if reserved else {}),
         "nomenclature_id": nom_id,
         "brand": brand,
         "subject": "Категория",
@@ -106,6 +115,29 @@ class TestGroupedReserved:
         groups = await _group_unified(None, 1, rows, "brand")
 
         assert sum(d["quantity"] for d in groups[0]["reserved_details"]) == groups[0]["reserved"]
+
+    async def test_reserved_by_warehouse_sums_per_warehouse(self):
+        """Колонка каждого ФФ показывает «свободно / в сборке», поэтому резерв
+        обязан агрегироваться в разрезе складов, а не только общей суммой."""
+        rows = [
+            _row(1, "Бренд", total_own=10, reserved=7, by_wh={"Газпром": 4, "натали": 3}),
+            _row(2, "Бренд", total_own=20, reserved=5, by_wh={"Газпром": 5}),
+        ]
+
+        groups = await _group_unified(None, 1, rows, "brand")
+
+        assert groups[0]["reserved_by_warehouse"] == {"Газпром": 9, "натали": 3}
+
+    async def test_reserved_by_warehouse_matches_total(self):
+        """Инвариант блока «В сборке на ФФ»: сумма по складам == общий резерв."""
+        rows = [
+            _row(1, "Бренд", total_own=10, reserved=7, by_wh={"Газпром": 4, "натали": 3}),
+            _row(2, "Бренд", total_own=20, reserved=5, by_wh={"натали": 5}),
+        ]
+
+        groups = await _group_unified(None, 1, rows, "brand")
+
+        assert sum(groups[0]["reserved_by_warehouse"].values()) == groups[0]["reserved"]
 
     async def test_reserved_present_when_group_has_none(self):
         """Поле обязано быть всегда — фронт считает «Свободно» как
