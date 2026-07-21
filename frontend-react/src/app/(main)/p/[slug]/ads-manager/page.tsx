@@ -154,6 +154,8 @@ export default function AdsManagerPage() {
     const [bidPending, setBidPending] = useState<{ cid: number; value: number } | null>(null);  // ставка ждёт встроенного подтверждения
     // Тулбар списка: фильтр статуса (завершённые скрыты), видимость колонок, открытое меню
     const [statusFilter, setStatusFilter] = useState('not_completed');
+    // Только кампании с включённой паузой по расписанию (тумблер в меню «Фильтр»)
+    const [scheduleOnly, setScheduleOnly] = useState(false);
     const [visibleCols, setVisibleCols] = useState<Set<string>>(() => new Set(CAMP_TOGGLE_KEYS));
     // Целевой ДРР для столбца «ДРР план» (%). Дефолт 8; грузится из localStorage в эффекте (чтобы не ломать SSR-гидрацию).
     const [targetDrr, setTargetDrr] = useState<number>(8);
@@ -300,6 +302,7 @@ export default function AdsManagerPage() {
             if (f.campaignType === '' || f.campaignType === 'cpm' || f.campaignType === 'cpc') setCampaignType(f.campaignType);
             if (f.bidMode === '' || f.bidMode === 'unified' || f.bidMode === 'manual') setBidMode(f.bidMode);
             if (typeof f.statusFilter === 'string') setStatusFilter(f.statusFilter);
+            if (typeof f.scheduleOnly === 'boolean') setScheduleOnly(f.scheduleOnly);
             if (typeof f.page === 'number' && f.page >= 1) setPage(f.page);
             if (typeof f.periodFrom === 'string') setPeriodFrom(f.periodFrom);
             if (typeof f.periodTo === 'string') setPeriodTo(f.periodTo);
@@ -319,10 +322,10 @@ export default function AdsManagerPage() {
         if (filtersFirstRun.current) { filtersFirstRun.current = false; return; }
         try {
             sessionStorage.setItem(ADS_FILTERS_SS_KEY, JSON.stringify(
-                { brand, subject, article, search, campaignType, bidMode, statusFilter, page, periodFrom, periodTo, campSort, view, campNmFilter },
+                { brand, subject, article, search, campaignType, bidMode, statusFilter, scheduleOnly, page, periodFrom, periodTo, campSort, view, campNmFilter },
             ));
         } catch { /* SSR / quota — игнор */ }
-    }, [brand, subject, article, search, campaignType, bidMode, statusFilter, page, periodFrom, periodTo, campSort, view, campNmFilter]);
+    }, [brand, subject, article, search, campaignType, bidMode, statusFilter, scheduleOnly, page, periodFrom, periodTo, campSort, view, campNmFilter]);
 
     // Видимость колонок — переживает перезагрузку
     useEffect(() => {
@@ -510,7 +513,7 @@ export default function AdsManagerPage() {
     };
     // campNmFilter тоже снимаем: он переживает уход в кампанию, и без этого «Сбросить»
     // оставлял бы список молча отфильтрованным по товарам склейки
-    const resetFilters = () => { setBrand(''); setSubject(''); setArticle(''); setSearch(''); setCampaignType(''); setBidMode(''); setCampNmFilter([]); };
+    const resetFilters = () => { setBrand(''); setSubject(''); setArticle(''); setSearch(''); setCampaignType(''); setBidMode(''); setCampNmFilter([]); setScheduleOnly(false); };
 
     // Кампании: бренд/предмет — по товарам кампании; артикул — по nm_id (клиентский фильтр)
     const visibleCampaigns = campaigns
@@ -526,6 +529,7 @@ export default function AdsManagerPage() {
         .filter(c => campNmFilter.length === 0 || c.nm_ids.some(n => campNmFilter.includes(n)))
         .filter(c => !campaignType || (c.campaign_type || '').toLowerCase() === campaignType)
         .filter(c => !bidMode || (c.bid_mode || '') === bidMode)
+        .filter(c => !scheduleOnly || !!schedule[String(c.campaign_id)]?.enabled)
         .sort((a, b) => {
             // Базово (колонку не выбрали) — сначала созданные позже. По created_at (может быть
             // null → в конец), а при равных датах — по campaign_id: advertID у WB монотонно
@@ -539,11 +543,11 @@ export default function AdsManagerPage() {
             const bv = Number(b[campSort.field]) || 0;
             return campSort.dir === 'asc' ? av - bv : bv - av;
         });
-    const campFiltered = !!(q || brand || subject || article || campaignType || bidMode);
+    const campFiltered = !!(q || brand || subject || article || campaignType || bidMode || scheduleOnly);
 
     // Пагинация: 50 на страницу. Сброс на 1-ю при смене фильтров/выборки.
     const pageCount = Math.max(1, Math.ceil(visibleCampaigns.length / PER_PAGE));
-    useEffect(() => { setPage(1); }, [q, brand, subject, article, statusFilter, campaignType, bidMode, campSort]);
+    useEffect(() => { setPage(1); }, [q, brand, subject, article, statusFilter, campaignType, bidMode, scheduleOnly, campSort]);
     const safePage = Math.min(page, pageCount);
     const pageCampaigns = visibleCampaigns.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
     const toggleCampSort = (field: keyof AdsManagerCampaign) =>
@@ -598,7 +602,19 @@ export default function AdsManagerPage() {
                 // Настоящая ссылка: правый клик даёт «Открыть в новой вкладке», Cmd/Ctrl+клик — тоже.
                 <Link href={campaignHref(c)} onClick={e => e.stopPropagation()}
                     style={{ display: 'block', maxWidth: 240, color: 'inherit', textDecoration: 'none' }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name || `#${c.campaign_id}`}</div>
+                    <div style={{ fontWeight: 600, fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name || `#${c.campaign_id}`}</span>
+                        {(() => {
+                            // Мини-значок «на расписании» у названия: не теснит артикул в подстроке,
+                            // окно часов — в подсказке (и в колонке «Расписание»)
+                            const sc = schedule[String(c.campaign_id)];
+                            if (!sc?.enabled) return null;
+                            return <span title={`Пауза по расписанию: ${scheduleLabel(sc)} МСК`}
+                                style={{ flexShrink: 0, padding: '0 3px', borderRadius: 4, background: '#d1fae5', color: '#047857', fontWeight: 700, fontSize: 8.5, lineHeight: '12px' }}>
+                                ⏸
+                            </span>;
+                        })()}
+                    </div>
                     <div style={{ fontSize: 10, color: '#9ca3af', display: 'flex', alignItems: 'center', gap: 5 }}>
                         #{c.campaign_id}
                         {(() => { const b = campaignTypeBadge(c); return <span style={{ padding: '0 5px', borderRadius: 4, background: b.bg, color: b.color, fontWeight: 700, fontSize: 9.5, letterSpacing: 0.2 }}>{b.label}</span>; })()}
@@ -905,7 +921,7 @@ export default function AdsManagerPage() {
                         {/* Фильтр по статусу */}
                         <div style={{ position: 'relative' }}>
                             <button onClick={() => setOpenMenu(openMenu === 'filter' ? null : 'filter')} className="btn btn-secondary btn-sm"
-                                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: (statusFilter !== 'not_completed' || campaignType || bidMode) ? 700 : 500 }}><IcSliders />Фильтр</button>
+                                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: (statusFilter !== 'not_completed' || campaignType || bidMode || scheduleOnly) ? 700 : 500 }}><IcSliders />Фильтр</button>
                             {openMenu === 'filter' && (<>
                                 <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={() => setOpenMenu(null)} />
                                 <div style={{ position: 'absolute', right: 0, top: '100%', marginTop: 6, zIndex: 41, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', padding: 8, minWidth: 230 }}>
@@ -932,6 +948,14 @@ export default function AdsManagerPage() {
                                             </div>
                                         );
                                     })}
+                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', padding: '4px 8px', marginTop: 6, borderTop: '1px solid #f1f2f4' }}>ПАУЗА ПО РАСПИСАНИЮ</div>
+                                    <div onClick={() => { setScheduleOnly(v => !v); setOpenMenu(null); }}
+                                        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 8, cursor: 'pointer', fontSize: 13, color: '#111827', background: scheduleOnly ? '#eff6ff' : undefined }}>
+                                        <span style={{ width: 15, height: 15, borderRadius: 4, flexShrink: 0, border: `2px solid ${scheduleOnly ? '#3b82f6' : '#cbd5e1'}`, background: scheduleOnly ? '#3b82f6' : '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 11, fontWeight: 700 }}>
+                                            {scheduleOnly ? '✓' : ''}
+                                        </span>
+                                        Только с расписанием
+                                    </div>
                                 </div>
                             </>)}
                         </div>

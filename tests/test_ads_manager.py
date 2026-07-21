@@ -888,6 +888,34 @@ async def test_run_schedule_tick_wb_error_logged_not_counted(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_schedule_log_for_ui_marks_ts_as_utc(monkeypatch):
+    """ts журнала (naive UTC) отдаётся фронту с UTC-смещением.
+
+    Регресс: строку без зоны браузер трактует как ЛОКАЛЬНОЕ время и не
+    конвертирует — история показывала UTC вместо МСК (пауза «22:16»
+    при реальной 01:16 МСК, прод 21.07).
+    """
+    import json as _json
+
+    from backend.services.funnel import ads_manager as am
+
+    store = _settings_store(monkeypatch)
+    store[am.SCHEDULE_LOG_KEY] = _json.dumps([
+        {"campaign_id": 101, "ts": "2026-07-20T22:16:00", "kind": "pause", "status": "ok"},
+        {"campaign_id": 202, "ts": "2026-07-21T06:01:01+00:00", "kind": "start", "status": "ok"},
+        {"campaign_id": 101, "ts": "not-a-date", "kind": "start", "status": "error"},
+    ])
+
+    log = await am.get_schedule_log_for_ui(AsyncMock(), PROJECT_ID)
+    assert log[0]["ts"] == "2026-07-20T22:16:00+00:00"  # naive UTC → помечен зоной
+    assert log[1]["ts"] == "2026-07-21T06:01:01+00:00"  # aware — как есть
+    assert log[2]["ts"] == "not-a-date"  # мусор не роняет выдачу
+
+    only = await am.get_schedule_log_for_ui(AsyncMock(), PROJECT_ID, campaign_id=202)
+    assert [e["campaign_id"] for e in only] == [202]
+
+
+@pytest.mark.asyncio
 async def test_set_campaign_state_unknown_action():
     """Неизвестное действие отбивается без сетевого вызова."""
     from backend.services.funnel.wb_advertising_api import set_campaign_state

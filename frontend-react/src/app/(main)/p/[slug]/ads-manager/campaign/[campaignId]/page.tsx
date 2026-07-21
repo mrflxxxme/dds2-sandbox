@@ -118,9 +118,6 @@ export default function CampaignPage() {
     // иначе на маунте (campaign ещё null → clustersAvailable=false) сбросили бы восстановленную вкладку.
     useEffect(() => { if (campaign && !clustersAvailable) setTab(t => (t === 'clusters' ? 'metrics' : t)); }, [campaign, clustersAvailable]);
     // Ручное пополнение бюджета
-    const [depositAmount, setDepositAmount] = useState('');
-    const [depositSource, setDepositSource] = useState(0);  // 0 = счёт кабинета Продвижения, 1 = баланс взаиморасчёта
-    const [depositing, setDepositing] = useState(false);
 
     // ─── Метрики по дням ───
     const [metrics, setMetrics] = useState<CampaignMetricsResponse | null>(null);
@@ -225,26 +222,6 @@ export default function CampaignPage() {
             .finally(() => setZonesLoading(false));
     }, [campaignId, dateFrom, dateTo, selectedNm, reloadKey]);
 
-
-    const doDeposit = async () => {
-        if (!campaign) return;
-        const amt = Math.round(Number(depositAmount) || 0);
-        if (amt < 1000) { toast.warning('Минимальная сумма пополнения — 1000 ₽.'); return; }
-        const srcLabel = depositSource === 1 ? 'с баланса взаиморасчёта' : 'со счёта кабинета Продвижения';
-        if (!window.confirm(`Пополнить бюджет кампании на ${amt} ₽ реальными деньгами ${srcLabel} WB?`)) return;
-        setDepositing(true); setCampError('');
-        try {
-            const res = await api.depositCampaignBudget(campaign.campaign_id, amt, depositSource);
-            if (!res.ok) { toast.error(humanizeAdsError(res.error, 'Не удалось пополнить бюджет')); return; }
-            toast.success(`Бюджет пополнен на ${amt.toLocaleString('ru-RU')} ₽`);
-            setDepositAmount('');
-            // WB возвращает новый остаток (budget_after) — показываем сразу, без тяжёлого рефетча
-            if (res.budget_after != null) setCampaign(prev => prev ? { ...prev, budget: res.budget_after as number } : prev);
-            loadCampaign(true);  // тихая сверка (в т.ч. на случай, когда WB не вернул total)
-        } catch (e) {
-            setCampError(humanizeAdsError(e, 'Ошибка пополнения'));
-        } finally { setDepositing(false); }
-    };
 
     // ─── Кластеры / минус-фразы / ставки (только CPM) ───
     const [data, setData] = useState<CampaignClustersResponse | null>(null);
@@ -652,15 +629,6 @@ export default function CampaignPage() {
                                     </span>
                                 )}
 
-                                <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                                    <input type="number" min={1000} step={100} inputMode="numeric" value={depositAmount} placeholder="Сумма, ₽"
-                                        onChange={e => setDepositAmount(e.target.value)} disabled={depositing}
-                                        style={{ width: 92, padding: '4px 6px', border: '1px solid #e5e7eb', borderRadius: 8, fontSize: 12, background: '#fff' }} />
-                                    <button onClick={doDeposit} disabled={depositing || Number(depositAmount) < 1000} className="btn btn-primary btn-sm" style={{ fontSize: 12 }}>
-                                        {depositing ? '…' : 'Пополнить'}
-                                    </button>
-                                </span>
-
                                 {/* Товары остаются кликабельными и в свёрнутом виде */}
                                 {campaign.nm_ids.length > 1 && (
                                     <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
@@ -723,7 +691,8 @@ export default function CampaignPage() {
                                     </div>
                                 </div>
 
-                                {/* Остаток бюджета + расписание паузы + пополнение — карточки одной высоты, метки на одном уровне */}
+                                {/* Остаток бюджета + расписание паузы — карточки одной высоты, метки на одном уровне.
+                                    Пополнения бюджета из ДДС больше нет: деньгами рулит автопополнение ВБ. */}
                                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'stretch' }}>
                                     <div style={{ minWidth: 140, padding: '10px 14px', border: '1px solid #d1d5db', borderRadius: 12, background: '#f9fafb', display: 'flex', flexDirection: 'column', gap: 6 }}>
                                         <div style={{ fontSize: 12, color: '#4b5563', fontWeight: 600 }}>Остаток бюджета</div>
@@ -738,24 +707,6 @@ export default function CampaignPage() {
                                         </button>
                                         <button onClick={() => setBudgetLogModal(true)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#3b82f6', fontSize: 12.5, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, marginTop: 'auto' }}>
                                             <IcHistory size={13} />История бюджета
-                                        </button>
-                                    </div>
-                                    <div style={{ minWidth: 210, padding: '10px 14px', border: '1px solid #d1d5db', borderRadius: 12, background: '#f9fafb', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                                        <div style={{ fontSize: 12, color: '#4b5563', fontWeight: 600 }}>Пополнение бюджета</div>
-                                        <div style={{ display: 'flex', gap: 6 }}>
-                                            <input type="number" min={1000} step={100} inputMode="numeric" value={depositAmount} placeholder="Сумма, ₽"
-                                                onChange={e => setDepositAmount(e.target.value)}
-                                                disabled={depositing}
-                                                style={{ width: 100, padding: '7px 9px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 14, color: '#111827', background: '#fff' }} />
-                                            <select value={depositSource} onChange={e => setDepositSource(Number(e.target.value))} disabled={depositing}
-                                                title="Откуда списать деньги"
-                                                style={{ padding: '7px 9px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 14, color: '#111827', background: '#fff' }}>
-                                                <option value={0}>Счёт</option>
-                                                <option value={1}>Баланс</option>
-                                            </select>
-                                        </div>
-                                        <button onClick={doDeposit} disabled={depositing || Number(depositAmount) < 1000} className="btn btn-primary btn-sm" style={{ fontSize: 13, marginTop: 'auto' }}>
-                                            {depositing ? 'Пополняем…' : 'Пополнить'}
                                         </button>
                                     </div>
                                 </div>
