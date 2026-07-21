@@ -2571,17 +2571,22 @@ async def get_hourly_spend(
 async def get_intraday_metrics(
     db: AsyncSession, project_id: int, campaign_id: int, date: str | None = None,
 ) -> dict:
-    """Внутридневные показы/клики/расход по кампании из снимков накопительного счётчика.
+    """Внутридневные показы/клики/расход по кампании — РЕГУЛЯРНАЯ сетка интервалов на весь день.
 
     WB нативно почасовку показов/кликов НЕ отдаёт (мин. ось — сутки). Мы копим снимки
-    кабинетного campaigns-stats каждые ~30 мин (WbAdCampaignSnapshot / snapshot_ad_intraday).
-    Дельта между соседними снимками одного дня = метрики за интервал (стиль mkeeper,
-    «место принятия решения»). Первый снимок дня = накопление от полуночи МСК.
+    накопительного счётчика (WbAdCampaignSnapshot / snapshot_ad_intraday). Дельта между
+    соседними снимками = прирост за отрезок; относим её к бакету сетки по моменту снимка.
 
-    CTR и порог «мин показов» считает ФРОНТ (интерактивный контрол), поэтому отдаём сырые
-    дельты. points[] упорядочены; time = ЧЧ:ММ МСК момента снимка (конец интервала).
-    totals = последний накопительный счётчик (авторитетное число WB за день).
+    Ось идёт от 00:00 регулярным шагом = ads_snapshot_interval_min (сегодня — до текущего
+    момента, прошлый день — до конца суток), без «пропусков»: интервалы без прироста = нули.
+    Это чинит эффект «первый снимок дня в один бар на полдня» — теперь ранние часы разбиты
+    на равные интервалы, просто с нулями там, где показов/снимков не было.
+
+    CTR и порог «мин показов» считает ФРОНТ. points[] упорядочены; time = ЧЧ:ММ МСК КОНЦА
+    интервала (начало = time предыдущего бакета). totals = последний накопительный счётчик.
     """
+    from backend.services.settings_service import get_ads_snapshot_interval_min
+
     camp = (
         await db.execute(
             select(WbAdCampaign).where(
@@ -2612,21 +2617,46 @@ async def get_intraday_metrics(
         .all()
     )
 
-    points = []
+    step = await get_ads_snapshot_interval_min(db, project_id)  # шаг сетки, мин (10/20/30/60)
+    buckets_per_day = (24 * 60) // step
+
+    # Дельты снимков → бакеты по минуте-от-полуночи МСК момента снимка.
+    agg: dict[int, dict] = {}
     prev_v = prev_c = 0
     prev_s = 0.0
     for snap in snaps:
         cum_v, cum_c = snap.views_cum or 0, snap.clicks_cum or 0
         cum_s = float(snap.spend_cum or 0)
+        cap_msk = pytz.UTC.localize(snap.captured_at).astimezone(MSK)
+        minute_of_day = cap_msk.hour * 60 + cap_msk.minute
+        b = min(minute_of_day // step, buckets_per_day - 1)
+        cell = agg.setdefault(b, {"views": 0, "clicks": 0, "spend": 0.0})
+        cell["views"] += max(0, cum_v - prev_v)  # clamp: WB может скорректировать счётчик вниз
+        cell["clicks"] += max(0, cum_c - prev_c)
+        cell["spend"] += max(0.0, cum_s - prev_s)
+        prev_v, prev_c, prev_s = cum_v, cum_c, cum_s
+
+    # Докуда рисуем ось: сегодня — до текущего интервала, прошлый день — все сутки.
+    if day >= now_msk.date():
+        last_bucket = (now_msk.hour * 60 + now_msk.minute) // step
+    else:
+        last_bucket = buckets_per_day - 1
+
+    def _label(bucket_end_min: int) -> str:
+        m = min(bucket_end_min, 24 * 60)
+        return f"{m // 60:02d}:{m % 60:02d}" if m < 24 * 60 else "24:00"
+
+    points = []
+    for b in range(last_bucket + 1):
+        cell = agg.get(b, {"views": 0, "clicks": 0, "spend": 0.0})
         points.append(
             {
-                "time": pytz.UTC.localize(snap.captured_at).astimezone(MSK).strftime("%H:%M"),
-                "views": max(0, cum_v - prev_v),  # clamp: WB может скорректировать счётчик вниз
-                "clicks": max(0, cum_c - prev_c),
-                "spend": round(max(0.0, cum_s - prev_s), 2),
+                "time": _label((b + 1) * step),  # конец интервала; начало = time предыдущего бакета
+                "views": cell["views"],
+                "clicks": cell["clicks"],
+                "spend": round(cell["spend"], 2),
             }
         )
-        prev_v, prev_c, prev_s = cum_v, cum_c, cum_s
 
     return {
         "campaign_id": campaign_id,

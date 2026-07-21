@@ -9,7 +9,7 @@
 - settings: get/set ads_snapshot_interval_min (валидация кратности тику).
 """
 
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 import pytest
@@ -143,38 +143,52 @@ async def test_snapshot_interval_gate_passes_when_stale(db_session, project, mon
 # ─── get_intraday_metrics ─────────────────────────────────────────────────────
 
 
-async def test_intraday_deltas_and_totals(db_session, project):
+# captured_at — naive UTC; МСК = UTC+3. Час МСК H → UTC H-3.
+def _yesterday_at_msk(hour_msk):
+    y = _today_msk() - timedelta(days=1)
+    return datetime.combine(y, time(hour=hour_msk - 3))
+
+
+async def test_intraday_grid_buckets_deltas(db_session, project):
+    """Дельты снимков ложатся в РЕГУЛЯРНУЮ сетку интервалов; прошлый день = все сутки.
+
+    Шаг по умолчанию 10 мин → 144 бакета. Снимки в 10:00 / 12:00 / 14:00 МСК → бакеты
+    60 / 72 / 84 (метка = конец интервала). Между ними — нулевые интервалы, без пропусков.
+    """
     await _seed_campaign(db_session, project.id)
-    today = _today_msk()
-    base = utcnow().replace(hour=6, minute=0, second=0, microsecond=0)
-    for i, (v, c, s) in enumerate([(100, 5, 50), (350, 20, 180), (500, 31, 277)]):
+    y = _today_msk() - timedelta(days=1)
+    for hour, (v, c, s) in [(10, (100, 5, 50)), (12, (350, 20, 180)), (14, (500, 31, 277))]:
         db_session.add(WbAdCampaignSnapshot(
-            project_id=project.id, campaign_id=CID, stat_date=today,
-            captured_at=base + timedelta(hours=2 * i), views_cum=v, clicks_cum=c, spend_cum=s,
+            project_id=project.id, campaign_id=CID, stat_date=y,
+            captured_at=_yesterday_at_msk(hour), views_cum=v, clicks_cum=c, spend_cum=s,
         ))
     await db_session.commit()
-    res = await get_intraday_metrics(db_session, project.id, CID)
-    assert res["snapshots"] == 3
-    assert [(p["views"], p["clicks"], p["spend"]) for p in res["points"]] == [
-        (100, 5, 50.0), (250, 15, 130.0), (150, 11, 97.0),
-    ]
+    res = await get_intraday_metrics(db_session, project.id, CID, date=y.isoformat())
+
+    assert len(res["points"]) == 144  # весь прошлый день регулярной сеткой
+    pts = res["points"]
+    assert (pts[60]["views"], pts[60]["clicks"], pts[60]["spend"]) == (100, 5, 50.0)
+    assert (pts[72]["views"], pts[72]["clicks"], pts[72]["spend"]) == (250, 15, 130.0)
+    assert (pts[84]["views"], pts[84]["clicks"], pts[84]["spend"]) == (150, 11, 97.0)
+    assert pts[60]["time"] == "10:10" and pts[59]["time"] == "10:00"  # диапазон 10:00–10:10
+    assert pts[65]["views"] == 0 and pts[65]["clicks"] == 0  # интервал без снимка = ноль
+    # сумма по всем интервалам сходится с накопительным итогом
+    assert sum(p["views"] for p in pts) == 500 and sum(p["clicks"] for p in pts) == 31
     assert res["totals"] == {"views": 500, "clicks": 31, "spend": 277.0}
 
 
 async def test_intraday_clamps_counter_decrease(db_session, project):
     """WB может скорректировать счётчик вниз — дельта зажимается в ноль, не уходит в минус."""
     await _seed_campaign(db_session, project.id)
-    today = _today_msk()
-    base = utcnow().replace(hour=6, minute=0, second=0, microsecond=0)
-    for i, (v, c, s) in enumerate([(100, 5, 50), (80, 4, 40)]):  # второй снимок МЕНЬШЕ
+    y = _today_msk() - timedelta(days=1)
+    for hour, (v, c, s) in [(10, (100, 5, 50)), (12, (80, 4, 40))]:  # второй снимок МЕНЬШЕ
         db_session.add(WbAdCampaignSnapshot(
-            project_id=project.id, campaign_id=CID, stat_date=today,
-            captured_at=base + timedelta(hours=i), views_cum=v, clicks_cum=c, spend_cum=s,
+            project_id=project.id, campaign_id=CID, stat_date=y,
+            captured_at=_yesterday_at_msk(hour), views_cum=v, clicks_cum=c, spend_cum=s,
         ))
     await db_session.commit()
-    res = await get_intraday_metrics(db_session, project.id, CID)
-    p = res["points"][1]
-    assert (p["views"], p["clicks"], p["spend"]) == (0, 0, 0.0)
+    res = await get_intraday_metrics(db_session, project.id, CID, date=y.isoformat())
+    assert (res["points"][72]["views"], res["points"][72]["clicks"]) == (0, 0)  # бакет 12:00
 
 
 async def test_intraday_unknown_campaign(db_session, project):

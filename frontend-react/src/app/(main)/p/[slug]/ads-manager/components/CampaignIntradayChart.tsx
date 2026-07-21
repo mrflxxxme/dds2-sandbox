@@ -55,8 +55,9 @@ export default function CampaignIntradayChart({ resp, onSetInterval }: {
     const focus = hover != null && points[hover] ? hover : points.length - 1;
     const fp = points[focus];
     const fCtr = fp ? ctrOf(fp) : null;
-    // Подписи значений над барами наклоняем, когда столбцов много — иначе слипаются.
-    const denseLabels = points.length > 14;
+    // Значения над барами: при плотной сетке подпись слиплась бы над каждым столбцом, поэтому
+    // показываем прорежённо (каждый labelStep-й) — плюс всегда над столбцом под курсором.
+    const showValueAt = (i: number) => i === focus || points.length <= 16 || i % labelStep === 0;
 
     return (
         <div style={{ padding: 16 }}>
@@ -89,13 +90,13 @@ export default function CampaignIntradayChart({ resp, onSetInterval }: {
                         onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
                         style={{ position: 'relative', flex: 1, height: '100%', cursor: 'default',
                             background: i === focus ? 'rgba(124,109,242,0.08)' : undefined, borderRadius: '4px 4px 0 0' }}>
-                        {/* бар показов */}
+                        {/* бар показов — над ним число показов (главная метрика) */}
                         <div style={{ position: 'absolute', bottom: 0, left: '6%', width: '42%', height: `${(p.views / maxViews) * 100}%`, minHeight: p.views > 0 ? 2 : 0, background: '#7c6df2', borderRadius: '2px 2px 0 0' }}>
-                            {p.views > 0 && <BarValue v={p.views} color="#6d5fd0" dense={denseLabels} />}
+                            {p.views > 0 && showValueAt(i) && <BarValue v={p.views} color="#5b4fc4" big={i === focus} />}
                         </div>
-                        {/* бар кликов */}
+                        {/* бар кликов — число только под курсором, чтобы над узкими барами не было каши */}
                         <div style={{ position: 'absolute', bottom: 0, right: '6%', width: '42%', height: `${(p.clicks / maxClicks) * 100}%`, minHeight: p.clicks > 0 ? 2 : 0, background: '#86c99a', borderRadius: '2px 2px 0 0' }}>
-                            {p.clicks > 0 && <BarValue v={p.clicks} color="#4f9e6a" dense={denseLabels} />}
+                            {p.clicks > 0 && i === focus && <BarValue v={p.clicks} color="#3f8a58" big />}
                         </div>
                     </div>
                 ))}
@@ -143,14 +144,12 @@ export default function CampaignIntradayChart({ resp, onSetInterval }: {
     );
 }
 
-/** Число над кончиком бара. При плотном графике наклоняем, чтобы соседние не слипались. */
-function BarValue({ v, color, dense }: { v: number; color: string; dense: boolean }) {
+/** Число над кончиком бара — горизонтальное и контрастное. Под курсором крупнее. */
+function BarValue({ v, color, big }: { v: number; color: string; big?: boolean }) {
     return (
         <span style={{
-            position: 'absolute', bottom: '100%', left: '50%', whiteSpace: 'nowrap',
-            fontSize: dense ? 8 : 9.5, fontWeight: 600, color, lineHeight: 1, paddingBottom: 2,
-            transform: dense ? 'translateX(-50%) rotate(-60deg)' : 'translateX(-50%)',
-            transformOrigin: 'bottom center',
+            position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
+            whiteSpace: 'nowrap', fontSize: big ? 12 : 10, fontWeight: 700, color, lineHeight: 1, paddingBottom: 3,
         }}>{fmt(v)}</span>
     );
 }
