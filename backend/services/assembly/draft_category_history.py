@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import AssemblyDraft, AssemblyDraftCategoryHourly
@@ -39,7 +40,8 @@ from backend.utils.time import utcnow
 logger = logging.getLogger(__name__)
 
 FALLBACK_CATEGORY = "Без категории"
-RETENTION_DAYS = 90
+# = максимум окна просмотра (роутер: days ≤ 60) — храним ровно то, что достижимо.
+RETENTION_DAYS = 60
 # 60 дней × 24 часа × ~40 категорий — с запасом выше любого реального объёма.
 _HISTORY_ROWS_CAP = 60_000
 
@@ -214,24 +216,38 @@ async def snapshot_project(
 
     stats = compute_category_stats(distributions, category_by_nm, machine, pallet_overrides)
 
-    # Idempotent-перезапись часа: срез часа = текущее состояние, не сумма прогонов.
-    await db.execute(
-        delete(AssemblyDraftCategoryHourly).where(
-            AssemblyDraftCategoryHourly.project_id == project_id,
-            AssemblyDraftCategoryHourly.taken_at == hour,
-        )
+    # Idempotent-перезапись часа БЕЗ delete+insert: почасовая джоба и ручной
+    # «Снять срез сейчас» могут наложиться — две транзакции delete+insert падали
+    # бы на uq_asm_draft_cat_hourly (ревью MEDIUM). Upsert по уникальному ключу
+    # конкуренцию переживает; категории, исчезнувшие с прошлого прогона часа,
+    # подчищаются отдельным DELETE (текущий срез = состояние, не сумма прогонов).
+    cat_names = [cat[:100] for cat in stats]
+    stale = delete(AssemblyDraftCategoryHourly).where(
+        AssemblyDraftCategoryHourly.project_id == project_id,
+        AssemblyDraftCategoryHourly.taken_at == hour,
     )
+    if cat_names:
+        stale = stale.where(AssemblyDraftCategoryHourly.category.not_in(cat_names))
+    await db.execute(stale)
     for cat, acc in stats.items():
-        db.add(
-            AssemblyDraftCategoryHourly(
-                project_id=project_id,
-                taken_at=hour,
-                category=cat[:100],
-                positions=len(acc.nm_ids),
-                units_rows=acc.units_rows,
-                units_prebook=acc.units_prebook,
-                boxes=acc.boxes,
-                pallets=acc.pallets,
+        values = {
+            "project_id": project_id,
+            "taken_at": hour,
+            "category": cat[:100],
+            "positions": len(acc.nm_ids),
+            "units_rows": acc.units_rows,
+            "units_prebook": acc.units_prebook,
+            "boxes": acc.boxes,
+            "pallets": acc.pallets,
+            "created_at": utcnow(),
+            "updated_at": utcnow(),
+        }
+        await db.execute(
+            pg_insert(AssemblyDraftCategoryHourly)
+            .values(**values)
+            .on_conflict_do_update(
+                constraint="uq_asm_draft_cat_hourly",
+                set_={k: values[k] for k in ("positions", "units_rows", "units_prebook", "boxes", "pallets", "updated_at")},
             )
         )
     await db.commit()

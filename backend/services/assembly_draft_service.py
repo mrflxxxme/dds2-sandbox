@@ -585,8 +585,24 @@ async def clear_draft(
     deleted_scoped: list[str] = []
     kept_scoped: list[str] = []
     if not _category_scope_set(draft):
-        scoped = [d for d in await list_drafts(db, project_id) if d.id != draft.id and _category_scope_set(d)]
-        for d in scoped:
+        # FOR UPDATE и на категорийных: решение «удалять или нет» принимается по
+        # handed-юнитам, а конкурентный hand_off/commit_unit (сами под FOR UPDATE)
+        # мог бы добавить юнит между чтением снимка и soft_delete — TOCTOU-обход
+        # гварда физически переданного товара (ревью MEDIUM).
+        others = await db.execute(
+            select(AssemblyDraft)
+            .where(
+                AssemblyDraft.project_id == project_id,
+                AssemblyDraft.id != draft.id,
+                AssemblyDraft.is_deleted == False,  # noqa: E712 — SQLAlchemy expression
+            )
+            .order_by(AssemblyDraft.updated_at.desc())
+            .limit(500)
+            .with_for_update()
+        )
+        for d in others.scalars().all():
+            if not _category_scope_set(d):
+                continue
             if _has_live_handed_units(d):
                 kept_scoped.append(d.name)
             else:

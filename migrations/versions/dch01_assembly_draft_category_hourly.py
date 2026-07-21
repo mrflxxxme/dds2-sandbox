@@ -38,13 +38,9 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("project_id", "taken_at", "category", name="uq_asm_draft_cat_hourly"),
     )
-    op.create_index(
-        "ix_asm_draft_cat_hourly_project_taken",
-        "assembly_draft_category_hourly",
-        ["project_id", "taken_at"],
-    )
+    # Отдельного индекса (project_id, taken_at) нет намеренно: уникальный индекс
+    # констрейнта покрывает этот префикс для всех запросов таблицы.
 
 
 def downgrade() -> None:
-    op.drop_index("ix_asm_draft_cat_hourly_project_taken", table_name="assembly_draft_category_hourly")
     op.drop_table("assembly_draft_category_hourly")

@@ -416,9 +416,10 @@ class AssemblyDraftCategoryHourly(Base, TimestampMixin):
     boxes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     pallets: Mapped[Decimal] = mapped_column(Numeric(10, 1), nullable=False, default=Decimal("0"))
 
+    # Уникальный индекс (project_id, taken_at, category) покрывает и get_history
+    # (префикс project_id+taken_at), и подчистку часа — отдельный индекс не нужен.
     __table_args__ = (
         UniqueConstraint("project_id", "taken_at", "category", name="uq_asm_draft_cat_hourly"),
-        Index("ix_asm_draft_cat_hourly_project_taken", "project_id", "taken_at"),
     )
 
 

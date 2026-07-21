@@ -12,7 +12,7 @@
  * по категориям и дни с почасовой детализацией (Δ к предыдущему часу).
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
     CartesianGrid,
@@ -101,16 +101,22 @@ export default function DraftDynamicsTab({ slug }: { slug: string }) {
     const [category, setCategory] = useState<string>(ALL_CATEGORIES);
     const [snapshotting, setSnapshotting] = useState(false);
 
+    // Счётчик запроса: быстрый клик 7→14→30 не даёт устаревшему ответу
+    // перезаписать выбранный период (ревью LOW).
+    const loadSeqRef = useRef(0);
     const load = useCallback(async (days: PeriodKey) => {
+        const seq = ++loadSeqRef.current;
         setLoading(true);
         setError('');
         try {
             const res = await api.getDraftCategoryHistory(Number(days));
+            if (seq !== loadSeqRef.current) return;
             setPoints(res.points || []);
         } catch (e) {
+            if (seq !== loadSeqRef.current) return;
             setError(e instanceof Error ? e.message : 'Не удалось загрузить историю');
         } finally {
-            setLoading(false);
+            if (seq === loadSeqRef.current) setLoading(false);
         }
     }, []);
 
@@ -164,6 +170,16 @@ export default function DraftDynamicsTab({ slug }: { slug: string }) {
         [hours],
     );
 
+    // Δ штук к предыдущему часу per ts — O(n) вместо findIndex в рендере (ревью LOW).
+    const deltaByTs = useMemo(() => {
+        const m = new Map<number, number | null>();
+        hours.forEach((h, i) => {
+            m.set(h.ts, i === 0 ? null
+                : (h.unitsRows + h.unitsPrebook) - (hours[i - 1].unitsRows + hours[i - 1].unitsPrebook));
+        });
+        return m;
+    }, [hours]);
+
     // Дни (MSK), свежие сверху; внутри дня часы свежие сверху + Δ к предыдущему часу.
     const days = useMemo(() => {
         const map = new Map<string, HourAgg[]>();
@@ -199,6 +215,8 @@ export default function DraftDynamicsTab({ slug }: { slug: string }) {
 
     const isEmpty = !loading && !error && points !== null && points.length === 0;
     const hasData = !loading && !error && hours.length > 0;
+    // Точки есть, но фильтр категории за период дал пусто — своя ветка (ревью LOW).
+    const emptyFiltered = !loading && !error && points !== null && points.length > 0 && hours.length === 0;
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -266,6 +284,15 @@ export default function DraftDynamicsTab({ slug }: { slug: string }) {
                     <button type="button" className="btn btn-sm btn-primary" onClick={handleSnapshot} disabled={snapshotting}>
                         {snapshotting ? 'Срез…' : '⏱ Снять срез сейчас'}
                     </button>
+                </div>
+            )}
+
+            {/* Пусто после фильтра категории */}
+            {emptyFiltered && (
+                <div className="glass-card" style={{ textAlign: 'center', padding: '32px 16px' }}>
+                    <div style={{ fontSize: 14, color: 'var(--color-text-muted)' }}>
+                        По категории «{category === ALL_CATEGORIES ? 'Все' : category}» за выбранный период срезов нет.
+                    </div>
                 </div>
             )}
 
@@ -360,14 +387,10 @@ export default function DraftDynamicsTab({ slug }: { slug: string }) {
                                 </tr>
                             </thead>
                             <tbody>
-                                {day.hoursDesc.map((h, i) => {
-                                    // Δ к предыдущему ЧАСУ (следующий элемент desc-списка; для
-                                    // первого часа дня — к последнему часу предыдущего дня).
-                                    const idx = hours.findIndex(x => x.ts === h.ts);
-                                    const prev = idx > 0 ? hours[idx - 1] : null;
-                                    const delta = prev
-                                        ? (h.unitsRows + h.unitsPrebook) - (prev.unitsRows + prev.unitsPrebook)
-                                        : 0;
+                                {day.hoursDesc.map(h => {
+                                    // Δ к предыдущему ЧАСУ (для первого часа дня — к последнему
+                                    // часу предыдущего дня); null = самая первая точка истории.
+                                    const delta = deltaByTs.get(h.ts) ?? null;
                                     return (
                                         <tr key={h.ts}>
                                             <td>{hourFmt.format(new Date(h.ts))}</td>
@@ -377,7 +400,7 @@ export default function DraftDynamicsTab({ slug }: { slug: string }) {
                                             <td style={{ textAlign: 'right' }}>{formatNumber(h.boxes, 0)}</td>
                                             <td style={{ textAlign: 'right' }}>{formatNumber(h.pallets, 1)}</td>
                                             <td style={{ textAlign: 'right' }}>
-                                                {i === day.hoursDesc.length - 1 && !prev
+                                                {delta === null
                                                     ? <span style={{ color: 'var(--color-text-dim)' }}>—</span>
                                                     : <span style={{ color: delta < 0 ? 'var(--color-success)' : delta > 0 ? 'var(--color-warning)' : 'var(--color-text-dim)' }}>
                                                         {delta > 0 ? '+' : ''}{formatNumber(delta, 0)}
@@ -391,6 +414,19 @@ export default function DraftDynamicsTab({ slug }: { slug: string }) {
                     </div>
                 </details>
             ))}
+
+            {/* styled-jsx скоупит keyframes per-компонент — без локальной копии
+                скелет был бы статичным (паттерн соседних вкладок). */}
+            <style jsx>{`
+                @keyframes shimmer {
+                    0% {
+                        background-position: 200% 0;
+                    }
+                    100% {
+                        background-position: -200% 0;
+                    }
+                }
+            `}</style>
         </div>
     );
 }
