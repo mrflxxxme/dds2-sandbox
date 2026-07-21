@@ -126,7 +126,13 @@ export function addWarehouseMethods(api: ApiClient) {
 
         // ─── Stock ───────────────────────────────────────────────────
         getExpectedVehicles(warehouseId: number) { return api.request<any[]>('GET', `/api/v1/warehouse/${warehouseId}/expected-vehicles`); },
-        getWarehouseStock(warehouseId: number) { return api.request<WarehouseStockRow[]>('GET', `/api/v1/warehouse/${warehouseId}/stock`); },
+        getWarehouseStock(warehouseId: number, excludeAssemblyId?: number) {
+            // excludeAssemblyId: экран редактирования сборки — её собственный резерв не вычитается из available
+            const params = new URLSearchParams();
+            if (excludeAssemblyId != null) params.set('exclude_assembly_id', String(excludeAssemblyId));
+            const qs = params.toString();
+            return api.request<WarehouseStockRow[]>('GET', `/api/v1/warehouse/${warehouseId}/stock${qs ? `?${qs}` : ''}`);
+        },
         getStockMovements(warehouseId: number, limit = 200) { return api.request<StockMovement[]>('GET', `/api/v1/warehouse/${warehouseId}/movements?limit=${limit}`); },
         getStockSummary() { return api.request<StockSummaryRow[]>('GET', '/api/v1/warehouse/stock/summary'); },
         getUnifiedStock(groupBy?: string, brand?: string, includeForecast?: boolean) {

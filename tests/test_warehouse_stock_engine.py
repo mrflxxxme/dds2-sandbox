@@ -364,6 +364,47 @@ class TestGetWarehouseStock:
         stock = await get_warehouse_stock(db_session, other_project.id, wh.id)
         assert stock == []
 
+    @pytest.mark.asyncio
+    async def test_exclude_assembly_id_returns_own_reserve(self, db_session, project, wh, bc):
+        """Экран редактирования сборки: её собственный резерв не должен «съедать»
+        available — иначе свои же позиции показывают ложный дефицит (прод-кейс ASM-850)."""
+        from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+
+        await _receive(db_session, project, wh, bc, 100)
+        nom_id = (
+            await db_session.execute(
+                text("SELECT id FROM nomenclature WHERE project_id = :pid AND barcode = :bc"),
+                {"pid": project.id, "bc": bc},
+            )
+        ).scalar_one()
+
+        def _assembly(number: str, qty: int) -> AssemblyRequest:
+            ar = AssemblyRequest(
+                project_id=project.id, warehouse_id=wh.id, number=number,
+                status=AssemblyStatus.READY, pallets_count=1, pallet_weight_kg=100,
+            )
+            ar.items = [
+                AssemblyRequestItem(project_id=project.id, nomenclature_id=nom_id, barcode=bc, quantity=qty)
+            ]
+            return ar
+
+        own = _assembly(f"ASM-OWN-{_uid()}", 30)
+        other = _assembly(f"ASM-OTH-{_uid()}", 20)
+        db_session.add_all([own, other])
+        await db_session.commit()
+
+        by_bc = lambda rows: next(s for s in rows if s["barcode"] == bc)  # noqa: E731
+
+        # Без исключения: резервируют обе сборки
+        item = by_bc(await get_warehouse_stock(db_session, project.id, wh.id))
+        assert item["reserved"] == 50
+        assert item["available"] == 50
+
+        # Редактирование own: её 30 возвращаются в available, чужие 20 — нет
+        item = by_bc(await get_warehouse_stock(db_session, project.id, wh.id, exclude_assembly_id=own.id))
+        assert item["reserved"] == 20
+        assert item["available"] == 80
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # get_stock_movements

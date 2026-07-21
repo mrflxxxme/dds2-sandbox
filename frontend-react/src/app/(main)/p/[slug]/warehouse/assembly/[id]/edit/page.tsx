@@ -171,7 +171,10 @@ export default function AssemblyEditPage() {
             setStockMap(new Map());
             return;
         }
-        api.getWarehouseStock(Number(warehouseId))
+        // exclude_assembly_id=id: резерв САМОЙ редактируемой сборки не вычитается из
+        // available — иначе её же позиции показывают «0 доступно» и ложный дефицит
+        // даже при уменьшении количества.
+        api.getWarehouseStock(Number(warehouseId), id)
             .then((rows: WarehouseStockRow[]) => {
                 const map = new Map<string, number>();
                 for (const row of rows) {
@@ -180,7 +183,7 @@ export default function AssemblyEditPage() {
                 setStockMap(map);
             })
             .catch(() => setStockMap(new Map()));
-    }, [warehouseId]);
+    }, [warehouseId, id]);
 
     // ─── Computed ─────────────────────────────────────────────────────────
 
