@@ -69,6 +69,48 @@ async def _brand_map(db: AsyncSession, project_id: int, nm_ids: set[int]) -> dic
     return {nm_id: b for nm_id, (_d, b) in best.items()}
 
 
+async def _subject_map(db: AsyncSession, project_id: int, nm_ids: set[int]) -> dict[int, str]:
+    """nm_id → предмет (fallback). WB иногда не шлёт subjectName в строке удержания →
+    добираем из замеров склада (тот же subjectName), затем из карточки (Nomenclature.subject).
+    """
+    if not nm_ids:
+        return {}
+    out: dict[int, str] = {}
+    # 1) из замеров склада — собственный subject_name замера
+    wh = (
+        await db.execute(
+            select(WbWarehouseMeasurement.nm_id, func.max(WbWarehouseMeasurement.subject_name))
+            .where(
+                WbWarehouseMeasurement.project_id == project_id,
+                WbWarehouseMeasurement.nm_id.in_(nm_ids),
+                WbWarehouseMeasurement.subject_name.isnot(None),
+            )
+            .group_by(WbWarehouseMeasurement.nm_id)
+        )
+    ).all()
+    for nm, s in wh:
+        if s and s.strip():
+            out[nm] = s
+    # 2) фолбэк из номенклатуры — subjectName карточки WB
+    missing = nm_ids - out.keys()
+    if missing:
+        nom = (
+            await db.execute(
+                select(Nomenclature.article_wb, func.max(Nomenclature.subject))
+                .where(
+                    Nomenclature.project_id == project_id,
+                    Nomenclature.article_wb.in_(missing),
+                    Nomenclature.subject.isnot(None),
+                )
+                .group_by(Nomenclature.article_wb)
+            )
+        ).all()
+        for nm, s in nom:
+            if s and s.strip():
+                out[nm] = s
+    return out
+
+
 async def _card_volume_map(db: AsyncSession, project_id: int, nm_ids: set[int]) -> dict[int, Decimal]:
     """nm_id → объём карточки WB (л) из номенклатуры (L×W×H/1000, WB Content API).
 
@@ -187,8 +229,11 @@ async def list_measurement_penalties(
     ).scalars().all()
     rows = list(rows)
     bmap = await _brand_map(db, project_id, {r.nm_id for r in rows})
+    smap = await _subject_map(db, project_id, {r.nm_id for r in rows if not (r.subject_name and r.subject_name.strip())})
     for r in rows:
         r.brand = bmap.get(r.nm_id)  # type: ignore[attr-defined]  # transient attr для схемы
+        if not (r.subject_name and r.subject_name.strip()):
+            r.subject_name = smap.get(r.nm_id)  # добор предмета из замеров/карточки
     return rows, total, total_penalty, total_reversal
 
 
@@ -230,11 +275,13 @@ async def summarize_penalties_by_article(
         )
     ).all()
 
-    bmap = await _brand_map(db, project_id, {r[0] for r in rows})
+    nm_ids = {r[0] for r in rows}
+    bmap = await _brand_map(db, project_id, nm_ids)
+    smap = await _subject_map(db, project_id, {nm for nm, subj, *_ in rows if not (subj and subj.strip())})
     items = [
         {
             "nm_id": nm_id,
-            "subject_name": subj,
+            "subject_name": subj if (subj and subj.strip()) else smap.get(nm_id),
             "brand": bmap.get(nm_id),
             "total_penalty": Decimal(pen),
             "total_reversal": Decimal(rev),

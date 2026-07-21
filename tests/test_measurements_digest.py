@@ -13,7 +13,7 @@ from decimal import Decimal
 import pytest
 
 from backend.models.cost import Nomenclature
-from backend.models.wb_measurements import WbWarehouseMeasurement
+from backend.models.wb_measurements import WbMeasurementPenalty, WbWarehouseMeasurement
 from backend.services import measurements_service as m
 
 
@@ -142,3 +142,33 @@ async def test_digest_data_project_isolation(db_session, project, other_project)
     data = await m.warehouse_digest_data(db_session, project.id, _DF, _DT)
     assert data["total"] == 1
     assert dict(data["subjects"]) == {"Ковры": 1}
+
+
+def _pen(project_id, dim_id, nm_id, subject, amount):
+    return WbMeasurementPenalty(
+        project_id=project_id, dim_id=dim_id, nm_id=nm_id, subject_name=subject,
+        penalty_amount=Decimal(str(amount)), reversal_amount=Decimal("0"),
+        penalty_date=_IN_PERIOD,
+    )
+
+
+@pytest.mark.asyncio
+async def test_summary_subject_fallback(db_session, project):
+    """Удержание без предмета → добираем из замера склада, затем из карточки."""
+    db_session.add_all([
+        _pen(project.id, 51, 501, None, 100),                       # добор из замера
+        _meas(project.id, 61, 501, "Ковры", 10.0, _IN_PERIOD),
+        _pen(project.id, 52, 502, None, 50),                        # добор из карточки
+        Nomenclature(project_id=project.id, barcode=f"bc-sub-{project.id}", article_wb=502, subject="Пледы"),
+        _pen(project.id, 53, 503, "Чехлы", 30),                     # свой предмет
+        _pen(project.id, 54, 504, "", 20),                          # пустая строка = как None
+        _meas(project.id, 64, 504, "Покрывала", 5.0, _IN_PERIOD),
+    ])
+    await db_session.commit()
+
+    items, _totals = await m.summarize_penalties_by_article(db_session, project.id)
+    by_nm = {i["nm_id"]: i["subject_name"] for i in items}
+    assert by_nm[501] == "Ковры"       # из замера склада
+    assert by_nm[502] == "Пледы"       # из карточки (замера нет)
+    assert by_nm[503] == "Чехлы"       # собственный не тронут
+    assert by_nm[504] == "Покрывала"   # пустая строка тоже добирается
