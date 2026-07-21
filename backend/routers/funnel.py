@@ -797,12 +797,9 @@ async def get_campaigns_schedule_log(
     db: AsyncSession = Depends(get_db),
 ):
     """Журнал пауз/запусков по расписанию (новые первыми); campaign_id — фильтр по кампании."""
-    from backend.services.funnel.ads_manager import get_schedule_log
+    from backend.services.funnel.ads_manager import get_schedule_log_for_ui
 
-    log = await get_schedule_log(db, project.id)
-    if campaign_id is not None:
-        log = [e for e in log if int(e.get("campaign_id") or 0) == campaign_id]
-    return log
+    return await get_schedule_log_for_ui(db, project.id, campaign_id)
 
 
 @router.get("/campaigns/budget/ledger")

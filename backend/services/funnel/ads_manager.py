@@ -1819,6 +1819,30 @@ async def append_schedule_log(db: AsyncSession, project_id: int, entry: dict) ->
     await set_setting(db, project_id, SCHEDULE_LOG_KEY, json.dumps(log[:SCHEDULE_LOG_CAP], ensure_ascii=False))
 
 
+async def get_schedule_log_for_ui(db: AsyncSession, project_id: int, campaign_id: int | None = None) -> list[dict]:
+    """Журнал для фронта: фильтр по кампании + ts с UTC-смещением.
+
+    В журнале ts — naive UTC (`utcnow().isoformat()`). Строку без зоны браузер
+    трактует как ЛОКАЛЬНОЕ время и не конвертирует — история показывала UTC
+    вместо МСК (пауза «22:16» при реальной 01:16 МСК). Отдаём ts как aware-ISO,
+    формат дат на фронте сам переведёт в зону пользователя.
+    """
+    log = await get_schedule_log(db, project_id)
+    if campaign_id is not None:
+        log = [e for e in log if int(e.get("campaign_id") or 0) == campaign_id]
+    out = []
+    for e in log:
+        try:
+            dt = datetime.fromisoformat(str(e.get("ts", "")))
+        except (TypeError, ValueError):
+            out.append(e)
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        out.append({**e, "ts": dt.isoformat()})
+    return out
+
+
 async def run_ads_schedule_tick(db: AsyncSession, project_id: int, api_key: str) -> dict:
     """Один проход паузы по расписанию: решения + WB start/pause + журнал.
 
