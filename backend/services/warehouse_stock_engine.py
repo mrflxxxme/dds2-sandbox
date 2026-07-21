@@ -193,15 +193,21 @@ async def _update_stock(
 # ─── Warehouse Stock queries ──────────────────────────────────────────────
 
 
-async def _get_reserved_map(db: AsyncSession, project_id: int, warehouse_id: int) -> dict[int, int]:
+async def _get_reserved_map(
+    db: AsyncSession, project_id: int, warehouse_id: int, exclude_assembly_id: int | None = None
+) -> dict[int, int]:
     """Get reserved qty per nomenclature_id from active assembly requests.
 
     PRE_DISTRIBUTED НАМЕРЕННО исключён: такая заявка зарезервирована под товар машины
     в пути, которого ещё нет на ФФ-складе — она НЕ держит реальный ФФ-сток. Включить
     её сюда = занять несуществующий остаток (фейк-резерв). На разгрузке машины статус
     становится IN_PROGRESS и заявка попадает в резерв уже законно. См. C1 в PREDIST_DESIGN.md.
+
+    exclude_assembly_id — не считать резерв этой сборки (экран её редактирования:
+    собственные позиции не должны «съедать» доступный остаток, иначе даже
+    уменьшение количества выглядит дефицитом).
     """
-    result = await db.execute(
+    query = (
         select(
             AssemblyRequestItem.nomenclature_id,
             func.sum(AssemblyRequestItem.quantity).label("reserved"),
@@ -222,6 +228,9 @@ async def _get_reserved_map(db: AsyncSession, project_id: int, warehouse_id: int
         )
         .group_by(AssemblyRequestItem.nomenclature_id)
     )
+    if exclude_assembly_id is not None:
+        query = query.where(AssemblyRequest.id != exclude_assembly_id)
+    result = await db.execute(query)
     return {row.nomenclature_id: row.reserved for row in result.all()}
 
 
@@ -328,8 +337,14 @@ async def _get_reserved_detail_batch(
     return details
 
 
-async def get_warehouse_stock(db: AsyncSession, project_id: int, warehouse_id: int) -> list[dict]:
-    """Get current stock for a warehouse, enriched with reserved/available."""
+async def get_warehouse_stock(
+    db: AsyncSession, project_id: int, warehouse_id: int, exclude_assembly_id: int | None = None
+) -> list[dict]:
+    """Get current stock for a warehouse, enriched with reserved/available.
+
+    exclude_assembly_id — резерв этой сборки не вычитается из available
+    (для экрана редактирования сборки: «сколько могу заказать в ЭТОЙ сборке»).
+    """
     result = await db.execute(
         select(WarehouseStock)
         .where(
@@ -341,7 +356,7 @@ async def get_warehouse_stock(db: AsyncSession, project_id: int, warehouse_id: i
     )
     rows = result.scalars().all()
 
-    reserved_map = await _get_reserved_map(db, project_id, warehouse_id)
+    reserved_map = await _get_reserved_map(db, project_id, warehouse_id, exclude_assembly_id=exclude_assembly_id)
 
     enriched = []
     for row in rows:

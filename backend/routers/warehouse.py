@@ -323,11 +323,16 @@ async def update_delivery_times(
 @router.get("/{warehouse_id}/stock")
 async def get_warehouse_stock(
     warehouse_id: int,
+    exclude_assembly_id: int | None = Query(
+        None, description="Не вычитать из available резерв этой сборки (экран её редактирования)"
+    ),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Get current stock for a warehouse."""
-    rows = await warehouse_service.get_warehouse_stock(db, project.id, warehouse_id)
+    rows = await warehouse_service.get_warehouse_stock(
+        db, project.id, warehouse_id, exclude_assembly_id=exclude_assembly_id
+    )
     return [WarehouseStockSchema(**r) for r in rows]
 
 
