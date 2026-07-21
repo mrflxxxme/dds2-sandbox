@@ -30,7 +30,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
+          # 768M было впритык: на простое ~450MB, пик распознавания счёта (растеризация
+          # скан-PDF + vision) добивал до лимита → cgroup OOM-kill uvicorn → 502 клиенту
+          # (3 OOM за 21.07.2026; свопа на хосте нет, host RAM 5.9G — запас есть).
+          memory: 1280M
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
       interval: 10s
@@ -82,7 +85,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1024M
+          # Ловил OOM-kill на 1024M (21.07.2026 15:30, anon-rss≈1019MB) — тот же класс
+          # проблемы, что у backend; поднято с запасом.
+          memory: 1280M
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request,json; r=urllib.request.urlopen('http://localhost:8000/health'); d=json.loads(r.read()); exit(0 if d.get('scheduler_ok',True) else 1)" ]
       interval: 15s
