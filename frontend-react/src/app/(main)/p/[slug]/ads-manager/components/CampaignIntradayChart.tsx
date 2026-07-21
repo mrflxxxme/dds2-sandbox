@@ -158,12 +158,13 @@ function avg(a: number[]): number {
     return a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0;
 }
 
-const INTERVAL_OPTIONS = [10, 20, 30, 60];
+// Только 30/60: официальная статистика WB обновляется не чаще ~раза в 30 мин.
+const INTERVAL_OPTIONS = [30, 60];
 
 /** Селектор частоты снимков (проект-глобально). Меняет, как часто job снимает стату. */
 function IntervalSelect({ value, onChange }: { value?: number; onChange?: (m: number) => void | Promise<void> }) {
     const [saving, setSaving] = useState(false);
-    const cur = value ?? 10;
+    const cur = value ?? 30;
     if (!onChange) return null;
     return (
         <label title="Как часто снимается внутридневная статистика — для всех кампаний проекта"

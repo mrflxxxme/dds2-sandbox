@@ -152,8 +152,8 @@ def _yesterday_at_msk(hour_msk):
 async def test_intraday_grid_buckets_deltas(db_session, project):
     """Дельты снимков ложатся в РЕГУЛЯРНУЮ сетку интервалов; прошлый день = все сутки.
 
-    Шаг по умолчанию 10 мин → 144 бакета. Снимки в 10:00 / 12:00 / 14:00 МСК → бакеты
-    60 / 72 / 84 (метка = конец интервала). Между ними — нулевые интервалы, без пропусков.
+    Шаг по умолчанию 30 мин → 48 бакетов. Снимки в 10:00 / 12:00 / 14:00 МСК → бакеты
+    20 / 24 / 28 (метка = конец интервала). Между ними — нулевые интервалы, без пропусков.
     """
     await _seed_campaign(db_session, project.id)
     y = _today_msk() - timedelta(days=1)
@@ -165,13 +165,13 @@ async def test_intraday_grid_buckets_deltas(db_session, project):
     await db_session.commit()
     res = await get_intraday_metrics(db_session, project.id, CID, date=y.isoformat())
 
-    assert len(res["points"]) == 144  # весь прошлый день регулярной сеткой
+    assert len(res["points"]) == 48  # весь прошлый день регулярной сеткой по 30 мин
     pts = res["points"]
-    assert (pts[60]["views"], pts[60]["clicks"], pts[60]["spend"]) == (100, 5, 50.0)
-    assert (pts[72]["views"], pts[72]["clicks"], pts[72]["spend"]) == (250, 15, 130.0)
-    assert (pts[84]["views"], pts[84]["clicks"], pts[84]["spend"]) == (150, 11, 97.0)
-    assert pts[60]["time"] == "10:10" and pts[59]["time"] == "10:00"  # диапазон 10:00–10:10
-    assert pts[65]["views"] == 0 and pts[65]["clicks"] == 0  # интервал без снимка = ноль
+    assert (pts[20]["views"], pts[20]["clicks"], pts[20]["spend"]) == (100, 5, 50.0)
+    assert (pts[24]["views"], pts[24]["clicks"], pts[24]["spend"]) == (250, 15, 130.0)
+    assert (pts[28]["views"], pts[28]["clicks"], pts[28]["spend"]) == (150, 11, 97.0)
+    assert pts[20]["time"] == "10:30" and pts[19]["time"] == "10:00"  # диапазон 10:00–10:30
+    assert pts[22]["views"] == 0 and pts[22]["clicks"] == 0  # интервал без снимка = ноль
     # сумма по всем интервалам сходится с накопительным итогом
     assert sum(p["views"] for p in pts) == 500 and sum(p["clicks"] for p in pts) == 31
     assert res["totals"] == {"views": 500, "clicks": 31, "spend": 277.0}
@@ -188,7 +188,7 @@ async def test_intraday_clamps_counter_decrease(db_session, project):
         ))
     await db_session.commit()
     res = await get_intraday_metrics(db_session, project.id, CID, date=y.isoformat())
-    assert (res["points"][72]["views"], res["points"][72]["clicks"]) == (0, 0)  # бакет 12:00
+    assert (res["points"][24]["views"], res["points"][24]["clicks"]) == (0, 0)  # бакет 12:00 (шаг 30)
 
 
 async def test_intraday_unknown_campaign(db_session, project):
@@ -199,18 +199,20 @@ async def test_intraday_unknown_campaign(db_session, project):
 # ─── settings: ads_snapshot_interval_min ──────────────────────────────────────
 
 
-async def test_interval_default_is_10(db_session, project):
-    assert await get_ads_snapshot_interval_min(db_session, project.id) == 10
+async def test_interval_default_is_30(db_session, project):
+    assert await get_ads_snapshot_interval_min(db_session, project.id) == 30
 
 
 async def test_interval_set_get(db_session, project):
-    await set_ads_snapshot_interval_min(db_session, project.id, 20)
-    assert await get_ads_snapshot_interval_min(db_session, project.id) == 20
+    await set_ads_snapshot_interval_min(db_session, project.id, 60)
+    assert await get_ads_snapshot_interval_min(db_session, project.id) == 60
 
 
 async def test_interval_rejects_invalid(db_session, project):
-    with pytest.raises(ValueError):
-        await set_ads_snapshot_interval_min(db_session, project.id, 7)
+    # 7 не кратно, 10/20 убраны (WB не обновляет чаще ~30 мин) — всё отклоняется
+    for bad in (7, 10, 20):
+        with pytest.raises(ValueError):
+            await set_ads_snapshot_interval_min(db_session, project.id, bad)
 
 
 # ─── snapshot_ad_intraday_all_projects: видимость нулевых исходов ─────────────
