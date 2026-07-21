@@ -319,7 +319,19 @@ export async function runDraftAutoSync(
         const dist = cur.distribution ?? {};
         const curManual = new Set<number>(dist.manual_nms ?? []);
         const preserve = new Set<string>(dist.prebook_origin ?? []);
-        const plan = buildAutoSyncPlan(dist, netted.rows, netted.prebook, shared.guardedNms, curManual, preserve);
+        // Ре-нормализация смёрженного плана (calc + замороженные строки): без неё
+        // хвосты направлений с ✋/unowned-SKU висели в rows неполной паллетой
+        // (прод 2026-07-21: Тула «⚠ 31%», ELKA ×40 в «Без целой паллеты»).
+        // freeByNm не передаём: план не добирает новый сток, только режет/демотирует.
+        const normCtx: NormalizeDraftCtx = {
+            ppbOf: (nm) => shared.nmPpb.get(nm),
+            ppbAt: (nm, ffId) => shared.nmPpbByWh.get(nm)?.[ffId] ?? null,
+            boxSizeOf: (nm) => shared.nmBoxSize.get(nm) ?? null,
+            overrides: shared.palletOverrides,
+            classOf,
+        };
+        const plan = buildAutoSyncPlan(dist, netted.rows, netted.prebook, shared.guardedNms, curManual, preserve,
+            (rs, pb) => { const n = scopedNormalizeDraft(rs, pb, normCtx, undefined); return { rows: n.rows, prebook: n.prebook }; });
         if (!plan) return { ...base, status: 'no-delta' };
         const before = sumUnits(dist.rows ?? []) + sumUnits(dist.prebook ?? []);
         const after = sumUnits(plan.rows) + sumUnits(plan.prebook);
