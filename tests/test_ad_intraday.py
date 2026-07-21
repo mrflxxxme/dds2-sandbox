@@ -152,8 +152,9 @@ def _yesterday_at_msk(hour_msk):
 async def test_intraday_grid_buckets_deltas(db_session, project):
     """Дельты снимков ложатся в РЕГУЛЯРНУЮ сетку интервалов; прошлый день = все сутки.
 
-    Шаг по умолчанию 30 мин → 48 бакетов. Снимки в 10:00 / 12:00 / 14:00 МСК → бакеты
-    20 / 24 / 28 (метка = конец интервала). Между ними — нулевые интервалы, без пропусков.
+    Шаг по умолчанию 30 мин → 48 бакетов. Снимки в 10:00 / 12:00 / 14:00 МСК.
+    Первый (10:00) — БАЗА отсчёта, в бар не идёт. Приросты со второго: 12:00 → бакет 24
+    (350-100=250), 14:00 → бакет 28 (500-350=150). Бакет 20 (10:00) остаётся нулевым.
     """
     await _seed_campaign(db_session, project.id)
     y = _today_msk() - timedelta(days=1)
@@ -167,13 +168,12 @@ async def test_intraday_grid_buckets_deltas(db_session, project):
 
     assert len(res["points"]) == 48  # весь прошлый день регулярной сеткой по 30 мин
     pts = res["points"]
-    assert (pts[20]["views"], pts[20]["clicks"], pts[20]["spend"]) == (100, 5, 50.0)
+    assert (pts[20]["views"], pts[20]["clicks"]) == (0, 0)  # первый снимок = база, не объём
     assert (pts[24]["views"], pts[24]["clicks"], pts[24]["spend"]) == (250, 15, 130.0)
     assert (pts[28]["views"], pts[28]["clicks"], pts[28]["spend"]) == (150, 11, 97.0)
-    assert pts[20]["time"] == "10:30" and pts[19]["time"] == "10:00"  # диапазон 10:00–10:30
-    assert pts[22]["views"] == 0 and pts[22]["clicks"] == 0  # интервал без снимка = ноль
-    # сумма по всем интервалам сходится с накопительным итогом
-    assert sum(p["views"] for p in pts) == 500 and sum(p["clicks"] for p in pts) == 31
+    assert pts[24]["time"] == "12:30" and pts[23]["time"] == "12:00"  # диапазон 12:00–12:30
+    assert pts[22]["views"] == 0  # интервал без снимка = ноль
+    # totals = последний накопительный WB (весь день), не сумма приростов
     assert res["totals"] == {"views": 500, "clicks": 31, "spend": 277.0}
 
 

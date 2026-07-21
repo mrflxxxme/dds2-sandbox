@@ -90,14 +90,14 @@ export default function CampaignIntradayChart({ resp, onSetInterval }: {
                         onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
                         style={{ position: 'relative', flex: 1, height: '100%', cursor: 'default',
                             background: i === focus ? 'rgba(124,109,242,0.08)' : undefined, borderRadius: '4px 4px 0 0' }}>
-                        {/* бар показов — над ним число показов (главная метрика) */}
+                        {/* бар показов — над его кончиком подпись ТОЛЬКО показов (главная метрика).
+                            Клики не подписываем: их видно по высоте зелёного бара, в заголовке при
+                            наведении и в таблице — иначе два числа над узким баром наезжают. */}
                         <div style={{ position: 'absolute', bottom: 0, left: '6%', width: '42%', height: `${(p.views / maxViews) * 100}%`, minHeight: p.views > 0 ? 2 : 0, background: '#7c6df2', borderRadius: '2px 2px 0 0' }}>
                             {p.views > 0 && showValueAt(i) && <BarValue v={p.views} color="#5b4fc4" big={i === focus} />}
                         </div>
-                        {/* бар кликов — число только под курсором, чтобы над узкими барами не было каши */}
-                        <div style={{ position: 'absolute', bottom: 0, right: '6%', width: '42%', height: `${(p.clicks / maxClicks) * 100}%`, minHeight: p.clicks > 0 ? 2 : 0, background: '#86c99a', borderRadius: '2px 2px 0 0' }}>
-                            {p.clicks > 0 && i === focus && <BarValue v={p.clicks} color="#3f8a58" big />}
-                        </div>
+                        {/* бар кликов */}
+                        <div style={{ position: 'absolute', bottom: 0, right: '6%', width: '42%', height: `${(p.clicks / maxClicks) * 100}%`, minHeight: p.clicks > 0 ? 2 : 0, background: '#86c99a', borderRadius: '2px 2px 0 0' }} />
                     </div>
                 ))}
             </div>
