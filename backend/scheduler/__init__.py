@@ -43,6 +43,7 @@ from backend.scheduler.jobs.funnel import (
     sync_funnel_hourly,
     sync_nomenclature_all_projects,
 )
+from backend.scheduler.jobs.draft_category_snapshot import snapshot_all_projects_draft_categories
 from backend.scheduler.jobs.draft_staleness_watch import check_all_projects_draft_staleness
 from backend.scheduler.jobs.health_check import health_monitor
 from backend.scheduler.jobs.heartbeat import heartbeat_ping
@@ -375,6 +376,18 @@ def start_scheduler():
         trigger=IntervalTrigger(hours=1),
         id="draft_staleness_watch",
         name="Draft staleness watch (hourly)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=600,
+    )
+
+    # Почасовой срез черновиков сборки по категориям (вкладка «Динамика черновика»):
+    # сдвиг :40 — после синка WB remains (:20), в стороне от прочих :00-джобов.
+    _scheduler.add_job(
+        snapshot_all_projects_draft_categories,
+        trigger=CronTrigger(minute=40, timezone=MSK),
+        id="draft_category_snapshot",
+        name="Assembly draft category snapshot (hourly :40 MSK)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=600,

@@ -525,11 +525,16 @@ export default function AssemblyDraftPage() {
                 stockNeed: trigger === 'load' ? stockNeed : null,
                 geometry: geomReuse,
             });
-            if (shared.wbStocksAgeHours != null && shared.wbStocksAgeHours > WB_STOCKS_STALE_HOURS) {
+            // null-штамп = зеркало остатков пусто/поле не отдано — это ХУДШИЙ кейс,
+            // не «свежий»: fail-closed, синк к нулевому WB-стоку хуже пропуска (ревью MEDIUM).
+            if (shared.wbStocksAgeHours == null || shared.wbStocksAgeHours > WB_STOCKS_STALE_HOURS) {
                 // Гейт повторов двигаем и на стоп-пути: иначе каждый focus заново
                 // качал бы shared-данные при устойчиво протухших остатках (ревью LOW).
                 markAutoSyncPass();
-                setPageSync({ running: false, lastAt: Date.now(), note: `⚠ Остатки WB не обновлялись ~${formatNumber(shared.wbStocksAgeHours, 0)} ч — авто-синк остановлен (расчёт ехал бы по старым данным)` });
+                const ageNote = shared.wbStocksAgeHours == null
+                    ? '⚠ Возраст остатков WB неизвестен (зеркало пусто?) — авто-синк остановлен'
+                    : `⚠ Остатки WB не обновлялись ~${formatNumber(shared.wbStocksAgeHours, 0)} ч — авто-синк остановлен (расчёт ехал бы по старым данным)`;
+                setPageSync({ running: false, lastAt: Date.now(), note: ageNote });
                 return;
             }
             const drafts = await api.listAssemblyDrafts();
@@ -2233,31 +2238,33 @@ export default function AssemblyDraftPage() {
         finally { setPalletOp(null); }
     }, [draftId, palletOp, prebook, rows, stripPalletsFromPrebook, buildDistribution, applyDraft, showToast]);
 
-    // ── «Очистить черновик»: удалить всё наполнение (строки + источники/цели). ──
+    // ── «Очистить черновик»: сброс наполнения на сервере; для основного черновика
+    // бэкенд заодно удаляет категорийные черновики (кроме переданных на ФФ). ──
     const [clearing, setClearing] = useState(false);
     const handleClearDraft = useCallback(async () => {
         if (!draftId || clearing) return;
-        if (rows.length === 0 && prebook.length === 0) { showToast('Черновик уже пуст', 'success'); return; }
-        if (!window.confirm('Очистить черновик? Всё наполнение и предбронь будут удалены.')) return;
+        const scopedNames = isScoped ? [] : allDrafts
+            .filter(d => d.id !== draftId && (d.distribution.category_scope?.length ?? 0) > 0)
+            .map(d => d.name);
+        if (rows.length === 0 && prebook.length === 0 && scopedNames.length === 0) { showToast('Черновик уже пуст', 'success'); return; }
+        const scopedNote = scopedNames.length > 0 ? ` Категорийные черновики (${scopedNames.join(', ')}) тоже будут удалены.` : '';
+        if (!window.confirm(`Очистить черновик? Всё наполнение и предбронь будут удалены.${scopedNote}`)) return;
         setClearing(true);
         try {
-            const dist: AssemblyDraftDistribution = {
-                ...buildDistribution(),
-                rows: [],
-                prebook: [],
-                source_warehouse_ids: [],
-                target_warehouse_names: [],
-                cold_start_shares: null,
-            };
-            const updated = await api.updateAssemblyDraft(draftId, { distribution: dist, event: { event_type: 'MATRIX_EDIT', summary: 'Черновик очищен (строки + предбронь)' } });
-            applyDraft(updated);
-            showToast('Черновик очищен', 'success');
+            const res = await api.clearAssemblyDraft(draftId);
+            applyDraft(res.draft);
+            refreshReserved(); // список черновиков + резерв: удалённые категорийные исчезают из шапки
+            const extra = [
+                res.deleted_scoped.length ? `удалены категорийные: ${res.deleted_scoped.join(', ')}` : '',
+                res.kept_scoped.length ? `оставлены (переданы на ФФ): ${res.kept_scoped.join(', ')}` : '',
+            ].filter(Boolean).join(' · ');
+            showToast(extra ? `Черновик очищен · ${extra}` : 'Черновик очищен', 'success');
         } catch (e: unknown) {
             showToast(e instanceof Error ? e.message : 'Ошибка очистки черновика', 'error');
         } finally {
             setClearing(false);
         }
-    }, [draftId, clearing, rows.length, prebook.length, buildDistribution, applyDraft, showToast]);
+    }, [draftId, clearing, isScoped, allDrafts, rows.length, prebook.length, applyDraft, refreshReserved, showToast]);
 
     // Удаление неликвида из вкладки «Прогноз»: убрать SKU из черновика на бэке, затем
     // АВТО-дозабивка — пере-собрать остатки округов в целые паллеты (как «Дозабить»).
@@ -2486,7 +2493,10 @@ export default function AssemblyDraftPage() {
                         <button className="btn btn-primary btn-sm" onClick={handleFillFromNeed} disabled={filling}>
                             {filling ? 'Заполнение…' : '⚡ Заполнить черновик из потребности'}
                         </button>
-                        {rows.length > 0 && (
+                        {/* Показ и при rows=[]: черновик с одной предбронью или висящими
+                            категорийными черновиками тоже должен очищаться (ревью LOW). */}
+                        {(rows.length > 0 || prebook.length > 0
+                            || allDrafts.some(d => d.id !== draftId && (d.distribution.category_scope?.length ?? 0) > 0)) && (
                             <button className="btn btn-danger btn-sm" onClick={handleClearDraft} disabled={clearing}>
                                 {clearing ? 'Очистка…' : '🗑 Очистить черновик'}
                             </button>

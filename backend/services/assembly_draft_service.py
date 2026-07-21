@@ -503,6 +503,22 @@ async def remove_rows_by_nm(
     return draft
 
 
+def _has_live_handed_units(draft: AssemblyDraft) -> bool:
+    """Есть ли в черновике юниты, реально переданные на ФФ (status=handed, непустые items).
+
+    Такой черновик — единственная запись о физически переданном товаре (плюс его
+    резерв в /drafts/reserved): молча удалить его нельзя. Читаем сырой JSONB
+    (не Pydantic) — в проде встречается explicit null вместо []/{}.
+    """
+    dist = draft.distribution if isinstance(draft.distribution, dict) else {}
+    for unit in (dist or {}).get("handed_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        if (unit.get("status") or "handed") == "handed" and (unit.get("items") or []):
+            return True
+    return False
+
+
 async def delete_draft(
     db: AsyncSession,
     project_id: int,
@@ -518,18 +534,92 @@ async def delete_draft(
     draft = await get_draft(db, project_id, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
-    # Сырой JSONB (не Pydantic): в проде встречается explicit null вместо []/{}.
-    dist = draft.distribution if isinstance(draft.distribution, dict) else {}
-    for unit in (dist or {}).get("handed_units") or []:
-        if not isinstance(unit, dict):
-            continue
-        if (unit.get("status") or "handed") == "handed" and (unit.get("items") or []):
-            raise HTTPException(
-                status_code=400,
-                detail="В черновике есть заявки, переданные на ФФ — сначала верните их в черновик",
-            )
+    if _has_live_handed_units(draft):
+        raise HTTPException(
+            status_code=400,
+            detail="В черновике есть заявки, переданные на ФФ — сначала верните их в черновик",
+        )
     draft.soft_delete()
     await db.commit()
+
+
+async def clear_draft(
+    db: AsyncSession,
+    project_id: int,
+    draft_id: int,
+    changed_by: str | None = None,
+) -> tuple[AssemblyDraft, list[str], list[str]]:
+    """«Очистить черновик»: сброс наполнения + удаление категорийных черновиков.
+
+    Обнуляет rows/prebook/prebook_origin/manual_nms/источники/цели/cold_start_shares,
+    сохраняя handed_units (переданное на ФФ — физический факт) и category_scope.
+    Для ОСНОВНОГО (бесскоупного) черновика дополнительно soft-delete'ит категорийные
+    черновики проекта: они создаются с того же экрана «Сборка» и раньше переживали
+    очистку вместе со своим наполнением и резервом (прод-баг 2026-07-21). Категорийные
+    с живыми handed-юнитами не удаляются (гвард как в delete_draft) — возвращаются
+    в kept. Очистка КАТЕГОРИЙНОГО черновика чистит только его самого.
+
+    Одна транзакция; в историю пишется MATRIX_EDIT с before-снапшотом ОСНОВНОГО
+    черновика (откат события вернёт его наполнение, но НЕ воскресит удалённые
+    категорийные — их можно восстановить только руками через is_deleted).
+
+    Returns (черновик, имена удалённых категорийных, имена оставленных).
+    """
+    import copy
+
+    draft = await _get_draft_for_update(db, project_id, draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+
+    before_distribution = copy.deepcopy(draft.distribution)
+    dist = AssemblyDraftDistribution.model_validate(draft.distribution or {})
+    dist.rows = []
+    dist.prebook = []
+    dist.prebook_origin = []
+    dist.manual_nms = []
+    dist.source_warehouse_ids = []
+    dist.target_warehouse_names = []
+    dist.cold_start_shares = None
+    draft.distribution = dist.model_dump()
+
+    deleted_scoped: list[str] = []
+    kept_scoped: list[str] = []
+    if not _category_scope_set(draft):
+        scoped = [d for d in await list_drafts(db, project_id) if d.id != draft.id and _category_scope_set(d)]
+        for d in scoped:
+            if _has_live_handed_units(d):
+                kept_scoped.append(d.name)
+            else:
+                d.soft_delete()
+                deleted_scoped.append(d.name)
+
+    await db.commit()
+    await db.refresh(draft)
+
+    from backend.services.assembly.draft_history import log_draft_event
+
+    summary = "Черновик очищен (строки + предбронь)"
+    if deleted_scoped:
+        summary += f"; удалены категорийные: {', '.join(deleted_scoped)}"
+    if kept_scoped:
+        summary += f"; оставлены (переданы на ФФ): {', '.join(kept_scoped)}"
+    # Best-effort: черновик уже сохранён (commit выше) — сбой лога не валит очистку.
+    try:
+        await log_draft_event(
+            db,
+            project_id,
+            draft_id,
+            "MATRIX_EDIT",
+            summary=summary,
+            before_distribution=before_distribution,
+            draft_updated_at=draft.updated_at,
+            changed_by=changed_by,
+        )
+        await db.refresh(draft)
+    except Exception:
+        logger.warning("Failed to log clear event for draft_id=%s", draft_id, exc_info=True)
+
+    return draft, deleted_scoped, kept_scoped
 
 
 def _category_scope_set(d: AssemblyDraft) -> frozenset[str]:

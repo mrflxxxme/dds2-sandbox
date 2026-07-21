@@ -74,12 +74,23 @@ export interface DraftSyncOutcome {
     updated?: AssemblyDraft;
 }
 
-/** Маркер последнего ЗАВЕРШЁННОГО прохода — модульный: переживает навигацию по
- *  SPA. Гейтит и «заход» (каждый вход на страницу = полный проход с PUT'ами
- *  выедал write-бакет → 429 на входном запросе страницы, прод 2026-07-20). */
-let lastPassAt = 0;
-export const getLastAutoSyncPassAt = (): number => lastPassAt;
-export const markAutoSyncPass = (): void => { lastPassAt = Date.now(); };
+/** Маркер последнего ЗАВЕРШЁННОГО прохода — localStorage: переживает не только
+ *  SPA-навигацию, но и F5/новую вкладку (модульная переменная сбрасывалась
+ *  перезагрузкой → каждый F5 = полный проход с PUT'ами, выедал write-бакет →
+ *  429 на входном запросе страницы, прод 2026-07-20; ревью MEDIUM). Две вкладки
+ *  через общий ключ больше не гоняют конкурентные проходы. */
+const LAST_PASS_KEY = 'dds.draftAutoSyncLastPassAt';
+let lastPassAt = 0; // фолбэк, если localStorage недоступен (private mode)
+export const getLastAutoSyncPassAt = (): number => {
+    try {
+        const v = Number(localStorage.getItem(LAST_PASS_KEY) || 0);
+        return Number.isFinite(v) ? Math.max(v, lastPassAt) : lastPassAt;
+    } catch { return lastPassAt; }
+};
+export const markAutoSyncPass = (): void => {
+    lastPassAt = Date.now();
+    try { localStorage.setItem(LAST_PASS_KEY, String(lastPassAt)); } catch { /* фолбэк выше */ }
+};
 
 /** Данные, которые страница уже загрузила сама — раннер их НЕ перекачивает
  *  (дубль тяжёлых GET на каждый заход тоже давил rate-limit). */

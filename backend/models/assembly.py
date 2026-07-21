@@ -389,6 +389,39 @@ class AssemblyStockDistributionDaily(Base, TimestampMixin):
     )
 
 
+class AssemblyDraftCategoryHourly(Base, TimestampMixin):
+    """Почасовой снимок наполнения черновиков сборки по категориям.
+
+    Что «Сборка» предлагает отправить в данный час: Σ по всем не-удалённым
+    черновикам проекта (основной + категорийные), rows и prebook раздельно,
+    handed_units не считаются (уже переданы на ФФ — это движение, а не «висит»).
+    Категория SKU = CategoryOverride ?? Nomenclature.subject ?? «Без категории»
+    (как categoryOf на фронте). Пишется почасовой scheduler-джобой (idempotent:
+    срез часа перезаписывается) — черновик хранит только текущее состояние,
+    динамику «разбирают или висит» иначе не восстановить. pallets — дробный
+    футпринт по геометрии коробов (машинная кратность × коробов-на-паллету),
+    оценка, а не документ.
+    """
+
+    __tablename__ = "assembly_draft_category_hourly"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    # Начало часа (UTC): 2026-07-21T14:00:00 — джоба пишет один срез на час.
+    taken_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    category: Mapped[str] = mapped_column(String(100), nullable=False)
+    positions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    units_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    units_prebook: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    boxes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pallets: Mapped[Decimal] = mapped_column(Numeric(10, 1), nullable=False, default=Decimal("0"))
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "taken_at", "category", name="uq_asm_draft_cat_hourly"),
+        Index("ix_asm_draft_cat_hourly_project_taken", "project_id", "taken_at"),
+    )
+
+
 # ─── Assembly Draft change history (audit + rollback) ───────────────────────
 
 
