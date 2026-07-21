@@ -5260,6 +5260,31 @@ export interface AssemblyDraftCreate {
   comment?: string | null;
 }
 
+/** Точка почасовой истории черновиков: категория × час (пишет джоба :40 MSK).
+ *  units_rows/units_prebook — штуки в строках и предброни; pallets — дробный
+ *  паллетный футпринт (оценка по геометрии, MONOPALLET — целыми). */
+export interface DraftCategoryHistoryPoint {
+  taken_at: string;
+  category: string;
+  positions: number;
+  units_rows: number;
+  units_prebook: number;
+  boxes: number;
+  pallets: number;
+}
+
+export interface DraftCategoryHistoryResponse {
+  points: DraftCategoryHistoryPoint[];
+}
+
+/** Ответ POST /assembly/drafts/{id}/clear: очищенный черновик + судьба категорийных
+ *  (имена удалённых и оставленных из-за переданных на ФФ юнитов). */
+export interface AssemblyDraftClearResponse {
+  draft: AssemblyDraft;
+  deleted_scoped: string[];
+  kept_scoped: string[];
+}
+
 export interface AssemblyDraftUpdate {
   name?: string | null;
   distribution?: AssemblyDraftDistribution | null;

@@ -268,6 +268,7 @@ from backend.models.wb_measurements import (
 # Assembly (единая «Сборка»: заявки, черновики, распределение остатков)
 from backend.models.assembly import (
     AssemblyDraft,
+    AssemblyDraftCategoryHourly,
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,
@@ -407,6 +408,7 @@ __all__ = [
     "WbMeasurementPenalty",
     # Assembly
     "AssemblyDraft",
+    "AssemblyDraftCategoryHourly",
     "AssemblyRequest",
     "AssemblyRequestItem",
     "AssemblyStatus",

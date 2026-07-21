@@ -1269,7 +1269,18 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
             // «Один мир»: план не дублирует уже едущее — иначе серверный транзит-гейт
             // резал прирост и демотировал направления целиком в предбронь (качель).
             const netted = await netOutInTransit(shipRows, effPrebook, articles, { nmPpb, nmPpbByWh, nmBoxSize, palletOverrides }, classOf ?? (() => '*'));
-            const plan = buildAutoSyncPlan(dist ?? {}, netted.rows, netted.prebook, guarded, curManual, preserve);
+            // Ре-нормализация смёрженного плана: направления с ✋/unowned-строками
+            // после подстановки замороженных объёмов теряли целость паллет, а хвост
+            // висел в rows (прод 2026-07-21). freeByNm пуст — только срез/демоция.
+            const normCtx: NormalizeDraftCtx = {
+                ppbOf: (nm) => nmPpb.get(nm),
+                ppbAt: (nm, ffId) => nmPpbByWh.get(nm)?.[ffId] ?? null,
+                boxSizeOf: (nm) => nmBoxSize.get(nm) ?? null,
+                overrides: palletOverrides,
+                classOf: classOf ?? (() => '*'),
+            };
+            const plan = buildAutoSyncPlan(dist ?? {}, netted.rows, netted.prebook, guarded, curManual, preserve,
+                (rs, pb) => { const n = scopedNormalizeDraft(rs, pb, normCtx, undefined); return { rows: n.rows, prebook: n.prebook }; });
             if (!plan) {
                 if (trigger === 'manual') showToast('План уже соответствует расчёту', 'success');
                 return;

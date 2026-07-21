@@ -216,6 +216,9 @@ export default function UrgentShipPanel({ slug, rows, prebook, stockNeed, reserv
                                 <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }} title={`Локализация за ${LOC_WINDOW_DAYS} дн (цель ${formatNumber(locTarget, 0)}%)`}>Локализация</th>
                                 <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'center' }}>Запас</th>
                                 <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }}>В черновике</th>
+                                <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }} title="В созданных сборках (заявки ещё не отгружены)">В сборке</th>
+                                <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }} title="Отгружено, едет до WB (ещё не принято)">В пути</th>
+                                <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }} title="Текущий остаток на складах WB">На WB</th>
                                 <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }}>₽/день</th>
                                 <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }} title={`₽/день × дни простоя в нуле до прихода поставки (плечо ${formatNumber(leadDays, 1)} дн)`}>Теряем</th>
                             </tr>
@@ -228,6 +231,9 @@ export default function UrgentShipPanel({ slug, rows, prebook, stockNeed, reserv
                                     <td style={{ padding: '5px 8px', textAlign: 'right' }}><LocPct pct={r.locPct} target={locTarget} /></td>
                                     <td style={{ padding: '5px 8px', textAlign: 'center' }}><DaysBadge row={r} /></td>
                                     <td style={{ padding: '5px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>{formatNumber(r.draftQty, 0)} шт</td>
+                                    <td style={{ padding: '5px 8px', textAlign: 'right', whiteSpace: 'nowrap', color: r.inAssembly > 0 ? 'var(--color-text)' : 'var(--color-text-dim)' }}>{formatNumber(r.inAssembly, 0)}</td>
+                                    <td style={{ padding: '5px 8px', textAlign: 'right', whiteSpace: 'nowrap', color: r.inTransit > 0 ? 'var(--color-text)' : 'var(--color-text-dim)' }}>{formatNumber(r.inTransit, 0)}</td>
+                                    <td style={{ padding: '5px 8px', textAlign: 'right', whiteSpace: 'nowrap', color: r.wbStock > 0 ? 'var(--color-text)' : 'var(--color-danger)', fontWeight: r.wbStock > 0 ? 400 : 700 }}>{formatNumber(r.wbStock, 0)}</td>
                                     <td style={{ padding: '5px 8px', textAlign: 'right', whiteSpace: 'nowrap', color: 'var(--color-text-muted)' }}>{formatNumber(r.dailyRevenue, 0)} ₽</td>
                                     <td style={{ padding: '5px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>
                                         {r.loss > 0
@@ -268,7 +274,7 @@ export default function UrgentShipPanel({ slug, rows, prebook, stockNeed, reserv
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                             {summary.missing.slice(0, VISIBLE_CHIPS).map(r => (
                                 <span key={r.nm_id}
-                                    title={`nm ${r.nm_id} · запас ${formatNumber(r.daysLeft, 0)} дн · свободно на ФФ ${formatNumber(r.ffFree, 0)} шт${r.loss > 0 ? ` · теряем ~${formatNumber(r.loss, 0)} ₽` : ''}`}
+                                    title={`nm ${r.nm_id} · запас ${formatNumber(r.daysLeft, 0)} дн · свободно на ФФ ${formatNumber(r.ffFree, 0)} шт · в сборке ${formatNumber(r.inAssembly, 0)} · в пути ${formatNumber(r.inTransit, 0)} · на WB ${formatNumber(r.wbStock, 0)}${r.loss > 0 ? ` · теряем ~${formatNumber(r.loss, 0)} ₽` : ''}`}
                                     style={{
                                         fontSize: 11, padding: '2px 8px', borderRadius: 6,
                                         background: r.bucket === 'zero' ? 'rgba(255,68,68,0.14)' : 'rgba(245,158,11,0.12)',

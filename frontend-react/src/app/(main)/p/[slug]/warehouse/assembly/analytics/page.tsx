@@ -40,6 +40,7 @@ import { api } from '@/lib/api';
 import { Toast } from '@/components';
 import TabLayout from '@/components/TabLayout';
 import { exportToExcel, formatDate, formatNumber, pluralRu } from '@/lib/utils';
+import DraftDynamicsTab from './components/DraftDynamicsTab';
 import LinkAnomaliesTab from './components/LinkAnomaliesTab';
 import StockDistributionTab from './components/StockDistributionTab';
 import type {
@@ -341,7 +342,7 @@ export default function AssemblyFlowAnalyticsPage() {
     const slug = params.slug as string;
 
     // Активная вкладка: поток / связи и расхождения / распределение остатков
-    const [tab, setTab] = useState<'flow' | 'links' | 'stock'>('flow');
+    const [tab, setTab] = useState<'flow' | 'links' | 'stock' | 'draft'>('flow');
 
     // Data
     const [data, setData] = useState<AssemblyFlowAnalyticsResponse | null>(null);
@@ -721,14 +722,16 @@ export default function AssemblyFlowAnalyticsPage() {
                     { key: 'flow', label: 'Поток' },
                     { key: 'links', label: 'Связи и расхождения' },
                     { key: 'stock', label: 'Распределение остатков' },
+                    { key: 'draft', label: 'Динамика черновика' },
                 ]}
                 active={tab}
-                onChange={k => setTab(k as 'flow' | 'links' | 'stock')}
+                onChange={k => setTab(k as 'flow' | 'links' | 'stock' | 'draft')}
             />
 
             {/* Ленивый монтаж: новые вкладки фетчат, только когда активны */}
             {tab === 'links' && <LinkAnomaliesTab slug={slug} />}
             {tab === 'stock' && <StockDistributionTab slug={slug} />}
+            {tab === 'draft' && <DraftDynamicsTab slug={slug} />}
 
             {/* Вкладка «Поток» — исходное содержимое страницы */}
             {tab === 'flow' && (
