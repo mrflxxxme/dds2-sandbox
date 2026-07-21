@@ -147,7 +147,11 @@ export function addPaymentRequestMethods(api: ApiClient) {
         parseInvoice(file: File): Promise<InvoiceParseResult> {
             const formData = new FormData();
             formData.append('file', file);
-            return api.uploadFormData<InvoiceParseResult>('/api/v1/payment-requests/parse-invoice', formData);
+            // Авто-повтор при обрыве/5xx: распознавание ничего не пишет в БД (идемпотентно),
+            // а разовый рестарт backend (окно деплоя / OOM) отдаёт сырой 502 — переживаем тихо.
+            return api.uploadFormData<InvoiceParseResult>(
+                '/api/v1/payment-requests/parse-invoice', formData, { retries: 2, retryDelayMs: 3000 },
+            );
         },
 
         /** Download a payment-request document as a Blob (auth + project headers handled by the client). */

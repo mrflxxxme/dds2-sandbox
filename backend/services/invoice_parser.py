@@ -20,6 +20,7 @@ import io
 import logging
 import math
 import re
+import time
 import zipfile
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
@@ -888,21 +889,31 @@ async def _parse_pdf_invoice(
     В обоих случаях, если файл = счёт+акт, разносим страницы по типам (`documents`)."""
     # pdfplumber/pypdfium2/Pillow — CPU-bound и синхронные; уводим с event-loop (иначе тяжёлый
     # многостраничный скан блокирует воркер на секунды).
+    t0 = time.monotonic()
     try:
         pages_text = await asyncio.to_thread(invoice_split.extract_pages_text, data)
     except Exception:
         logger.warning("invoice parse: не удалось прочитать PDF %s", filename, exc_info=True)
         return InvoiceParseResult(warnings=["Не удалось прочитать файл — введите реквизиты вручную"])
+    t_extract = time.monotonic() - t0
 
     if any(p.strip() for p in pages_text):  # текстовый PDF
         types = [invoice_split.classify_page_text(t) for t in pages_text]
         invoice_text = "\n".join(t for t, ty in zip(pages_text, types) if ty != "ACT").strip()
+        t1 = time.monotonic()
         result = await _requisites_from_text(invoice_text or "\n".join(pages_text), own_accounts)
+        # Замер фаз каждого вызова (не только slow-порог): жалобы «стало медленнее»
+        # разбираются по этим строкам — истории дольше ретеншна контейнера у прода нет.
+        logger.info(
+            "invoice parse [pdf-text] %s: %d КБ, %d стр, extract=%.1fс, llm=%.1fс",
+            filename, len(data) // 1024, len(pages_text), t_extract, time.monotonic() - t1,
+        )
         if _is_real_mix(types):
             result.documents = await asyncio.to_thread(_build_split_docs, data, types, filename, None)
         return result
 
     # Скан-PDF (нет текстового слоя) → растеризуем и распознаём vision-Claude.
+    t1 = time.monotonic()
     try:
         images = await asyncio.to_thread(invoice_split.rasterize_pages, data)
     except Exception:
@@ -910,11 +921,16 @@ async def _parse_pdf_invoice(
         images = []
     if not images:
         return InvoiceParseResult(warnings=["Не удалось прочитать PDF — введите реквизиты вручную"])
+    t2 = time.monotonic()
     try:
         parsed = await extract_requisites_vision_pages(images, own_accounts)
     except Exception as e:  # API недоступен/refusal/таймаут — не роняем
         logger.warning("invoice vision(pages) failed (%s)", type(e).__name__)
         return InvoiceParseResult(warnings=["Не удалось распознать PDF-скан — введите реквизиты вручную"])
+    logger.info(
+        "invoice parse [pdf-scan] %s: %d КБ, %d стр, extract=%.1fс, raster=%.1fс, vision=%.1fс",
+        filename, len(data) // 1024, len(images), t_extract, t2 - t1, time.monotonic() - t2,
+    )
     if parsed is None:
         return InvoiceParseResult(warnings=["Распознавание PDF-скана недоступно — введите реквизиты вручную или приложите фото"])
     result, types = parsed
@@ -934,11 +950,13 @@ async def _parse_image_invoice(
         except Exception:
             logger.warning("invoice parse: не удалось конвертировать HEIC", exc_info=True)
             return InvoiceParseResult(warnings=["Не удалось обработать HEIC — приложите фото в JPEG/PNG или PDF"])
+    t0 = time.monotonic()
     try:
         vision = await extract_requisites_vision(data, media_type, own_accounts)
     except Exception as e:  # API недоступен/refusal/таймаут — не роняем
         logger.warning("invoice vision extract failed (%s)", type(e).__name__)
         return InvoiceParseResult(warnings=["Не удалось распознать фото — введите реквизиты вручную"])
+    logger.info("invoice parse [image]: %d КБ, vision=%.1fс", len(data) // 1024, time.monotonic() - t0)
     if vision is None:
         return InvoiceParseResult(warnings=["Распознавание фото недоступно — введите реквизиты вручную или приложите PDF"])
     return vision
