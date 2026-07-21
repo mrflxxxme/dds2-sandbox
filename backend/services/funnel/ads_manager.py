@@ -2626,16 +2626,18 @@ async def get_intraday_metrics(
     # весь день свалился бы в один бар (баг, если джоба стартовала не с утра). Приросты идут со
     # второго снимка. Штатно (снимки с 00:0x) теряется лишь самый первый неполный интервал.
     agg: dict[int, dict] = {}
-    prev_v = prev_c = None  # None = базы ещё нет (первый снимок её задаёт)
+    prev_v = prev_c = 0
     prev_s = 0.0
     last_v = last_c = 0
     last_s = 0.0
+    have_base = False  # первый снимок задаёт базу отсчёта, сам в бакет не идёт
     for snap in snaps:
         cum_v, cum_c = snap.views_cum or 0, snap.clicks_cum or 0
         cum_s = float(snap.spend_cum or 0)
         last_v, last_c, last_s = cum_v, cum_c, cum_s
-        if prev_v is None:  # первый снимок — только база, без бакета
+        if not have_base:  # первый снимок — только база, без бакета
             prev_v, prev_c, prev_s = cum_v, cum_c, cum_s
+            have_base = True
             continue
         cap_msk = pytz.UTC.localize(snap.captured_at).astimezone(MSK)
         minute_of_day = cap_msk.hour * 60 + cap_msk.minute
