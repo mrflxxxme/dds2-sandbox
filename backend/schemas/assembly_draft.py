@@ -164,6 +164,41 @@ class AssemblyDraftRead(BaseModel):
     newcomer_nm_ids: list[int] = Field(default_factory=list)
 
 
+class DraftCategoryHistoryPoint(BaseModel):
+    """Одна точка почасовой истории черновиков: категория × час.
+
+    units_rows/units_prebook — штуки в строках и предброни; boxes — короба по
+    машинной кратности; pallets — дробный паллетный футпринт (оценка по
+    геометрии, MONOPALLET — целыми). Точки пишет почасовая scheduler-джоба.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    taken_at: datetime
+    category: str
+    positions: int
+    units_rows: int
+    units_prebook: int
+    boxes: int
+    pallets: float
+
+
+class DraftCategoryHistoryResponse(BaseModel):
+    points: list[DraftCategoryHistoryPoint] = Field(default_factory=list)
+
+
+class AssemblyDraftClearResponse(BaseModel):
+    """Ответ POST /{draft_id}/clear: очищенный черновик + судьба категорийных.
+
+    deleted_scoped/kept_scoped — ИМЕНА категорийных черновиков: удалённых при
+    очистке основного и оставленных из-за живых handed-юнитов (переданы на ФФ).
+    """
+
+    draft: AssemblyDraftRead
+    deleted_scoped: list[str] = Field(default_factory=list)
+    kept_scoped: list[str] = Field(default_factory=list)
+
+
 class DraftsReservedResponse(BaseModel):
     """Резерв стока черновиками: barcode → {ff_warehouse_id → qty}.
 

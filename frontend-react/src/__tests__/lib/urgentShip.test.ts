@@ -140,3 +140,22 @@ describe('buildUrgentShip', () => {
         expect(res.inDraft[0].loss).toBe(0);
     });
 });
+
+describe('buildUrgentShip · WB/сборка/путь', () => {
+    it('несёт stocks_wb / in_assembly / in_transit в строку (колонки «На WB / В сборке / В пути»)', () => {
+        const res = buildUrgentShip({
+            articles: [art({ nm_id: 1, days_left: 3, stocks_wb: 25, in_assembly: 40, in_transit: 12 })],
+            draftQtyByNm: new Map([[1, 8]]),
+            leadDays: 10,
+        });
+        expect(res.inDraft[0]).toMatchObject({ wbStock: 25, inAssembly: 40, inTransit: 12 });
+    });
+    it('отсутствующие in_assembly/in_transit → 0 (mode без этих полей)', () => {
+        const res = buildUrgentShip({
+            articles: [art({ nm_id: 1, days_left: 3, in_assembly: undefined, in_transit: undefined })],
+            draftQtyByNm: new Map([[1, 8]]),
+            leadDays: 10,
+        });
+        expect(res.inDraft[0]).toMatchObject({ wbStock: 10, inAssembly: 0, inTransit: 0 });
+    });
+});

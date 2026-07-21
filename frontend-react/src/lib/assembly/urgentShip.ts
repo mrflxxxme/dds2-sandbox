@@ -29,6 +29,12 @@ export interface UrgentShipRow {
     locPct: number | null;
     /** Штук в черновике (0 для сегмента «вне черновика»). */
     draftQty: number;
+    /** Остаток на складах WB, шт. */
+    wbStock: number;
+    /** В созданных сборках (ещё не отгружены), шт. */
+    inAssembly: number;
+    /** В пути до WB (отгружено, не принято), шт. */
+    inTransit: number;
     /** Свободный остаток на ФФ — есть чем пополнить черновик. */
     ffFree: number;
     /** Кратность короба (штук в коробе); null — ppbOf не передан или кратность не задана. */
@@ -110,6 +116,9 @@ export function buildUrgentShip(params: {
             loss: Math.round(dailyRevenue * gapDays),
             locPct: locPctByNm?.get(a.nm_id) ?? null,
             draftQty,
+            wbStock: a.stocks_wb ?? 0,
+            inAssembly: a.in_assembly ?? 0,
+            inTransit: a.in_transit ?? 0,
             ffFree,
             ppb,
             bucket,

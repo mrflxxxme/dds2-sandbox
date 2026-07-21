@@ -11,6 +11,8 @@ import type {
     AssemblyDraftRow,
     BarcodeEligibilityResponse,
     CommitSupply,
+    AssemblyDraftClearResponse,
+    DraftCategoryHistoryResponse,
     DraftsReservedResponse,
     ForecastResponse,
     AssemblyDraftCreate,
@@ -665,6 +667,21 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         deleteAssemblyDraft(id: number) {
             return api.request<void>('DELETE', `/api/v1/assembly/drafts/${id}`);
+        },
+        /** «Очистить черновик»: сброс наполнения на сервере; для основного черновика
+         *  дополнительно удаляет категорийные черновики проекта (кроме переданных
+         *  на ФФ — их имена вернутся в kept_scoped). */
+        clearAssemblyDraft(id: number) {
+            return api.request<AssemblyDraftClearResponse>('POST', `/api/v1/assembly/drafts/${id}/clear`);
+        },
+        /** Почасовая история наполнения черновиков по категориям (вкладка «Динамика
+         *  черновика» на «Анализ сборки»): точки старые → новые. */
+        getDraftCategoryHistory(days: number) {
+            return api.request<DraftCategoryHistoryResponse>('GET', `/api/v1/assembly/drafts/category-history?days=${days}`);
+        },
+        /** Ручной срез текущего часа (не ждать почасовую джобу). Идемпотентен. */
+        snapshotDraftCategoryHistory() {
+            return api.request<DraftCategoryHistoryResponse>('POST', '/api/v1/assembly/drafts/category-history/snapshot');
         },
         /** История изменений черновика (события дозабора/раскладки/создания заявок), новейшие первыми. */
         getDraftHistory(draftId: number) {

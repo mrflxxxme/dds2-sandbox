@@ -17,6 +17,7 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.assembly_draft import (
     AssemblyDraftAddRows,
+    AssemblyDraftClearResponse,
     AssemblyDraftCommitResponse,
     AssemblyDraftCreate,
     AssemblyDraftMergeRequest,
@@ -26,13 +27,15 @@ from backend.schemas.assembly_draft import (
     AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
     CommitDraftOptions,
+    DraftCategoryHistoryPoint,
+    DraftCategoryHistoryResponse,
     DraftEventRevertResponse,
     DraftHistoryResponse,
     DraftsReservedResponse,
     ForecastResponse,
 )
 from backend.services import assembly_draft_service, assembly_load_forecast_service
-from backend.services.assembly import draft_history
+from backend.services.assembly import draft_category_history, draft_history
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/assembly/drafts", tags=["Assembly Drafts"])
@@ -94,6 +97,44 @@ async def get_drafts_reserved(
     """
     reserved = await assembly_draft_service.get_drafts_reserved(db, project.id, exclude_draft_id)
     return DraftsReservedResponse(reserved=reserved)
+
+
+@router.get("/category-history", response_model=DraftCategoryHistoryResponse)
+async def get_category_history(
+    days: int = Query(14, ge=1, le=60, description="Глубина истории в днях"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> DraftCategoryHistoryResponse:
+    """Почасовая история наполнения черновиков по категориям (вкладка «Динамика
+    черновика»): что «Сборка» предлагала отправить час за часом — видно,
+    разбирают ли менеджеры черновик в заявки или он висит. Точки пишет
+    почасовая джоба; старые → новые. ⚠ Маршрут обязан стоять ВЫШЕ
+    `GET /{draft_id}` — иначе «category-history» уйдёт в int-конвертер (422).
+    """
+    points = await draft_category_history.get_history(db, project.id, days)
+    return DraftCategoryHistoryResponse(
+        points=[DraftCategoryHistoryPoint.model_validate(p) for p in points]
+    )
+
+
+@router.post(
+    "/category-history/snapshot",
+    response_model=DraftCategoryHistoryResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def snapshot_category_history(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> DraftCategoryHistoryResponse:
+    """Ручной срез текущего часа (кнопка «Снять срез сейчас»): не ждать джобу
+    после правок черновика. Idempotent — срез часа перезаписывается. Возвращает
+    точки записанного часа."""
+    await draft_category_history.snapshot_project(db, project.id)
+    points = await draft_category_history.get_history(db, project.id, 1)
+    last_hour = max((p.taken_at for p in points), default=None)
+    return DraftCategoryHistoryResponse(
+        points=[DraftCategoryHistoryPoint.model_validate(p) for p in points if p.taken_at == last_hour]
+    )
 
 
 @router.get("/{draft_id}/forecast", response_model=ForecastResponse)
@@ -190,6 +231,30 @@ async def merge_drafts(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
     return await assembly_draft_service.to_read_model(db, project.id, draft)
+
+
+@router.post("/{draft_id}/clear", response_model=AssemblyDraftClearResponse, dependencies=[Depends(rate_limit_write)])
+async def clear_draft(
+    draft_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> AssemblyDraftClearResponse:
+    """«Очистить черновик»: сброс наполнения + удаление категорийных черновиков.
+
+    Обнуляет rows/prebook/источники/цели/cold_start_shares (handed_units и
+    category_scope живут). Для основного (бесскоупного) черновика дополнительно
+    soft-delete'ит категорийные черновики проекта — кроме тех, где есть живые
+    handed-юниты (переданы на ФФ): их имена возвращаются в kept_scoped.
+    404 если черновик не найден.
+    """
+    draft, deleted_scoped, kept_scoped = await assembly_draft_service.clear_draft(
+        db, project.id, draft_id, changed_by="user"
+    )
+    return AssemblyDraftClearResponse(
+        draft=await assembly_draft_service.to_read_model(db, project.id, draft),
+        deleted_scoped=deleted_scoped,
+        kept_scoped=kept_scoped,
+    )
 
 
 @router.delete("/{draft_id}", status_code=204, dependencies=[Depends(rate_limit_write)])

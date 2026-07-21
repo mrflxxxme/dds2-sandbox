@@ -478,11 +478,28 @@ export function buildAutoSyncPlan(
     guardedNms: Set<number>,
     manualNms: Set<number>,
     preserveCells: Set<string> = new Set(),
+    normalizePair?: (rows: AssemblyDraftRow[], prebook: AssemblyDraftRow[]) => { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] },
 ): ReturnType<typeof buildWriteDistribution> | null {
     const autoShip = calcShipRows.filter((r) => !manualNms.has(r.nm_id));
     const autoPrebook = calcPrebook.filter((r) => !manualNms.has(r.nm_id));
     const purge = new Set([...guardedNms].filter((nm) => !manualNms.has(nm)));
-    const next = buildWriteDistribution(dist, autoShip, autoPrebook, purge, preserveCells);
+    let next = buildWriteDistribution(dist, autoShip, autoPrebook, purge, preserveCells);
+    // Ре-нормализация СМЁРЖЕННОГО плана: calc нормализован со своими объёмами
+    // всех SKU, но после подстановки замороженных (✋/unowned/preserve) строк
+    // направление могло перестать быть целыми паллетами — без полного прохода
+    // хвост висел в rows («⚠ 31%» / «Без целой паллеты», прод 2026-07-21).
+    // Колбэк (scopedNormalizeDraft с геометрией вызывающего) кладёт хвосты в
+    // предбронь; подпись no-delta ниже считается уже по нормализованной паре.
+    if (normalizePair) {
+        const norm = normalizePair(next.rows, next.prebook);
+        const srcIds = new Set<number>();
+        const tgtNames = new Set<string>();
+        for (const r of [...norm.rows, ...norm.prebook]) {
+            for (const ff of Object.keys(r.src || {})) srcIds.add(Number(ff));
+            for (const wb of Object.keys(r.tgt || {})) tgtNames.add(wb);
+        }
+        next = { rows: norm.rows, prebook: norm.prebook, source_warehouse_ids: [...srcIds], target_warehouse_names: [...tgtNames] };
+    }
     // Подпись — с сортировкой ключей src/tgt: карв/слияние сохранённых ячеек пересобирает
     // объекты, и без канонизации одинаковое содержимое давало бы ложную дельту (PUT-шум).
     const canonRec = (rec: Record<string, number>) =>

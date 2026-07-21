@@ -18,7 +18,9 @@ import {
 } from '@/lib/assembly/draftDistribution';
 import { applyAcceptanceSplits } from '@/lib/assembly/buildAssemblyDistribution';
 import { buildDraftRows, type DraftSkuInput } from '@/lib/assembly/buildDraftRows';
-import type { PackageType, StockNeedArticle } from '@/types/api';
+import { scopedNormalizeDraft } from '@/lib/utils/scopedNormalizeDraft';
+import type { NormalizeDraftCtx } from '@/lib/utils/normalizeDraft';
+import type { AssemblyDraftRow, PackageType, StockNeedArticle } from '@/types/api';
 
 /** Артикул потребности (минимальный фабричный хелпер). rf = { ffId: available }. */
 function article(barcode: string, nm: number, rf: Record<number, number>): StockNeedArticle {
@@ -713,5 +715,53 @@ describe('applyAcceptanceSplits — сплит приёмки BOX+MONO (прод
         const rows = buildDraftRows({ skus: effective });
         const totalSrc = rows.reduce((s, r) => s + sumRec(r.src as Record<string, number>), 0);
         expect(totalSrc).toBeLessThanOrEqual(200);
+    });
+});
+
+describe('buildAutoSyncPlan — ре-нормализация смёрженного плана (normalizePair)', () => {
+    // Прод-кейс 2026-07-21 (Тула 1.31 пал / ELKA ×40): calc нормализован СО СВОИМИ
+    // объёмами, но после подстановки замороженных (✋/unowned) строк смёрженное
+    // направление переставало быть целыми паллетами, а ре-нормализации не было —
+    // хвост висел в rows, манифест честно рисовал «⚠ 31%» / «Без целой паллеты».
+    const nrow = (nm: number, tgt: Record<string, number>, src: Record<string, number>) =>
+        ({ nm_id: nm, barcode: `bc${nm}`, vendor_code: `art-${nm}`, src, tgt, package_type: 'BOX' as PackageType });
+    const ctx: NormalizeDraftCtx = {
+        ppbOf: () => 10,
+        boxSizeOf: () => '60x40x50',
+        overrides: { '60x40x50': 10 }, // 10 кор × 10 шт → паллета = 100 шт
+    };
+    const normalizePair = (rs: AssemblyDraftRow[], pb: AssemblyDraftRow[]) => {
+        const n = scopedNormalizeDraft(rs, pb, ctx, undefined);
+        return { rows: n.rows, prebook: n.prebook };
+    };
+
+    it('замороженный ✋-хвост направления демотируется в предбронь, не висит в rows', () => {
+        const dist = { rows: [nrow(2, { 'Тула': 30 }, { '5': 30 })], prebook: [] }; // ✋ 0.3 паллеты
+        const calc = [nrow(1, { 'Тула': 100 }, { '5': 100 })];                      // 1.0 паллета
+        const out = buildAutoSyncPlan(dist, calc, [], new Set(), new Set([2]), new Set(), normalizePair);
+        expect(out).not.toBeNull();
+        const rowsTula = out!.rows.reduce((s, r) => s + (r.tgt['Тула'] || 0), 0);
+        const pbTula = out!.prebook.reduce((s, r) => s + (r.tgt['Тула'] || 0), 0);
+        expect(rowsTula).toBe(100); // в rows — только целая паллета
+        expect(pbTula).toBe(30);    // хвост уехал в предбронь, не потерян
+    });
+
+    it('фикс-поинт: повторный синк от нормализованного результата → null (нет PUT-цикла)', () => {
+        const dist = { rows: [nrow(2, { 'Тула': 30 }, { '5': 30 })], prebook: [] };
+        const calc = [nrow(1, { 'Тула': 100 }, { '5': 100 })];
+        const first = buildAutoSyncPlan(dist, calc, [], new Set(), new Set([2]), new Set(), normalizePair);
+        expect(first).not.toBeNull();
+        const second = buildAutoSyncPlan(
+            { rows: first!.rows, prebook: first!.prebook }, calc, [], new Set(), new Set([2]), new Set(), normalizePair,
+        );
+        expect(second).toBeNull();
+    });
+
+    it('без normalizePair поведение прежнее (хвост остаётся в rows — легаси-путь)', () => {
+        const dist = { rows: [nrow(2, { 'Тула': 30 }, { '5': 30 })], prebook: [] };
+        const calc = [nrow(1, { 'Тула': 100 }, { '5': 100 })];
+        const out = buildAutoSyncPlan(dist, calc, [], new Set(), new Set([2]));
+        expect(out).not.toBeNull();
+        expect(out!.rows.reduce((s, r) => s + (r.tgt['Тула'] || 0), 0)).toBe(130);
     });
 });
