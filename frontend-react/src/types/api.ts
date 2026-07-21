@@ -3874,8 +3874,8 @@ export interface CampaignIntradayPoint {
 }
 
 /** Внутридневные показы/клики/расход по кампании (GET /campaigns/{id}/intraday).
- *  Копятся вперёд из снимков кабинетного campaigns-stats (~30 мин) — WB нативно почасовку
- *  не отдаёт. CTR и порог «мин показов» считаются на клиенте. */
+ *  Копятся вперёд из снимков официальной статистики WB (adv/v3/fullstats) — WB нативно
+ *  почасовку не отдаёт. CTR и порог «мин показов» считаются на клиенте. */
 export interface CampaignIntradayMetrics {
   campaign_id: number;
   name: string | null;

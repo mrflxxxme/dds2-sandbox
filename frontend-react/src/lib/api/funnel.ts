@@ -166,7 +166,7 @@ export function addFunnelMethods(api: ApiClient) {
             const qs = q.toString();
             return api.request<CampaignHourlySpend>('GET', `/api/v1/funnel/campaigns/${campaignId}/hourly${qs ? `?${qs}` : ''}`);
         },
-        /** Внутридневные показы/клики/расход по интервалам (снимки campaigns-stats). */
+        /** Внутридневные показы/клики/расход по интервалам (снимки официальной статистики WB). */
         getCampaignIntraday(campaignId: number, date?: string) {
             const q = new URLSearchParams();
             if (date) q.set('date', date);
