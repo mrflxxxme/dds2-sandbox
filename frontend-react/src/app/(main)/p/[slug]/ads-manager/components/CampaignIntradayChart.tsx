@@ -4,14 +4,15 @@ import type { CampaignIntradayMetrics, CampaignIntradayPoint } from '@/types/api
 import { fmt, thStyle, tdStyle, tdLeft } from './adsShared';
 
 /** Внутридневной график «место принятия решения» (стиль mkeeper): по интервалам снимков
- *  (~30 мин) — показы (фиолетовые бары) + клики (зелёные, своя шкала), расход, CTR с порогом
- *  «мин показов» и тренд. Данные копятся вперёд из кабинетной сессии (WB нативно почасовку
- *  не отдаёт), поэтому первые дни/часы график наполняется постепенно. */
+ *  — показы (фиолетовые бары) + клики (зелёные, своя шкала), расход, CTR с порогом
+ *  «мин показов» и тренд. Данные копятся вперёд из официальной статистики WB (нативно
+ *  почасовку WB не отдаёт), поэтому первые дни/часы график наполняется постепенно. */
 export default function CampaignIntradayChart({ resp, onSetInterval }: {
     resp: CampaignIntradayMetrics;
     onSetInterval?: (minutes: number) => void | Promise<void>;
 }) {
     const [minViews, setMinViews] = useState(50);
+    const [hover, setHover] = useState<number | null>(null);
     const points = resp.points;
 
     // CTR интервала считаем только при показах >= порога — иначе шум (1 клик / 3 показа = 33%).
@@ -30,9 +31,6 @@ export default function CampaignIntradayChart({ resp, onSetInterval }: {
 
     const maxViews = Math.max(1, ...points.map(p => p.views));
     const maxClicks = Math.max(1, ...points.map(p => p.clicks));
-    const last = points[points.length - 1];
-    const lastCtr = last ? ctrOf(last) : null;
-    const totalCtr = resp.totals.views ? (resp.totals.clicks / resp.totals.views) * 100 : 0;
     // Подписи времени прореживаем, чтобы не слипались (цель ~8 меток).
     const labelStep = Math.max(1, Math.ceil(points.length / 8));
 
@@ -43,22 +41,31 @@ export default function CampaignIntradayChart({ resp, onSetInterval }: {
                     <IntervalSelect value={resp.interval_min} onChange={onSetInterval} />
                 </div>
                 <div style={{ textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>
-                    За этот день снимков ещё нет. Внутридневные показы/клики копятся вперёд из сессии
-                    рекламного кабинета — WB готовую почасовку не отдаёт. Первые интервалы появятся через
-                    пару снимков. Если данных нет и завтра — проверьте доступ WB в настройках (сессия
-                    рекламного кабинета).
+                    За этот день снимков ещё нет. Внутридневные показы/клики копятся вперёд из официальной
+                    статистики WB — готовую почасовку WB не отдаёт. Интервалы появляются по мере
+                    обновления данных WB (примерно раз в 30–60 мин), первые — через пару снимков.
                 </div>
             </div>
         );
     }
 
+    // Диапазон интервала «начало–конец»: начало = время прошлого снимка, у первого — от полуночи.
+    const rangeOf = (i: number) => `${i > 0 ? points[i - 1].time : '00:00'}–${points[i].time}`;
+    // Наведённый бар (иначе — последний): его цифры крупно в заголовке, как «место решения».
+    const focus = hover != null && points[hover] ? hover : points.length - 1;
+    const fp = points[focus];
+    const fCtr = fp ? ctrOf(fp) : null;
+    // Значения над барами: при плотной сетке подпись слиплась бы над каждым столбцом, поэтому
+    // показываем прорежённо (каждый labelStep-й) — плюс всегда над столбцом под курсором.
+    const showValueAt = (i: number) => i === focus || points.length <= 16 || i % labelStep === 0;
+
     return (
         <div style={{ padding: 16 }}>
-            {/* Шапка: последний интервал + тренд + порог */}
+            {/* Шапка: интервал в фокусе (наведённый/последний) + диапазон времени + тренд + порог */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
-                <div style={{ fontSize: 13, color: '#374151', display: 'flex', alignItems: 'center', gap: 8 }}>
-                    {last ? (
-                        <span>Интервал <b>{last.time}</b> · Показы: <b>{last.views}</b> · Клики: <b>{last.clicks}</b> · CTR: <b>{lastCtr != null ? lastCtr.toFixed(1) : '—'}</b></span>
+                <div style={{ fontSize: 14, color: '#374151', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {fp ? (
+                        <span><b>{rangeOf(focus)}</b> · Показы: <b>{fmt(fp.views)}</b> · Клики: <b>{fmt(fp.clicks)}</b> · CTR: <b>{fCtr != null ? fCtr.toFixed(1) : '—'}</b> · Расход: <b>{fmt(fp.spend)} ₽</b></span>
                     ) : <span>Нет интервалов</span>}
                     <TrendArrow trend={trend} />
                 </div>
@@ -75,36 +82,43 @@ export default function CampaignIntradayChart({ resp, onSetInterval }: {
                 </div>
             </div>
 
-            {/* График: по интервалу два бара рядом — показы (фиолетовый) и клики (зелёный, своя шкала) */}
-            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 190, borderBottom: '1px solid #e5e7eb' }}>
+            {/* График: по интервалу два бара рядом — показы (фиолетовый) + клики (зелёный, своя шкала).
+                Над кончиком каждого бара — его значение за интервал. Наведение подсвечивает столбец. */}
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 220, borderBottom: '1px solid #e5e7eb', paddingTop: 18 }}>
                 {points.map((p, i) => (
-                    <div key={i} title={`${p.time} — показы ${p.views}, клики ${p.clicks}, ${fmt(p.spend)} ₽`}
-                        style={{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: 1, height: '100%' }}>
-                        <div style={{ width: '46%', height: `${(p.views / maxViews) * 100}%`, minHeight: p.views > 0 ? 2 : 0, background: '#7c6df2', borderRadius: '2px 2px 0 0' }} />
-                        <div style={{ width: '46%', height: `${(p.clicks / maxClicks) * 100}%`, minHeight: p.clicks > 0 ? 2 : 0, background: '#86c99a', borderRadius: '2px 2px 0 0' }} />
+                    <div key={i}
+                        onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
+                        style={{ position: 'relative', flex: 1, height: '100%', cursor: 'default',
+                            background: i === focus ? 'rgba(124,109,242,0.08)' : undefined, borderRadius: '4px 4px 0 0' }}>
+                        {/* бар показов — над ним число показов (главная метрика) */}
+                        <div style={{ position: 'absolute', bottom: 0, left: '6%', width: '42%', height: `${(p.views / maxViews) * 100}%`, minHeight: p.views > 0 ? 2 : 0, background: '#7c6df2', borderRadius: '2px 2px 0 0' }}>
+                            {p.views > 0 && showValueAt(i) && <BarValue v={p.views} color="#5b4fc4" big={i === focus} />}
+                        </div>
+                        {/* бар кликов — число только под курсором, чтобы над узкими барами не было каши */}
+                        <div style={{ position: 'absolute', bottom: 0, right: '6%', width: '42%', height: `${(p.clicks / maxClicks) * 100}%`, minHeight: p.clicks > 0 ? 2 : 0, background: '#86c99a', borderRadius: '2px 2px 0 0' }}>
+                            {p.clicks > 0 && i === focus && <BarValue v={p.clicks} color="#3f8a58" big />}
+                        </div>
                     </div>
                 ))}
             </div>
             {/* Подписи времени (прорежены) */}
             <div style={{ display: 'flex', gap: 2, marginBottom: 10 }}>
                 {points.map((p, i) => (
-                    <div key={i} style={{ flex: 1, textAlign: 'center', fontSize: 9, color: '#9ca3af' }}>{i % labelStep === 0 ? p.time : ''}</div>
+                    <div key={i} style={{ flex: 1, textAlign: 'center', fontSize: 9, color: i === focus ? '#6d5fd0' : '#9ca3af', fontWeight: i === focus ? 700 : 400 }}>{i % labelStep === 0 || i === focus ? p.time : ''}</div>
                 ))}
             </div>
 
-            {/* Легенда + сводка за день */}
+            {/* Легенда */}
             <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', fontSize: 12, color: '#6b7280', marginBottom: 14 }}>
                 <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}><i style={{ width: 10, height: 10, background: '#7c6df2', borderRadius: 2, display: 'inline-block' }} /> Показы</span>
                 <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}><i style={{ width: 10, height: 10, background: '#86c99a', borderRadius: 2, display: 'inline-block' }} /> Клики</span>
-                <span style={{ marginLeft: 'auto' }}>
-                    За <b>{resp.date}</b>: показы <b>{resp.totals.views}</b> · клики <b>{resp.totals.clicks}</b> · CTR <b>{totalCtr.toFixed(1)}%</b> · потрачено <b>{fmt(resp.totals.spend)} ₽</b>
-                </span>
+                <span style={{ marginLeft: 'auto', color: '#9ca3af' }}>наведите на столбец — показы и клики за интервал</span>
             </div>
 
-            {/* Таблица по интервалам */}
+            {/* Таблица по интервалам: диапазон времени + сколько показов/кликов пришло ЗА интервал */}
             <table className="data-table" style={{ borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>
                 <thead><tr>
-                    <th style={{ ...thStyle, textAlign: 'left' }}>Время (МСК)</th>
+                    <th style={{ ...thStyle, textAlign: 'left' }}>Интервал (МСК)</th>
                     <th style={thStyle}>Показы</th>
                     <th style={thStyle}>Клики</th>
                     <th style={thStyle}>CTR</th>
@@ -114,25 +128,29 @@ export default function CampaignIntradayChart({ resp, onSetInterval }: {
                     {points.map((p, i) => {
                         const c = ctrOf(p);
                         return (
-                            <tr key={i}>
-                                <td style={tdLeft}>{p.time}</td>
-                                <td style={tdStyle}>{p.views}</td>
-                                <td style={tdStyle}>{p.clicks}</td>
+                            <tr key={i} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
+                                style={{ background: i === focus ? '#f5f3ff' : undefined }}>
+                                <td style={tdLeft}>{rangeOf(i)}</td>
+                                <td style={tdStyle}>{fmt(p.views)}</td>
+                                <td style={tdStyle}>{fmt(p.clicks)}</td>
                                 <td style={{ ...tdStyle, color: c == null ? '#c0c4cc' : undefined }}>{c != null ? c.toFixed(1) : '—'}</td>
                                 <td style={tdStyle}>{fmt(p.spend)}</td>
                             </tr>
                         );
                     })}
-                    <tr style={{ background: '#f5f3ff' }}>
-                        <td style={{ ...tdLeft, fontWeight: 700 }}>Всего</td>
-                        <td style={{ ...tdStyle, fontWeight: 700 }}>{resp.totals.views}</td>
-                        <td style={{ ...tdStyle, fontWeight: 700 }}>{resp.totals.clicks}</td>
-                        <td style={{ ...tdStyle, fontWeight: 700 }}>{totalCtr.toFixed(1)}</td>
-                        <td style={{ ...tdStyle, fontWeight: 700 }}>{fmt(resp.totals.spend)}</td>
-                    </tr>
                 </tbody>
             </table>
         </div>
+    );
+}
+
+/** Число над кончиком бара — горизонтальное и контрастное. Под курсором крупнее. */
+function BarValue({ v, color, big }: { v: number; color: string; big?: boolean }) {
+    return (
+        <span style={{
+            position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
+            whiteSpace: 'nowrap', fontSize: big ? 12 : 10, fontWeight: 700, color, lineHeight: 1, paddingBottom: 3,
+        }}>{fmt(v)}</span>
     );
 }
 
@@ -140,12 +158,13 @@ function avg(a: number[]): number {
     return a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0;
 }
 
-const INTERVAL_OPTIONS = [10, 20, 30, 60];
+// Только 30/60: официальная статистика WB обновляется не чаще ~раза в 30 мин.
+const INTERVAL_OPTIONS = [30, 60];
 
 /** Селектор частоты снимков (проект-глобально). Меняет, как часто job снимает стату. */
 function IntervalSelect({ value, onChange }: { value?: number; onChange?: (m: number) => void | Promise<void> }) {
     const [saving, setSaving] = useState(false);
-    const cur = value ?? 10;
+    const cur = value ?? 30;
     if (!onChange) return null;
     return (
         <label title="Как часто снимается внутридневная статистика — для всех кампаний проекта"

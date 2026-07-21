@@ -564,28 +564,23 @@ async def snapshot_ad_intraday(db: AsyncSession, project_id: int) -> dict:
     """Снимок накопительных ВНУТРИДНЕВНЫХ счётчиков активных кампаний (показы/клики/расход).
 
     Зовётся планировщиком каждые 10 мин (per-project реже — гейт ads_snapshot_interval_min).
-    Тянет «сегодняшний» (МСК) накопительный счётчик
-    из кабинета рекламы (cmp campaigns-stats, сессия wb_portal_session) и пишет по строке
+    Берёт «сегодняшний» (МСК) накопительный счётчик из уже синканной официальной статистики WB
+    (таблица wb_ad_campaign_daily, наполняется из adv/v3/fullstats) и пишет по строке
     WbAdCampaignSnapshot на кампанию. Дельта между снимками = интрадей-метрики
     (get_intraday_metrics). WB нативно почасовку не отдаёт — копим сами вперёд.
 
-    Кабинетная сессия ≠ API-ключ: нет сессии → тихий skip (фича опциональна, синк не ломаем).
-    Протухла сессия (401) → mark_wb_portal_expired, UI попросит обновить доступ WB.
+    Ноль обращений к WB: читаем свою таблицу. Снимок пишем только когда накопительный счётчик
+    изменился с прошлого раза (официальная статистика обновляется реже тика).
     """
-    from backend.integrations.wb_portal_client import WbPortalError, WbSessionExpired
-    from backend.services.integrations_service import (
-        get_wb_portal_client,
-        mark_wb_portal_expired,
-    )
     from backend.services.settings_service import get_ads_snapshot_interval_min
 
-    try:
-        client = await get_wb_portal_client(db, project_id)
-    except ValueError as e:
-        # ValueError здесь двузначен: сессии нет (норма, фича опциональна) ИЛИ ключ не
-        # расшифровался (`_decrypt` → «Проверьте SECRET_KEY», уже поломка). Обе ветки
-        # выглядят одинаково, поэтому отдаём текст наружу — он попадёт в сводку тика.
-        return {"snapshots": 0, "skipped": "no_session", "detail": str(e)}
+    # Источник — уже синканная официальная статистика WB: таблица wb_ad_campaign_daily,
+    # которую sync_ad_campaigns наполняет из adv/v3/fullstats каждые 30 мин. За «сегодня»
+    # там лежит накопительный итог кампании на момент последнего синка. Ходить в WB из этой
+    # джобы НЕЛЬЗЯ: полный fullstats ловит 429 (~3 мин на проект) и дерётся за rate-лимит с
+    # основным синком. Раньше источником была кабинетная сессия (wb_portal_session) — хрупкая
+    # (на проде отвалилась молча, снимков ноль с 09.07) и на локалке мёртвая (sync-prod гасит
+    # ключ). Теперь ноль обращений к WB, а клики — настоящие (кабинет восстанавливал из CTR).
 
     # Гейт частоты: job тикает каждые 10 мин, но проект может хотеть реже (20/30/60).
     # Пропускаем, если с последнего снимка прошло меньше интервала (grace 5 мин на джиттер тика).
@@ -598,7 +593,6 @@ async def snapshot_ad_intraday(db: AsyncSession, project_id: int) -> dict:
         )
     ).scalar()
     if last_at is not None and (utcnow() - last_at).total_seconds() / 60 < interval_min - 5:
-        await client.aclose()
         return {"snapshots": 0, "skipped": "interval"}
 
     active = (
@@ -610,42 +604,71 @@ async def snapshot_ad_intraday(db: AsyncSession, project_id: int) -> dict:
         )
     ).scalars().all()
     if not active:
-        await client.aclose()
         return {"snapshots": 0, "skipped": "no_active_campaigns"}
     campaign_ids = [c.campaign_id for c in active]
 
     today_msk = pytz.UTC.localize(utcnow()).astimezone(MSK).date()
-    day_str = today_msk.isoformat()
-    try:
-        stats = await client.fetch_campaigns_stats(campaign_ids, day_str, day_str)
-    except WbSessionExpired:
-        await mark_wb_portal_expired(db, project_id)
-        logger.warning(f"snapshot_ad_intraday: session expired for project {project_id}")
-        return {"snapshots": 0, "error": "session_expired"}
-    except WbPortalError as e:
-        logger.warning(f"snapshot_ad_intraday: WB portal error for project {project_id}: {e}")
-        return {"snapshots": 0, "error": "wb_error"}
-    finally:
-        await client.aclose()
+
+    # Накопительный «сегодня» по кампаниям из уже синканной официальной статистики.
+    daily = (
+        await db.execute(
+            select(WbAdCampaignDaily.campaign_id, WbAdCampaignDaily.views, WbAdCampaignDaily.clicks, WbAdCampaignDaily.spend)
+            .where(
+                WbAdCampaignDaily.project_id == project_id,
+                WbAdCampaignDaily.date == today_msk,
+                WbAdCampaignDaily.campaign_id.in_(campaign_ids),
+            )
+        )
+    ).all()
+    by_camp = {r.campaign_id: {"views": r.views or 0, "clicks": r.clicks or 0, "sum": float(r.spend or 0)} for r in daily}
+    if not by_camp:
+        # Синк рекламы ещё не наполнил сегодняшний день — не поломка, ждём его тика.
+        return {"snapshots": 0, "skipped": "no_rows_from_wb"}
+
+    # Прошлый накопительный счётчик по кампаниям (последний снимок дня): если WB с тех пор
+    # ничего не обновил, снимок не пишем — иначе график зарастает нулевыми интервалами.
+    # Официальный fullstats обновляется реже кабинета (~30–60 мин), тик — 10 мин.
+    prev_rows = (
+        await db.execute(
+            select(WbAdCampaignSnapshot.campaign_id, WbAdCampaignSnapshot.views_cum, WbAdCampaignSnapshot.clicks_cum)
+            .where(
+                WbAdCampaignSnapshot.project_id == project_id,
+                WbAdCampaignSnapshot.stat_date == today_msk,
+                WbAdCampaignSnapshot.captured_at == last_at,
+            )
+        )
+    ).all() if last_at is not None else []
+    prev = {r.campaign_id: (r.views_cum or 0, r.clicks_cum or 0) for r in prev_rows}
 
     now = utcnow()
-    rows = [
-        WbAdCampaignSnapshot(
-            project_id=project_id,
-            campaign_id=s["campaign_id"],
-            stat_date=today_msk,
-            captured_at=now,
-            views_cum=s["views"],
-            clicks_cum=s["clicks"],
-            spend_cum=Decimal(str(round(s["spend"], 2))),
+    rows = []
+    changed = False
+    for cid in campaign_ids:
+        cs = by_camp.get(cid)
+        if not cs:
+            continue
+        views, clicks = int(cs.get("views", 0)), int(cs.get("clicks", 0))
+        spend = float(cs.get("sum", 0))
+        if prev.get(cid, (0, 0)) != (views, clicks):
+            changed = True
+        rows.append(
+            WbAdCampaignSnapshot(
+                project_id=project_id,
+                campaign_id=cid,
+                stat_date=today_msk,
+                captured_at=now,
+                views_cum=views,
+                clicks_cum=clicks,
+                spend_cum=Decimal(str(round(spend, 2))),
+            )
         )
-        for s in stats
-    ]
-    if rows:
+    # Первый снимок дня (prev пуст) пишем всегда — это база отсчёта; дальше только при изменении.
+    if rows and (not prev or changed):
         db.add_all(rows)
         await db.commit()
-    logger.info(f"snapshot_ad_intraday: {len(rows)} snapshots for project {project_id}")
-    return {"snapshots": len(rows)}
+        logger.info(f"snapshot_ad_intraday: {len(rows)} snapshots for project {project_id}")
+        return {"snapshots": len(rows)}
+    return {"snapshots": 0, "skipped": "unchanged"}
 
 
 def _assign_abc(items: list[dict], value_key: str, abc_key: str) -> None:

@@ -163,8 +163,8 @@ def start_scheduler():
     )
 
     # Ad intraday snapshots: тик каждые 10 мин (:7,:17,…) — накопительные показы/клики/расход
-    # из кабинетной сессии (cmp campaigns-stats) для интрадей-графика «место принятия решения».
-    # Фактическая частота на проект — настройка ads_snapshot_interval_min (10/20/30/60): гейт
+    # из официальной статистики WB (wb_ad_campaign_daily) для интрадей-графика «место принятия
+    # решения». Фактическая частота на проект — настройка ads_snapshot_interval_min (30/60): гейт
     # внутри snapshot_ad_intraday пропускает тик, если с прошлого снимка прошло меньше интервала.
     _scheduler.add_job(
         snapshot_ad_intraday_all_projects,

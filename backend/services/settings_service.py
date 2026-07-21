@@ -311,12 +311,14 @@ async def set_forecast_rf_default_days(db: AsyncSession, project_id: int, days: 
 # ─── Ad intraday snapshot interval (minutes) ─────────────────────────────────
 
 _ADS_SNAPSHOT_INTERVAL_KEY = "ads_snapshot_interval_min"
-_ADS_SNAPSHOT_INTERVAL_ALLOWED = (10, 20, 30, 60)  # job тикает каждые 10 мин → кратно 10
-_ADS_SNAPSHOT_INTERVAL_DEFAULT = 10
+# Официальная статистика WB (fullstats) обновляется примерно раз в 30–60 мин, поэтому шаг
+# чаще 30 мин смысла не имеет — дал бы пустые интервалы между обновлениями. 10/20 убраны.
+_ADS_SNAPSHOT_INTERVAL_ALLOWED = (30, 60)
+_ADS_SNAPSHOT_INTERVAL_DEFAULT = 30
 
 
 async def get_ads_snapshot_interval_min(db: AsyncSession, project_id: int) -> int:
-    """Как часто снимать внутридневную стату кампаний (мин). Дефолт 10."""
+    """Как часто снимать внутридневную стату кампаний (мин). Дефолт 30; старые 10/20 → 30."""
     raw = await get_setting(db, project_id, _ADS_SNAPSHOT_INTERVAL_KEY)
     if raw is None:
         return _ADS_SNAPSHOT_INTERVAL_DEFAULT
@@ -328,7 +330,7 @@ async def get_ads_snapshot_interval_min(db: AsyncSession, project_id: int) -> in
 
 
 async def set_ads_snapshot_interval_min(db: AsyncSession, project_id: int, minutes: int) -> int:
-    """Задать интервал снимков. Разрешено только кратное тику job'а (10/20/30/60)."""
+    """Задать интервал снимков. Разрешено только 30/60 (реже WB и так не обновляет)."""
     m = int(minutes)
     if m not in _ADS_SNAPSHOT_INTERVAL_ALLOWED:
         raise ValueError(
