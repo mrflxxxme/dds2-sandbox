@@ -8,7 +8,7 @@ import logging
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import case, desc, func, or_, select
+from sqlalchemy import case, desc, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import CostOrderItem, WbCostOverride, WbFunnelDaily
@@ -245,6 +245,59 @@ async def load_tax_settings(db: AsyncSession, pid: int, d_from: date, d_to: date
         "nds_rate": float(row.nds_rate or 0),
         "cost_as_expense": row.cost_as_expense or False,
     }
+
+
+_TAX_DEFAULTS: dict = {
+    "tax_regime": "usn_income",
+    "usn_rate": 0,
+    "nds_rate": 0,
+    "cost_as_expense": False,
+}
+
+
+def month_keys(d_from: date, d_to: date) -> list[str]:
+    """Календарные месяцы диапазона включительно: ['2026-06', '2026-07', ...]."""
+    out = []
+    y, m = d_from.year, d_from.month
+    while (y, m) <= (d_to.year, d_to.month):
+        out.append(f"{y:04d}-{m:02d}")
+        m += 1
+        if m == 13:
+            y, m = y + 1, 1
+    return out
+
+
+async def load_tax_settings_by_month(
+    db: AsyncSession, pid: int, d_from: date, d_to: date
+) -> dict[str, dict]:
+    """Налоговые настройки на КАЖДЫЙ месяц диапазона ('YYYY-MM' → dict).
+
+    Месяц без строки TaxRate получает нулевые ставки — то же поведение, что у
+    load_tax_settings для отсутствующей записи. Нужен для честного налога на
+    диапазонах, пересекающих смену ставки/режима (load_tax_settings берёт только
+    первый месяц)."""
+    from backend.models.tax import TaxRate
+
+    mks = month_keys(d_from, d_to)
+    pairs = [(int(mk[:4]), int(mk[5:7])) for mk in mks]
+    result = await db.execute(
+        select(TaxRate).where(
+            TaxRate.project_id == pid,
+            TaxRate.brand == "__project__",
+            tuple_(TaxRate.year, TaxRate.month).in_(pairs),
+        )
+    )
+    by_ym = {(r.year, r.month): r for r in result.scalars()}
+    out: dict[str, dict] = {}
+    for mk, (y, m) in zip(mks, pairs):
+        row = by_ym.get((y, m))
+        out[mk] = dict(_TAX_DEFAULTS) if not row else {
+            "tax_regime": row.tax_regime,
+            "usn_rate": float(row.usn_rate or 0),
+            "nds_rate": float(row.nds_rate or 0),
+            "cost_as_expense": row.cost_as_expense or False,
+        }
+    return out
 
 
 # ─── Cancel stats loader (for accurate buyout_pct) ──────────────────────────

@@ -18,13 +18,13 @@ _DATE_FILTER = """(
     OR (sale_dt IS NULL AND rr_dt IS NULL AND date_from >= :date_from AND date_to <= :date_to)
   )"""
 
-_SELECT_COLS_BDR = """
-    sa_name,
-    MAX(NULLIF(nm_id, 0)) AS nm_id,
-    MAX(NULLIF(brand_name, '')) AS brand_name,
-    MAX(NULLIF(subject_name, '')) AS subject_name,
-    COUNT(*) AS row_count,
+_MONTH_KEY_EXPR = (
+    "COALESCE(to_char(sale_dt, 'YYYY-MM'), to_char(rr_dt, 'YYYY-MM'), to_char(date_from, 'YYYY-MM'))"
+)
 
+# Метрики без identity-блока — переиспользуются помесячным тоталом (налог при
+# смене ставок внутри диапазона): строки обоих SQL кормятся compute_metrics_from_sql.
+_METRIC_COLS_BDR = """
     -- Realization components (sale/ret split)
     COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub ELSE 0 END), 0) AS sale_retail,
     COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub ELSE 0 END), 0) AS ret_retail,
@@ -76,6 +76,17 @@ _SELECT_COLS_BDR = """
         THEN deduction ELSE 0 END), 0) AS loan_deduction
 """
 
+_SELECT_COLS_BDR = (
+    """
+    sa_name,
+    MAX(NULLIF(nm_id, 0)) AS nm_id,
+    MAX(NULLIF(brand_name, '')) AS brand_name,
+    MAX(NULLIF(subject_name, '')) AS subject_name,
+    COUNT(*) AS row_count,
+"""
+    + _METRIC_COLS_BDR
+)
+
 
 _ALLOWED_GROUP_COLS = {"brand": "brand_name", "subject": "subject_name", "article": "sa_name"}
 
@@ -121,6 +132,29 @@ def build_bdr_aggregate_sql(
         + group_col
         + " ORDER BY "
         + group_col
+    )
+
+
+def build_bdr_monthly_totals_sql(brand: str | None, article: str | None) -> str:
+    """Помесячные тоталы тех же метрик (identity-блок заменён на month_key).
+
+    Нужны налогу при смене ставок внутри диапазона: каждая строка-месяц
+    скармливается compute_metrics_from_sql (метрики идентичны основному SQL),
+    итоговый налог = сумма помесячных. Фильтры — те же, что у основного SQL."""
+    where = "project_id = :project_id AND " + _DATE_FILTER
+    where += " AND LOWER(COALESCE(sa_name, '')) != 'неопознанный товар'"
+    if brand:
+        where += " AND brand_name = :brand"
+    if article:
+        where += r" AND LOWER(sa_name) LIKE :article_like ESCAPE '\\'"
+    return (
+        "SELECT "  # noqa: S608 — фильтры параметризованы, колонки из констант
+        + _MONTH_KEY_EXPR
+        + " AS month_key, COUNT(*) AS row_count, "
+        + _METRIC_COLS_BDR
+        + " FROM wb_finance_rows WHERE "
+        + where
+        + " GROUP BY month_key ORDER BY month_key"
     )
 
 
@@ -310,3 +344,24 @@ def compute_metrics_from_sql(row: Any) -> dict:  # type: ignore[type-arg]
 def serialize(d: dict) -> dict:
     """Convert Decimals to floats for JSON."""
     return {k: float(v) if isinstance(v, Decimal) else v for k, v in d.items()}
+
+
+def cost_with_fallback(
+    engine_price: float,
+    sku: str,
+    nm_id: int,
+    cost_map: dict[str, float],
+    overrides: dict[int, float],
+) -> float:
+    """Цена движка, если положительная; иначе средняя закупочная → override.
+
+    Движок оценки отдаёт 0, когда партии не сматчились по ключу или окно
+    нетто-нулевое (возвраты = продажам). Списывать ноль при известной цене
+    нельзя — прибыль тихо завышается (прод-кейс elka_240х220: 123 шт/нед по
+    0 ₽ при известных 1 396 ₽)."""
+    if engine_price > 0:
+        return engine_price
+    price = cost_map.get(sku, 0) if sku else 0
+    if price == 0 and nm_id in overrides:
+        price = overrides[nm_id]
+    return price

@@ -72,6 +72,98 @@ def apply_tax(summary: dict, tax_info: dict, total_adv, total_cost):
     )
 
 
+def tax_settings_uniform(tax_by_month: dict[str, dict]) -> bool:
+    """True, если во всех месяцах диапазона одинаковые налоговые настройки —
+    тогда старый одноставочный путь точен и остаётся бит-в-бит."""
+    vals = list(tax_by_month.values())
+    return all(v == vals[0] for v in vals[1:]) if vals else True
+
+
+def _month_tax(income: float, expenses: float, info: dict) -> tuple[float, float]:
+    """(НДС, УСН) одного месяца по его настройкам — та же математика, что в apply_tax."""
+    usn_rate = info.get("usn_rate", 0) / 100
+    nds_rate = info.get("nds_rate", 0) / 100
+    nds_sum = income * nds_rate / (1 + nds_rate) if nds_rate > 0 else 0
+    tax_base = income - nds_sum
+    if info.get("tax_regime", "usn_income") == "usn_income_expense_vat":
+        tax_base -= expenses
+    return nds_sum, max(tax_base * usn_rate, 0)
+
+
+def apply_tax_by_month(summary: dict, monthly: dict[str, dict], tax_by_month: dict[str, dict],
+                       total_adv, total_cost):
+    """Налог сводки для диапазона со СМЕНОЙ ставок: помесячный расчёт, итог = сумма.
+
+    ``monthly``: 'YYYY-MM' → {income, logistics, storage, commission, penalties,
+    deductions, adv, cost} — те же компоненты, что apply_tax берёт из summary,
+    только в разрезе месяцев. Прибыль пишется той же формулой, что в apply_tax."""
+    nds_total = usn_total = expenses_total = 0.0
+    has_expense_regime = False
+    for mk, m in monthly.items():
+        info = tax_by_month.get(mk, {})
+        expenses = 0.0
+        if info.get("tax_regime", "usn_income") == "usn_income_expense_vat":
+            has_expense_regime = True
+            expenses = (
+                abs(float(m.get("logistics", 0)))
+                + abs(float(m.get("storage", 0)))
+                + abs(float(m.get("commission", 0)))
+                + abs(float(m.get("penalties", 0)))
+                + abs(float(m.get("deductions", 0)))
+                + float(m.get("adv", 0))
+            )
+            if info.get("cost_as_expense", False):
+                expenses += float(m.get("cost", 0))
+            expenses_total += expenses
+        nds, usn = _month_tax(float(m.get("income", 0)), expenses, info)
+        nds_total += nds
+        usn_total += usn
+
+    if has_expense_regime:
+        summary["expenses_total"] = round(expenses_total, 2)
+    total_tax = nds_total + usn_total
+    summary["tax_nds"] = round(nds_total, 2)
+    summary["tax_usn"] = round(usn_total, 2)
+    summary["tax_total"] = round(total_tax, 2)
+    summary["profit"] = round(
+        float(summary.get("to_pay", 0))
+        + float(summary.get("ad_deduction", 0))
+        + float(summary.get("loan_deduction", 0))
+        - float(total_adv)
+        - float(total_cost)
+        - total_tax,
+        2,
+    )
+
+
+def blended_tax_info(monthly_income: dict[str, float], tax_by_month: dict[str, dict]) -> dict:
+    """Эффективные ставки для построчного налога при смешанных месяцах.
+
+    Строки отчёта не имеют помесячного разреза доходов, поэтому по ним налог
+    считается взвешенной по доходам месяца ставкой (НДС blend'ится в доле
+    извлечения r/(1+r), затем конвертируется обратно в ставку). Режим и
+    cost_as_expense берутся из месяца с максимальным доходом. Это приближение —
+    точный помесячный налог считается для «Итого» (apply_tax_by_month)."""
+    total_income = sum(v for v in monthly_income.values() if v > 0)
+    if total_income <= 0:
+        first = next(iter(tax_by_month.values()), None)
+        return dict(first) if first else {}
+    f_nds = usn_eff = 0.0
+    for mk, info in tax_by_month.items():
+        w = max(monthly_income.get(mk, 0.0), 0.0) / total_income
+        r = info.get("nds_rate", 0) / 100
+        f_nds += w * (r / (1 + r) if r > 0 else 0.0)
+        usn_eff += w * info.get("usn_rate", 0)
+    dominant_mk = max(tax_by_month, key=lambda mk: monthly_income.get(mk, 0.0))
+    dominant = tax_by_month[dominant_mk]
+    return {
+        "tax_regime": dominant.get("tax_regime", "usn_income"),
+        "cost_as_expense": dominant.get("cost_as_expense", False),
+        "nds_rate": round(f_nds / (1 - f_nds) * 100, 6) if f_nds < 1 else 0,
+        "usn_rate": usn_eff,
+    }
+
+
 def apply_tax_article(art: dict, tax_info: dict):
     """Per-article tax calculation."""
     usn_rate = tax_info.get("usn_rate", 0) / 100

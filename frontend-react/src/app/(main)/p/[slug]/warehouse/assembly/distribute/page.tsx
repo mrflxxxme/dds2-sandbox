@@ -214,7 +214,11 @@ export default function AssemblyDraftPage() {
     // внешний reload, PUT самого self-heal) scope не совпадёт → ПОЛНЫЙ проход (сеть
     // безопасности инварианта). additive-хендлер после своего PUT кладёт scope на новую
     // версию, subtractive — пустой scope, чтобы трейлинг-проход self-heal не рескан-нул всё.
-    const healScopeRef = useRef<{ ts: string; only: Set<string> } | null>(null);
+    // fromSync: версия записана АВТО-синком с расчётом (не ручным действием) — такой
+    // скоуп гасит только self-heal, но НЕ консолидацию по приёмке (синк может слить
+    // хвосты в ≥1 целую паллету в предброни — промотировать после него ЕСТЬ что;
+    // прод 2026-07-22: 5 паллет апл→Екб застряли в предброни при открытом приёме).
+    const healScopeRef = useRef<{ ts: string; only: Set<string>; fromSync?: boolean } | null>(null);
 
     // ─── Apply a draft payload into state (initial load + reload after commit) ─
     const applyDraft = useCallback((d: AssemblyDraft) => {
@@ -550,7 +554,7 @@ export default function AssemblyDraftPage() {
                 const o = await runDraftAutoSync(d, shared, categoryOf, classOf);
                 outcomes.push(o);
                 if (o.status === 'synced' && o.updated && o.draftId === draftId) {
-                    healScopeRef.current = { ts: o.updated.updated_at, only: new Set() };
+                    healScopeRef.current = { ts: o.updated.updated_at, only: new Set(), fromSync: true };
                     applyDraft(o.updated);
                 }
                 // Пейсинг write-бакета: пауза после реального PUT — серия по N
@@ -1229,7 +1233,10 @@ export default function AssemblyDraftPage() {
         const accSig = [...checkedPkgWbs].sort().join(';') + '||' + [...readyPkgWbs].sort().join(';');
         const accChanged = consAccSigRef.current !== accSig;
         const scope = healScopeRef.current;
-        const scopedMutation = !!scope && scope.ts === (draft?.updated_at || '');
+        // fromSync-версии гейт НЕ скипают: «инвариант скипа» (self-heal не собирает
+        // целую паллету) для синк-PUT ложен — его normalizePair может слить хвосты
+        // направления в ≥1 целую паллету в предброни, промотировать после него есть что.
+        const scopedMutation = !!scope && scope.ts === (draft?.updated_at || '') && !scope.fromSync;
         if (!accChanged && scopedMutation) return;
         consolidatingRef.current = true;
         let cancelled = false;
@@ -2680,14 +2687,16 @@ export default function AssemblyDraftPage() {
                         scopeFfId={scopeFfId}
                         categoryOf={categoryOf}
                         classOf={classOf}
-                        onDraftChanged={(d) => {
+                        onDraftChanged={(d, opts) => {
                             // Тихая синхронизация из редактора-матрицы (автосейв степпера / ✕):
                             // ручная правка = ТОЧНЫЙ план юзера — пустой heal-scope на эту
                             // версию, иначе полный self-heal переупаковал бы её (rows→prebook,
                             // некратные released) вторым PUT. Вкладку НЕ переключаем.
-                            healScopeRef.current = { ts: d.updated_at, only: new Set() };
+                            // fromSync (авто-синк матрицы) не гасит консолидацию по приёмке.
+                            healScopeRef.current = { ts: d.updated_at, only: new Set(), fromSync: opts?.fromSync };
                             applyDraft(d);
                         }}
+                        readyPkgWbs={readyPkgWbs}
                     />
                 ) : (
                     <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>
