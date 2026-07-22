@@ -26,16 +26,20 @@ from backend.cache import cached
 from backend.services.bdr_enrichment import (
     apply_tax,
     apply_tax_article,
+    apply_tax_by_month,
+    blended_tax_info,
     compute_abc,
     enrich_article,
+    tax_settings_uniform,
 )
 from backend.services.bdr_loaders import (
     load_ads,
+    load_ads_monthly,
     load_avg_costs,
     load_cancel_stats,
     load_cost_overrides,
     load_orders_stocks,
-    load_tax_settings,
+    load_tax_settings_by_month,
 )
 from backend.services.cost.valuation import (
     DEFAULT_METHOD,
@@ -45,11 +49,13 @@ from backend.services.cost.valuation import (
 from backend.services.settings_service import get_valuation_method
 from backend.services.wb_bdr_helpers import (
     build_bdr_aggregate_sql,
+    build_bdr_monthly_totals_sql,
     build_brands_sql_bdr,
     build_group_nm_ids_sql,
     build_group_sa_names_sql,
     build_total_count_sql,
     compute_metrics_from_sql,
+    cost_with_fallback,
     empty_metrics,
     serialize,
 )
@@ -136,7 +142,12 @@ async def get_wb_bdr(
     ads_map = await load_ads(db, project_id, date_from, date_to)
     orders_stocks_map = await load_orders_stocks(db, project_id, date_from, date_to)
     cost_overrides = await load_cost_overrides(db, project_id)
-    tax_info = await load_tax_settings(db, project_id, date_from, date_to)
+    # Налог: настройки на каждый месяц диапазона. Одинаковые во всех месяцах
+    # (обычный случай) → прежний одноставочный путь бит-в-бит; смешанные →
+    # «Итого» считается помесячно, строки — по взвешенной эффективной ставке.
+    tax_by_month = await load_tax_settings_by_month(db, project_id, date_from, date_to)
+    tax_uniform = tax_settings_uniform(tax_by_month)
+    tax_info = next(iter(tax_by_month.values()))
     cancel_stats = await load_cancel_stats(db, project_id, date_from, date_to)
 
     # COGS source depends on the project's valuation method. lifetime_avg keeps the
@@ -147,10 +158,13 @@ async def get_wb_bdr(
     # engine doesn't know.
     method = await get_valuation_method(db, project_id)
     win: dict[str, dict] = {}
-    if method == DEFAULT_METHOD:
-        cost_map = await load_avg_costs(db, project_id)
-    else:
-        cost_map = {}
+    # cost_map грузится при ЛЮБОМ методе: для движковых методов это страховка —
+    # SKU, по которому движок дал 0 (партии не сматчились по ключу, нетто-ноль
+    # окна), не должен уходить в P&L с нулевой себестоимостью, когда средняя
+    # закупочная известна (прод-кейс elka_240х220: 123 шт/нед по 0 ₽ при
+    # известных 1 396 ₽ — прибыль завышалась на ~172 тыс. за неделю).
+    cost_map = await load_avg_costs(db, project_id)
+    if method != DEFAULT_METHOD:
         valuation = await compute_project_valuation(db, project_id)
         win = slice_window(valuation, date_from, date_to, method)
 
@@ -279,6 +293,10 @@ async def get_wb_bdr(
                 # would charge a full month against a sub-month window.
                 g_qty = grouped_cogs_qty.get(sa_name, 0)
                 cost_price = (grouped_cogs[sa_name] / g_qty) if g_qty > 0 else 0.0
+                if cost_price <= 0:
+                    # Движок дал группе 0 (партии не сматчились / нетто-ноль окна) —
+                    # не списываем ноль при известной средней закупочной.
+                    cost_price = grouped_avg_cost.get(sa_name, 0)
                 cost_total = cost_price * sale_qty if sale_qty > 0 else 0
             else:
                 cost_price = grouped_avg_cost.get(sa_name, 0)
@@ -316,7 +334,9 @@ async def get_wb_bdr(
                 # the SAME days as revenue. Using win[sku]["cogs"] directly charges
                 # the WHOLE calendar month's COGS against a sub-month window (the
                 # engine buckets COGS by month) → COGS far above revenue / phantom loss.
-                cost_price = float(win[sku]["eff_cost"])
+                cost_price = cost_with_fallback(
+                    float(win[sku]["eff_cost"]), sku, nm_id, cost_map, cost_overrides
+                )
                 cost_total = cost_price * sale_qty if sale_qty > 0 else 0
             else:
                 cost_price = cost_map.get(sku, 0) if sku else 0
@@ -378,7 +398,44 @@ async def get_wb_bdr(
     summary_result["cost_total"] = float(total_cost)
 
     # ── 8. Tax calculation ──
-    apply_tax(summary_result, tax_info, D(str(summary_result["adv_sum"])), total_cost)
+    if tax_uniform:
+        apply_tax(summary_result, tax_info, D(str(summary_result["adv_sum"])), total_cost)
+    else:
+        # Смена ставок внутри диапазона: «Итого»-налог помесячно (точно), строки —
+        # по blended-ставке. Себестоимость раскладывается по месяцам долей дохода
+        # (нужна только режиму Д−Р с cost_as_expense; помесячного среза COGS у
+        # сводки нет — допущение задокументировано в blended_tax_info).
+        monthly_rows = (
+            await db.execute(text(build_bdr_monthly_totals_sql(brand, article)), params)
+        ).mappings().all()
+        if group_by in ("brand", "subject"):
+            included_nms = {nm for nm in nm_to_group if nm}
+        else:
+            included_nms = {a["nm_id"] for a in result_articles if a.get("nm_id")}
+        ads_by_month = await load_ads_monthly(db, project_id, date_from, date_to)
+        total_income = sum(float(compute_metrics_from_sql(r)["sales_amount"]) for r in monthly_rows) or 1.0
+        monthly_tax: dict[str, dict] = {}
+        for mrow in monthly_rows:
+            mm = compute_metrics_from_sql(mrow)
+            income_m = float(mm["sales_amount"])
+            monthly_tax[mrow["month_key"]] = {
+                "income": income_m,
+                "logistics": float(mm["logistics"]),
+                "storage": float(mm["storage"]),
+                "commission": float(mm["commission"]),
+                "penalties": float(mm["penalties"]),
+                "deductions": float(mm["deductions"]),
+                "adv": sum(
+                    a for nm, a in ads_by_month.get(mrow["month_key"], {}).items() if nm in included_nms
+                ),
+                "cost": float(total_cost) * income_m / total_income,
+            }
+        apply_tax_by_month(
+            summary_result, monthly_tax, tax_by_month, D(str(summary_result["adv_sum"])), total_cost
+        )
+        tax_info = blended_tax_info(
+            {mk: m["income"] for mk, m in monthly_tax.items()}, tax_by_month
+        )
     for art_row in result_articles:
         apply_tax_article(art_row, tax_info)
 

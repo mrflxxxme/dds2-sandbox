@@ -23,7 +23,7 @@ from backend.services.bdr_loaders import (
     load_ads_monthly,
     load_avg_costs,
     load_cost_overrides,
-    load_tax_settings,
+    load_tax_settings_by_month,
 )
 from backend.services.cost.valuation import (
     DEFAULT_METHOD,
@@ -40,6 +40,7 @@ from backend.services.opiu_helpers import (
     empty_totals,
 )
 from backend.services.settings_service import get_valuation_method
+from backend.services.wb_bdr_helpers import cost_with_fallback
 
 logger = logging.getLogger("dds.opiu")
 
@@ -83,7 +84,10 @@ async def get_opiu(
     agg_rows = result.mappings().all()
 
     # ── 2. Load enrichment data (small queries) ──
-    tax_info = await load_tax_settings(db, project_id, date_from, date_to)
+    # Налог: настройки на каждый месяц диапазона — месячные колонки считаются
+    # ставками СВОЕГО месяца (раньше весь диапазон шёл по первому месяцу).
+    tax_by_month = await load_tax_settings_by_month(db, project_id, date_from, date_to)
+    tax_info = next(iter(tax_by_month.values()))  # настройки первого месяца (строки/ответ)
 
     # ── 3. Determine months in range ──
     months_set: set[str] = set()
@@ -180,10 +184,11 @@ async def get_opiu(
     cost_overrides = await load_cost_overrides(db, project_id)
 
     win: dict[str, dict] = {}
-    if method == DEFAULT_METHOD:
-        cost_map = await load_avg_costs(db, project_id)
-    else:
-        cost_map = {}
+    # cost_map грузится при ЛЮБОМ методе — страховка для SKU, по которым движок
+    # дал 0 (партии не сматчились по ключу / нетто-ноль месяца): не списываем
+    # ноль при известной средней закупочной (зеркало фикса в wb_bdr_service).
+    cost_map = await load_avg_costs(db, project_id)
+    if method != DEFAULT_METHOD:
         valuation = await compute_project_valuation(db, project_id)
         win = slice_window(valuation, date_from, date_to, method)
 
@@ -203,6 +208,9 @@ async def get_opiu(
             # being charged the whole month — the engine buckets COGS by month.
             m_qty = int(m_engine["qty"])
             eff = (float(m_engine["cogs"]) / m_qty) if m_qty else 0.0
+            # Движок дал 0 (партии не сматчились / нетто-ноль месяца) → фолбэк
+            # на среднюю закупочную/override, не списываем ноль.
+            eff = cost_with_fallback(eff, sku, nm_id, cost_map, cost_overrides)
             cost_amount = eff * qty
         else:
             # lifetime_avg path, or override fallback for SKUs missing from valuation.
@@ -231,6 +239,7 @@ async def get_opiu(
         total_cost_val,
         date_from,
         date_to,
+        tax_by_month=tax_by_month,
     )
     return pnl_result
 
@@ -246,8 +255,12 @@ def _build_pnl_result(
     total_cost_val,
     date_from,
     date_to,
+    tax_by_month=None,
 ):
-    """Build the final P&L rows and return the result dict."""
+    """Build the final P&L rows and return the result dict.
+
+    ``tax_by_month`` — настройки налога на каждый месяц ('YYYY-MM' → dict);
+    None (старые вызовы) → все месяцы по настройкам первого (tax_info)."""
 
     def _metric_monthly(field):
         return {mk: float(monthly_data[mk].get(field, 0)) for mk in months_sorted}
@@ -321,33 +334,43 @@ def _build_pnl_result(
     ebitda_m = {mk: margin_m[mk] - ops_m[mk] for mk in months_sorted}
     ebitda_t = margin_t - ops_t
 
-    usn_rate = tax_info.get("usn_rate", 0) / 100
-    nds_rate = tax_info.get("nds_rate", 0) / 100
-    regime = tax_info.get("tax_regime", "usn_income")
-    cost_as_expense = tax_info.get("cost_as_expense", False)
+    # Настройки на месяц: смена ставки/режима внутри диапазона учитывается
+    # помесячно; tax_by_month=None (старые вызовы) → настройки первого месяца.
+    months_tax = tax_by_month or {}
+    uniform = all(v == tax_info for v in months_tax.values()) if months_tax else True
 
-    def _calc_tax(income, expenses=0):
+    def _info_for(mk):
+        return months_tax.get(mk, tax_info)
+
+    def _calc_tax(income, expenses, info):
+        usn_rate = info.get("usn_rate", 0) / 100
+        nds_rate = info.get("nds_rate", 0) / 100
         nds = income * nds_rate / (1 + nds_rate) if nds_rate > 0 else 0
         base = income - nds
-        if regime == "usn_income_expense_vat":
+        if info.get("tax_regime", "usn_income") == "usn_income_expense_vat":
             base = base - expenses
         usn = max(base * usn_rate, 0)
         return nds + usn
 
-    def _tax_expenses_for(log, stor, comm, pen, ded, adv, cost_val):
+    def _tax_expenses_for(log, stor, comm, pen, ded, adv, cost_val, info):
         exp = abs(log) + abs(stor) + abs(comm) + abs(pen) + abs(ded) + abs(adv)
-        if cost_as_expense:
+        if info.get("cost_as_expense", False):
             exp += abs(cost_val)
         return exp
 
     tax_exp_m = {
-        mk: _tax_expenses_for(log_m[mk], stor_m[mk], comm_m[mk], pen_m[mk], ded_m[mk], adv_m[mk], cost_m[mk])
+        mk: _tax_expenses_for(
+            log_m[mk], stor_m[mk], comm_m[mk], pen_m[mk], ded_m[mk], adv_m[mk], cost_m[mk],
+            _info_for(mk),
+        )
         for mk in months_sorted
     }
-    tax_exp_t = _tax_expenses_for(log_t, stor_t, comm_t, pen_t, ded_t, adv_t, cost_t)
+    tax_exp_t = _tax_expenses_for(log_t, stor_t, comm_t, pen_t, ded_t, adv_t, cost_t, tax_info)
 
-    tax_m = {mk: _calc_tax(sales_m[mk], tax_exp_m[mk]) for mk in months_sorted}
-    tax_t = _calc_tax(sales_t, tax_exp_t)
+    tax_m = {mk: _calc_tax(sales_m[mk], tax_exp_m[mk], _info_for(mk)) for mk in months_sorted}
+    # Одинаковые настройки → прежний агрегатный расчёт (бит-в-бит); смешанные →
+    # итог обязан быть суммой месяцев, каждый по своей ставке.
+    tax_t = _calc_tax(sales_t, tax_exp_t, tax_info) if uniform else sum(tax_m.values())
 
     net_m = {mk: ebitda_m[mk] - tax_m[mk] for mk in months_sorted}
     net_t = ebitda_t - tax_t
