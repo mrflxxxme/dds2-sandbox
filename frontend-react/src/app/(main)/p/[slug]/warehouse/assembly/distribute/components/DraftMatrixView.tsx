@@ -11,6 +11,7 @@ import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams'
 import { subtractReserveFromArticles, restrictArticlesToFf, reservedForBarcode, type DraftReserveMap } from '@/lib/assembly/draftReserve';
 import { inScopeOf } from '@/lib/assembly/categoryCompat';
 import { scopedNormalizeDraft } from '@/lib/utils/scopedNormalizeDraft';
+import { makeAutoSyncNormalizePair } from '@/lib/assembly/autoSyncNormalize';
 import { netOutInTransit } from '@/lib/assembly/draftAutoSyncRunner';
 import type { NormalizeDraftCtx } from '@/lib/utils/normalizeDraft';
 import {
@@ -126,8 +127,13 @@ interface DraftMatrixViewProps {
     ffNameById: Map<number, string>;
     /** Черновик изменён редактором (автосейв степпера / ✕ / авто-синк с расчётом).
      *  Родитель обновляет свой стейт БЕЗ смены вкладки и БЕЗ полного self-heal
-     *  (план редактора = точное состояние). */
-    onDraftChanged?: (draft: AssemblyDraft) => void;
+     *  (план редактора = точное состояние). `fromSync` — запись сделана АВТО-синком
+     *  с расчётом (не ручной правкой): такой маркер не должен гасить страничную
+     *  консолидацию по приёмке (промоцию целых паллет из предброни). */
+    onDraftChanged?: (draft: AssemblyDraft, opts?: { fromSync?: boolean }) => void;
+    /** Направления (`${pkg}::${wb}`), готовые к сдаче по живой приёмке страницы —
+     *  авто-синк матрицы промотирует по ним целые паллеты из предброни в rows. */
+    readyPkgWbs?: Set<string>;
     /** Резерв стока ДРУГИМИ черновиками (barcode → {ff → qty}) — вычитается из
      *  доступного ФФ до расчёта; в ячейке «На ФФ» видна 🔒-подстрока. */
     reserved?: DraftReserveMap;
@@ -146,7 +152,7 @@ interface DraftMatrixViewProps {
  *  напрямую с автосейвом; «⟳ Пересчитать от потребности» пишет живой расчёт
  *  (need-канал + новинки cold-start с гвардом пересорта) заменой по SKU:
  *  целые паллеты → строки, хвосты → предбронь. */
-export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, reserved, scopeCategories, scopeFfId, categoryOf, classOf }: DraftMatrixViewProps) {
+export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, reserved, scopeCategories, scopeFfId, categoryOf, classOf, readyPkgWbs }: DraftMatrixViewProps) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -1271,7 +1277,9 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
             const netted = await netOutInTransit(shipRows, effPrebook, articles, { nmPpb, nmPpbByWh, nmBoxSize, palletOverrides }, classOf ?? (() => '*'));
             // Ре-нормализация смёрженного плана: направления с ✋/unowned-строками
             // после подстановки замороженных объёмов теряли целость паллет, а хвост
-            // висел в rows (прод 2026-07-21). freeByNm пуст — только срез/демоция.
+            // висел в rows (прод 2026-07-21). Двусторонний клапан (2026-07-22):
+            // нормализ с реальным пулом ФФ + промоция целых паллет готовых по
+            // приёмке направлений из предброни (обратный путь демоции).
             const normCtx: NormalizeDraftCtx = {
                 ppbOf: (nm) => nmPpb.get(nm),
                 ppbAt: (nm, ffId) => nmPpbByWh.get(nm)?.[ffId] ?? null,
@@ -1280,7 +1288,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                 classOf: classOf ?? (() => '*'),
             };
             const plan = buildAutoSyncPlan(dist ?? {}, netted.rows, netted.prebook, guarded, curManual, preserve,
-                (rs, pb) => { const n = scopedNormalizeDraft(rs, pb, normCtx, undefined); return { rows: n.rows, prebook: n.prebook }; });
+                makeAutoSyncNormalizePair(normCtx, articles, readyPkgWbs ?? new Set()));
             if (!plan) {
                 if (trigger === 'manual') showToast('План уже соответствует расчёту', 'success');
                 return;
@@ -1303,7 +1311,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
             setDraftPrebook(d.distribution?.prebook ?? []);
             setManualNms(new Set(d.distribution?.manual_nms ?? []));
             showToast(`⟳ План синхронизирован с расчётом: ${formatNumber(before, 0)} → ${formatNumber(after, 0)} шт${curManual.size > 0 ? ` · ✋ ручных не тронуто: ${curManual.size}` : ''}`, 'success');
-            onDraftChanged?.(d);
+            onDraftChanged?.(d, { fromSync: true });
         } catch (e) {
             if (e instanceof Error && e.message.includes('DRAFT_VERSION_CONFLICT')) {
                 // Черновик записали между нашим GET и PUT — синк пересчитается на
@@ -1315,7 +1323,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
         } finally {
             setWriting(false);
         }
-    }, [writing, distRows, draftId, guardByNm, shipRows, effPrebook, articles, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides, classOf, flushDraftSave, showToast, onDraftChanged]);
+    }, [writing, distRows, draftId, guardByNm, shipRows, effPrebook, articles, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides, classOf, readyPkgWbs, flushDraftSave, showToast, onDraftChanged]);
 
     // Авто-запуск синка: один раз за заход, когда готовы И расчёт, И черновик.
     const autoSyncDoneRef = useRef(false);

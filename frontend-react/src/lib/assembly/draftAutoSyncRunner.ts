@@ -26,6 +26,7 @@ import {
     finalizeDraftDistribution,
     splitByKratnost,
 } from '@/lib/assembly/draftDistribution';
+import { makeAutoSyncNormalizePair, readyPkgWbsFromAvailability } from '@/lib/assembly/autoSyncNormalize';
 import { subtractReserveFromArticles, restrictArticlesToFf } from '@/lib/assembly/draftReserve';
 import { inTransitMap, subtractInTransitFromRows } from '@/lib/assembly/reconcileInTransit';
 import { scopedNormalizeDraft } from '@/lib/utils/scopedNormalizeDraft';
@@ -280,6 +281,9 @@ export async function runDraftAutoSync(
         // синк после одного сбоя и переиспользовал устаревшие лимиты между тиками —
         // ревью MEDIUM×2). Квоту бережёт пер-баркод кэш бэка (10 мин), тик — часовой.
         let splitMap: AcceptanceSplitMap = new Map();
+        // Готовые к сдаче направления по той же живой приёмке — для обратной промоции
+        // целых паллет из предброни (без данных множество пусто → «нет данных ≠ готов»).
+        let readyPkgWbs = new Set<string>();
         if (autoSkus.length > 0) {
             try {
                 const resp = await api.checkWbAcceptance({
@@ -291,6 +295,7 @@ export async function runDraftAutoSync(
                         : [{ package_type: it.package_type, distribution: it.distribution }];
                     splitMap.set(`${it.nm_id}::${it.barcode}`, splits);
                 }
+                readyPkgWbs = readyPkgWbsFromAvailability(resp.items.map((it) => it.availability || {}));
             } catch {
                 // Fail-open: без живой приёмки план не персистим — иначе синканули бы
                 // непроверенный план на закрытые склады. Следующий тик честно ретраит.
@@ -322,7 +327,10 @@ export async function runDraftAutoSync(
         // Ре-нормализация смёрженного плана (calc + замороженные строки): без неё
         // хвосты направлений с ✋/unowned-SKU висели в rows неполной паллетой
         // (прод 2026-07-21: Тула «⚠ 31%», ELKA ×40 в «Без целой паллеты»).
-        // freeByNm не передаём: план не добирает новый сток, только режет/демотирует.
+        // Двусторонний клапан (2026-07-22): нормализ идёт с реальным пулом ФФ
+        // (иначе release тихо стрипал добиваемые хвосты предброни), а собравшиеся
+        // в предброни ЦЕЛЫЕ паллеты готовых по приёмке направлений промотируются
+        // в rows — обратный путь демоции (5 паллет апл→Екб застревали навсегда).
         const normCtx: NormalizeDraftCtx = {
             ppbOf: (nm) => shared.nmPpb.get(nm),
             ppbAt: (nm, ffId) => shared.nmPpbByWh.get(nm)?.[ffId] ?? null,
@@ -331,7 +339,7 @@ export async function runDraftAutoSync(
             classOf,
         };
         const plan = buildAutoSyncPlan(dist, netted.rows, netted.prebook, shared.guardedNms, curManual, preserve,
-            (rs, pb) => { const n = scopedNormalizeDraft(rs, pb, normCtx, undefined); return { rows: n.rows, prebook: n.prebook }; });
+            makeAutoSyncNormalizePair(normCtx, articles, readyPkgWbs));
         if (!plan) return { ...base, status: 'no-delta' };
         const before = sumUnits(dist.rows ?? []) + sumUnits(dist.prebook ?? []);
         const after = sumUnits(plan.rows) + sumUnits(plan.prebook);
