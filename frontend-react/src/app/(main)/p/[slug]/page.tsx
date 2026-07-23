@@ -16,6 +16,7 @@ import {
     AreaChart, Area, BarChart, Bar,
 } from 'recharts';
 import KpiCard from '@/components/KpiCard';
+import PageGuard from '@/components/PageGuard';
 
 /* ─── Цвета ────────────────────────────────────────────────────── */
 const C = { income: '#22c55e', expense: '#ef4444', accent: '#a78bfa', warning: '#f59e0b', info: '#3b82f6', muted: '#64748b' };
@@ -117,6 +118,14 @@ function InlineTxnRows({txnList,txnTotal,txnFlow,onFlowChange,filterLoading,colS
 
 /* ═══════════════════════════════════════════════════════════════ */
 export default function DashboardPage() {
+    return (
+        <PageGuard page="dashboard">
+            <DashboardInner />
+        </PageGuard>
+    );
+}
+
+function DashboardInner() {
     const params=useParams();
     const slug=(params?.slug as string)||'';
     const [data,setData]=useState<DashboardSummary|null>(null);

@@ -175,7 +175,8 @@ export default function ShipmentPaymentsTab() {
             'Склад забора': r.source_warehouse ?? '',
             'Дата забора': r.pickup_date ? formatDate(r.pickup_date) : '',
             'Дата отгрузки': r.shipped_date ? formatDate(r.shipped_date) : '',
-            'Палет': r.pallets_count ?? '',
+            'Кол-во ед.': r.pallets_count ?? '',
+            'Единица': r.shipped_as_boxes ? 'короба' : 'паллеты',
             'Перевозчик': r.carrier_name ?? '',
             'ИНН': r.carrier_inn ?? '',
             'Сумма': r.pickup_cost != null ? Number(r.pickup_cost) : '',
@@ -343,7 +344,7 @@ export default function ShipmentPaymentsTab() {
                                     <Th sortKey="source_warehouse" sort={sort} onSort={handleSort}>Склад забора</Th>
                                     <Th sortKey="pickup_date" sort={sort} onSort={handleSort}>Дата забора</Th>
                                     <Th sortKey="shipped_date" sort={sort} onSort={handleSort}>Дата отгрузки</Th>
-                                    <Th right sortKey="pallets_count" sort={sort} onSort={handleSort}>Палет</Th>
+                                    <Th right sortKey="pallets_count" sort={sort} onSort={handleSort}>Кол-во ед.</Th>
                                     <Th sortKey="carrier_name" sort={sort} onSort={handleSort}>Перевозчик</Th>
                                     <Th right sortKey="pickup_cost" sort={sort} onSort={handleSort}>Сумма</Th>
                                     <Th right sortKey="oplata" sort={sort} onSort={handleSort}>Оплата</Th>
@@ -367,7 +368,7 @@ export default function ShipmentPaymentsTab() {
                                             <td style={{ padding: '8px 8px', color: 'var(--color-text-muted)' }}>{r.source_warehouse ?? '—'}</td>
                                             <td style={{ padding: '8px 8px', whiteSpace: 'nowrap' }}>{r.pickup_date ? formatDate(r.pickup_date) : '—'}</td>
                                             <td style={{ padding: '8px 8px', whiteSpace: 'nowrap' }}>{r.shipped_date ? formatDate(r.shipped_date) : '—'}</td>
-                                            <td style={{ padding: '8px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{r.pallets_count ?? '—'}</td>
+                                            <td style={{ padding: '8px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{r.pallets_count != null ? `${formatNumber(r.pallets_count, 0)} ${r.shipped_as_boxes ? 'кор' : 'пал'}` : '—'}</td>
                                             <td style={{ padding: '8px 8px' }}>
                                                 <div>{r.carrier_name ?? '—'}</div>
                                                 {r.carrier_inn && <div style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--color-text-muted)' }}>{r.carrier_inn}</div>}

@@ -270,12 +270,14 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
                 </div>
 
                 <nav className="sidebar-nav">
-                    {/* Дашборд — отдельно, без группы, всегда виден */}
-                    <Link href={`/p/${slug}`}
-                        className={`sidebar-link ${isActive('') ? 'active' : ''}`}>
-                        <span className="sidebar-link-icon">{dashboardIcon}</span>
-                        <span>{dashboardItem.label}</span>
-                    </Link>
+                    {/* Дашборд — отдельно, без группы, но по праву 'dashboard' */}
+                    {canAccess('dashboard') && (
+                        <Link href={`/p/${slug}`}
+                            className={`sidebar-link ${isActive('') ? 'active' : ''}`}>
+                            <span className="sidebar-link-icon">{dashboardIcon}</span>
+                            <span>{dashboardItem.label}</span>
+                        </Link>
+                    )}
 
                     {filteredGroups.map(group => {
                         const isCollapsed = !!collapsed[group.section];

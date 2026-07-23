@@ -150,6 +150,8 @@ WAREHOUSE_TO_DISTRICT: dict[str, str] = {
     "СЦ Вологда 2": DISTRICT_NORTHWEST,
     "СЦ Шушары": DISTRICT_NORTHWEST,
     "Красный Бор СГТ": DISTRICT_NORTHWEST,
+    # Новый обычный склад WB (2026-07), тот же комплекс, что «Красный Бор СГТ».
+    "Красный Бор": DISTRICT_NORTHWEST,
     "Санкт-Петербург СГТ": DISTRICT_NORTHWEST,
     "Шушары: Питание": DISTRICT_NORTHWEST,
     "СПБ Шушары": DISTRICT_NORTHWEST,
@@ -282,6 +284,8 @@ WAREHOUSE_LOGISTICS_COEF: dict[str, Decimal | None] = {
     "СЦ Вологда 2": None,
     "СЦ Шушары": None,
     "Красный Бор СГТ": None,
+    # Склад хранения — аналогия СПБ Шушары (та же зона доставки).
+    "Красный Бор": Decimal("2.20"),
     "Санкт-Петербург СГТ": Decimal("1.05"),
     "Шушары: Питание": Decimal("2.20"),
     "СПБ Шушары": Decimal("2.20"),

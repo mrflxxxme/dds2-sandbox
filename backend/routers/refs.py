@@ -31,6 +31,7 @@ from backend.schemas.refs import (
     ProductTagSchema,
     SizeAliasPayload,
     SizeOverrideBulkPayload,
+    StockIgnoredWarehousesPayload,
     SubcategoryBulkPayload,
     SubcategorySchema,
 )
@@ -248,6 +249,31 @@ async def set_preorder_allowed_warehouses(
 
     result = await settings_service.set_preorder_allowed_warehouses(db, project.id, payload.warehouses)
     return {"ok": True, "preorder_allowed": result}
+
+
+@router.get("/stock-ignored-warehouses")
+async def get_stock_ignored_warehouses(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Склады WB «🔥 Остатки не учитывать» (сгоревшие): расчёты не верят их стоку."""
+    from backend.services import settings_service
+
+    return await settings_service.get_stock_ignored_warehouses(db, project.id)
+
+
+@router.put("/stock-ignored-warehouses")
+async def set_stock_ignored_warehouses(
+    payload: StockIgnoredWarehousesPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    """Set stock-ignored warehouses. Body: {"warehouses": ["Краснодар", ...]}"""
+    from backend.services import settings_service
+
+    result = await settings_service.set_stock_ignored_warehouses(db, project.id, payload.warehouses)
+    return {"ok": True, "stock_ignored": result}
 
 
 @router.get("/pallet-boxes-by-size")

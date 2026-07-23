@@ -7,6 +7,8 @@ export function WarehouseExclusionSettings() {
     const [warehouses, setWarehouses] = useState<Array<{ name: string; is_sorting_center?: boolean }>>([]);
     const [excluded, setExcluded] = useState<string[]>([]);
     const [preorderAllowed, setPreorderAllowed] = useState<string[]>([]);
+    // 🔥 сгоревшие/потерянные склады: остатки не учитываются в расчётах; независим от excluded
+    const [stockIgnored, setStockIgnored] = useState<string[]>([]);
     const [compat, setCompat] = useState<PalletCategoryCompat>({ enabled: false, groups: [] });
     const [compatError, setCompatError] = useState('');
     const [allCategories, setAllCategories] = useState<string[]>([]);
@@ -22,10 +24,12 @@ export function WarehouseExclusionSettings() {
     useEffect(() => {
         (async () => {
             try {
-                const [wh, ex, pa, rf, compatRes, cats] = await Promise.all([
+                const [wh, ex, pa, si, rf, compatRes, cats] = await Promise.all([
                     api.getAllWbWarehouses(),
                     api.getExcludedWarehouses(),
                     api.getPreorderAllowedWarehouses(),
+                    // best-effort: в окне деплой-скью нового эндпоинта 404 не должен ронять весь экран
+                    api.getStockIgnoredWarehouses().catch(() => [] as string[]),
                     api.getForecastRfDefaultDays(),
                     // best-effort: сбой правил/списка категорий не должен ломать остальные секции
                     api.getPalletCategoryCompat().catch(() => null),
@@ -43,6 +47,7 @@ export function WarehouseExclusionSettings() {
                 setWarehouses(wh);
                 setExcluded(ex);
                 setPreorderAllowed(pa);
+                setStockIgnored(si);
                 setRfDefaultDays(rf.days);
                 setRfDefaultDaysSaved(rf.days);
                 if (compatRes) {
@@ -90,6 +95,11 @@ export function WarehouseExclusionSettings() {
         setHasChanges(true);
     };
 
+    const toggleStockIgnored = (name: string) => {
+        setStockIgnored(prev => (prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]));
+        setHasChanges(true);
+    };
+
     // ─── Совместимость категорий на паллете ───────────────────────────
     const mutateCompat = (updater: (prev: PalletCategoryCompat) => PalletCategoryCompat) => {
         setCompat(updater);
@@ -132,9 +142,10 @@ export function WarehouseExclusionSettings() {
         setSaving(true);
         setMsg('');
         try {
-            const [, , savedCompat] = await Promise.all([
+            const [, , , savedCompat] = await Promise.all([
                 api.setExcludedWarehouses(excluded),
                 api.setPreorderAllowedWarehouses(preorderAllowed),
+                api.setStockIgnoredWarehouses(stockIgnored),
                 // не перезаписываем правила дефолтом, если их не удалось загрузить
                 compatError ? Promise.resolve(null) : api.setPalletCategoryCompat(compat),
             ]);
@@ -198,6 +209,9 @@ export function WarehouseExclusionSettings() {
                 <h3 style={{ margin: '0 0 8px' }}>🏭 Исключение складов</h3>
                 <p style={{ color: 'var(--color-text-muted)', margin: '0 0 16px', fontSize: 14 }}>
                     Исключённые склады не участвуют в расчёте потребностей. Заказы из их регионов перераспределяются на ближайшие оставшиеся склады.
+                    {' '}Тумблер 🔥 — отдельный флаг «остатки не учитывать» (склад сгорел/потерян, но WB продолжает отдавать его остатки как живые):
+                    расчёты (потребность/запас/срочность) перестают верить остаткам такого склада, а страницы «факта»
+                    (Остатки по складам WB, Сводные остатки) показывают их как есть.
                 </p>
 
                 <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -207,6 +221,11 @@ export function WarehouseExclusionSettings() {
                     {excluded.length > 0 && (
                         <span style={{ fontSize: 13, color: 'var(--color-danger)', fontWeight: 500 }}>
                             ⛔ Исключено: {excluded.length}
+                        </span>
+                    )}
+                    {stockIgnored.length > 0 && (
+                        <span style={{ fontSize: 13, color: '#f97316', fontWeight: 500 }}>
+                            🔥 Остатки игнорируются: {stockIgnored.length}
                         </span>
                     )}
                     <span style={{ flex: 1 }} />
@@ -242,6 +261,7 @@ export function WarehouseExclusionSettings() {
                 }}>
                     {warehouses.map(w => {
                         const isExcluded = excluded.includes(w.name);
+                        const isStockIgnored = stockIgnored.includes(w.name);
                         return (
                             <label
                                 key={w.name}
@@ -269,6 +289,27 @@ export function WarehouseExclusionSettings() {
                                 }}>
                                     {w.name}
                                 </span>
+                                <button
+                                    type="button"
+                                    // карточка — <label>: без preventDefault клик по кнопке флипнет excluded-чекбокс
+                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleStockIgnored(w.name); }}
+                                    title="Остатки не учитывать (сгорел/потерян)"
+                                    aria-pressed={isStockIgnored}
+                                    style={{
+                                        marginLeft: 'auto',
+                                        padding: '2px 6px',
+                                        borderRadius: 6,
+                                        border: `1px solid ${isStockIgnored ? '#f97316' : 'transparent'}`,
+                                        background: isStockIgnored ? 'rgba(249,115,22,0.12)' : 'transparent',
+                                        cursor: 'pointer',
+                                        fontSize: 14,
+                                        lineHeight: 1,
+                                        opacity: isStockIgnored ? 1 : 0.35,
+                                        transition: 'all 0.15s',
+                                    }}
+                                >
+                                    🔥
+                                </button>
                             </label>
                         );
                     })}
@@ -479,12 +520,21 @@ export function WarehouseExclusionSettings() {
                 {msg && <span style={{ fontSize: 14 }}>{msg}</span>}
             </div>
 
-            {excludedList.length > 0 && (
+            {(excludedList.length > 0 || stockIgnored.length > 0) && (
                 <div className="glass-card" style={{ padding: 16, marginTop: 16 }}>
-                    <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: 0 }}>
-                        ⚠️ Исключены: <strong>{excludedList.map(w => w.name).join(', ')}</strong>.
-                        Заказы из этих регионов будут распределены на ближайшие активные склады.
-                    </p>
+                    {excludedList.length > 0 && (
+                        <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: 0 }}>
+                            ⚠️ Исключены: <strong>{excludedList.map(w => w.name).join(', ')}</strong>.
+                            Заказы из этих регионов будут распределены на ближайшие активные склады.
+                        </p>
+                    )}
+                    {stockIgnored.length > 0 && (
+                        <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: excludedList.length > 0 ? '8px 0 0' : 0 }}>
+                            🔥 Остатки не учитываются: <strong>{stockIgnored.join(', ')}</strong>.
+                            Расчёты (потребность/запас/срочность) считают остатки этих складов нулевыми;
+                            страницы «факта» показывают их как есть.
+                        </p>
+                    )}
                 </div>
             )}
         </div>

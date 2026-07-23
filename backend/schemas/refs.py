@@ -175,6 +175,15 @@ class PreorderAllowedWarehousesPayload(BaseModel):
     warehouses: list[str]
 
 
+class StockIgnoredWarehousesPayload(BaseModel):
+    """Input payload: склады WB «🔥 Остатки не учитывать» (сгоревшие). Расчётные
+    читатели (потребность, прогнозы, cold-start, кратность, прайсинг, воронка)
+    выкидывают их сток; страницы факта/история/спрос — не трогаются.
+    Независим от excluded_warehouses."""
+
+    warehouses: list[str]
+
+
 class ForecastRfDefaultDaysPayload(BaseModel):
     """Input payload for default RF→WB lead time (days), used when
     `WarehouseDeliveryTime` rows are missing for a fulfillment warehouse."""

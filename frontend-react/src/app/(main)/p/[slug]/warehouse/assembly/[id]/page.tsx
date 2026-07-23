@@ -1228,7 +1228,7 @@ export default function AssemblyDetailPage() {
                                             {a.driver_phone && <span>Тел.: {a.driver_phone}</span>}
                                             {a.carrier_name && <span>Подрядчик: {a.carrier_name}</span>}
                                             {a.pickup_cost != null && <span>Стоимость: <strong style={{ color: 'var(--color-text)' }}>{formatNumber(a.pickup_cost)} ₽</strong></span>}
-                                            {a.pallets_count != null && <span>Палет: {formatNumber(a.pallets_count, 0)}</span>}
+                                            {a.pallets_count != null && <span>{a.shipped_as_boxes ? 'Короба' : 'Палет'}: {formatNumber(a.pallets_count, 0)}</span>}
                                         </div>
                                         {a.outcome === 'rejected' && a.returned_to_warehouse_name && (
                                             <div style={{ fontSize: 13, color: 'var(--color-warning)', marginTop: 4 }}>

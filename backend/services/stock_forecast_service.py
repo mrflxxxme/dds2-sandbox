@@ -203,7 +203,13 @@ async def _load_wb_breakdown(db: AsyncSession, project_id: int) -> dict[int, dic
 
     Returns {nm_id: {"quantity", "in_way_to_client", "in_way_from_client"}}.
     """
-    result = await db.execute(
+    from backend.services.settings_service import get_stock_ignored_set
+
+    # 🔥 stock_ignored: фантомный сток сгоревших складов не питает «На WB» /
+    # days_left / срочность. Fallback на WbFunnelDaily (см. stocks_wb ниже по
+    # коду) сознательно не фильтруется — там нет разбивки по складам.
+    ignored = await get_stock_ignored_set(db, project_id)
+    stmt = (
         select(
             WbWarehouseStock.nm_id,
             func.sum(WbWarehouseStock.quantity).label("qty"),
@@ -213,6 +219,9 @@ async def _load_wb_breakdown(db: AsyncSession, project_id: int) -> dict[int, dic
         .where(WbWarehouseStock.project_id == project_id)
         .group_by(WbWarehouseStock.nm_id)
     )
+    if ignored:
+        stmt = stmt.where(WbWarehouseStock.warehouse_name.notin_(sorted(ignored)))
+    result = await db.execute(stmt)
     return {
         int(r.nm_id): {
             "quantity": int(r.qty or 0),

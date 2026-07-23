@@ -775,6 +775,7 @@ async def ship_request(
         delivery_date=req.delivery_date,
         pallets_count=req.pallets_count,
         pallet_weight_kg=req.pallet_weight_kg,
+        shipped_as_boxes=req.shipped_as_boxes,
     )
     db.add(shipment)
     await db.flush()

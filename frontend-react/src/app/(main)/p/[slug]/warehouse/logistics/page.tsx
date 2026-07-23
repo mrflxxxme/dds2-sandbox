@@ -87,6 +87,9 @@ function ffRequestNumbers(item: AssemblyRequest): string[] {
 
 // ─── Joint (совместная) FBO-поставка: коллапс N сборок в одну карточку ─────────
 
+/** Короткая подпись единицы поставки: короба или паллеты. */
+const unitShort = (shippedAsBoxes?: boolean) => (shippedAsBoxes ? 'кор' : 'пал');
+
 /** Строка разбивки забора совместной поставки: один склад-источник. */
 interface JointRow {
     number: string;                        // номер сборки этого склада-источника (ASM-…)
@@ -659,7 +662,8 @@ export default function LogisticsPage() {
             'Склад': i.warehouse_name || '',
             'Склад WB': i.effective_wb_warehouse || '',
             'Поставка FBO': i.wb_supply_name || '',
-            'Палеты': i.pallets_count,
+            'Кол-во ед.': i.pallets_count,
+            'Единица': i.shipped_as_boxes ? 'короба' : 'паллеты',
             'Общий вес': i.total_weight_kg || 0,
             'Машина': i.vehicle_info || '',
             'Дата готовности': i.estimated_ready_date || '',
@@ -1032,7 +1036,7 @@ export default function LogisticsPage() {
                                                         <td>{item.effective_wb_warehouse || '—'}</td>
                                                         <td style={{ fontSize: 12 }}>{renderWbDeliveryDate(item)}</td>
                                                         <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{item.wb_supply_id_wb ||'\u2014'}</td>
-                                                        <td style={{ textAlign: 'right' }}>{isJoint ? formatNumber(jointTotalPallets(item), 0) : item.pallets_count}</td>
+                                                        <td style={{ textAlign: 'right' }}>{isJoint ? formatNumber(jointTotalPallets(item), 0) + ' пал' : `${formatNumber(item.pallets_count, 0)} ${unitShort(item.shipped_as_boxes)}`}</td>
                                                         <td style={{ textAlign: 'right' }}>{isJoint ? formatNumber(jointTotalWeight(item), 0) + ' кг' : (item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014')}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.items?.length || 0}</td>
                                                         <td style={{ textAlign: 'right' }}>{(() => {
@@ -1223,7 +1227,7 @@ export default function LogisticsPage() {
                                                         {isJoint ? (
                                                             <div>Палет: {formatNumber(jointTotalPallets(item), 0)} &middot; Вес: {formatNumber(jointTotalWeight(item), 0)} кг <span style={{ fontSize: 11, opacity: 0.7 }}>(вся поставка)</span></div>
                                                         ) : (
-                                                        <div>Палет: {item.pallets_count} &middot; Вес: {item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</div>
+                                                        <div>{item.shipped_as_boxes ? 'Короба' : 'Палет'}: {formatNumber(item.pallets_count, 0)} &middot; Вес: {item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</div>
                                                         )}
                                                         <div>Позиций: {item.items?.length || 0}</div>
                                                         {(item.wb_supply_id_wb || item.wb_supply_name) && (
@@ -1531,7 +1535,7 @@ export default function LogisticsPage() {
                                 { key: 'shipped_date', label: 'Дата отгрузки', sortable: true, render: (v: string) => v ? formatDate(v) : '—' },
                                 { key: 'wb_fbo_actual_date', label: 'Дата сдачи', sortable: true, render: (v: string) => v ? formatDate(v) : '—' },
                                 { key: 'wb_fbo_planned_date', label: 'План сдачи', sortable: true, render: (v: string) => v ? formatDate(v) : '—' },
-                                { key: 'pallets_count', label: 'Палеты', align: 'right', sortable: true, render: (v: number | null) => v != null ? formatNumber(v, 0) : '—' },
+                                { key: 'pallets_count', label: 'Кол-во ед.', headerTitle: 'Число единиц поставки (паллет или коробов)', align: 'right', sortable: true, render: (v: number | null, row: LogisticsShipmentRow) => v != null ? `${formatNumber(v, 0)} ${unitShort(row.shipped_as_boxes)}` : '—' },
                                 { key: 'pickup_cost', label: 'Стоимость', align: 'right', sortable: true, render: (v: number | null) => v != null ? formatNumber(v, 0) : '—' },
                                 { key: 'cost_per_pallet', label: '₽/палета', align: 'right', sortable: true, render: (v: number | null, row: LogisticsShipmentRow) => {
                                     if (v == null) {

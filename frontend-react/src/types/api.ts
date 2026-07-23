@@ -2914,6 +2914,7 @@ export interface AssemblyAttempt {
     carrier_name: string | null;
     pickup_cost: number | null;
     pallets_count: number | null;
+    shipped_as_boxes?: boolean;  // единица забора: паллеты (false) или короба (true)
     pickup_date: string | null;
     delivery_date: string | null;
     outcome: 'accepted' | 'rejected' | 'in_transit';
@@ -3124,6 +3125,7 @@ export interface LogisticsShipmentRow {
   wb_fbo_planned_date: string | null;
   wb_fbo_actual_date: string | null;
   pallets_count: number | null;
+  shipped_as_boxes?: boolean;  // единица забора: паллеты (false) или короба (true)
   pickup_cost: number | null;
   cost_per_pallet: number | null;
   total_weight_kg: number | null;
@@ -3304,6 +3306,7 @@ export interface ShippableShipmentRow {
   matched_at: string | null;
   matched_txn_date: string | null;
   pallets_count: number | null;
+  shipped_as_boxes?: boolean;  // единица забора: паллеты (false) или короба (true)
   pickup_date: string | null;
   source_warehouse: string | null;
   wb_supply_number: string | null;
