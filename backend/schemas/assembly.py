@@ -754,6 +754,46 @@ class LogisticsAnalyticsResponse(BaseModel):
     anomalies: list[LogisticsAnomaly] = []
 
 
+# ─── Стоимость логистики ₽/шт и ₽/короб (по категории/бренду + динамика) ─────
+
+
+class LogisticsCostPerUnitRow(BaseModel):
+    """Срез стоимости логистики по измерению (категория или бренд)."""
+
+    name: str
+    units: int  # штук в срезе
+    boxes: int  # коробов в срезе (позиции без кратности не считаются)
+    total_cost: Decimal  # стоимость логистики, разнесённая на срез (unit-alloc)
+    cost_per_unit: Decimal | None = None  # ₽ на штуку
+    cost_per_box: Decimal | None = None  # ₽ на короб (None — если коробов нет)
+
+
+class LogisticsCostPerUnitPoint(LogisticsCostPerUnitRow):
+    """Точка динамики за период (ключ периода — day/week/month)."""
+
+    period: str
+
+
+class LogisticsCostPerUnitSummary(BaseModel):
+    total_cost: Decimal
+    total_units: int
+    total_boxes: int
+    cost_per_unit: Decimal | None = None
+    cost_per_box: Decimal | None = None
+    shipments: int
+
+
+class LogisticsCostPerUnitResponse(BaseModel):
+    summary: LogisticsCostPerUnitSummary
+    by_category: list[LogisticsCostPerUnitRow] = []
+    by_brand: list[LogisticsCostPerUnitRow] = []
+    dynamics: list[LogisticsCostPerUnitPoint] = []
+    brands_available: list[str] = []  # для селекта фильтра (все бренды периода)
+    categories_available: list[str] = []
+    group_by: str = "month"
+    truncated: bool = False  # период шире кап-лимита отгрузок — выборка урезана
+
+
 # ─── Logistics shipments list (История отправок — построчно) ────────────────
 
 

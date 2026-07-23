@@ -40,6 +40,7 @@ from backend.services.assembly import (  # noqa: F401
     get_assembly_request,
     get_created_groups,
     get_logistics_analytics,
+    get_logistics_cost_per_unit,
     get_pickup_cost_history,
     get_pre_distribution_vehicles,
     get_vehicle_pre_dist_pool,
