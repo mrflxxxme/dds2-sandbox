@@ -2079,6 +2079,10 @@ export interface AssemblyRequest {
   counterparty_id?: number | null;
   carrier_inn?: string | null;
   carrier_name?: string | null;
+  /** логистику оказывает склад забора (перевозчик = контрагент склада-источника) */
+  logistics_by_warehouse?: boolean;
+  /** контрагент склада-источника; null → у склада не задан контрагент (гейт чекбокса) */
+  warehouse_counterparty_id?: number | null;
   package_type?: PackageType;
   /** WB-сводка поставки (F1/F2): статус в кабинете + паллеты пропуска. null — не заведена */
   wb_supply?: WbSupplyStateBrief | null;
@@ -3055,6 +3059,41 @@ export interface LogisticsAnalyticsResponse {
   dest_pallet_cells: LogisticsDestBucketCell[];
   cost_points: LogisticsCostPoint[];
   anomalies: LogisticsAnomaly[];
+}
+
+// Стоимость логистики ₽/шт и ₽/короб по категории/бренду + динамика.
+// Denominator-note: Decimal-поля приходят строкой — перед formatNumber коэрсить Number().
+export interface LogisticsCostPerUnitRow {
+  name: string;
+  units: number;
+  boxes: number;
+  total_cost: number;
+  cost_per_unit: number | null;
+  cost_per_box: number | null;
+}
+
+export interface LogisticsCostPerUnitPoint extends LogisticsCostPerUnitRow {
+  period: string;
+}
+
+export interface LogisticsCostPerUnitSummary {
+  total_cost: number;
+  total_units: number;
+  total_boxes: number;
+  cost_per_unit: number | null;
+  cost_per_box: number | null;
+  shipments: number;
+}
+
+export interface LogisticsCostPerUnitResponse {
+  summary: LogisticsCostPerUnitSummary;
+  by_category: LogisticsCostPerUnitRow[];
+  by_brand: LogisticsCostPerUnitRow[];
+  dynamics: LogisticsCostPerUnitPoint[];
+  brands_available: string[];
+  categories_available: string[];
+  group_by: string;
+  truncated: boolean;
 }
 
 export interface LogisticsShipmentRow {
@@ -5284,6 +5323,68 @@ export interface DraftCategoryHistoryPoint {
 
 export interface DraftCategoryHistoryResponse {
   points: DraftCategoryHistoryPoint[];
+}
+
+/* ─── Динамика расхождения остатков (mismatch flow-analytics) ─── */
+
+/** Точка дневного среза расхождения остатков одного склада (пишет джоба снапшота). */
+export interface StockMismatchDynPoint {
+  /** ISO-дата (без времени) снятого среза */
+  snapshot_date: string;
+  warehouse_id: number;
+  /** суммарно у ФФ больше на этот день, штук */
+  surplus_ff_qty: number;
+  /** на скольких SKU у ФФ больше */
+  surplus_ff_sku: number;
+  /** суммарно у нас больше на этот день, штук */
+  surplus_our_qty: number;
+  /** на скольких SKU у нас больше */
+  surplus_our_sku: number;
+  /** surplus_ff_qty - surplus_our_qty (нетто ФФ − наш) */
+  net_diff: number;
+}
+
+/** Склад в справочнике истории расхождения (для селекта и подписи серий графика). */
+export interface StockMismatchDynWarehouse {
+  warehouse_id: number;
+  warehouse_name: string | null;
+  provider: string | null;
+}
+
+export interface StockMismatchHistoryResponse {
+  points: StockMismatchDynPoint[];
+  warehouses: StockMismatchDynWarehouse[];
+  categories: string[];
+}
+
+/** Событие изменения расхождения по конкретному SKU между двумя соседними срезами. */
+export interface StockMismatchChangeRow {
+  snapshot_date: string;
+  warehouse_id: number;
+  warehouse_name: string | null;
+  barcode: string;
+  article_seller: string | null;
+  name: string | null;
+  category: string | null;
+  /** "appeared" | "resolved" | "grew" | "shrank" | "flipped" */
+  event: string;
+  prev_diff: number;
+  cur_diff: number;
+  delta: number;
+  prev_ff_good: number;
+  cur_ff_good: number;
+  prev_our_quantity: number;
+  cur_our_quantity: number;
+}
+
+export interface StockMismatchChangesResponse {
+  changes: StockMismatchChangeRow[];
+}
+
+export interface StockMismatchSnapshotResponse {
+  points: StockMismatchDynPoint[];
+  warehouses: StockMismatchDynWarehouse[];
+  snapshot_date: string | null;
 }
 
 /** Ответ POST /assembly/drafts/{id}/clear: очищенный черновик + судьба категорийных

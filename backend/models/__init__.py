@@ -275,6 +275,7 @@ from backend.models.assembly import (
     AssemblyStatus,
     AssemblyStatusHistory,
     AssemblyStockDistributionDaily,
+    AssemblyStockMismatchDaily,
     PackageType,
 )
 from backend.models.assembly_wb import (
@@ -416,6 +417,7 @@ __all__ = [
     "AssemblyStatus",
     "AssemblyStatusHistory",
     "AssemblyStockDistributionDaily",
+    "AssemblyStockMismatchDaily",
     "PackageType",
     "AssemblyWbSupply",
     "WbSupplySyncStatus",

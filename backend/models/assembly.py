@@ -164,6 +164,12 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     driver_first_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     driver_last_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     counterparty_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=True)
+    # Логистику оказывает склад забора: при назначении машины перевозчик берётся
+    # из Warehouse.counterparty_id склада-источника (не из введённого ИНН подрядчика).
+    # Флаг — чтобы UI показывал режим и помнил выбор при переоткрытии. См. assign_vehicle.
+    logistics_by_warehouse: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     pickup_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     pickup_time_slot: Mapped[str | None] = mapped_column(String(20), nullable=True)
     pickup_cost: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
@@ -449,6 +455,60 @@ class AssemblyDraftCategoryHourly(Base, TimestampMixin):
     # (префикс project_id+taken_at), и подчистку часа — отдельный индекс не нужен.
     __table_args__ = (
         UniqueConstraint("project_id", "taken_at", "category", name="uq_asm_draft_cat_hourly"),
+    )
+
+
+class AssemblyStockMismatchDaily(Base, TimestampMixin):
+    """Ежедневный снимок расхождения «наш склад vs ФФ-зеркало» по складу и SKU.
+
+    Накопительная история для вкладки «Динамика расхождения»: `FulfillmentStock` —
+    только текущий снимок (перезатир каждым синком), поэтому динамику расхождения
+    нельзя восстановить задним числом — эта таблица копит её вперёд. Одна строка =
+    день × склад × эффективный ШК, ТОЛЬКО со строкой расхождения (`diff != 0`):
+    наличие/отсутствие строки за день кодирует «появился/сошёлся» для журнала
+    изменений. `diff` и досчёт логистики (`ff_logistics`) считаются тем же ядром,
+    что живой блок расхождения (`link_anomalies.compute_stock_mismatch_cells`) —
+    история ≡ живой вкладке. `article_seller`/`category` — снимок для отображения
+    без джойна к живой номенклатуре (карточка могла измениться/удалиться). Пишется
+    ежедневной scheduler-джобой (idempotent: снимок дня перезаписывается UPSERT-ом +
+    подчистка SKU, которые за день сошлись).
+    """
+
+    __tablename__ = "assembly_stock_mismatch_daily"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
+    provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    barcode: Mapped[str] = mapped_column(String(64), nullable=False)
+    nomenclature_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    article_seller: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ff_good: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ff_logistics: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    our_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    our_defect: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    diff: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "snapshot_date",
+            "warehouse_id",
+            "barcode",
+            name="uq_asm_stock_mismatch_daily",
+        ),
+        # Таймлайн одного SKU по складу (drill журнала изменений; префикс
+        # project_id+snapshot_date покрывает выборку истории за окно).
+        Index(
+            "ix_asm_stock_mismatch_daily_sku",
+            "project_id",
+            "warehouse_id",
+            "barcode",
+            "snapshot_date",
+        ),
+        Index("ix_asm_stock_mismatch_daily_project_date", "project_id", "snapshot_date"),
     )
 
 

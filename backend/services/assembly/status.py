@@ -145,6 +145,19 @@ async def _resolve_carrier_by_name(db: AsyncSession, project_id: int, name: str 
     return await _create_carrier(db, project_id, clean)
 
 
+async def _warehouse_counterparty_id(db: AsyncSession, project_id: int, warehouse_id: int) -> int | None:
+    """Контрагент склада-источника (`Warehouse.counterparty_id`) — перевозчик для
+    режима «логистику оказывает склад забора». None → у склада не задан контрагент."""
+    res = await db.execute(
+        select(Warehouse.counterparty_id).where(
+            Warehouse.id == warehouse_id,
+            Warehouse.project_id == project_id,
+            Warehouse.is_deleted == False,  # noqa: E712
+        )
+    )
+    return res.scalar_one_or_none()
+
+
 # --- Helpers (used by crud.py via from .status import _log_status_change) ---
 
 
@@ -408,7 +421,22 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
             f"Заявка отправлена в Газельку — машину назначает Газелька, вручную нельзя ({blocked})."
         )
 
-    cp_id = await _resolve_carrier(db, project_id, payload.carrier_inn, payload.carrier_name)
+    # Перевозчик: либо контрагент склада забора (по КАЖДОЙ сборке отдельно — у
+    # совместной поставки склады-источники разные), либо резолв по ИНН подрядчика.
+    wh_cp: dict[int, int | None] = {}
+    if payload.logistics_by_warehouse:
+        for s in targets:
+            if s.warehouse_id not in wh_cp:
+                wh_cp[s.warehouse_id] = await _warehouse_counterparty_id(db, project_id, s.warehouse_id)
+        missing = [s for s in targets if wh_cp.get(s.warehouse_id) is None]
+        if missing:
+            names = ", ".join(s.number for s in missing)
+            raise ValueError(
+                f"У склада забора не указан контрагент — заполните в справочнике складов ({names})."
+            )
+        cp_id = None  # проставляется пер-сборке ниже
+    else:
+        cp_id = await _resolve_carrier(db, project_id, payload.carrier_inn, payload.carrier_name)
     for s in targets:
         _check_transition(AssemblyStatus(s.status), AssemblyStatus.VEHICLE_ASSIGNED)
         old = s.status
@@ -425,7 +453,10 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
         s.pickup_cost = payload.pickup_cost
         s.delivery_date = payload.delivery_date
         s.vehicle_assigned_at = utcnow()
-        if cp_id is not None:
+        s.logistics_by_warehouse = payload.logistics_by_warehouse
+        if payload.logistics_by_warehouse:
+            s.counterparty_id = wh_cp[s.warehouse_id]
+        elif cp_id is not None:
             s.counterparty_id = cp_id
         # F3: зеркалим реквизиты машины в WB-пропуск заявки (госномер/марка/телефон
         # + best-effort ФИО), чтобы логист не перевводил их в панели «Поставка WB».
@@ -619,6 +650,7 @@ async def unassign_vehicle(db: AsyncSession, project_id: int, request_id: int) -
     req.pickup_cost = None
     req.delivery_date = None
     req.vehicle_assigned_at = None
+    req.logistics_by_warehouse = False
     await _log_status_change(db, project_id, req.id, old, AssemblyStatus.READY, comment="Отмена назначения машины")
     await db.commit()
     await db.refresh(req)

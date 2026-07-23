@@ -205,6 +205,11 @@ export default function AssemblyNewPage() {
 
     const selectedWarehouse = warehouses.find(w => w.id === warehouseId) || null;
     const totalWeight = palletsCount * palletWeightKg;
+    // Единица поставки: короб (packageType=BOX) или паллета (моно/суперсейф). Подписи
+    // поля количества/веса переключаются, чтобы «Тип поставки» реально задавал единицу.
+    const isBoxUnit = packageType === 'BOX';
+    const unitCountLabel = isBoxUnit ? 'Короба' : 'Палеты';
+    const unitWeightLabel = isBoxUnit ? 'Вес 1 короба (кг)' : 'Вес 1 палеты (кг)';
 
     // ─── Item management ──────────────────────────────────────────────────
 
@@ -476,10 +481,10 @@ export default function AssemblyNewPage() {
                         </div>
                     </div>
 
-                    {/* Pallets */}
+                    {/* Единица поставки: короба или паллеты (подписи по «Тип поставки») */}
                     <div style={{ display: 'flex', gap: 12 }}>
                         <div className="form-group" style={{ flex: 1 }}>
-                            <label className="form-label">Палеты</label>
+                            <label className="form-label">{unitCountLabel}</label>
                             <input
                                 className="form-input"
                                 type="number"
@@ -489,7 +494,7 @@ export default function AssemblyNewPage() {
                             />
                         </div>
                         <div className="form-group" style={{ flex: 1 }}>
-                            <label className="form-label">Вес 1 палеты (кг)</label>
+                            <label className="form-label">{unitWeightLabel}</label>
                             <input
                                 className="form-input"
                                 type="number"

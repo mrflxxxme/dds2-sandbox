@@ -561,6 +561,10 @@ async def _build_response(
         "counterparty_id": request.counterparty_id,
         "carrier_inn": carrier_inn,
         "carrier_name": carrier_name,
+        "logistics_by_warehouse": request.logistics_by_warehouse,
+        # Контрагент склада-источника — для UI-гейта чекбокса «логистику оказывает
+        # склад». warehouse уже загружен (warehouse_name выше) — без лишнего запроса.
+        "warehouse_counterparty_id": request.warehouse.counterparty_id if request.warehouse else None,
         "items": (
             items := await _build_items_with_stock(
                 db, request, nom_map=nom_map, stock_by_wh_nom=stock_by_wh_nom,

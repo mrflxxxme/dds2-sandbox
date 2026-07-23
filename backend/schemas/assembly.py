@@ -172,6 +172,9 @@ class AssignVehicle(BaseModel):
     delivery_date: date
     carrier_inn: str | None = None
     carrier_name: str | None = None
+    # Логистику оказывает склад забора: перевозчик = контрагент склада-источника,
+    # carrier_inn/carrier_name игнорируются.
+    logistics_by_warehouse: bool = False
 
 
 class BulkAssignItem(BaseModel):
@@ -190,6 +193,9 @@ class AssignVehicleBulk(BaseModel):
     driver_last_name: str | None = None
     carrier_inn: str | None = None
     carrier_name: str | None = None
+    # Логистику оказывает склад забора (см. AssignVehicle) — резолвится по каждой
+    # заявке отдельно (у совместных поставок склады-источники разные).
+    logistics_by_warehouse: bool = False
     items: list[BulkAssignItem]
 
 
@@ -320,6 +326,11 @@ class AssemblyRequestResponse(BaseModel):
     counterparty_id: int | None = None
     carrier_inn: str | None = None
     carrier_name: str | None = None
+    # Логистику оказывает склад забора (перевозчик = контрагент склада-источника).
+    logistics_by_warehouse: bool = False
+    # Контрагент склада-источника (Warehouse.counterparty_id) — чтобы UI знал, можно ли
+    # включить «логистику от склада» (None → у склада не задан контрагент).
+    warehouse_counterparty_id: int | None = None
     comment: str | None = None
     wb_warehouse_name_manual: str | None = None
     source_draft_id: int | None = None  # черновик-источник (поток распределения сборки)
@@ -754,6 +765,46 @@ class LogisticsAnalyticsResponse(BaseModel):
     anomalies: list[LogisticsAnomaly] = []
 
 
+# ─── Стоимость логистики ₽/шт и ₽/короб (по категории/бренду + динамика) ─────
+
+
+class LogisticsCostPerUnitRow(BaseModel):
+    """Срез стоимости логистики по измерению (категория или бренд)."""
+
+    name: str
+    units: int  # штук в срезе
+    boxes: int  # коробов в срезе (позиции без кратности не считаются)
+    total_cost: Decimal  # стоимость логистики, разнесённая на срез (unit-alloc)
+    cost_per_unit: Decimal | None = None  # ₽ на штуку
+    cost_per_box: Decimal | None = None  # ₽ на короб (None — если коробов нет)
+
+
+class LogisticsCostPerUnitPoint(LogisticsCostPerUnitRow):
+    """Точка динамики за период (ключ периода — day/week/month)."""
+
+    period: str
+
+
+class LogisticsCostPerUnitSummary(BaseModel):
+    total_cost: Decimal
+    total_units: int
+    total_boxes: int
+    cost_per_unit: Decimal | None = None
+    cost_per_box: Decimal | None = None
+    shipments: int
+
+
+class LogisticsCostPerUnitResponse(BaseModel):
+    summary: LogisticsCostPerUnitSummary
+    by_category: list[LogisticsCostPerUnitRow] = []
+    by_brand: list[LogisticsCostPerUnitRow] = []
+    dynamics: list[LogisticsCostPerUnitPoint] = []
+    brands_available: list[str] = []  # для селекта фильтра (все бренды периода)
+    categories_available: list[str] = []
+    group_by: str = "month"
+    truncated: bool = False  # период шире кап-лимита отгрузок — выборка урезана
+
+
 # ─── Logistics shipments list (История отправок — построчно) ────────────────
 
 
@@ -1084,6 +1135,81 @@ class LinkAnomaliesResponse(BaseModel):
     stock_mismatch: list[StockMismatchWarehouseRow] = []
     # Расхождение WB-поставок (машина назначена/в пути): дата сдачи / паллеты / пропуск.
     supply_discrepancies: list[SupplyDiscrepancyRow] = []
+
+
+# ─── Динамика расхождения остатков (stock mismatch dynamics) ───────────────
+# Вкладка «Динамика расхождения»: накопительные суточные снимки расхождения наш
+# склад vs ФФ-зеркало (модель AssemblyStockMismatchDaily) + журнал изменений
+# (появился/сошёлся/вырос/…). Зеркало TS-контракта: frontend-react/src/types/api.ts.
+
+
+class StockMismatchDynPoint(BaseModel):
+    """Суточный агрегат расхождения по одному складу (точка графика)."""
+
+    snapshot_date: str  # ISO YYYY-MM-DD (MSK-день среза)
+    warehouse_id: int
+    surplus_ff_qty: int  # суммарно у ФФ больше, штук
+    surplus_ff_sku: int
+    surplus_our_qty: int  # суммарно у нас больше, штук
+    surplus_our_sku: int
+    net_diff: int  # surplus_ff_qty − surplus_our_qty (нетто ФФ − наш)
+
+
+class StockMismatchDynWarehouse(BaseModel):
+    """Склад-кандидат для селектора (есть история расхождения в окне)."""
+
+    warehouse_id: int
+    warehouse_name: str | None
+    provider: str | None
+
+
+class StockMismatchHistoryResponse(BaseModel):
+    """История расхождения по дням: точки (склад × день) + справочники фильтров."""
+
+    points: list[StockMismatchDynPoint]
+    warehouses: list[StockMismatchDynWarehouse]  # селектор склада
+    categories: list[str]  # селектор категории (по данным окна)
+
+
+class StockMismatchChangeRow(BaseModel):
+    """Событие журнала изменений расхождения по SKU за день (срез vs предыдущий).
+
+    event: appeared — появился в расхождении (в пред. срезе строки не было);
+           resolved — сошёлся/пропал (был, стал 0 / строки нет);
+           grew — |diff| вырос в том же знаке; shrank — |diff| уменьшился;
+           flipped — сменил знак (у-нас ↔ у-ФФ). Храним обе стороны (ff_good /
+           our_quantity) до и после → видно, какая сторона двинулась.
+    """
+
+    snapshot_date: str  # ISO YYYY-MM-DD — день события
+    warehouse_id: int
+    warehouse_name: str | None
+    barcode: str
+    article_seller: str | None
+    name: str | None
+    category: str | None
+    event: str  # appeared | resolved | grew | shrank | flipped
+    prev_diff: int  # diff в предыдущем срезе (0 = строки не было)
+    cur_diff: int  # diff в этом срезе (0 = сошёлся/пропал)
+    delta: int  # cur_diff − prev_diff
+    prev_ff_good: int
+    cur_ff_good: int
+    prev_our_quantity: int
+    cur_our_quantity: int
+
+
+class StockMismatchChangesResponse(BaseModel):
+    """Журнал изменений расхождения (свежие дни сверху)."""
+
+    changes: list[StockMismatchChangeRow]
+
+
+class StockMismatchSnapshotResponse(BaseModel):
+    """Ответ ручного «Снять срез сейчас»: точки пересчитанного (сегодняшнего) дня."""
+
+    points: list[StockMismatchDynPoint]
+    warehouses: list[StockMismatchDynWarehouse]
+    snapshot_date: str | None  # день пересчитанного среза (None — нечего писать)
 
 
 # ─── Распределение остатков (stock distribution) ───────────────────────────

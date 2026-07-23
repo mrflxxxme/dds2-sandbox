@@ -47,6 +47,7 @@ from backend.schemas.assembly import (
     JointSibling,
     LinkAnomaliesResponse,
     LogisticsAnalyticsResponse,
+    LogisticsCostPerUnitResponse,
     LogisticsShipmentListResponse,
     PreDistAdvanceResult,
     PreDistributionCreate,
@@ -66,6 +67,9 @@ from backend.schemas.assembly import (
     StatusBulk,
     StockDistributionHistoryResponse,
     StockDistributionResponse,
+    StockMismatchChangesResponse,
+    StockMismatchHistoryResponse,
+    StockMismatchSnapshotResponse,
 )
 from backend.schemas.fulfillment import FfMismatchDetail
 from backend.services import assembly_service, fulfillment_service
@@ -78,6 +82,13 @@ from backend.services.assembly.analytics import (
 from backend.services.assembly.crud import review_ff_proposal
 from backend.services.assembly.link_anomalies import get_link_anomalies
 from backend.services.assembly.stock_distribution import get_stock_distribution, get_stock_distribution_history
+from backend.services.assembly.stock_mismatch_history import (
+    build_mismatch_changes_xlsx,
+    get_changes as get_mismatch_changes,
+    get_history as get_mismatch_history,
+    msk_today,
+    snapshot_project as snapshot_mismatch_project,
+)
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/warehouse/assembly", tags=["Assembly"])
@@ -535,6 +546,34 @@ async def get_logistics_analytics(
     )
 
 
+@router.get("/shipments/cost-per-unit", response_model=LogisticsCostPerUnitResponse)
+async def get_logistics_cost_per_unit(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    warehouse_ids: str | None = Query(None, description="Comma-separated warehouse IDs"),
+    brands: str | None = Query(None, description="Comma-separated brand names"),
+    categories: str | None = Query(None, description="Comma-separated category names"),
+    group_by: str = Query("month", description="day | week | month"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Стоимость логистики ₽/шт и ₽/короб в разрезе категории и бренда + динамика за
+    период (по дате отгрузки). Данные из заборов (pickup_cost) и позиций отгрузок."""
+    wh_ids = _parse_warehouse_ids(warehouse_ids)
+    brand_list = [x.strip() for x in brands.split(",") if x.strip()] if brands else None
+    cat_list = [x.strip() for x in categories.split(",") if x.strip()] if categories else None
+    return await assembly_service.get_logistics_cost_per_unit(
+        db,
+        project.id,
+        date_from=date_from,
+        date_to=date_to,
+        warehouse_ids=wh_ids,
+        brands=brand_list,
+        categories=cat_list,
+        group_by=group_by,
+    )
+
+
 @router.get("/shipments/list", response_model=LogisticsShipmentListResponse)
 async def list_logistics_shipments(
     date_from: date | None = Query(None),
@@ -664,6 +703,73 @@ async def get_flow_stock_distribution_history(
     wh_ids = _parse_warehouse_ids(warehouse_ids)
     return await get_stock_distribution_history(
         db, project.id, date_from=date_from, date_to=date_to, warehouse_ids=wh_ids, product_status=product_status
+    )
+
+
+@router.get("/flow-analytics/mismatch-history", response_model=StockMismatchHistoryResponse)
+async def get_flow_mismatch_history(
+    days: int = Query(30, ge=1, le=90, description="Окно в днях"),
+    warehouse_id: int | None = Query(None),
+    category: str | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Вкладка «Динамика расхождения остатков»: суточные точки (склад×день) +
+    справочники фильтров. Пусто, пока ежедневная джоба не накопила данные."""
+    return await get_mismatch_history(db, project.id, days, warehouse_id=warehouse_id, category=category)
+
+
+@router.get("/flow-analytics/mismatch-changes", response_model=StockMismatchChangesResponse)
+async def get_flow_mismatch_changes(
+    days: int = Query(30, ge=1, le=90, description="Окно в днях"),
+    warehouse_id: int | None = Query(None),
+    category: str | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Журнал изменений расхождения по SKU (appeared/resolved/grew/shrank/flipped),
+    свежие дни сверху."""
+    return await get_mismatch_changes(db, project.id, days, warehouse_id=warehouse_id, category=category)
+
+
+@router.post(
+    "/flow-analytics/mismatch-snapshot",
+    response_model=StockMismatchSnapshotResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def post_flow_mismatch_snapshot(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """«Снять срез сейчас»: пересчитать сегодняшний снимок расхождения вручную
+    (не дожидаясь ежедневной джобы) и вернуть точки пересчитанного дня."""
+    today = msk_today()
+    written = await snapshot_mismatch_project(db, project.id, day=today)
+    hist = await get_mismatch_history(db, project.id, 1)
+    return {
+        "points": hist["points"],
+        "warehouses": hist["warehouses"],
+        "snapshot_date": today.isoformat() if written else None,
+    }
+
+
+@router.get("/flow-analytics/mismatch-changes.xlsx")
+async def download_flow_mismatch_changes(
+    days: int = Query(30, ge=1, le=90, description="Окно в днях"),
+    warehouse_id: int | None = Query(None),
+    category: str | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Выгрузить журнал изменений расхождения в Excel."""
+    result = await get_mismatch_changes(db, project.id, days, warehouse_id=warehouse_id, category=category)
+    data = build_mismatch_changes_xlsx(result["changes"])
+    filename = f"mismatch_changes_{msk_today().isoformat()}.xlsx"
+    disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": disposition},
     )
 
 
@@ -1160,6 +1266,7 @@ async def assign_vehicle_bulk(
                 # per-request AssignVehicle → при массовом назначении терялся.
                 carrier_inn=payload.carrier_inn,
                 carrier_name=payload.carrier_name,
+                logistics_by_warehouse=payload.logistics_by_warehouse,
             )
             req = await assembly_service.assign_vehicle(db, project.id, item.request_id, assign_payload)
             results.append(req)
