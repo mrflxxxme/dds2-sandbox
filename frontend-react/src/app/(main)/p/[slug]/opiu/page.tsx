@@ -10,6 +10,7 @@ interface OpiuRow {
     level: number;
     bold: boolean;
     expandable: boolean;
+    parent_key?: string | null;
     total: number;
     total_pct: number | null;
     monthly: Record<string, number>;
@@ -92,8 +93,13 @@ export default function OpiuPage() {
         });
     };
 
-    // Determine which rows to hide based on collapsed state
+    // Determine which rows to hide based on collapsed state.
+    // Dynamic children (e.g. opex-by-type) carry an explicit parent_key from the
+    // backend; static groups still use the GROUP_CHILDREN map.
     const isRowHidden = (row: OpiuRow): boolean => {
+        if (row.parent_key && collapsed.has(row.parent_key)) {
+            return true;
+        }
         for (const [parent, children] of Object.entries(GROUP_CHILDREN)) {
             if (children.includes(row.key) && collapsed.has(parent)) {
                 return true;

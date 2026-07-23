@@ -7,6 +7,7 @@ Row-level accumulation is now done in SQL (see _build_aggregate_sql).
 These tests validate the totals structure and P&L formula correctness.
 """
 
+from datetime import date
 from decimal import Decimal
 
 D = Decimal
@@ -15,7 +16,11 @@ ZERO = D("0")
 
 # ─── Imports ─────────────────────────────────────────────────────────────────
 
-from backend.services.opiu_service import _empty_totals
+from backend.services.opiu_helpers import (
+    OPEX_EXCLUDED_TYPES,
+    build_opex_by_type_sql,
+)
+from backend.services.opiu_service import _build_pnl_result, _empty_totals
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: _empty_totals
@@ -146,3 +151,95 @@ class TestPnLFormulas:
         tax = t["sales_amount"] * D("0.06")
         net_profit = margin - tax
         assert net_profit == D("3266.00")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tests: Операционные расходы (opex by counterparty type)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _pnl(opex_by_type):
+    """Run _build_pnl_result over a single month with a fixed base scenario."""
+    mk = "2026-01"
+    d = _empty_totals()
+    d["realization"] = D("10000")
+    d["sales_amount"] = D("8000")
+    monthly_data = {mk: d}
+    total_data = dict(d)
+    months_sorted = [mk]
+    tax_info = {"usn_rate": 0, "nds_rate": 0, "tax_regime": "usn_income", "cost_as_expense": False}
+    return _build_pnl_result(
+        monthly_data,
+        total_data,
+        months_sorted,
+        [],
+        tax_info,
+        {mk: 0.0},  # ads
+        {mk: 0.0},  # cost
+        0.0,
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        opex_by_type=opex_by_type,
+    )
+
+
+class TestOperatingExpenses:
+    """«Операционные расходы» раскрываются в разбивку по типам контрагентов."""
+
+    def _rows_by_key(self, result):
+        return {r["key"]: r for r in result["rows"]}
+
+    def test_zero_when_no_opex(self):
+        """Без данных opex строка = 0 и не раскрывается."""
+        rows = self._rows_by_key(_pnl({}))
+        ops = rows["operating_expenses"]
+        assert ops["total"] == 0
+        assert ops["expandable"] is False
+        assert not any(r["key"].startswith("opex_") for r in _pnl({}).get("rows", []))
+
+    def test_children_created_and_summed(self):
+        """Родитель = сумма детей; дети несут parent_key."""
+        result = _pnl({"LANDLORD": {"2026-01": 100.0}, "DESIGNER": {"2026-01": 300.0}})
+        rows = self._rows_by_key(result)
+        ops = rows["operating_expenses"]
+        assert ops["total"] == 400
+        assert ops["expandable"] is True
+        assert rows["opex_landlord"]["total"] == 100
+        assert rows["opex_designer"]["total"] == 300
+        assert rows["opex_landlord"]["parent_key"] == "operating_expenses"
+        assert rows["opex_designer"]["level"] == 1
+        # RU label from OPEX_TYPE_LABELS
+        assert rows["opex_designer"]["label"] == "Дизайнер"
+
+    def test_children_sorted_by_total_desc(self):
+        """Дети отсортированы по убыванию суммы, идут сразу за родителем."""
+        result = _pnl({"LANDLORD": {"2026-01": 100.0}, "DESIGNER": {"2026-01": 300.0}})
+        keys = [r["key"] for r in result["rows"]]
+        parent_idx = keys.index("operating_expenses")
+        assert keys[parent_idx + 1] == "opex_designer"  # 300 > 100
+        assert keys[parent_idx + 2] == "opex_landlord"
+
+    def test_ebitda_subtracts_opex(self):
+        """EBITDA = Валовая маржа − Операционные расходы."""
+        result = _pnl({"DESIGNER": {"2026-01": 300.0}})
+        rows = self._rows_by_key(result)
+        assert rows["ebitda"]["total"] == rows["gross_margin"]["total"] - 300
+
+
+class TestOpexSql:
+    """SQL-агрегатор opex по типам контрагентов."""
+
+    def test_excluded_types(self):
+        """Закупочные типы и «Прочее» исключены из opex."""
+        assert OPEX_EXCLUDED_TYPES == frozenset({"OTHER", "SUPPLIER", "TRADING_HOUSE"})
+
+    def test_sql_shape(self):
+        """SQL группирует по типу, бьёт по месяцам, отсекает внутренние и CNY."""
+        sql = build_opex_by_type_sql()
+        assert "transactions" in sql
+        assert "primary_type" in sql
+        assert "is_internal = false" in sql
+        assert "is_deleted = false" in sql
+        assert "<> 'CNY'" in sql
+        for t in OPEX_EXCLUDED_TYPES:
+            assert f"'{t}'" in sql

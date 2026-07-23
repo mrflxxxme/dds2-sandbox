@@ -31,11 +31,13 @@ from backend.services.cost.valuation import (
     slice_window,
 )
 from backend.services.opiu_helpers import (
+    OPEX_TYPE_LABELS,
     build_aggregate_sql,
     build_article_nm_ids_sql,
     build_brand_nm_ids_sql,
     build_brands_sql,
     build_cost_qty_sql,
+    build_opex_by_type_sql,
     build_row,
     empty_totals,
 )
@@ -225,6 +227,20 @@ async def get_opiu(
             monthly_cost[mk] = cost_amount
     total_cost_val = sum(monthly_cost.values())
 
+    # ── 7b. Operating expenses by counterparty type (bank transactions) ──
+    # Транзакции не привязаны к бренду/артикулу → разбивку по типам контрагентов
+    # считаем только для общего вида проекта; при фильтре по бренду/артикулу opex = 0.
+    opex_by_type: dict[str, dict[str, float]] = {}
+    if not brand and not article:
+        opex_result = await db.execute(
+            text(build_opex_by_type_sql()),
+            {"project_id": project_id, "date_from": date_from, "date_to": date_to},
+        )
+        for opex_row in opex_result:
+            opex_by_type.setdefault(opex_row.primary_type, {})[opex_row.month_key] = float(
+                opex_row.expense_sum or 0
+            )
+
     # ── 8. Build P&L rows ──
     months_sorted = sorted(months_set, reverse=True)
 
@@ -240,6 +256,7 @@ async def get_opiu(
         date_from,
         date_to,
         tax_by_month=tax_by_month,
+        opex_by_type=opex_by_type,
     )
     return pnl_result
 
@@ -256,6 +273,7 @@ def _build_pnl_result(
     date_from,
     date_to,
     tax_by_month=None,
+    opex_by_type=None,
 ):
     """Build the final P&L rows and return the result dict.
 
@@ -328,8 +346,22 @@ def _build_pnl_result(
     margin_m = {mk: sales_m[mk] - direct_m[mk] + comp_total_m[mk] for mk in months_sorted}
     margin_t = sales_t - direct_t + comp_total_t
 
-    ops_m = {mk: 0 for mk in months_sorted}
-    ops_t = 0
+    # ── Операционные расходы: разбивка по типам контрагентов ──
+    # opex_by_type: {primary_type: {month_key: amount}}. Дети сортируются по
+    # убыванию суммы за период; родитель = их сумма.
+    opex_by_type = opex_by_type or {}
+    opex_child_defs = []  # (total, key, label, monthly)
+    for ptype, month_amounts in opex_by_type.items():
+        child_m = {mk: month_amounts.get(mk, 0.0) for mk in months_sorted}
+        child_t = sum(child_m.values())
+        if child_t == 0:
+            continue
+        label = OPEX_TYPE_LABELS.get(ptype, ptype)
+        opex_child_defs.append((child_t, f"opex_{ptype.lower()}", label, child_m))
+    opex_child_defs.sort(key=lambda x: x[0], reverse=True)
+
+    ops_m = {mk: sum(c[3][mk] for c in opex_child_defs) for mk in months_sorted}
+    ops_t = sum(c[0] for c in opex_child_defs)
 
     ebitda_m = {mk: margin_m[mk] - ops_m[mk] for mk in months_sorted}
     ebitda_t = margin_t - ops_t
@@ -375,8 +407,13 @@ def _build_pnl_result(
     net_m = {mk: ebitda_m[mk] - tax_m[mk] for mk in months_sorted}
     net_t = ebitda_t - tax_t
 
-    def _r(key, label, level, bold, vm, vt, bm=None, bt=None, expandable=False):
-        return build_row(key, label, level, bold, vm, vt, months_sorted, bm, bt, expandable)
+    def _r(key, label, level, bold, vm, vt, bm=None, bt=None, expandable=False, parent_key=None):
+        return build_row(key, label, level, bold, vm, vt, months_sorted, bm, bt, expandable, parent_key)
+
+    opex_child_rows = [
+        _r(child_key, label, 1, False, child_m, child_t, real_m, real_t, parent_key="operating_expenses")
+        for child_t, child_key, label, child_m in opex_child_defs
+    ]
 
     rows = [
         _r("realization", "Реализация", 0, True, real_m, real_t),
@@ -405,7 +442,18 @@ def _build_pnl_result(
             real_t,
         ),
         _r("gross_margin", "Валовая маржа", 0, True, margin_m, margin_t, real_m, real_t),
-        _r("operating_expenses", "Операционные расходы", 0, False, ops_m, ops_t, real_m, real_t),
+        _r(
+            "operating_expenses",
+            "Операционные расходы",
+            0,
+            False,
+            ops_m,
+            ops_t,
+            real_m,
+            real_t,
+            expandable=bool(opex_child_rows),
+        ),
+        *opex_child_rows,
         _r("ebitda", "Операционная прибыль (EBITDA)", 0, True, ebitda_m, ebitda_t, real_m, real_t),
         _r("taxes", "Налоги (кроме зарплатных)", 0, True, tax_m, tax_t, real_m, real_t, expandable=True),
         _r("net_profit", "Чистая прибыль", 0, True, net_m, net_t, real_m, real_t),
