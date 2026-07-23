@@ -749,10 +749,11 @@ def test_extract_logistics_no_route_no_vehicle():
 
 
 class _FakeActiveClient:
-    """Клиент Газельки для синка: async-контекст + authenticate + fetch_active."""
+    """Клиент Газельки для синка: async-контекст + authenticate + fetch_active/planned."""
 
-    def __init__(self, data: dict):
-        self._data = data
+    def __init__(self, active: dict, planned: dict | None = None):
+        self._active = active
+        self._planned = planned or {"plans": [], "marketplaces": []}
 
     async def __aenter__(self) -> "_FakeActiveClient":
         return self
@@ -764,20 +765,32 @@ class _FakeActiveClient:
         return None
 
     async def fetch_active(self) -> dict:
-        return self._data
+        return self._active
+
+    async def fetch_planned(self) -> dict:
+        return self._planned
 
 
-def _patch_sync(monkeypatch, plan: dict, linked: dict) -> tuple:
+def _patch_sync(
+    monkeypatch,
+    plan: dict,
+    linked: dict,
+    *,
+    planned_plans: list | None = None,
+    supply_idx: dict | None = None,
+) -> tuple:
     """Замокать окружение sync_gazelka_states, вернуть моки downstream-вызовов."""
     from backend.services import wb_supply_service
     from backend.services.assembly import status as assembly_status
 
     # fetch_active отдаёт справочники СПИСКАМИ (joins строит sync сам из data.get(k))
     lists = {k: list(v.values()) for k, v in _active_joins().items()}
-    data = {"plans": [plan], **lists, "marketplaces": []}
+    active = {"plans": [plan], **lists, "marketplaces": []}
+    planned = {"plans": planned_plans or [], "marketplaces": []}
     monkeypatch.setattr(gazelka_service, "_get_key_or_none", AsyncMock(return_value=object()))
-    monkeypatch.setattr(gazelka_service, "_client_from_key", lambda key: _FakeActiveClient(data))
+    monkeypatch.setattr(gazelka_service, "_client_from_key", lambda key: _FakeActiveClient(active, planned))
     monkeypatch.setattr(gazelka_service, "_linked_map", AsyncMock(return_value=linked))
+    monkeypatch.setattr(gazelka_service, "_assembly_supply_index", AsyncMock(return_value=supply_idx or {}))
 
     apply_mock = AsyncMock(return_value="VEHICLE_ASSIGNED")
     ship_mock = AsyncMock()
@@ -795,7 +808,7 @@ async def test_sync_states_ships_and_pushes_pass_on_in_route(monkeypatch):
 
     stats = await gazelka_service.sync_gazelka_states(MagicMock(), 4)
 
-    assert stats == {"assigned": 1, "passed": 1, "shipped": 1}
+    assert stats == {"autolinked": 0, "assigned": 1, "passed": 1, "shipped": 1}
     kw = apply_mock.await_args.kwargs
     assert kw["car_number"] == "Х392РМ37"
     assert kw["car_model"] == "Мерседес"
@@ -814,7 +827,7 @@ async def test_sync_states_assigns_but_no_ship_on_accepted(monkeypatch):
 
     stats = await gazelka_service.sync_gazelka_states(MagicMock(), 4)
 
-    assert stats == {"assigned": 1, "passed": 1, "shipped": 0}
+    assert stats == {"autolinked": 0, "assigned": 1, "passed": 1, "shipped": 0}
     apply_mock.assert_awaited_once()
     ship_mock.assert_not_awaited()
 
@@ -826,7 +839,7 @@ async def test_sync_states_skips_unlinked_orders(monkeypatch):
 
     stats = await gazelka_service.sync_gazelka_states(MagicMock(), 4)
 
-    assert stats == {"assigned": 0, "passed": 0, "shipped": 0}
+    assert stats == {"autolinked": 0, "assigned": 0, "passed": 0, "shipped": 0}
     apply_mock.assert_not_awaited()
     ship_mock.assert_not_awaited()
 
@@ -846,7 +859,54 @@ async def test_sync_states_ship_idempotent_swallows_value_error(monkeypatch):
 async def test_sync_states_no_integration_returns_zero(monkeypatch):
     monkeypatch.setattr(gazelka_service, "_get_key_or_none", AsyncMock(return_value=None))
     stats = await gazelka_service.sync_gazelka_states(MagicMock(), 4)
-    assert stats == {"assigned": 0, "passed": 0, "shipped": 0}
+    assert stats == {"autolinked": 0, "assigned": 0, "passed": 0, "shipped": 0}
+
+
+async def test_sync_states_autolinks_by_wb_supply_number(monkeypatch):
+    """Несвязанная заявка с № поставки WB в supply_id → авто-связь MATCHED (без клика)."""
+    # Запланированная заявка (код 2, без маршрута) — авто-связь есть, reconcile её не трогает.
+    planned = {"id": "330662", "status": "2", "supply_id": "Невинномысск 40842600 PVB-000"}
+    apply_mock, ship_mock, pass_mock = _patch_sync(
+        monkeypatch,
+        {"id": "999", "status": "2"},  # активная — без матча/машины
+        {},  # ничего не связано
+        planned_plans=[planned],
+        supply_idx={"40842600": (945, "ASM-774")},
+    )
+    added: list = []
+    db = MagicMock()
+    db.add = MagicMock(side_effect=lambda o: added.append(o))
+    db.commit = AsyncMock()
+
+    stats = await gazelka_service.sync_gazelka_states(db, 4)
+
+    assert stats["autolinked"] == 1
+    order = next(o for o in added if getattr(o, "gazelka_ref", None) == "330662")
+    assert order.status == GazelkaOrderStatus.MATCHED
+    assert order.assembly_request_id == 945
+    assert order.payload == {"_autolink": True}
+    # Запланированную не отгружаем и машину не назначаем
+    ship_mock.assert_not_awaited()
+
+
+async def test_sync_states_autolink_skips_already_linked_assembly(monkeypatch):
+    """Сборка уже связана с другой заявкой → авто-связь НЕ переклеивает на новую."""
+    planned = {"id": "330662", "status": "2", "supply_id": "40842600"}
+    _patch_sync(
+        monkeypatch,
+        {"id": "999", "status": "2"},
+        {"555": (945, "ASM-774", None)},  # 945 уже связана с заявкой 555
+        planned_plans=[planned],
+        supply_idx={"40842600": (945, "ASM-774")},
+    )
+    db = MagicMock()
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+
+    stats = await gazelka_service.sync_gazelka_states(db, 4)
+
+    assert stats["autolinked"] == 0
+    db.add.assert_not_called()
 
 
 # ─── Перевозчик Газельки по имени (ИНН нет — в листе оплаты не «—») ───────────

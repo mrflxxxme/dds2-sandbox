@@ -1130,16 +1130,70 @@ async def _reconcile_active_order(
             pass
 
 
-async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, int]:
-    """Фоновый синк активных заявок Газельки (шедулер). Best-effort, без исключений наружу.
+async def _auto_link_unmatched(
+    db: AsyncSession,
+    project_id: int,
+    plans: list[dict],
+    supply_idx: dict[str, tuple[int, str]],
+    linked: dict[str, tuple[int, str | None, str | None]],
+) -> int:
+    """Авто-связать заявки портала со сборкой по № поставки WB — без клика «Сопоставить».
 
-    Для СВЯЗАННЫХ заявок из кабинета перевозчика:
-      • назначена машина/водитель → сборка READY→VEHICLE_ASSIGNED + реквизиты + WB-пропуск
+    Логист заводит заявки прямо в кабинете Газельки (SENT-записей нет, всё матчилось руками).
+    Здесь связываем автоматически, но ТОЛЬКО при ОДНОЗНАЧНОМ совпадении: № поставки заявки
+    указывает ровно на одну нашу сборку, и та ещё не связана с другой заявкой (не переклеиваем).
+    Пишем MATCHED (как ручной матч) → дальше синк подхватит машину/пропуск/отгрузку.
+    Мутирует ``linked`` на месте (добавляет новые связи для последующего reconcile).
+    """
+    if not supply_idx:
+        return 0
+    linked_assemblies = {aid for aid, _num, _st in linked.values()}
+    created = 0
+    for plan in plans:
+        gid = str(plan.get("id") or "")
+        if not gid or gid in linked:
+            continue
+        hit: tuple[int, str] | None = None
+        for num in _extract_wb_numbers(plan.get("supply_id")):
+            cand = supply_idx.get(num)
+            if cand:
+                hit = cand
+                break
+        if hit is None:
+            continue
+        aid, number = hit
+        if aid in linked_assemblies:
+            continue  # сборка уже связана с другой заявкой Газельки — не переклеиваем
+        db.add(
+            GazelkaOrder(
+                project_id=project_id,
+                assembly_request_id=aid,
+                status=GazelkaOrderStatus.MATCHED,
+                gazelka_ref=gid,
+                payload={"_autolink": True},
+                created_by="gazelka",
+            )
+        )
+        linked[gid] = (aid, number, None)
+        linked_assemblies.add(aid)
+        created += 1
+    if created:
+        await db.commit()
+        logger.info("gazelka.sync_states.autolinked", project_id=project_id, count=created)
+    return created
+
+
+async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, int]:
+    """Фоновый синк заявок Газельки (шедулер). Best-effort, без исключений наружу.
+
+    • Авто-связь несвязанных заявок (planned+active) со сборкой по № поставки WB.
+    • Для СВЯЗАННЫХ заявок из кабинета перевозчика:
+      – назначена машина/водитель → сборка READY→VEHICLE_ASSIGNED + реквизиты + WB-пропуск
         (авто-занос в кабинет, как при ручном назначении машины);
-      • статус «В маршруте» (код 31) → авто-шип сборки (тариф → стоимость забора).
+      – статус «В маршруте» (код 31) → авто-шип сборки (тариф → стоимость забора).
     Сбой одной заявки не роняет синк остальных.
     """
-    stats = {"assigned": 0, "passed": 0, "shipped": 0}
+    stats = {"autolinked": 0, "assigned": 0, "passed": 0, "shipped": 0}
     key = await _get_key_or_none(db, project_id)
     if key is None:
         return stats
@@ -1147,11 +1201,17 @@ async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, in
         async with _client_from_key(key) as client:
             await client.authenticate()
             data = await client.fetch_active()
+            planned = await client.fetch_planned()
     except (GazelkaApiError, httpx.HTTPError, CircuitOpenError, ValueError) as e:
         logger.warning("gazelka.sync_states.unavailable", project_id=project_id, error=str(e))
         return stats
 
     linked = await _linked_map(db, project_id)
+    # Авто-связь по № поставки: и запланированные, и активные (заведённые в кабинете руками).
+    supply_idx = await _assembly_supply_index(db, project_id)
+    all_plans = (planned.get("plans") or []) + (data.get("plans") or [])
+    stats["autolinked"] = await _auto_link_unmatched(db, project_id, all_plans, supply_idx, linked)
+
     joins = {
         k: {str(r.get("id")): r for r in (data.get(k) or [])}
         for k in ("routes", "drivers", "vehicles", "carriers")
