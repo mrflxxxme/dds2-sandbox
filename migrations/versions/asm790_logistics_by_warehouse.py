@@ -1,7 +1,7 @@
 """assembly logistics_by_warehouse: логистику оказывает склад забора
 
 Revision ID: asm790_logistics_by_warehouse
-Revises: asm785_pickup_cost_history
+Revises: smd01_stock_mismatch_daily
 Create Date: 2026-07-23
 
 Булев флаг на `assembly_requests`: при назначении машины перевозчик берётся из
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "asm790_logistics_by_warehouse"
-down_revision = "asm785_pickup_cost_history"
+down_revision = "smd01_stock_mismatch_daily"
 branch_labels = None
 depends_on = None
 
