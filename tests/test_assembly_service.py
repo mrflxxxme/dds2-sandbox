@@ -1097,6 +1097,42 @@ class TestLifecycle:
         ).scalar_one()
         assert os_row.shipped_as_boxes is True  # снимок единицы из заявки
 
+    async def test_edit_after_ship_syncs_shipped_as_boxes(self, db_session):
+        """Постфактум-правка единицы на отгруженной заявке зеркалится на забор
+        (чтобы «Оплаты»/«История отправок» показывали короба, а не паллеты)."""
+        # Отгружаем как паллеты (дефолт).
+        req = await _create_test_request(db_session)
+        req = await mark_ready(db_session, PROJECT_ID, req.id)
+        req = await assign_vehicle(
+            db_session,
+            PROJECT_ID,
+            req.id,
+            AssignVehicle(
+                vehicle_info="Truck PAL",
+                vehicle_brand="GAZ",
+                driver_phone="+79990000003",
+                pickup_date="2026-03-22",
+                pickup_time_slot="08:00-12:00",
+                pickup_cost=5000,
+                delivery_date="2026-03-23",
+            ),
+        )
+        req = await ship_request(db_session, PROJECT_ID, req.id)
+        ship_id = req.outbound_shipment_id
+        os_before = (
+            await db_session.execute(select(OutboundShipment).where(OutboundShipment.id == ship_id))
+        ).scalar_one()
+        assert os_before.shipped_as_boxes is False  # отгрузили паллетами
+
+        # Постфактум переключаем заявку на короба → забор должен обновиться.
+        await update_assembly_request(
+            db_session, PROJECT_ID, req.id, AssemblyRequestUpdate(shipped_as_boxes=True)
+        )
+        os_after = (
+            await db_session.execute(select(OutboundShipment).where(OutboundShipment.id == ship_id))
+        ).scalar_one()
+        assert os_after.shipped_as_boxes is True  # синхронизировано с заявкой
+
     async def test_assign_vehicle_logistics_by_warehouse(self, db_session):
         """Логистику оказывает склад забора: перевозчик = контрагент склада-источника,
         введённые ИНН/название подрядчика игнорируются."""
