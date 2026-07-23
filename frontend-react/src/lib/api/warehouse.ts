@@ -22,6 +22,9 @@ import type {
     DraftEventRevertResponse,
     AssemblyFlowAnalyticsResponse,
     LinkAnomaliesResponse,
+    StockMismatchHistoryResponse,
+    StockMismatchChangesResponse,
+    StockMismatchSnapshotResponse,
     StockDistributionResponse,
     StockDistributionHistoryResponse,
     HandedUnitItem,
@@ -687,6 +690,51 @@ export function addWarehouseMethods(api: ApiClient) {
         /** Ручной срез текущего часа (не ждать почасовую джобу). Идемпотентен. */
         snapshotDraftCategoryHistory() {
             return api.request<DraftCategoryHistoryResponse>('POST', '/api/v1/assembly/drafts/category-history/snapshot');
+        },
+        /** Дневная история расхождения остатков (вкладка «Динамика расхождения» на
+         *  «Анализ сборки»): по складам × дням, пишет джоба снапшота. */
+        getStockMismatchHistory(days: number, warehouseId?: number, category?: string) {
+            const query = new URLSearchParams({ days: String(days) });
+            if (warehouseId != null) query.set('warehouse_id', String(warehouseId));
+            if (category) query.set('category', category);
+            return api.request<StockMismatchHistoryResponse>(
+                'GET',
+                `/api/v1/warehouse/assembly/flow-analytics/mismatch-history?${query.toString()}`,
+            );
+        },
+        /** Журнал изменений расхождения по SKU между соседними срезами. */
+        getStockMismatchChanges(days: number, warehouseId?: number, category?: string) {
+            const query = new URLSearchParams({ days: String(days) });
+            if (warehouseId != null) query.set('warehouse_id', String(warehouseId));
+            if (category) query.set('category', category);
+            return api.request<StockMismatchChangesResponse>(
+                'GET',
+                `/api/v1/warehouse/assembly/flow-analytics/mismatch-changes?${query.toString()}`,
+            );
+        },
+        /** Ручной срез расхождения остатков сейчас (не ждать джобу). */
+        snapshotStockMismatchHistory() {
+            return api.request<StockMismatchSnapshotResponse>(
+                'POST',
+                '/api/v1/warehouse/assembly/flow-analytics/mismatch-snapshot',
+            );
+        },
+        /** Скачать журнал изменений расхождения (Excel) — через requestBlob (авторизация + X-Project-Id). */
+        async downloadStockMismatchChangesExcel(days: number, warehouseId?: number, category?: string): Promise<void> {
+            const query = new URLSearchParams({ days: String(days) });
+            if (warehouseId != null) query.set('warehouse_id', String(warehouseId));
+            if (category) query.set('category', category);
+            const blob = await api.requestBlob(
+                `/api/v1/warehouse/assembly/flow-analytics/mismatch-changes.xlsx?${query.toString()}`,
+            );
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `stock_mismatch_changes_${days}d.xlsx`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
         },
         /** История изменений черновика (события дозабора/раскладки/создания заявок), новейшие первыми. */
         getDraftHistory(draftId: number) {
