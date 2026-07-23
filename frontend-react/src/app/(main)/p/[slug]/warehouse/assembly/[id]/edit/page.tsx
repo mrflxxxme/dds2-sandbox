@@ -28,6 +28,7 @@ export default function AssemblyEditPage() {
     const [estimatedReadyDate, setEstimatedReadyDate] = useState('');
     const [palletsCount, setPalletsCount] = useState<number>(1);
     const [palletWeightKg, setPalletWeightKg] = useState<number>(0);
+    const [shippedAsBoxes, setShippedAsBoxes] = useState<boolean>(false);
     const [packageType, setPackageType] = useState<PackageType>('BOX');
     const [comment, setComment] = useState('');
     const [wbWarehouseName, setWbWarehouseName] = useState('');
@@ -84,6 +85,7 @@ export default function AssemblyEditPage() {
                 setEstimatedReadyDate(data.estimated_ready_date || '');
                 setPalletsCount(data.pallets_count);
                 setPalletWeightKg(data.pallet_weight_kg);
+                setShippedAsBoxes(data.shipped_as_boxes ?? false);
                 setPackageType(data.package_type ?? 'BOX');
                 setComment(data.comment || '');
                 setWbWarehouseName(data.wb_warehouse_name_manual || '');
@@ -191,10 +193,9 @@ export default function AssemblyEditPage() {
 
     const selectedWarehouse = warehouses.find(w => w.id === warehouseId) || null;
     const totalWeight = palletsCount * palletWeightKg;
-    // Единица поставки: короб (BOX) или паллета (моно/суперсейф) — подписи полей.
-    const isBoxUnit = packageType === 'BOX';
-    const unitCountLabel = isBoxUnit ? 'Короба' : 'Палеты';
-    const unitWeightLabel = isBoxUnit ? 'Вес 1 короба (кг)' : 'Вес 1 палеты (кг)';
+    // Единица поставки — паллета/короб. Подписи полей количества/веса.
+    const unitCountLabel = shippedAsBoxes ? 'Короба' : 'Палеты';
+    const unitWeightLabel = shippedAsBoxes ? 'Вес 1 короба (кг)' : 'Вес 1 палеты (кг)';
     const canEditItems = assembly && !['SHIPPED', 'DELIVERED', 'CLOSED', 'CANCELLED'].includes(assembly.status);
 
     // ─── Item management ──────────────────────────────────────────────────
@@ -254,6 +255,7 @@ export default function AssemblyEditPage() {
                 wb_fbo_supply_id: fboSupplyId ? Number(fboSupplyId) : null,
                 wb_warehouse_name_manual: fboSupplyId ? undefined : (wbWarehouseName || null),
                 estimated_ready_date: estimatedReadyDate || null,
+                shipped_as_boxes: shippedAsBoxes,
                 pallets_count: palletsCount,
                 pallet_weight_kg: palletWeightKg,
                 package_type: packageType,
@@ -460,21 +462,20 @@ export default function AssemblyEditPage() {
                         </div>
                     </div>
 
-                    {/* Тип поставки (единица: короб / монопаллета / суперсейф) */}
+                    {/* Единица поставки: паллеты или короба */}
                     <div className="form-group">
-                        <label className="form-label">Тип поставки</label>
+                        <label className="form-label">Единица поставки</label>
                         <select
                             className="form-input"
-                            value={packageType}
-                            onChange={e => setPackageType(e.target.value as PackageType)}
+                            value={shippedAsBoxes ? 'boxes' : 'pallets'}
+                            onChange={e => setShippedAsBoxes(e.target.value === 'boxes')}
                         >
-                            <option value="BOX">Короб</option>
-                            <option value="MONOPALLET">Монопаллета</option>
-                            <option value="SUPERSAFE">Суперсейф</option>
+                            <option value="pallets">Паллеты</option>
+                            <option value="boxes">Короба</option>
                         </select>
                     </div>
 
-                    {/* Единица поставки: короба или паллеты (подписи по «Тип поставки») */}
+                    {/* Количество единиц + вес (подписи по «Единица поставки») */}
                     <div style={{ display: 'flex', gap: 12 }}>
                         <div className="form-group" style={{ flex: 1 }}>
                             <label className="form-label">{unitCountLabel}</label>

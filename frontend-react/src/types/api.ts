@@ -1137,8 +1137,15 @@ export interface Warehouse {
   counterparty_id?: number | null;
   counterparty_inn?: string | null;
   counterparty_name?: string | null;
+  extra_counterparties?: WarehouseExtraCounterparty[];
   created_at?: string;
   updated_at?: string;
+}
+
+export interface WarehouseExtraCounterparty {
+  id: number; // counterparty id
+  inn?: string | null;
+  name?: string | null;
 }
 
 export interface DeliveryTimeRow {
@@ -2047,6 +2054,7 @@ export interface AssemblyRequest {
   actual_ready_date?: string;
   pallets_count: number;
   pallet_weight_kg: number;
+  shipped_as_boxes?: boolean;  // единица: паллеты (false) или короба (true)
   total_weight_kg?: number;
   /** true — «Общий вес» показан РАСЧЁТНЫМ (ручной не задан): нетто + тара коробов */
   weight_is_estimated?: boolean;
@@ -2927,6 +2935,7 @@ export interface AssemblyRequestCreate {
   estimated_ready_date?: string;
   pallets_count: number;
   pallet_weight_kg: number;
+  shipped_as_boxes?: boolean;  // единица: паллеты (false) или короба (true)
   comment?: string;
   package_type?: PackageType;
   items: { barcode: string; quantity: number }[];
@@ -2937,6 +2946,7 @@ export interface AssemblyRequestUpdate {
   estimated_ready_date?: string | null;
   pallets_count?: number;
   pallet_weight_kg?: number;
+  shipped_as_boxes?: boolean;  // единица: паллеты (false) или короба (true)
   comment?: string | null;
   wb_fbo_supply_id?: number | null;
   wb_warehouse_name_manual?: string | null;

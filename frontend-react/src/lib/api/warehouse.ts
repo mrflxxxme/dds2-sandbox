@@ -104,6 +104,12 @@ export function addWarehouseMethods(api: ApiClient) {
         setWarehouseCounterparty(id: number, data: { inn: string | null; name: string | null }) {
             return api.request<Warehouse>('PATCH', `/api/v1/warehouse/${id}/counterparty`, data);
         },
+        addWarehouseExtraCounterparty(id: number, data: { inn: string; name: string | null }) {
+            return api.request<Warehouse>('POST', `/api/v1/warehouse/${id}/counterparties`, data);
+        },
+        removeWarehouseExtraCounterparty(id: number, counterpartyId: number) {
+            return api.request<Warehouse>('DELETE', `/api/v1/warehouse/${id}/counterparties/${counterpartyId}`);
+        },
         deleteWarehouse(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/warehouse/${id}`); },
         reorderWarehouses(items: { id: number; sort_order: number }[]) {
             return api.request<MessageResponse>('PUT', '/api/v1/warehouse/reorder', { items });

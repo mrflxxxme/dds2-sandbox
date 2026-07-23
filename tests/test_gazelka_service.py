@@ -991,7 +991,7 @@ async def test_sync_states_autolink_skips_already_linked_assembly(monkeypatch):
 async def test_resolve_carrier_by_name_reuses_existing_carrier():
     from backend.services.assembly.status import _resolve_carrier_by_name
 
-    existing = SimpleNamespace(id=12, primary_type="CARRIER", name="ИП Иванов")
+    existing = SimpleNamespace(id=12, primary_type="CARRIER", name="ИП Иванов", inn="7701234567")
     db = MagicMock()
     db.execute = AsyncMock(return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [existing])))
     db.add = MagicMock()
@@ -1031,3 +1031,19 @@ async def test_resolve_carrier_by_name_empty_returns_none():
     db.execute = AsyncMock()
     assert await _resolve_carrier_by_name(db, 4, "  ") is None
     db.execute.assert_not_awaited()
+
+
+async def test_resolve_carrier_gazelka_variants_collapse_to_one():
+    """Любое газельное имя («Газель-Ка» из портала) → один контрагент (CARRIER с ИНН), не дубль."""
+    from backend.services.assembly.status import _resolve_carrier_by_name
+
+    other = SimpleNamespace(id=67, primary_type="CARRIER", name="Газель-Ка", inn=None)
+    canonical = SimpleNamespace(id=16881, primary_type="CARRIER", name="Газелька", inn="371301792940")
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [other, canonical])))
+    db.add = MagicMock()
+
+    cid = await _resolve_carrier_by_name(db, 4, "Газель-Ка")
+
+    assert cid == 16881  # CARRIER с ИНН победил, дубль не создан
+    db.add.assert_not_called()

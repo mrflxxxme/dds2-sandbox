@@ -10,12 +10,14 @@ Split into:
 
 # ─── CRUD ──────────────────────────────────────────────────────────────────
 from backend.services.warehouse_crud import (  # noqa: F401
+    add_extra_counterparty,
     create_warehouse,
     delete_warehouse,
     get_delivery_times,
     get_warehouse,
     link_counterparty,
     list_warehouses,
+    remove_extra_counterparty,
     reorder_warehouses,
     update_delivery_times,
     update_warehouse,

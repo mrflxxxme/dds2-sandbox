@@ -46,6 +46,7 @@ from backend.schemas.warehouse import (
     SupplyAcceptanceSlotsResponse,
     WarehouseCounterpartyLink,
     WarehouseCreate,
+    WarehouseExtraCounterpartyAdd,
     WarehouseReorder,
     WarehouseSchema,
     WarehouseStockSchema,
@@ -140,6 +141,45 @@ async def set_warehouse_counterparty(
         warehouse_id,
         inn=payload.inn,
         name=payload.name,
+    )
+    if not wh:
+        raise HTTPException(404, "Warehouse not found")
+    return WarehouseSchema.model_validate(wh)
+
+
+@router.post("/{warehouse_id}/counterparties", dependencies=[Depends(rate_limit_write)])
+async def add_warehouse_extra_counterparty(
+    warehouse_id: int,
+    payload: WarehouseExtraCounterpartyAdd,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Привязать ДОПОЛНИТЕЛЬНОГО контрагента к складу (поверх основного). Авто-FULFILLMENT."""
+    wh = await warehouse_service.add_extra_counterparty(
+        db,
+        project.id,
+        warehouse_id,
+        inn=payload.inn,
+        name=payload.name,
+    )
+    if not wh:
+        raise HTTPException(404, "Warehouse not found")
+    return WarehouseSchema.model_validate(wh)
+
+
+@router.delete("/{warehouse_id}/counterparties/{counterparty_id}", dependencies=[Depends(rate_limit_write)])
+async def remove_warehouse_extra_counterparty(
+    warehouse_id: int,
+    counterparty_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Отвязать доп. контрагента от склада (связь удаляется, сам контрагент остаётся)."""
+    wh = await warehouse_service.remove_extra_counterparty(
+        db,
+        project.id,
+        warehouse_id,
+        counterparty_id,
     )
     if not wh:
         raise HTTPException(404, "Warehouse not found")

@@ -521,8 +521,9 @@ class CounterpartyService:
         )
         docs_count = int(docs_res.scalar_one() or 0)
 
-        # Warehouses that use this counterparty as their legal entity
-        from backend.models.warehouse import Warehouse
+        # Warehouses that use this counterparty as their legal entity — as the primary
+        # counterparty (warehouses.counterparty_id) OR as an additional one (link table).
+        from backend.models.warehouse import Warehouse, WarehouseCounterparty
 
         wh_res = await self.db.execute(
             select(Warehouse.id, Warehouse.name, Warehouse.warehouse_type).where(
@@ -531,9 +532,21 @@ class CounterpartyService:
                 Warehouse.is_deleted == False,  # noqa: E712
             )
         )
-        linked_warehouses = [
-            {"id": row.id, "name": row.name, "warehouse_type": row.warehouse_type} for row in wh_res.all()
-        ]
+        wh_by_id: dict[int, dict] = {
+            row.id: {"id": row.id, "name": row.name, "warehouse_type": row.warehouse_type} for row in wh_res.all()
+        }
+        extra_res = await self.db.execute(
+            select(Warehouse.id, Warehouse.name, Warehouse.warehouse_type)
+            .join(WarehouseCounterparty, WarehouseCounterparty.warehouse_id == Warehouse.id)
+            .where(
+                WarehouseCounterparty.project_id == project_id,
+                WarehouseCounterparty.counterparty_id == counterparty_id,
+                Warehouse.is_deleted == False,  # noqa: E712
+            )
+        )
+        for row in extra_res.all():
+            wh_by_id.setdefault(row.id, {"id": row.id, "name": row.name, "warehouse_type": row.warehouse_type})
+        linked_warehouses = list(wh_by_id.values())
 
         # Expense category (level-2), from the cp_key→category mapping.
         cp_key = (cp.inn or "").strip() or (cp.name or "").strip().lower()

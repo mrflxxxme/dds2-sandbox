@@ -521,10 +521,9 @@ export default function AssemblyDetailPage() {
     const canEditFields = assembly && assembly.status !== 'CANCELLED';
     const canEditAlways = assembly && assembly.status !== 'CANCELLED';
     const canEditFbo = assembly && ['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED'].includes(assembly.status);
-    // Единица поставки: короб (package_type=BOX) или паллета — подписи полей количества/веса.
-    const isBoxUnit = assembly?.package_type === 'BOX';
-    const unitCountLabel = isBoxUnit ? 'Короба' : 'Палеты';
-    const unitWeightLabel = isBoxUnit ? 'Вес 1 короба' : 'Вес 1 палеты';
+    // Единица поставки — паллета/короб (отдельное поле shipped_as_boxes, НЕ package_type).
+    const unitCountLabel = assembly?.shipped_as_boxes ? 'Короба' : 'Палеты';
+    const unitWeightLabel = assembly?.shipped_as_boxes ? 'Вес 1 короба' : 'Вес 1 палеты';
 
     const handleFieldSave = async (field: string, value: number | string) => {
         if (!assembly) return;

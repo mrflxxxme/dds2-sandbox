@@ -108,6 +108,32 @@ class Warehouse(Base, TimestampMixin, SoftDeleteMixin):
     )
 
 
+class WarehouseCounterparty(Base, TimestampMixin):
+    """Дополнительные контрагенты (юр. лица) склада-ФФ.
+
+    Основной контрагент хранится в `Warehouse.counterparty_id` (блок «Реквизиты
+    компании»); эта таблица — для ДОПОЛНИТЕЛЬНЫХ юр. лиц, которые тоже относятся
+    к этому складу. Все их ИНН так же категоризируются в «Фулфилмент» при импорте
+    выписок (см. `_upsert_counterparties` в `backend/etl/service.py`).
+
+    Обычная link-таблица: отвязка — hard-delete (без SoftDeleteMixin).
+    """
+
+    __tablename__ = "warehouse_counterparty"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
+    counterparty_id: Mapped[int] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("warehouse_id", "counterparty_id", name="uq_warehouse_counterparty"),
+        Index("ix_warehouse_counterparty_warehouse_id", "warehouse_id"),
+        Index("ix_warehouse_counterparty_counterparty_id", "counterparty_id"),
+        Index("ix_warehouse_counterparty_project_id", "project_id"),
+    )
+
+
 # ─── Inbound Receipt (Приёмка) ──────────────────────────────────────────────
 
 
