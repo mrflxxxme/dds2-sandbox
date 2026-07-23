@@ -11,8 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response
 
+from backend.auth import get_current_user
 from backend.database import get_db
-from backend.models import Project
+from backend.models import Project, User
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
 from backend.models.assembly_wb import AssemblyWbSupply, WbSupplySyncStatus
 from backend.models.wb_fbo import WbFboSupply
@@ -57,6 +58,7 @@ from backend.schemas.assembly import (
     PreDistVehiclePool,
     PrebookingCreate,
     PrebookingCreateResult,
+    PickupCostHistoryResponse,
     RefreshFromFboResponse,
     SourceVehicleOption,
     ReturnToWarehouse,
@@ -826,16 +828,25 @@ async def review_ff_proposed_composition(
 # --- Update -----------------------------------------------------------------
 
 
+def _actor_name(user: User) -> str:
+    """Отображаемое имя автора правки для истории («кто поменял»)."""
+    full = f"{user.first_name or ''} {user.last_name or ''}".strip()
+    return (full or user.username)[:50]
+
+
 @router.put("/{request_id}", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
 async def update_assembly_request(
     request_id: int,
     payload: AssemblyRequestUpdate,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """Update an assembly request."""
     try:
-        req = await assembly_service.update_assembly_request(db, project.id, request_id, payload)
+        req = await assembly_service.update_assembly_request(
+            db, project.id, request_id, payload, changed_by=_actor_name(user)
+        )
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
@@ -1255,6 +1266,20 @@ async def get_assembly_history(
     try:
         history = await assembly_service.get_assembly_history(db, project.id, request_id)
         return [AssemblyHistoryResponse.model_validate(h) for h in history]
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.get("/{request_id}/pickup-cost-history", response_model=list[PickupCostHistoryResponse])
+async def get_pickup_cost_history(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """История изменений стоимости перевозки заявки (старая→новая + автор, ASM-785)."""
+    try:
+        history = await assembly_service.get_pickup_cost_history(db, project.id, request_id)
+        return [PickupCostHistoryResponse.model_validate(h) for h in history]
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
 

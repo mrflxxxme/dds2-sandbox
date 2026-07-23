@@ -581,6 +581,18 @@ class AssemblyHistoryResponse(BaseModel):
     comment: str | None
 
 
+class PickupCostHistoryResponse(BaseModel):
+    """Одна запись истории изменения стоимости перевозки (ASM-785)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    old_cost: Decimal | None
+    new_cost: Decimal | None
+    changed_at: datetime
+    changed_by: str | None
+
+
 class StockDeficit(BaseModel):
     barcode: str
     need: int

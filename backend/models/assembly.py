@@ -292,6 +292,35 @@ class AssemblyStatusHistory(Base):
     )
 
 
+# ─── Assembly Pickup Cost History ────────────────────────────────────────────
+
+
+class AssemblyPickupCostHistory(Base):
+    """Audit log for assembly request pickup (transport) cost changes.
+
+    Пишет запись на КАЖДУЮ фактическую правку `AssemblyRequest.pickup_cost`
+    (стоимость перевозки/забора): старую цену, новую цену, момент и автора
+    («кто поменял»). Питает карточку «История стоимости перевозки» на деталке.
+    """
+
+    __tablename__ = "assembly_pickup_cost_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    assembly_request_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("assembly_requests.id", ondelete="CASCADE"), nullable=False
+    )
+    old_cost: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    new_cost: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    changed_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_assembly_pickup_cost_history_project_id", "project_id"),
+        Index("ix_assembly_pickup_cost_history_request_id", "assembly_request_id"),
+    )
+
+
 # ─── Assembly Draft ─────────────────────────────────────────────────────────
 
 

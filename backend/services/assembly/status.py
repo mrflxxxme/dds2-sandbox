@@ -7,6 +7,7 @@ One-way dependency: status -> crud (never crud -> status, except _log_status_cha
 """
 
 from datetime import date
+from decimal import Decimal
 
 import structlog
 from sqlalchemy import func, select
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.cache import invalidate_cache
 from backend.models.assembly import (
     ASSEMBLY_TRANSITIONS,
+    AssemblyPickupCostHistory,
     AssemblyRequest,
     AssemblyStatus,
     AssemblyStatusHistory,
@@ -101,6 +103,26 @@ async def _log_status_change(
         changed_at=utcnow(),
         changed_by=changed_by,
         comment=comment,
+    )
+    db.add(history)
+
+
+async def _log_pickup_cost_change(
+    db: AsyncSession,
+    project_id: int,
+    request_id: int,
+    old_cost: Decimal | None,
+    new_cost: Decimal,
+    changed_by: str | None = None,
+) -> None:
+    """Record a pickup-cost change in assembly_pickup_cost_history (ASM-785)."""
+    history = AssemblyPickupCostHistory(
+        project_id=project_id,
+        assembly_request_id=request_id,
+        old_cost=old_cost,
+        new_cost=new_cost,
+        changed_at=utcnow(),
+        changed_by=changed_by,
     )
     db.add(history)
 
@@ -1107,5 +1129,27 @@ async def get_assembly_history(
             AssemblyStatusHistory.project_id == project_id,
         )
         .order_by(AssemblyStatusHistory.changed_at.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_pickup_cost_history(
+    db: AsyncSession,
+    project_id: int,
+    request_id: int,
+) -> list[AssemblyPickupCostHistory]:
+    """Get pickup (transport) cost change history for an assembly request."""
+    from .crud import get_assembly_request
+
+    req = await get_assembly_request(db, project_id, request_id)
+    if not req:
+        raise ValueError("Assembly request not found")
+    result = await db.execute(
+        select(AssemblyPickupCostHistory)
+        .where(
+            AssemblyPickupCostHistory.assembly_request_id == request_id,
+            AssemblyPickupCostHistory.project_id == project_id,
+        )
+        .order_by(AssemblyPickupCostHistory.changed_at.asc())
     )
     return list(result.scalars().all())

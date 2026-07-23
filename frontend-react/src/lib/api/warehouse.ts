@@ -31,6 +31,7 @@ import type {
     AssemblyBulkStatus,
     AssemblyBulkStatusResult,
     AssemblyHistoryEntry,
+    AssemblyPickupCostHistoryEntry,
     AssemblyListResponse,
     AssemblyRequest,
     AssemblyRequestCreate,
@@ -557,6 +558,10 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         getAssemblyHistory(id: number) {
             return api.request<AssemblyHistoryEntry[]>('GET', `/api/v1/warehouse/assembly/${id}/history`);
+        },
+        /** История изменений стоимости перевозки заявки (старая→новая + автор, ASM-785). */
+        getAssemblyPickupCostHistory(id: number) {
+            return api.request<AssemblyPickupCostHistoryEntry[]>('GET', `/api/v1/warehouse/assembly/${id}/pickup-cost-history`);
         },
         getShipmentAnalytics(params?: { date_from?: string; date_to?: string; warehouse_ids?: string; brands?: string; carrier_id?: number }) {
             const query = new URLSearchParams();
