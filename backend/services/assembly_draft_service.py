@@ -381,7 +381,10 @@ async def update_draft(
     каждом автосейве матрицы (PUT на каждый клик), и черновик «таял»."""
     import copy
 
-    draft = await get_draft(db, project_id, draft_id)
+    # FOR UPDATE: CAS-сравнение обязано идти под блокировкой строки — без неё два
+    # одновременных PUT читали одну версию, оба проходили проверку и last-write
+    # затирал промоцию (прод 2026-07-23: два PUT 200 в одну секунду, ни одного 409).
+    draft = await _get_draft_for_update(db, project_id, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
 

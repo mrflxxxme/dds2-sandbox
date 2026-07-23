@@ -122,6 +122,13 @@ class DraftEventLog(BaseModel):
     summary: str | None = None
 
 
+# События-«последняя воля юзера»: явное действие в UI (клик), которому позволено
+# писать без CAS-токена — юзер видит текущее состояние и его решение побеждает.
+# Всё прочее с distribution (eventless-автосейвы, AUTO_SYNC, ACCEPTANCE_SYNC) —
+# фоновые писатели: токен ОБЯЗАТЕЛЕН (см. AssemblyDraftUpdate.requires_base_version).
+_USER_WILL_EVENTS = frozenset({"PREBOOK_TOPUP", "MATRIX_WRITE", "MATRIX_EDIT"})
+
+
 class AssemblyDraftUpdate(BaseModel):
     name: str | None = None
     distribution: AssemblyDraftDistribution | None = None
@@ -131,9 +138,20 @@ class AssemblyDraftUpdate(BaseModel):
     # Оптимистическая версия (CAS): updated_at черновика, от которого клиент строил
     # distribution. Не совпала с БД → 409 DRAFT_VERSION_CONFLICT вместо молчаливого
     # full-replace (прод-кейс: фоновый синк stale-вкладки воскресил очищенный
-    # черновик через 9с). Шлют ФОНОВЫЕ писатели (автосейв/консолидация/self-heal);
-    # явные действия юзера идут без версии — последняя воля побеждает.
+    # черновик через 9с). Для ФОНОВЫХ писателей токен обязателен на HTTP-границе
+    # (прод 2026-07-23, «5-й возврат»: промоция консолидации затиралась соседним
+    # PUT без токена в ту же секунду); явные действия юзера (_USER_WILL_EVENTS)
+    # идут без версии — последняя воля побеждает.
     base_updated_at: datetime | None = None
+
+    def requires_base_version(self) -> bool:
+        """True → фоновая запись `distribution` без CAS-токена, PUT надо отбить 409.
+
+        Контракт HTTP-границы (роутер): любой PUT с `distribution` обязан нести
+        `base_updated_at`, кроме явных действий юзера (event из _USER_WILL_EVENTS)."""
+        if self.distribution is None or self.base_updated_at is not None:
+            return False
+        return self.event is None or self.event.event_type not in _USER_WILL_EVENTS
 
 
 class AssemblyDraftAddRows(BaseModel):

@@ -189,6 +189,19 @@ async def update_draft(
     db: AsyncSession = Depends(get_db),
 ) -> AssemblyDraftRead:
     """Update mutable fields of a draft."""
+    # Контракт CAS (прод 2026-07-23, «5-й возврат целых паллет в предброни»):
+    # фоновая запись distribution без base_updated_at затирала конкурентные
+    # изменения молча (два PUT 200 в одну секунду). Detail несёт подстроку
+    # DRAFT_VERSION_CONFLICT — уже задеплоенные клиенты (isVersionConflict)
+    # деградируют в перечитку черновика, а не в error-тост.
+    if payload.requires_base_version():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "DRAFT_VERSION_REQUIRED (DRAFT_VERSION_CONFLICT): фоновая запись "
+                "distribution без base_updated_at запрещена — перечитайте черновик"
+            ),
+        )
     draft = await assembly_draft_service.update_draft(db, project.id, draft_id, payload, changed_by="user")
     return await assembly_draft_service.to_read_model(db, project.id, draft)
 
