@@ -74,6 +74,9 @@ export default function AssemblyDetailPage() {
     const [driverLastName, setDriverLastName] = useState('');
     const [carrierInn, setCarrierInn] = useState('');
     const [carrierName, setCarrierName] = useState('');
+    // Логистику оказывает склад забора: перевозчик = контрагент склада-источника,
+    // поля подрядчика скрываются.
+    const [logisticsByWarehouse, setLogisticsByWarehouse] = useState(false);
     const [pickupDate, setPickupDate] = useState('');
     const [pickupTimeSlot, setPickupTimeSlot] = useState('');
     const [pickupCost, setPickupCost] = useState<number | ''>('');
@@ -295,6 +298,7 @@ export default function AssemblyDetailPage() {
         setDriverPhone(assembly?.driver_phone || wbState?.pass_driver_phone || '');
         setDriverFirstName(assembly?.driver_first_name || wbState?.pass_driver_first || '');
         setDriverLastName(assembly?.driver_last_name || wbState?.pass_driver_last || '');
+        setLogisticsByWarehouse(assembly?.logistics_by_warehouse ?? false);
         setShowVehicleModal(true);
     };
 
@@ -318,14 +322,18 @@ export default function AssemblyDetailPage() {
                 pickup_time_slot: pickupTimeSlot,
                 pickup_cost: Number(pickupCost),
                 delivery_date: deliveryDate,
-                carrier_inn: carrierInn.trim() || null,
-                carrier_name: carrierName.trim() || null,
+                // В режиме «логистика от склада» подрядчик берётся из контрагента склада —
+                // введённые ИНН/название игнорируем.
+                carrier_inn: logisticsByWarehouse ? null : (carrierInn.trim() || null),
+                carrier_name: logisticsByWarehouse ? null : (carrierName.trim() || null),
+                logistics_by_warehouse: logisticsByWarehouse,
             });
             setAssembly(updated);
             setShowVehicleModal(false);
             setVehicleInfo('');
             setCarrierInn('');
             setCarrierName('');
+            setLogisticsByWarehouse(false);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
@@ -513,6 +521,10 @@ export default function AssemblyDetailPage() {
     const canEditFields = assembly && assembly.status !== 'CANCELLED';
     const canEditAlways = assembly && assembly.status !== 'CANCELLED';
     const canEditFbo = assembly && ['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED'].includes(assembly.status);
+    // Единица поставки: короб (package_type=BOX) или паллета — подписи полей количества/веса.
+    const isBoxUnit = assembly?.package_type === 'BOX';
+    const unitCountLabel = isBoxUnit ? 'Короба' : 'Палеты';
+    const unitWeightLabel = isBoxUnit ? 'Вес 1 короба' : 'Вес 1 палеты';
 
     const handleFieldSave = async (field: string, value: number | string) => {
         if (!assembly) return;
@@ -993,14 +1005,14 @@ export default function AssemblyDetailPage() {
                     />
                     <InfoField label="Дата готовности (факт)" value={formatDate(assembly.actual_ready_date)} />
                     <EditableInfoField
-                        label="Палеты"
+                        label={unitCountLabel}
                         value={String(assembly.pallets_count || '')}
                         displayValue={String(assembly.pallets_count)}
                         type="number"
                         editable={!!canEditAlways}
                         onSave={(v) => handleFieldSave('pallets_count', Number(v))}
                     />
-                    <InfoField label="Вес 1 палеты" value={assembly.pallet_weight_kg ? formatNumber(assembly.pallet_weight_kg, 1) + ' кг' : '\u2014'} />
+                    <InfoField label={unitWeightLabel} value={assembly.pallet_weight_kg ? formatNumber(assembly.pallet_weight_kg, 1) + ' кг' : '\u2014'} />
                     <InfoField label="Общий вес" value={assembly.total_weight_kg ? formatNumber(assembly.total_weight_kg, 1) + ' кг' : '\u2014'} />
                     <InfoField
                         label="Вес товаров (расчёт)"
@@ -1097,6 +1109,9 @@ export default function AssemblyDetailPage() {
                             editable={!!canEditAlways}
                             onSave={(v) => handleFieldSave('carrier_name', v)}
                         />
+                    )}
+                    {assembly.logistics_by_warehouse && (
+                        <InfoField label="Логистика" value={`Склад забора${assembly.warehouse_name ? ` (${assembly.warehouse_name})` : ''}`} />
                     )}
                     {assembly.pickup_date && (
                         <InfoField label="Забор" value={`${formatDate(assembly.pickup_date)}${assembly.pickup_time_slot ? ', ' + assembly.pickup_time_slot : ''}`} />
@@ -1534,29 +1549,51 @@ export default function AssemblyDetailPage() {
                                 <input className="form-input" type="date" value={deliveryDate} onChange={e => setDeliveryDate(e.target.value)} />
                             </div>
                             <div className="form-group" style={{ gridColumn: '1 / -1', borderTop: '1px solid var(--color-border)', paddingTop: 12, marginTop: 4 }}>
-                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
-                                    Подрядчик (опционально) — расходы из выписки с этим ИНН попадут в «Перевозчик».
-                                </div>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: assembly?.warehouse_counterparty_id ? 'pointer' : 'not-allowed' }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={logisticsByWarehouse}
+                                        disabled={!assembly?.warehouse_counterparty_id}
+                                        onChange={e => setLogisticsByWarehouse(e.target.checked)}
+                                    />
+                                    <span style={{ fontSize: 13 }}>
+                                        Логистику оказывает склад забора{assembly?.warehouse_name ? ` (${assembly.warehouse_name})` : ''}
+                                    </span>
+                                </label>
+                                {!assembly?.warehouse_counterparty_id && (
+                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6 }}>
+                                        У склада не задан контрагент — укажите его в справочнике складов, чтобы включить.
+                                    </div>
+                                )}
                             </div>
-                            <div className="form-group">
-                                <label className="form-label">ИНН подрядчика</label>
-                                <input
-                                    className="form-input"
-                                    value={carrierInn}
-                                    onChange={e => setCarrierInn(e.target.value)}
-                                    placeholder="10 или 12 цифр"
-                                    maxLength={12}
-                                />
-                            </div>
-                            <div className="form-group">
-                                <label className="form-label">Название подрядчика</label>
-                                <input
-                                    className="form-input"
-                                    value={carrierName}
-                                    onChange={e => setCarrierName(e.target.value)}
-                                    placeholder="ООО «ТК» / ИП Иванов"
-                                />
-                            </div>
+                            {!logisticsByWarehouse && (
+                                <>
+                                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                            Подрядчик (опционально) — расходы из выписки с этим ИНН попадут в «Перевозчик».
+                                        </div>
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">ИНН подрядчика</label>
+                                        <input
+                                            className="form-input"
+                                            value={carrierInn}
+                                            onChange={e => setCarrierInn(e.target.value)}
+                                            placeholder="10 или 12 цифр"
+                                            maxLength={12}
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Название подрядчика</label>
+                                        <input
+                                            className="form-input"
+                                            value={carrierName}
+                                            onChange={e => setCarrierName(e.target.value)}
+                                            placeholder="ООО «ТК» / ИП Иванов"
+                                        />
+                                    </div>
+                                </>
+                            )}
                         </div>
                         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
                             <button className="btn btn-secondary" onClick={() => setShowVehicleModal(false)}>Отмена</button>

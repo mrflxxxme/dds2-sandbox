@@ -1160,6 +1160,7 @@ async def assign_vehicle_bulk(
                 # per-request AssignVehicle → при массовом назначении терялся.
                 carrier_inn=payload.carrier_inn,
                 carrier_name=payload.carrier_name,
+                logistics_by_warehouse=payload.logistics_by_warehouse,
             )
             req = await assembly_service.assign_vehicle(db, project.id, item.request_id, assign_payload)
             results.append(req)
