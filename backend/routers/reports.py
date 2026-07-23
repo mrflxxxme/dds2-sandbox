@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.rbac import require_role
 from backend.routers.reports_stock import router as _stock_router
 
 # ─── Sub-routers ────────────────────────────────────────────────────────────
@@ -131,7 +132,7 @@ async def get_income_by_category_daily(
     return await reports_service.get_income_by_category_daily(db, project.id, year, month, currency, cat_lvl1)
 
 
-@router.get("/dashboard_summary")
+@router.get("/dashboard_summary", dependencies=[Depends(require_role(page="dashboard"))])
 async def get_dashboard_summary(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
@@ -142,7 +143,7 @@ async def get_dashboard_summary(
     return await reports_service.get_dashboard_summary(db, project.id, date_from, date_to)
 
 
-@router.get("/dashboard_daily_filtered")
+@router.get("/dashboard_daily_filtered", dependencies=[Depends(require_role(page="dashboard"))])
 async def get_dashboard_daily_filtered(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
@@ -159,7 +160,7 @@ async def get_dashboard_daily_filtered(
     return await reports_service.get_daily_filtered(db, project.id, df, dt, cp_key=cp_key, category=category)
 
 
-@router.get("/dashboard_transactions")
+@router.get("/dashboard_transactions", dependencies=[Depends(require_role(page="dashboard"))])
 async def get_dashboard_transactions(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
