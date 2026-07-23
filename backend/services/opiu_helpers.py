@@ -70,6 +70,67 @@ def build_cost_qty_sql(brand: str | None, article: str | None) -> str:
         GROUP BY month_key, sa_name, nm_id"""
 
 
+# ─── Operating expenses by counterparty type ────────────────────────────────
+
+# Russian labels for counterparty primary_type (mirror of frontend TYPE_CONFIG
+# in CounterpartyTypeBadge.tsx). Unknown types fall back to the raw code.
+OPEX_TYPE_LABELS: dict[str, str] = {
+    "SUPPLIER": "Поставщик",
+    "FULFILLMENT": "Фулфилмент",
+    "CARRIER": "Перевозчик",
+    "TRADING_HOUSE": "Торговый дом",
+    "CUSTOMS_BROKER": "Таможенный брокер",
+    "DESIGNER": "Дизайнер",
+    "LEGAL": "Юридические услуги",
+    "LANDLORD": "Аренда",
+    "IT_SERVICE": "IT-сервис",
+    "MARKETPLACE": "Маркетплейс",
+    "BANK": "Банк",
+    "GOVERNMENT": "Государство / ФНС",
+    "AFFILIATED": "Аффилированное лицо",
+    "OTHER": "Прочее",
+}
+
+# Types excluded from «Операционные расходы»:
+#   OTHER         — «Прочее» (по требованию)
+#   SUPPLIER /    — закупочная цепочка: их траты — это покупка товара, уже
+#   TRADING_HOUSE   учтённая в строке «Себестоимость» выше; включать = задвоить P&L.
+# Всё остальное (аренда, IT, дизайн, перевозчик, таможенный брокер, банк, ФНС, …)
+# — реальный opex.
+OPEX_EXCLUDED_TYPES: frozenset[str] = frozenset({"OTHER", "SUPPLIER", "TRADING_HOUSE"})
+
+
+def build_opex_by_type_sql() -> str:
+    """
+    Monthly expense from bank transactions grouped by counterparty primary_type.
+
+    Same source/filters as the counterparty reference summary (expense side,
+    non-internal, RUB — i.e. everything not CNY), но с помесячной разбивкой и
+    исключением закупочных типов и «Прочее». Excluded types are inlined as a
+    literal tuple (fixed enum values, not user input).
+    """
+    excluded = ", ".join(f"'{t}'" for t in sorted(OPEX_EXCLUDED_TYPES))
+    return f"""
+        SELECT
+            to_char(t.date, 'YYYY-MM') AS month_key,
+            c.primary_type AS primary_type,
+            COALESCE(SUM(t.expense), 0) AS expense_sum
+        FROM transactions t
+        JOIN counterparty c ON c.id = t.counterparty_id
+        WHERE t.project_id = :project_id
+          AND t.is_deleted = false
+          AND t.is_internal = false
+          AND t.date >= :date_from
+          AND t.date < (:date_to + INTERVAL '1 day')
+          AND UPPER(t.currency) <> 'CNY'
+          AND c.is_deleted = false
+          AND c.project_id = :project_id
+          AND c.primary_type NOT IN ({excluded})
+        GROUP BY month_key, c.primary_type
+        HAVING COALESCE(SUM(t.expense), 0) > 0
+    """  # noqa: S608
+
+
 def build_brand_nm_ids_sql() -> str:
     return (
         f"SELECT DISTINCT nm_id FROM wb_finance_rows"  # noqa: S608
@@ -126,6 +187,7 @@ def build_row(
     base_monthly=None,
     base_total=None,
     expandable=False,
+    parent_key=None,
 ):
     total_pct = pct(values_total, base_total) if base_total else None
     monthly = {}
@@ -142,6 +204,7 @@ def build_row(
         "level": level,
         "bold": bold,
         "expandable": expandable,
+        "parent_key": parent_key,
         "total": round(float(values_total), 2),
         "total_pct": total_pct,
         "monthly": monthly,

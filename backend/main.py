@@ -30,6 +30,7 @@ from backend.routers import (
     cost,
     counterparty,
     fbo_supplies,
+    ff_billing,
     ff_portal,
     fulfillment,
     funnel,
@@ -597,6 +598,12 @@ app.include_router(
     warehouse.router,
     prefix="/api/v1",
     tags=["Warehouse"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    ff_billing.router,
+    prefix="/api/v1",
+    tags=["FF Billing"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

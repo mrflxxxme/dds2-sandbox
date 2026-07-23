@@ -10,6 +10,7 @@ import { FfMismatchBlock } from '@/components/FfMismatchModal';
 import MigfullModal from './MigfullModal';
 import PalletLayoutTab from './PalletLayoutTab';
 import WbSupplyPanel from './WbSupplyPanel';
+import FfExpectedCostCard from './FfExpectedCostCard';
 import type { Column } from '@/components/DataTable';
 import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyPickupCostHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply, WbSupplyState, WbSupplySyncStatus } from '@/types/api';
 
@@ -1194,6 +1195,9 @@ export default function AssemblyDetailPage() {
                     )}
                 </div>
             </div>
+
+            {/* Ожидаемая стоимость услуг ФФ + доп-услуги (тарифы склада) */}
+            <FfExpectedCostCard assemblyId={id} warehouseId={assembly.warehouse_id} slug={slug} />
 
             {/* Цепочка попыток отгрузки (отгрузил → не приняли → вернул → переотгрузил) */}
             {attempts.length > 0 && (

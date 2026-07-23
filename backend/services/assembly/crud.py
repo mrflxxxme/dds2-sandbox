@@ -1575,6 +1575,10 @@ async def update_assembly_request(
                 cur_ship.pallets_count = req.pallets_count
             if payload.pallet_weight_kg is not None:
                 cur_ship.pallet_weight_kg = req.pallet_weight_kg
+            if payload.shipped_as_boxes is not None:
+                # Единица (короб/паллета) — постфактум-правка заявки зеркалится на забор,
+                # чтобы «Оплаты»/«История отправок» показывали ту же единицу, что в заявке.
+                cur_ship.shipped_as_boxes = req.shipped_as_boxes
 
     # Update items: allowed everywhere except SHIPPED/DELIVERED/RETURNED/CANCELLED.
     # READY/VEHICLE_ASSIGNED — позволяем подправить кол-во под факт WB (например,

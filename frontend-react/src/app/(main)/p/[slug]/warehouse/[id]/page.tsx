@@ -15,6 +15,7 @@ import type {
 import type { Column } from '@/components/DataTable';
 import Toast from '@/components/Toast';
 import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffSkippedNotice, ffStageBadge, ffStatusBadge, ffStatusLabel, ffEventBadge, ffEventSummary } from './ff-shared';
+import FfBillingTab from './FfBillingTab';
 import { FfMismatchModal } from '@/components/FfMismatchModal';
 import { whNamesMatch } from '@/lib/utils/ffLinkCandidates';
 
@@ -36,8 +37,8 @@ function countActionableTransfers(transfers: StockTransfer[], warehouseId: numbe
 
 /* ─── Main page ────────────────────────────────────────────────────────────── */
 
-type WarehouseTab = 'all' | 'receipts' | 'shipments' | 'assemblies' | 'transfers' | 'stock' | 'defects' | 'delivery' | 'requisites' | 'fulfillment';
-const WAREHOUSE_TABS: WarehouseTab[] = ['all', 'receipts', 'shipments', 'assemblies', 'transfers', 'stock', 'defects', 'delivery', 'requisites', 'fulfillment'];
+type WarehouseTab = 'all' | 'receipts' | 'shipments' | 'assemblies' | 'transfers' | 'stock' | 'defects' | 'delivery' | 'requisites' | 'fulfillment' | 'ffbilling';
+const WAREHOUSE_TABS: WarehouseTab[] = ['all', 'receipts', 'shipments', 'assemblies', 'transfers', 'stock', 'defects', 'delivery', 'requisites', 'fulfillment', 'ffbilling'];
 
 // Под-вкладки раздела «Фулфилмент» — вложенная навигация внутри одной вкладки.
 type FfSubTab = 'stocks' | 'boxes' | 'assembly' | 'inbound' | 'history' | 'sync';
@@ -153,6 +154,7 @@ export default function WarehouseDetailPage() {
         ...(ffConnected ? [
             { key: 'fulfillment' as const, label: 'Фулфилмент' },
         ] : []),
+        ...(isFulfillment ? [{ key: 'ffbilling' as const, label: 'Тарифы ФФ' }] : []),
         { key: 'requisites' as const, label: 'Реквизиты' },
     ];
 
@@ -250,6 +252,7 @@ export default function WarehouseDetailPage() {
             {tab === 'fulfillment' && ffConnected && (
                 <FulfillmentTabs warehouseId={warehouseId} slug={slug} sub={ffSub} onSubChange={setFfSub} provider={ffStatus?.provider ?? null} />
             )}
+            {tab === 'ffbilling' && isFulfillment && <FfBillingTab warehouseId={warehouseId} />}
             {tab === 'requisites' && (
                 <>
                     <RequisitesTab warehouse={warehouse} onChanged={load} />
