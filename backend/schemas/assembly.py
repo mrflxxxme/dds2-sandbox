@@ -172,6 +172,9 @@ class AssignVehicle(BaseModel):
     delivery_date: date
     carrier_inn: str | None = None
     carrier_name: str | None = None
+    # Логистику оказывает склад забора: перевозчик = контрагент склада-источника,
+    # carrier_inn/carrier_name игнорируются.
+    logistics_by_warehouse: bool = False
 
 
 class BulkAssignItem(BaseModel):
@@ -190,6 +193,9 @@ class AssignVehicleBulk(BaseModel):
     driver_last_name: str | None = None
     carrier_inn: str | None = None
     carrier_name: str | None = None
+    # Логистику оказывает склад забора (см. AssignVehicle) — резолвится по каждой
+    # заявке отдельно (у совместных поставок склады-источники разные).
+    logistics_by_warehouse: bool = False
     items: list[BulkAssignItem]
 
 
@@ -320,6 +326,11 @@ class AssemblyRequestResponse(BaseModel):
     counterparty_id: int | None = None
     carrier_inn: str | None = None
     carrier_name: str | None = None
+    # Логистику оказывает склад забора (перевозчик = контрагент склада-источника).
+    logistics_by_warehouse: bool = False
+    # Контрагент склада-источника (Warehouse.counterparty_id) — чтобы UI знал, можно ли
+    # включить «логистику от склада» (None → у склада не задан контрагент).
+    warehouse_counterparty_id: int | None = None
     comment: str | None = None
     wb_warehouse_name_manual: str | None = None
     source_draft_id: int | None = None  # черновик-источник (поток распределения сборки)

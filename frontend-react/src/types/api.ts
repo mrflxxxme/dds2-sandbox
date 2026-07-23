@@ -2079,6 +2079,10 @@ export interface AssemblyRequest {
   counterparty_id?: number | null;
   carrier_inn?: string | null;
   carrier_name?: string | null;
+  /** логистику оказывает склад забора (перевозчик = контрагент склада-источника) */
+  logistics_by_warehouse?: boolean;
+  /** контрагент склада-источника; null → у склада не задан контрагент (гейт чекбокса) */
+  warehouse_counterparty_id?: number | null;
   package_type?: PackageType;
   /** WB-сводка поставки (F1/F2): статус в кабинете + паллеты пропуска. null — не заведена */
   wb_supply?: WbSupplyStateBrief | null;

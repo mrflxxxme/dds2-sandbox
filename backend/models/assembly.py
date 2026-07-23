@@ -164,6 +164,12 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     driver_first_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     driver_last_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     counterparty_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=True)
+    # Логистику оказывает склад забора: при назначении машины перевозчик берётся
+    # из Warehouse.counterparty_id склада-источника (не из введённого ИНН подрядчика).
+    # Флаг — чтобы UI показывал режим и помнил выбор при переоткрытии. См. assign_vehicle.
+    logistics_by_warehouse: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     pickup_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     pickup_time_slot: Mapped[str | None] = mapped_column(String(20), nullable=True)
     pickup_cost: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)

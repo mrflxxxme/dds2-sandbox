@@ -473,6 +473,8 @@ export function addWarehouseMethods(api: ApiClient) {
             delivery_date: string;
             carrier_inn?: string | null;
             carrier_name?: string | null;
+            /** Логистику оказывает склад забора: перевозчик = контрагент склада-источника. */
+            logistics_by_warehouse?: boolean;
         }) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/assign-vehicle`, data);
         },
@@ -543,6 +545,8 @@ export function addWarehouseMethods(api: ApiClient) {
             driver_last_name?: string | null;
             carrier_inn?: string | null;
             carrier_name?: string | null;
+            /** Логистику оказывает склад забора (резолвится по каждой заявке отдельно). */
+            logistics_by_warehouse?: boolean;
             items: Array<{
                 request_id: number;
                 pickup_date: string;
