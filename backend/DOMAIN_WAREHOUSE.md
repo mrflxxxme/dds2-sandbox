@@ -115,6 +115,14 @@ WB не принимает коробку, где кол-во штук одно�
 ### WB остатки (отдельная система)
 `WbWarehouseStock` — read-only данные из WB API. Не интегрирован с локальным `WarehouseStock`. Синхронизация: `warehouse_stock_service.sync_warehouse_stocks()`. Используется для аналитики (`compute_need`) и единых остатков.
 
+### 🔥 Остатки не учитывать (`stock_ignored_warehouses`)
+Сгоревшие склады WB (Краснодар/Невинномысск/Электросталь, 2026-07): WB продолжает отдавать их остатки как живые → фантомные штуки в расчётах. `ProjectSetting "stock_ignored_warehouses"` (`settings_service.get/set_stock_ignored_warehouses`, GET/PUT `/refs/stock-ignored-warehouses`) — список складов, стоку которых расчёты НЕ верят. **Независим от `excluded_warehouses`** (excluded = «не цель отгрузки», ignored = «сток фантомный, спрос/цель — живые»).
+- **Хелпер:** `settings_service.get_stock_ignored_set(db, pid)` — канон (`_normalize_wb_warehouse`) + все сырые написания из `ACCEPTANCE_TO_STOCK_NAME` (для SQL-фильтров `warehouse_name NOT IN (...)` по сырому имени). KV-чтение дешёвое, отдельного кэша нет.
+- **Фильтруют сток:** `warehouse_need_service` (только `stock_lookup`/`wb_stock_total`; спрос по заказам сохранён), `assembly_load_forecast_service` (только `stock`, не incoming), `stock_forecast_service._load_wb_breakdown` («На WB»/days_left; fallback на `WbFunnelDaily` не фильтруется — нет разбивки по складам), `cold_start_distribution_service` (`fetch_sku`/`fetch_cold_start_segment`, raw SQL + expanding `:ignored`), `box_multiplicity_service`, `funnel/stock_costs.py`, `pricing/markup.py`, `funnel/ad_campaigns_service.py`.
+- **СОЗНАТЕЛЬНО не трогаются:** страницы факта (Остатки по складам WB, Сводные остатки), история/снапшоты, БДР/Отчёты и спрос матрицы потребности.
+- **Ловушка in_way-носителя:** мост `_bridge_rows_from_remains` вешает общекарточные `in_way_*` на строку-носителя (max qty). Носитель теперь предпочитает склад НЕ из ignored-сета (иначе `notin_`-читатели выкинули бы и в-пути); все склады ignored → как раньше (max qty). Настройка читается один раз на прогон синка.
+- `set_*` инвалидирует project-scoped: `reports:warehouse_need|stock_warehouses|stock_warehouses_articles|stock_history`.
+
 ### WB Goods Returns (возвраты на ПВЗ)
 `WbGoodsReturn` — отчёт «Возвраты и перемещение товаров» из WB Seller Analytics API (`GET /api/v1/analytics/goods-return`). Хранится зеркально + линк на `InboundReceipt` при оформлении приёмки на физ.склад.
 - **Flow:** sync (раз в 30 мин, rate limit 1/min, max окно 31 день) → `WbGoodsReturn.upsert(srid)` → пользователь выбирает srids + warehouse → `POST /wb-returns/create-receipt` → `create_receipt_from_returns` создаёт `InboundReceipt(EXPECTED, is_defect=true)` → склад подтверждает через стандартный Accept flow → `WarehouseStock.defect_quantity` пополняется.

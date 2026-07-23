@@ -35,7 +35,11 @@ def compute_need(stock_qty: int, avg_daily: float, need_days: int) -> int:
     return max(0, int(deficit + 0.5))
 
 
-def _bridge_rows_from_remains(project_id: int, remains_rows: list[dict]) -> list[dict]:
+def _bridge_rows_from_remains(
+    project_id: int,
+    remains_rows: list[dict],
+    stock_ignored: set[str] | frozenset[str] = frozenset(),
+) -> list[dict]:
     """Собрать строки wb_warehouse_stocks из агрегированных строк remains-отчёта.
 
     Зачем мост: старый источник зеркала (statistics supplier/stocks) с 2026-07-15
@@ -48,12 +52,24 @@ def _bridge_rows_from_remains(project_id: int, remains_rows: list[dict]) -> list
     выбрасывается; «В пути …» НЕ становятся строками (читатели группируют по
     складам) — их qty едет полями in_way_* на строке-НОСИТЕЛЕ карточки (max qty):
     Σ по nm остаётся честной для fallback-читателей. quantity_full носителя =
-    qty + в-пути (семантика quantityFull старого API). Чистая функция."""
+    qty + в-пути (семантика quantityFull старого API). Чистая функция.
+
+    `stock_ignored` — 🔥-склады («остаткам не верим», см. settings_service
+    get_stock_ignored_set): носитель in_way предпочитает склад НЕ из этого сета,
+    иначе notin_-фильтры читателей выкинули бы вместе со строкой-носителем и
+    общекарточные in_way. Fallback: все склады карточки ignored → как раньше
+    (max qty)."""
+    from backend.services.warehouse_need_service import _normalize_wb_warehouse
     from backend.services.warehouse_stock_engine import (
         WB_REMAINS_IN_WAY_FROM_CLIENT,
         WB_REMAINS_IN_WAY_TO_CLIENT,
         WB_REMAINS_TOTAL_ROW,
     )
+
+    def _is_ignored(wh: str) -> bool:
+        if not stock_ignored:
+            return False
+        return wh in stock_ignored or _normalize_wb_warehouse(wh) in stock_ignored
 
     per_wh: dict[tuple[int, str], dict[str, Any]] = {}
     in_way_to: dict[int, int] = {}
@@ -89,9 +105,12 @@ def _bridge_rows_from_remains(project_id: int, remains_rows: list[dict]) -> list
             cur["quantity_full"] += qty
 
     # Носитель в-пути = строка карточки с max qty (tie-break по имени склада —
-    # детерминизм между синками).
+    # детерминизм между синками). 🔥-склады — в последнюю очередь: если есть
+    # хоть один живой склад, in_way едет на него.
     carriers: dict[int, dict[str, Any]] = {}
-    for (nm, _wh), row in sorted(per_wh.items(), key=lambda kv: (-kv[1]["quantity"], kv[0][1])):
+    for (nm, _wh), row in sorted(
+        per_wh.items(), key=lambda kv: (_is_ignored(kv[0][1]), -kv[1]["quantity"], kv[0][1])
+    ):
         if nm not in carriers:
             carriers[nm] = row
     for nm in set(in_way_to) | set(in_way_from):
@@ -170,7 +189,11 @@ async def sync_warehouse_remains(
     # МОСТ: пересобрать wb_warehouse_stocks из этого же отчёта (одной транзакцией).
     # Старый источник зеркала (statistics supplier/stocks) мёртв — «OK, 0 строк»
     # с 2026-07-15, а зеркало читают потребность/прогнозы/кратность/прайсинг.
-    bridged = _bridge_rows_from_remains(project_id, rows)
+    # Настройку 🔥-складов читаем один раз на прогон (выбор носителя in_way).
+    from backend.services.settings_service import get_stock_ignored_set
+
+    stock_ignored = await get_stock_ignored_set(db, project_id)
+    bridged = _bridge_rows_from_remains(project_id, rows, stock_ignored=stock_ignored)
     if bridged:
         await db.execute(delete(WbWarehouseStock).where(WbWarehouseStock.project_id == project_id))
         for i in range(0, len(bridged), 500):

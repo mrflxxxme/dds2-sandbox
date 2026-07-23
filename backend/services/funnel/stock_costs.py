@@ -46,8 +46,14 @@ async def get_stock_cost_map(db: AsyncSession, pid: int) -> dict[int, dict]:
     prev_start = today - timedelta(days=14)  # [today-14 .. today-8]
     yesterday = today - timedelta(days=1)
 
-    # 1. WB остатки: quantity_full включает товар в пути (как в get_unified_stock_summary)
-    wb_result = await db.execute(
+    # 1. WB остатки: quantity_full включает товар в пути (как в get_unified_stock_summary).
+    # 🔥 stock_ignored: сток сгоревших складов — фантом, в себестоимость остатков
+    # и прогноз исчерпания не входит (in_way не теряется: мост вешает его на
+    # НЕ-игнорируемый склад-носитель).
+    from backend.services.settings_service import get_stock_ignored_set
+
+    ignored = await get_stock_ignored_set(db, pid)
+    wb_stmt = (
         select(
             WbWarehouseStock.nm_id,
             func.sum(WbWarehouseStock.quantity_full).label("qty"),
@@ -58,6 +64,9 @@ async def get_stock_cost_map(db: AsyncSession, pid: int) -> dict[int, dict]:
         .group_by(WbWarehouseStock.nm_id)
         .limit(_MAX_ROWS)
     )
+    if ignored:
+        wb_stmt = wb_stmt.where(WbWarehouseStock.warehouse_name.notin_(sorted(ignored)))
+    wb_result = await db.execute(wb_stmt)
     wb_rows = wb_result.all()
 
     # 2. Свои склады: годный сток (включая резерв), брак — отдельное поле, не входит

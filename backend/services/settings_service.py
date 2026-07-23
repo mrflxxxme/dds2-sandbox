@@ -103,6 +103,81 @@ async def set_preorder_allowed_warehouses(db: AsyncSession, project_id: int, war
     return valid
 
 
+# ─── 🔥 Склады WB, остаткам которых НЕ верим (сгоревшие) ─────────────────────
+#
+# WB после пожара продолжает отдавать остатки сгоревших складов как живые →
+# фантомные штуки в расчётах. Флаг заставляет РАСЧЁТНЫХ читателей (потребность,
+# прогнозы, cold-start, кратность, прайсинг, воронка) выкидывать сток этих
+# складов. Страницы факта (Остатки по складам, Сводные), история/снапшоты,
+# БДР/Отчёты и СПРОС — сознательно не трогаются. Независим от excluded.
+
+_STOCK_IGNORED_WAREHOUSES_KEY = "stock_ignored_warehouses"
+
+
+async def get_stock_ignored_warehouses(db: AsyncSession, project_id: int) -> list[str]:
+    """Список складов «🔥 Остатки не учитывать» (хранится без «(…)»)."""
+    raw = await get_setting(db, project_id, _STOCK_IGNORED_WAREHOUSES_KEY)
+    if not raw:
+        return []
+    try:
+        parsed: list[str] = json.loads(raw)
+        return parsed
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+async def set_stock_ignored_warehouses(db: AsyncSession, project_id: int, warehouses: list[str]) -> list[str]:
+    """Set stock-ignored warehouses. Normalizes names (strips parenthesized suffix)."""
+    import re
+
+    from backend.cache import invalidate_cache
+
+    parens_re = re.compile(r"\s*\([^)]*\)\s*$")
+    valid = sorted({parens_re.sub("", w).strip() for w in warehouses if w and w.strip()})
+    await set_setting(db, project_id, _STOCK_IGNORED_WAREHOUSES_KEY, json.dumps(valid, ensure_ascii=False))
+    # Iron rule #7: флаг меняет покрытие в кэшируемых отчётах — инвалидируем
+    # project-scoped (как sync в warehouse_stock_service). Только @cached-читатели
+    # флага: потребность и наценка. Страницы факта/история флагом сознательно
+    # не фильтруются — их кэши не трогаем (их обновит сам синк остатков).
+    for prefix in (
+        "reports:warehouse_need",
+        "reports:pricing_markup",
+    ):
+        try:
+            await invalidate_cache(f"{prefix}:project_id={project_id}")
+        except Exception as e:
+            logger.warning("invalidate %s failed: %s", prefix, e)
+    logger.info("Set stock-ignored warehouses for project %s: %s", project_id, valid)
+    return valid
+
+
+async def get_stock_ignored_set(db: AsyncSession, project_id: int) -> set[str]:
+    """Игнор-сет для читателей: канон (_normalize_wb_warehouse) + все известные
+    сырые написания (алиасы ACCEPTANCE_TO_STOCK_NAME) — чтобы SQL-фильтры
+    `warehouse_name NOT IN (...)` по СЫРОМУ имени тоже попадали. Python-читатели
+    сверяют уже-канонизированное имя — лишние алиасы в сете безвредны."""
+    raw = await get_stock_ignored_warehouses(db, project_id)
+    if not raw:
+        return set()
+    # Лениво: warehouse_need_service сам лениво импортирует settings_service.
+    from backend.services.warehouse_geo_data import ACCEPTANCE_TO_STOCK_NAME
+    from backend.services.warehouse_need_service import _normalize_wb_warehouse
+
+    canon = {_normalize_wb_warehouse(w) for w in raw if w}
+    canon.discard("")
+    if not canon:
+        return set()
+    aliases = {alias for alias, target in ACCEPTANCE_TO_STOCK_NAME.items() if target in canon}
+    # Настройка хранится БЕЗ «(…)», а мост кладёт в warehouse_name СЫРОЕ имя WB
+    # («Рязань (Тюшевское)»). Возвращаем скобочные формы белого списка, чья база
+    # без скобок совпала с каноном, — иначе SQL-фильтры notin_ их пропустят.
+    from backend.services.warehouse_geo_data import WAREHOUSE_COORDS
+
+    parens_re = re.compile(r"\s*\([^)]*\)\s*$")
+    paren_forms = {name for name in WAREHOUSE_COORDS if parens_re.sub("", name).strip() in canon}
+    return canon | aliases | paren_forms
+
+
 _BOX_SIZE_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 
 

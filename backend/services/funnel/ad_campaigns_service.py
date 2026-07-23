@@ -817,7 +817,11 @@ async def get_ad_tab_data(
         )
         bdr_map[b.nm_id] = {"revenue": revenue, "profit": profit}
 
-    # Load current WB stock per nm_id (sum across all warehouses)
+    # Load current WB stock per nm_id (sum across all warehouses,
+    # кроме 🔥-игнорируемых: фантом сгоревшего склада не считается остатком)
+    from backend.services.settings_service import get_stock_ignored_set
+
+    ignored = await get_stock_ignored_set(db, project_id)
     S = WbWarehouseStock
     stock_q = (
         select(
@@ -827,6 +831,8 @@ async def get_ad_tab_data(
         .where(S.project_id == project_id)
         .group_by(S.nm_id)
     )
+    if ignored:
+        stock_q = stock_q.where(S.warehouse_name.notin_(sorted(ignored)))
     stock_rows = (await db.execute(stock_q)).all()
     stock_map: dict[int, int] = {s.nm_id: int(s.stock_qty) for s in stock_rows}
 
