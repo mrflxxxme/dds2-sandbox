@@ -749,11 +749,12 @@ def test_extract_logistics_no_route_no_vehicle():
 
 
 class _FakeActiveClient:
-    """Клиент Газельки для синка: async-контекст + authenticate + fetch_active/planned."""
+    """Клиент Газельки для синка: async-контекст + authenticate + fetch_active/planned/completed."""
 
-    def __init__(self, active: dict, planned: dict | None = None):
+    def __init__(self, active: dict, planned: dict | None = None, completed: dict | None = None):
         self._active = active
         self._planned = planned or {"plans": [], "marketplaces": []}
+        self._completed = completed or {"plans": [], "marketplaces": []}
 
     async def __aenter__(self) -> "_FakeActiveClient":
         return self
@@ -770,6 +771,9 @@ class _FakeActiveClient:
     async def fetch_planned(self) -> dict:
         return self._planned
 
+    async def fetch_completed(self) -> dict:
+        return self._completed
+
 
 def _patch_sync(
     monkeypatch,
@@ -777,18 +781,20 @@ def _patch_sync(
     linked: dict,
     *,
     planned_plans: list | None = None,
+    completed_plans: list | None = None,
     supply_idx: dict | None = None,
 ) -> tuple:
     """Замокать окружение sync_gazelka_states, вернуть моки downstream-вызовов."""
     from backend.services import wb_supply_service
     from backend.services.assembly import status as assembly_status
 
-    # fetch_active отдаёт справочники СПИСКАМИ (joins строит sync сам из data.get(k))
+    # fetch_active/completed отдают справочники СПИСКАМИ (joins строит sync сам из data.get(k))
     lists = {k: list(v.values()) for k, v in _active_joins().items()}
     active = {"plans": [plan], **lists, "marketplaces": []}
     planned = {"plans": planned_plans or [], "marketplaces": []}
+    completed = {"plans": completed_plans or [], **lists, "marketplaces": []}
     monkeypatch.setattr(gazelka_service, "_get_key_or_none", AsyncMock(return_value=object()))
-    monkeypatch.setattr(gazelka_service, "_client_from_key", lambda key: _FakeActiveClient(active, planned))
+    monkeypatch.setattr(gazelka_service, "_client_from_key", lambda key: _FakeActiveClient(active, planned, completed))
     monkeypatch.setattr(gazelka_service, "_linked_map", AsyncMock(return_value=linked))
     monkeypatch.setattr(gazelka_service, "_assembly_supply_index", AsyncMock(return_value=supply_idx or {}))
 
@@ -910,31 +916,53 @@ async def test_sync_states_backfills_cost_for_already_shipped(monkeypatch):
     assert bf_args[4] == "ИП Иванов"  # перевозчик
 
 
-async def test_list_completed_maps_shipment_snapshot(monkeypatch):
-    """Завершённые строятся из наших данных: снимок отгрузки → строка (дедуп по ref)."""
+async def test_sync_states_backfills_from_completed_list(monkeypatch):
+    """Заявка ушла из «Активных», но есть в «Завершённых» с тарифом → бэкфилл стоимости."""
+    completed_plan = {"id": "330662", "status": "4", "route_id": "5", "rate": "15 624", "delivery_date": "2026-07-22"}
+    apply_mock, ship_mock, pass_mock, backfill_mock = _patch_sync(
+        monkeypatch,
+        {"id": "999", "status": "2"},  # активных нет
+        {"330662": (945, "ASM-774", "SHIPPED")},  # завершённая связана
+        completed_plans=[completed_plan],
+    )
+    backfill_mock.return_value = True
+
+    stats = await gazelka_service.sync_gazelka_states(MagicMock(), 4)
+
+    assert stats["cost_backfilled"] == 1
+    args = backfill_mock.await_args.args
+    assert args[2] == 945
+    assert args[3] == Decimal("15624")
+    assert args[4] == "ИП Иванов"
+
+
+async def test_list_completed_from_portal(monkeypatch):
+    """Завершённые — из кабинета (?completed=1): водитель/ТС/перевозчик/тариф + связь + статус «Завершена»."""
+    plan = {
+        "id": "331751", "status": "4", "route_id": "5", "rate": "5580",
+        "supply_id": "41022935", "delivery_date": "2026-07-23", "delivery_address": "Владимир FBO",
+    }
+    lists = {k: list(v.values()) for k, v in _active_joins().items()}
+    completed = {"plans": [plan], **lists, "marketplaces": []}
     monkeypatch.setattr(gazelka_service, "_get_key", AsyncMock(return_value=object()))
-    # порядок колонок select: ref, id, number, status, dfn, dln, dest, sup, cost,
-    # vinfo, vbrand, dphone, shipped, ddate, carrier
-    older = ("330662", 945, "ASM-774", "SHIPPED", "Иван", "Петров", "Невинномысск",
-             "40842600", None, None, None, None, None, None, None)  # SENT (перекроется)
-    newer = ("330662", 945, "ASM-774", "SHIPPED", "Иван", "Петров", "Невинномысск",
-             "40842600", Decimal("15624"), "Х392РМ37", "Мерседес", "+79001112233",
-             date(2026, 7, 22), None, "ИП Иванов")
-    db = MagicMock()
-    db.execute = AsyncMock(return_value=SimpleNamespace(all=lambda: [older, newer]))
+    monkeypatch.setattr(
+        gazelka_service, "_client_from_key",
+        lambda key: _FakeActiveClient({"plans": []}, None, completed),
+    )
+    monkeypatch.setattr(gazelka_service, "_linked_map", AsyncMock(return_value={"331751": (983, "ASM-810", "SHIPPED")}))
+    monkeypatch.setattr(gazelka_service, "_assembly_supply_index", AsyncMock(return_value={}))
 
-    res = await gazelka_service.list_completed(db, 4)
+    res = await gazelka_service.list_completed(MagicMock(), 4)
 
-    assert res.count == 1  # дедуп по gazelka_ref
+    assert res.count == 1
     row = res.items[0]
-    assert row.gazelka_id == "330662"
-    assert row.status_label == "Отгружена"
-    assert row.linked_assembly_number == "ASM-774"
-    assert row.driver_name == "Петров Иван"  # Фамилия Имя
+    assert row.gazelka_id == "331751"
+    assert row.status_label == "Завершена"  # status "4"
+    assert row.rate == "5580"
+    assert row.driver_name == "Дейнекин Андрей Геннадьевич"
     assert row.vehicle == "Мерседес Х392РМ37"
-    assert row.rate == "15624"
     assert row.carrier == "ИП Иванов"
-    assert row.delivery_date == "2026-07-22"
+    assert row.linked_assembly_number == "ASM-810"
 
 
 async def test_sync_states_autolink_skips_already_linked_assembly(monkeypatch):

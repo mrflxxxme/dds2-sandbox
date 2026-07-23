@@ -38,8 +38,6 @@ from backend.cache import invalidate_cache
 from backend.integrations.resilience import CircuitOpenError
 from backend.models import GazelkaOrder, GazelkaOrderStatus, IntegrationKey, Warehouse
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
-from backend.models.counterparty import Counterparty
-from backend.models.warehouse import OutboundShipment
 from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.gazelka import (
     GazelkaConfigResponse,
@@ -759,7 +757,7 @@ async def send_order(
 # ─── Списки заявок из портала (read) ─────────────────────────────────────────
 
 # Коды статусов портала (best-effort; неизвестные показываем как «Статус N»)
-_STATUS_LABELS = {"2": "Запланирована", "3": "Принята в работу", "31": "В маршруте"}
+_STATUS_LABELS = {"2": "Запланирована", "3": "Принята в работу", "31": "В маршруте", "4": "Завершена"}
 _MONO_LABELS = {
     "1": "Моно", "2": "Микс", "3": "Суперсейф", "4": "КГТ", "5": "FBS", "6": "Транзит", "7": "Питание",
 }
@@ -1134,16 +1132,30 @@ async def _reconcile_active_order(
     # 3. Бэкфилл: сборки, отгруженные ДО фичи (авто-шип по приёмке WB из READY), ушли в снимок
     #    отгрузки без тарифа/перевозчика. Пока заявка видна в кабинете — дозаполняем пустой снимок
     #    (в листе оплаты не «—»). Идемпотентно: заполненный снимок не трогаем.
-    if info.pickup_cost is not None:
-        try:
-            if await assembly_status.backfill_gazelka_shipment_cost(
-                db, project_id, assembly_id, info.pickup_cost, info.carrier
-            ):
-                stats["cost_backfilled"] += 1
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001
-            logger.warning("gazelka.sync_states.backfill_failed", project_id=project_id, assembly_id=assembly_id)
+    await _backfill_cost(db, project_id, assembly_id, info, stats)
+
+
+async def _backfill_cost(
+    db: AsyncSession,
+    project_id: int,
+    assembly_id: int,
+    info: _GazelkaLogistics,
+    stats: dict[str, int],
+) -> None:
+    """Дозаполнить пустой снимок отгрузки тарифом/перевозчиком заявки (best-effort)."""
+    if info.pickup_cost is None:
+        return
+    from backend.services.assembly import status as assembly_status
+
+    try:
+        if await assembly_status.backfill_gazelka_shipment_cost(
+            db, project_id, assembly_id, info.pickup_cost, info.carrier
+        ):
+            stats["cost_backfilled"] += 1
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.warning("gazelka.sync_states.backfill_failed", project_id=project_id, assembly_id=assembly_id)
 
 
 async def _auto_link_unmatched(
@@ -1218,14 +1230,15 @@ async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, in
             await client.authenticate()
             data = await client.fetch_active()
             planned = await client.fetch_planned()
+            completed = await client.fetch_completed()
     except (GazelkaApiError, httpx.HTTPError, CircuitOpenError, ValueError) as e:
         logger.warning("gazelka.sync_states.unavailable", project_id=project_id, error=str(e))
         return stats
 
     linked = await _linked_map(db, project_id)
-    # Авто-связь по № поставки: и запланированные, и активные (заведённые в кабинете руками).
+    # Авто-связь по № поставки: запланированные + активные + завершённые (заведённые в кабинете руками).
     supply_idx = await _assembly_supply_index(db, project_id)
-    all_plans = (planned.get("plans") or []) + (data.get("plans") or [])
+    all_plans = (planned.get("plans") or []) + (data.get("plans") or []) + (completed.get("plans") or [])
     stats["autolinked"] = await _auto_link_unmatched(db, project_id, all_plans, supply_idx, linked)
 
     joins = {
@@ -1250,84 +1263,62 @@ async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, in
                 assembly_id=assembly_id,
                 gazelka_id=str(plan.get("id") or ""),
             )
+
+    # Бэкфилл стоимости из ЗАВЕРШЁННЫХ: заявки, ушедшие из «Активных» (отгружены до фичи),
+    # несут тариф на странице «Завершённые» → дозаполняем пустой снимок отгрузки.
+    completed_joins = {
+        k: {str(r.get("id")): r for r in (completed.get(k) or [])}
+        for k in ("routes", "drivers", "vehicles", "carriers")
+    }
+    for plan in completed.get("plans") or []:
+        lk = linked.get(str(plan.get("id") or ""))
+        if not lk:
+            continue
+        info = _extract_logistics(plan, completed_joins)
+        try:
+            await _backfill_cost(db, project_id, lk[0], info, stats)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "gazelka.sync_states.completed_backfill_failed",
+                project_id=project_id,
+                gazelka_id=str(plan.get("id") or ""),
+            )
+
     logger.info("gazelka.sync_states", project_id=project_id, **stats)
     return stats
 
 
 async def list_completed(db: AsyncSession, project_id: int) -> GazelkaOrderList:
-    """Завершённые заявки Газельки — из НАШИХ данных.
+    """Завершённые заявки из кабинета Газельки: ``/customer/orders?completed=1``.
 
-    У портала архива нет: кабинет показывает только «Запланированные» + «Активные», а
-    выполненные оттуда исчезают (проверено — разделов completed/history/archive у них нет).
-    Поэтому источник — связанные заявки (``GazelkaOrder`` SENT/MATCHED), чья сборка уже
-    отгружена (SHIPPED/DELIVERED/CLOSED). Реквизиты — снимок отгрузки (``OutboundShipment``),
-    захваченный синком на момент «В маршруте» (водитель/ТС/тариф/перевозчик), — он не пропадёт
-    вместе с заявкой в кабинете.
+    Тот же встроенный JSON, что у «Активных» (водитель/ТС/перевозчик/тариф + статус),
+    с пометкой связи с нашей сборкой. У портала это отдельная страница «Завершённые заявки».
     """
-    await _get_key(db, project_id)  # интеграция должна быть настроена
-    _COMPLETED = [AssemblyStatus.SHIPPED.value, AssemblyStatus.DELIVERED.value, AssemblyStatus.CLOSED.value]
-    rows = await db.execute(
-        select(
-            GazelkaOrder.gazelka_ref,
-            AssemblyRequest.id,
-            AssemblyRequest.number,
-            AssemblyRequest.status,
-            AssemblyRequest.driver_first_name,
-            AssemblyRequest.driver_last_name,
-            OutboundShipment.destination,
-            OutboundShipment.wb_supply_id,
-            OutboundShipment.pickup_cost,
-            OutboundShipment.vehicle_info,
-            OutboundShipment.vehicle_brand,
-            OutboundShipment.driver_phone,
-            OutboundShipment.shipped_date,
-            OutboundShipment.delivery_date,
-            Counterparty.name,
-        )
-        .join(AssemblyRequest, AssemblyRequest.id == GazelkaOrder.assembly_request_id)
-        .join(
-            OutboundShipment,
-            OutboundShipment.id == AssemblyRequest.outbound_shipment_id,
-            isouter=True,
-        )
-        .join(Counterparty, Counterparty.id == AssemblyRequest.counterparty_id, isouter=True)
-        .where(
-            GazelkaOrder.project_id == project_id,
-            GazelkaOrder.status.in_([GazelkaOrderStatus.SENT, GazelkaOrderStatus.MATCHED]),
-            GazelkaOrder.gazelka_ref.isnot(None),
-            AssemblyRequest.is_deleted.is_(False),
-            AssemblyRequest.status.in_(_COMPLETED),
-        )
-        .order_by(GazelkaOrder.id)  # last-wins dedup по gazelka_ref (ручной матч поверх отправки)
-        .limit(500)
-    )
-    by_ref: dict[str, GazelkaOrderRow] = {}
-    for (
-        ref, aid, number, ast, dfn, dln,
-        dest, sup, cost, vinfo, vbrand, dphone, shipped, ddate, carrier,
-    ) in rows.all():
-        driver = " ".join(p for p in (dln, dfn) if p) or None
-        vehicle = " ".join(p for p in (vbrand, vinfo) if p) or None
-        day = shipped or ddate
-        by_ref[str(ref)] = GazelkaOrderRow(
-            gazelka_id=str(ref),
-            status=str(ast),
-            status_label=_assembly_status_label(ast) or str(ast),
-            delivery_date=day.isoformat() if day else None,
-            delivery_address=dest,
-            supply_id=sup,
-            rate=str(cost) if cost is not None else None,
-            carrier=carrier,
-            driver_name=driver,
-            driver_phone=dphone,
-            vehicle=vehicle,
-            editable=False,
-            linked_assembly_id=aid,
-            linked_assembly_number=number,
-            linked_assembly_status=_assembly_status_label(ast),
-        )
-    items = sorted(by_ref.values(), key=lambda r: r.delivery_date or "", reverse=True)
-    return GazelkaOrderList(items=items, count=len(items))
+    key = await _get_key(db, project_id)
+    try:
+        async with _client_from_key(key) as client:
+            await client.authenticate()
+            data = await client.fetch_completed()
+    except GazelkaApiError as e:
+        raise GazelkaServiceError(str(e), status_code=e.status_code) from e
+    except (httpx.HTTPError, CircuitOpenError, ValueError) as e:
+        raise GazelkaServiceError(f"Газелька недоступна: {e}", status_code=502) from e
+
+    linked = await _linked_map(db, project_id)
+    supply_idx = await _assembly_supply_index(db, project_id)
+    mkts = data.get("marketplaces") or []
+    joins = {
+        k: {str(r.get("id")): r for r in (data.get(k) or [])}
+        for k in ("routes", "drivers", "vehicles", "carriers", "places")
+    }
+    rows = []
+    for p in data.get("plans") or []:
+        row = _row_from_plan(p, mkts, linked, editable=False, joins=joins)
+        _attach_suggestion(row, p, supply_idx)
+        rows.append(row)
+    return GazelkaOrderList(items=rows, count=len(rows))
 
 
 async def get_ttn(db: AsyncSession, project_id: int, plan_id: str) -> tuple[bytes, str]:
