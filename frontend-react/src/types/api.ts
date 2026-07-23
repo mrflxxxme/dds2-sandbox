@@ -2876,6 +2876,15 @@ export interface AssemblyHistoryEntry {
     comment: string | null;
 }
 
+/** Одна запись истории изменения стоимости перевозки заявки (ASM-785). */
+export interface AssemblyPickupCostHistoryEntry {
+    id: number;
+    old_cost: number | null;
+    new_cost: number | null;
+    changed_at: string;
+    changed_by: string | null;
+}
+
 /** Одна попытка отгрузки заявки (цепочка: отгрузил → не приняли → вернул → переотгрузил). */
 export interface AssemblyAttempt {
     attempt_no: number;

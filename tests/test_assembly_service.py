@@ -48,6 +48,7 @@ from backend.services.assembly_service import (
     get_assembly_attempts,
     get_assembly_request,
     get_logistics_analytics,
+    get_pickup_cost_history,
     list_assembly_requests,
     mark_ready,
     prefetch_list_maps,
@@ -636,6 +637,66 @@ class TestUpdateAssemblyRequest:
         updated = await update_assembly_request(db_session, PROJECT_ID, req.id, payload)
         assert len(updated.items) == 1
         assert updated.items[0].barcode == TEST_BARCODE_2
+
+
+@pytest.mark.asyncio
+class TestPickupCostHistory:
+    """ASM-785: аудит правок стоимости перевозки (старая→новая + кто поменял)."""
+
+    async def test_change_records_history_with_author(self, db_session):
+        """Правка pickup_cost пишет запись со старой/новой ценой и автором."""
+        req = await _create_test_request(db_session)
+        # Первичная установка: old=None → new=1000.
+        await update_assembly_request(
+            db_session, PROJECT_ID, req.id,
+            AssemblyRequestUpdate(pickup_cost=Decimal("1000.00")),
+            changed_by="Иван Петров",
+        )
+        # Правка: old=1000 → new=1500.
+        await update_assembly_request(
+            db_session, PROJECT_ID, req.id,
+            AssemblyRequestUpdate(pickup_cost=Decimal("1500.00")),
+            changed_by="Мария Смирнова",
+        )
+        hist = await get_pickup_cost_history(db_session, PROJECT_ID, req.id)
+        assert len(hist) == 2
+        assert hist[0].old_cost is None
+        assert hist[0].new_cost == Decimal("1000.00")
+        assert hist[0].changed_by == "Иван Петров"
+        assert hist[1].old_cost == Decimal("1000.00")
+        assert hist[1].new_cost == Decimal("1500.00")
+        assert hist[1].changed_by == "Мария Смирнова"
+
+    async def test_no_history_when_cost_unchanged(self, db_session):
+        """Повторный PUT с той же ценой не плодит записей истории."""
+        req = await _create_test_request(db_session)
+        await update_assembly_request(
+            db_session, PROJECT_ID, req.id,
+            AssemblyRequestUpdate(pickup_cost=Decimal("1000.00")), changed_by="A",
+        )
+        # Та же цена — история не растёт.
+        await update_assembly_request(
+            db_session, PROJECT_ID, req.id,
+            AssemblyRequestUpdate(pickup_cost=Decimal("1000.00")), changed_by="B",
+        )
+        # Правка другого поля — цену не трогаем, история не растёт.
+        await update_assembly_request(
+            db_session, PROJECT_ID, req.id,
+            AssemblyRequestUpdate(comment="просто коммент"), changed_by="C",
+        )
+        hist = await get_pickup_cost_history(db_session, PROJECT_ID, req.id)
+        assert len(hist) == 1
+        assert hist[0].changed_by == "A"
+
+    async def test_history_isolated_by_project(self, db_session):
+        """Чтение истории по чужому проекту не находит заявку."""
+        req = await _create_test_request(db_session)
+        await update_assembly_request(
+            db_session, PROJECT_ID, req.id,
+            AssemblyRequestUpdate(pickup_cost=Decimal("500.00")), changed_by="A",
+        )
+        with pytest.raises(ValueError, match="not found"):
+            await get_pickup_cost_history(db_session, OTHER_PROJECT_ID, req.id)
 
 
 @pytest.mark.asyncio

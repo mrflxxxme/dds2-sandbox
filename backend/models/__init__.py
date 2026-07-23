@@ -269,6 +269,7 @@ from backend.models.wb_measurements import (
 from backend.models.assembly import (
     AssemblyDraft,
     AssemblyDraftCategoryHourly,
+    AssemblyPickupCostHistory,
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,
@@ -409,6 +410,7 @@ __all__ = [
     # Assembly
     "AssemblyDraft",
     "AssemblyDraftCategoryHourly",
+    "AssemblyPickupCostHistory",
     "AssemblyRequest",
     "AssemblyRequestItem",
     "AssemblyStatus",

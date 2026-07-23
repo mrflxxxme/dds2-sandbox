@@ -12,8 +12,10 @@ send_order   — РЕАЛЬНОЕ создание заявки во внешн�
                audit-строку ``GazelkaOrder`` с исходом и выдержкой ответа.
 """
 
+import asyncio
 import html as _html
 import re
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -1018,6 +1020,162 @@ async def list_active(db: AsyncSession, project_id: int) -> GazelkaOrderList:
         if row.linked_assembly_id in promoted:
             row.linked_assembly_status = _assembly_status_label(AssemblyStatus.VEHICLE_ASSIGNED.value)
     return GazelkaOrderList(items=rows, count=len(rows))
+
+
+# ─── Фоновый синк статусов заявок (шедулер, каждые 15 мин) ───────────────────
+
+
+def _split_driver_name(name: str | None) -> tuple[str | None, str | None]:
+    """ФИО Газельки «Фамилия Имя [Отчество]» → (first, last). Порядок — как в кабинете WB."""
+    parts = [p for p in re.split(r"\s+", (name or "").strip()) if p]
+    if not parts:
+        return None, None
+    first = parts[1] if len(parts) > 1 else None
+    return first, parts[0]
+
+
+def _parse_rate(v: object) -> Decimal | None:
+    """Тариф Газельки → Decimal: убираем разделители тысяч (пробел/NBSP), запятую→точку."""
+    s = (_u(v) or "").replace("\xa0", "").replace(" ", "").replace(",", ".")
+    return _dec_or_none(s)
+
+
+@dataclass
+class _GazelkaLogistics:
+    """Реквизиты машины/водителя/тарифа из активной заявки портала (для зеркала в сборку)."""
+
+    car_number: str | None
+    car_model: str | None
+    driver_first: str | None
+    driver_last: str | None
+    driver_phone: str | None
+    carrier: str | None
+    pickup_cost: Decimal | None
+    delivery_date: date | None
+    pickup_date: date | None
+    has_vehicle: bool
+
+
+def _extract_logistics(plan: dict, joins: dict[str, dict[str, dict]]) -> _GazelkaLogistics:
+    """Достать реквизиты из плана + JOIN-справочников (route→driver/vehicle/carrier)."""
+    route = joins["routes"].get(str(plan.get("route_id") or "")) or {}
+    drv = joins["drivers"].get(str(route.get("driver_id") or "")) or {}
+    veh = joins["vehicles"].get(str(route.get("vehicle_id") or "")) or {}
+    car = joins["carriers"].get(str(route.get("carrier_id") or "")) or {}
+    first, last = _split_driver_name(_u(drv.get("name")))
+    car_number = _u(veh.get("vehicle_number"))
+    car_model = _u(veh.get("vehicle_make"))
+    return _GazelkaLogistics(
+        car_number=car_number,
+        car_model=car_model,
+        driver_first=first,
+        driver_last=last,
+        driver_phone=_u(drv.get("phone")),
+        carrier=_u(car.get("organization")),
+        pickup_cost=_parse_rate(plan.get("rate")),
+        delivery_date=_date_or_none(plan.get("delivery_date")),
+        pickup_date=_date_or_none(route.get("date")) or _date_or_none(plan.get("departure_date")),
+        has_vehicle=bool(car_number or car_model or first or last),
+    )
+
+
+async def _reconcile_active_order(
+    db: AsyncSession,
+    project_id: int,
+    assembly_id: int,
+    code: str,
+    info: _GazelkaLogistics,
+    stats: dict[str, int],
+) -> None:
+    """Синхронизировать ОДНУ связанную заявку: назначение машины / пропуск / отгрузка."""
+    from backend.services import wb_supply_service
+    from backend.services.assembly import status as assembly_status
+
+    # 1. Газелька назначила машину (Принята в работу / В маршруте) → реквизиты в сборку,
+    #    промоушн READY→VEHICLE_ASSIGNED, зеркало WB-пропуска.
+    if info.has_vehicle and code in ("3", "31"):
+        new_status = await assembly_status.apply_gazelka_logistics(
+            db,
+            project_id,
+            assembly_id,
+            car_number=info.car_number,
+            car_model=info.car_model,
+            driver_phone=info.driver_phone,
+            driver_first_name=info.driver_first,
+            driver_last_name=info.driver_last,
+            carrier_name=info.carrier,
+            pickup_cost=info.pickup_cost,
+            delivery_date=info.delivery_date,
+            pickup_date=info.pickup_date,
+            promote=True,
+        )
+        if new_status == AssemblyStatus.VEHICLE_ASSIGNED.value:
+            stats["assigned"] += 1
+        # Занос пропуска в кабинет WB (best-effort; требует брони supply_id, иначе ждёт).
+        try:
+            if await wb_supply_service.try_autopush_pass_by_assembly(db, project_id, assembly_id):
+                stats["passed"] += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning("gazelka.sync_states.pass_push_failed", project_id=project_id, assembly_id=assembly_id)
+
+    # 2. «В маршруте» (код 31) → авто-шип: товар физически уехал. Отгрузка несёт газельный
+    #    тариф как pickup_cost. Идемпотентно: уже SHIPPED → ValueError (глушим).
+    if code == "31":
+        try:
+            await assembly_status.ship_request(db, project_id, assembly_id, allow_gazelka_ready=True)
+            stats["shipped"] += 1
+        except ValueError:
+            pass
+
+
+async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, int]:
+    """Фоновый синк активных заявок Газельки (шедулер). Best-effort, без исключений наружу.
+
+    Для СВЯЗАННЫХ заявок из кабинета перевозчика:
+      • назначена машина/водитель → сборка READY→VEHICLE_ASSIGNED + реквизиты + WB-пропуск
+        (авто-занос в кабинет, как при ручном назначении машины);
+      • статус «В маршруте» (код 31) → авто-шип сборки (тариф → стоимость забора).
+    Сбой одной заявки не роняет синк остальных.
+    """
+    stats = {"assigned": 0, "passed": 0, "shipped": 0}
+    key = await _get_key_or_none(db, project_id)
+    if key is None:
+        return stats
+    try:
+        async with _client_from_key(key) as client:
+            await client.authenticate()
+            data = await client.fetch_active()
+    except (GazelkaApiError, httpx.HTTPError, CircuitOpenError, ValueError) as e:
+        logger.warning("gazelka.sync_states.unavailable", project_id=project_id, error=str(e))
+        return stats
+
+    linked = await _linked_map(db, project_id)
+    joins = {
+        k: {str(r.get("id")): r for r in (data.get(k) or [])}
+        for k in ("routes", "drivers", "vehicles", "carriers")
+    }
+    for plan in data.get("plans") or []:
+        lk = linked.get(str(plan.get("id") or ""))
+        if not lk:
+            continue
+        assembly_id = lk[0]
+        code = str(plan.get("status") or "")
+        info = _extract_logistics(plan, joins)
+        try:
+            await _reconcile_active_order(db, project_id, assembly_id, code, info, stats)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "gazelka.sync_states.reconcile_failed",
+                project_id=project_id,
+                assembly_id=assembly_id,
+                gazelka_id=str(plan.get("id") or ""),
+            )
+    logger.info("gazelka.sync_states", project_id=project_id, **stats)
+    return stats
 
 
 async def get_ttn(db: AsyncSession, project_id: int, plan_id: str) -> tuple[bytes, str]:

@@ -11,7 +11,7 @@ import MigfullModal from './MigfullModal';
 import PalletLayoutTab from './PalletLayoutTab';
 import WbSupplyPanel from './WbSupplyPanel';
 import type { Column } from '@/components/DataTable';
-import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply, WbSupplyState, WbSupplySyncStatus } from '@/types/api';
+import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyPickupCostHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply, WbSupplyState, WbSupplySyncStatus } from '@/types/api';
 
 // Статус заноса заявки в кабинет WB (для вкладки «Поставка WB»).
 const WB_SYNC_MAP: Record<WbSupplySyncStatus, { label: string; className: string }> = {
@@ -109,6 +109,8 @@ export default function AssemblyDetailPage() {
 
     // History
     const [history, setHistory] = useState<AssemblyHistoryEntry[]>([]);
+    // История правок стоимости перевозки (старая→новая + кто поменял, ASM-785).
+    const [costHistory, setCostHistory] = useState<AssemblyPickupCostHistoryEntry[]>([]);
 
     // Цепочка попыток отгрузки (отгрузил → не приняли → вернул → переотгрузил).
     const [attempts, setAttempts] = useState<AssemblyAttempt[]>([]);
@@ -136,6 +138,7 @@ export default function AssemblyDetailPage() {
             const data = await api.getAssemblyRequest(id);
             setAssembly(data);
             api.getAssemblyHistory(id).then(setHistory).catch(() => {});
+            api.getAssemblyPickupCostHistory(id).then(setCostHistory).catch(() => {});
             api.getAssemblyAttempts(id).then(setAttempts).catch(() => {});
             // Занос в кабинет WB — опционально: ошибку глотаем, карточка покажет дефолт.
             api.wbSupplyGetState(id).then(setWbState).catch(() => {});
@@ -555,6 +558,10 @@ export default function AssemblyDetailPage() {
                 update[field] = value || undefined;
             }
             await api.updateAssemblyRequest(id, update);
+            // Правка стоимости перевозки пишет запись в историю — перечитываем её.
+            if (field === 'pickup_cost') {
+                api.getAssemblyPickupCostHistory(id).then(setCostHistory).catch(() => {});
+            }
         } catch (e: unknown) {
             setAssembly(oldAssembly);
             setError(e instanceof Error ? e.message : 'Ошибка сохранения');
@@ -1395,6 +1402,33 @@ export default function AssemblyDetailPage() {
             })()}
 
             {/* History timeline */}
+            {costHistory.length > 0 && (
+                <div className="glass-card" style={{ padding: 24, marginTop: 16 }}>
+                    <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>
+                        История стоимости перевозки
+                    </h2>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                        {[...costHistory].reverse().map((entry) => (
+                            <div key={entry.id} style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                <span style={{ fontSize: 14, fontWeight: 500 }}>
+                                    {entry.old_cost != null ? formatNumber(Number(entry.old_cost)) + ' ₽' : '—'}
+                                    {' → '}
+                                    <strong>{entry.new_cost != null ? formatNumber(Number(entry.new_cost)) + ' ₽' : '—'}</strong>
+                                </span>
+                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                    {formatDateTime(entry.changed_at)}
+                                </span>
+                                {entry.changed_by && (
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
+                                        ({entry.changed_by})
+                                    </span>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
             {history.length > 0 && (
                 <div className="glass-card" style={{ padding: 24, marginTop: 16 }}>
                     <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>
