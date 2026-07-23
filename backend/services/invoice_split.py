@@ -30,7 +30,13 @@ _RASTER_DPI = 150             # рендер скан-страницы
 # на абсурдный/дегенеративный размер страницы (реальные счёта ≤~3500 pt; 20000 pt ≈ 280").
 _MAX_MEDIABOX_PT = 20_000.0
 _STORE_MAX_LONG_PX = 2200     # потолок длинной стороны хранимого под-файла (читаемо, но компактно)
-_VISION_MAX_LONG_PX = 1568    # потолок vision-входа (рекомендация Claude; экономит токены/латентность)
+# vision-вход шлётся base64 через РФ-прокси (Anthropic geo-blocked) — узкий канал давится
+# тяжёлыми картинками и не отвечает за таймаут (прод 2026-07-23: скан не распознавался). Держим
+# payload маленьким: меньше px + ниже quality + кап страниц. 1180px/q70 обычно достаточно для
+# реквизитов, а р/с в любом случае гейтится контроль-ключом по БИК (мисрид → предупреждение).
+_VISION_MAX_LONG_PX = 1180    # потолок vision-входа (было 1568 — резали payload под прокси)
+_VISION_JPEG_QUALITY = 70     # quality vision-JPEG (хранилище держит _JPEG_QUALITY=85 отдельно)
+_VISION_MAX_PAGES = 4         # сколько страниц скан-PDF шлём в vision за раз (реквизиты — на 1-й)
 _JPEG_QUALITY = 85
 _ATTACH_DOWNSCALE_MIN_BYTES = 3 * 1024 * 1024  # ужимаем при привязке только крупные сканы (>3 МБ)
 
@@ -90,9 +96,11 @@ def rasterize_pages(data: bytes) -> list[Image.Image]:
 
 
 def image_to_jpeg(img: Image.Image, max_long_px: int = _VISION_MAX_LONG_PX) -> bytes:
-    """PIL.Image → JPEG-байты для vision-входа (доп. downscale + сжатие)."""
+    """PIL.Image → JPEG-байты для vision-входа (доп. downscale + сжатие).
+    Пониженный _VISION_JPEG_QUALITY (не хранилищный 85) — payload должен пролезть
+    через узкий РФ-прокси к Anthropic за таймаут."""
     buf = io.BytesIO()
-    _to_rgb_downscaled(img, max_long_px).save(buf, format="JPEG", quality=_JPEG_QUALITY)
+    _to_rgb_downscaled(img, max_long_px).save(buf, format="JPEG", quality=_VISION_JPEG_QUALITY)
     return buf.getvalue()
 
 
