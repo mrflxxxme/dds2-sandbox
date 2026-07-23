@@ -646,6 +646,7 @@ class AssemblyAttempt(BaseModel):
     carrier_name: str | None = None
     pickup_cost: Decimal | None = None
     pallets_count: int | None = None
+    shipped_as_boxes: bool = False  # единица забора: паллеты (False) или короба (True)
     pickup_date: date | None = None
     delivery_date: date | None = None
     outcome: Literal["accepted", "rejected", "in_transit"]
@@ -835,6 +836,7 @@ class LogisticsShipmentRow(BaseModel):
     wb_fbo_planned_date: date | None = None
     wb_fbo_actual_date: date | None = None
     pallets_count: int | None = None
+    shipped_as_boxes: bool = False  # единица забора: паллеты (False) или короба (True)
     pickup_cost: Decimal | None = None
     cost_per_pallet: Decimal | None = None
     total_weight_kg: Decimal | None = None

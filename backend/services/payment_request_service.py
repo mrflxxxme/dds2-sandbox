@@ -314,6 +314,7 @@ class PaymentRequestService:
                     matched_at=os_row.matched_at,
                     matched_txn_date=matched_txn_dt.date() if matched_txn_dt else None,
                     pallets_count=os_row.pallets_count,
+                    shipped_as_boxes=os_row.shipped_as_boxes,
                     pickup_date=os_row.pickup_date,
                     source_warehouse=src_wh_name,
                     wb_supply_number=os_row.wb_supply_id or fbo_supply_no,

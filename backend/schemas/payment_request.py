@@ -323,6 +323,7 @@ class ShippableShipmentRow(BaseModel):
     matched_txn_date: date | None = None
     # Доп. данные забора для рабочего списка
     pallets_count: int | None = None
+    shipped_as_boxes: bool = False  # единица забора: паллеты (False) или короба (True)
     pickup_date: date | None = None
     source_warehouse: str | None = None
     wb_supply_number: str | None = None

@@ -1833,6 +1833,7 @@ async def get_assembly_attempts(db: AsyncSession, project_id: int, request_id: i
                 "carrier_name": carrier_name,
                 "pickup_cost": ship.pickup_cost,
                 "pallets_count": ship.pallets_count,
+                "shipped_as_boxes": ship.shipped_as_boxes,
                 "pickup_date": ship.pickup_date,
                 "delivery_date": ship.delivery_date,
                 "outcome": outcome,
