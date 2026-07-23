@@ -25,12 +25,12 @@ grew/shrank/flipped) по фактическим ДНЯМ СРЕЗА (а не п
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import date, timedelta
 from io import BytesIO
 
 from openpyxl import Workbook
-from sqlalchemy import delete, func, select, tuple_
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import case, delete, func, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.assembly import AssemblyStockMismatchDaily
@@ -43,8 +43,19 @@ from backend.utils.time import utcnow
 MSK_OFFSET = timedelta(hours=3)
 FALLBACK_CATEGORY = "Без категории"
 RETENTION_DAYS = 90
-# Окно (роутер: days ≤ 90) × склады × SKU — разумный потолок для одной выборки.
+# Окно (роутер: days ≤ 90) × склады × SKU — разумный потолок для одной выборки
+# (используется только get_changes — get_history агрегирует в SQL, см. ниже).
 _ROWS_CAP = 200_000
+# Multi-VALUES INSERT чанк: 15 колонок в values() × 2000 = 30 000 параметров —
+# запас под asyncpg-лимит 32767 параметров на один statement (грабля проекта:
+# tuple_(...).not_in(list(...)) и построчный UPSERT падали на >16k ячеек/день).
+_INSERT_CHUNK_SIZE = 2000
+
+
+def _chunked(rows: list[dict], size: int) -> Iterator[list[dict]]:
+    for i in range(0, len(rows), size):
+        yield rows[i : i + size]
+
 
 _EVENT_LABELS_RU = {
     "appeared": "Появился",
@@ -105,11 +116,16 @@ async def _category_by_nomenclature_id(
 
 
 async def snapshot_project(db: AsyncSession, project_id: int, day: date | None = None) -> int:
-    """Записать снимок расхождения дня (idempotent: снимок дня перезаписывается).
+    """Записать снимок расхождения дня (idempotent: день перезаписывается целиком).
 
     Считает через `compute_stock_mismatch_cells` (то же ядро, что живая вкладка),
-    UPSERT-ит строки дня и удаляет строки этого дня, чьих (warehouse_id, barcode)
-    в свежем расчёте больше нет (сошлись). Коммитит сам. Возвращает число строк.
+    удаляет ВСЕ строки этого дня и батч-вставляет свежие ячейки (multi-VALUES,
+    чанками — см. `_INSERT_CHUNK_SIZE`). Delete-all-day+insert идемпотентно
+    перезаписывает день целиком (включая «сошедшиеся» SKU — их просто нет
+    среди свежих строк) и не зависит от tuple_(...).not_in(list(...)) /
+    построчного UPSERT, падавших на asyncpg-лимите параметров при >16k
+    ячеек/день. Ключи cells уникальны по построению — дедуп не нужен.
+    Коммитит сам. Возвращает число строк.
     """
     snapshot_date = day or msk_today()
     cells = await compute_stock_mismatch_cells(db, project_id, None)
@@ -117,66 +133,41 @@ async def snapshot_project(db: AsyncSession, project_id: int, day: date | None =
     nom_ids = {c["nomenclature_id"] for c in cells if c["nomenclature_id"]}
     category_by_nm = await _category_by_nomenclature_id(db, project_id, nom_ids)
 
-    fresh_keys: set[tuple[int, str]] = set()
     now = utcnow()
+    rows: list[dict] = []
     for c in cells:
         barcode = str(c["barcode"])[:64]
-        fresh_keys.add((c["warehouse_id"], barcode))
         category = category_by_nm.get(c["nomenclature_id"]) or FALLBACK_CATEGORY
         article_seller = c.get("article_seller")
-        values = {
-            "project_id": project_id,
-            "snapshot_date": snapshot_date,
-            "warehouse_id": c["warehouse_id"],
-            "provider": c.get("provider"),
-            "barcode": barcode,
-            "nomenclature_id": c["nomenclature_id"],
-            "article_seller": article_seller[:255] if article_seller else None,
-            "category": category[:100],
-            "ff_good": c["ff_good"],
-            "ff_logistics": c["ff_logistics"],
-            "our_quantity": c["our_quantity"],
-            "our_defect": c["our_defect"],
-            "diff": c["diff"],
-            "created_at": now,
-            "updated_at": now,
-        }
-        await db.execute(
-            pg_insert(AssemblyStockMismatchDaily)
-            .values(**values)
-            .on_conflict_do_update(
-                constraint="uq_asm_stock_mismatch_daily",
-                set_={
-                    k: values[k]
-                    for k in (
-                        "provider",
-                        "nomenclature_id",
-                        "article_seller",
-                        "category",
-                        "ff_good",
-                        "ff_logistics",
-                        "our_quantity",
-                        "our_defect",
-                        "diff",
-                        "updated_at",
-                    )
-                },
-            )
+        rows.append(
+            {
+                "project_id": project_id,
+                "snapshot_date": snapshot_date,
+                "warehouse_id": c["warehouse_id"],
+                "provider": c.get("provider"),
+                "barcode": barcode,
+                "nomenclature_id": c["nomenclature_id"],
+                "article_seller": article_seller[:255] if article_seller else None,
+                "category": category[:100],
+                "ff_good": c["ff_good"],
+                "ff_logistics": c["ff_logistics"],
+                "our_quantity": c["our_quantity"],
+                "our_defect": c["our_defect"],
+                "diff": c["diff"],
+                "created_at": now,
+                "updated_at": now,
+            }
         )
 
-    # Сошедшиеся SKU: были в снимке дня раньше (либо повторный прогон дня),
-    # в свежем расчёте их уже нет — строка дня для них подлежит удалению.
-    stale = delete(AssemblyStockMismatchDaily).where(
-        AssemblyStockMismatchDaily.project_id == project_id,
-        AssemblyStockMismatchDaily.snapshot_date == snapshot_date,
-    )
-    if fresh_keys:
-        stale = stale.where(
-            tuple_(AssemblyStockMismatchDaily.warehouse_id, AssemblyStockMismatchDaily.barcode).not_in(
-                list(fresh_keys)
-            )
+    await db.execute(
+        delete(AssemblyStockMismatchDaily).where(
+            AssemblyStockMismatchDaily.project_id == project_id,
+            AssemblyStockMismatchDaily.snapshot_date == snapshot_date,
         )
-    await db.execute(stale)
+    )
+    for chunk in _chunked(rows, _INSERT_CHUNK_SIZE):
+        await db.execute(insert(AssemblyStockMismatchDaily).values(chunk))
+
     await db.commit()
     return len(cells)
 
@@ -239,6 +230,10 @@ async def get_history(
 ) -> dict:
     """StockMismatchHistoryResponse-shape: точки (склад×день) + справочники фильтров.
 
+    Точки агрегируются В SQL (`SUM`/`COUNT` по знаку diff, `GROUP BY` день+склад):
+    из БД приходит склад×день, а не потенциально сотни тысяч построчных ячеек —
+    снимает зависимость от `_ROWS_CAP`/недетерминированного усечения без
+    `ORDER BY` (окно project×дни×склады×SKU легко превышало старый лимит).
     `warehouses`/`categories` — по ПОЛНОМУ окну (project_id + дата), без учёта
     текущих warehouse_id/category — так селекторы дают переключиться, а не
     схлопываются до одного значения при уже применённом фильтре.
@@ -254,44 +249,40 @@ async def get_history(
     if category is not None:
         point_filters.append(AssemblyStockMismatchDaily.category == category)
 
-    rows = (
+    diff_col = AssemblyStockMismatchDaily.diff
+    surplus_ff_qty = func.coalesce(func.sum(case((diff_col > 0, diff_col), else_=0)), 0)
+    surplus_ff_sku = func.coalesce(func.sum(case((diff_col > 0, 1), else_=0)), 0)
+    surplus_our_qty = func.coalesce(func.sum(case((diff_col < 0, -diff_col), else_=0)), 0)
+    surplus_our_sku = func.coalesce(func.sum(case((diff_col < 0, 1), else_=0)), 0)
+
+    agg_rows = (
         await db.execute(
             select(
                 AssemblyStockMismatchDaily.snapshot_date,
                 AssemblyStockMismatchDaily.warehouse_id,
-                AssemblyStockMismatchDaily.diff,
+                surplus_ff_qty.label("surplus_ff_qty"),
+                surplus_ff_sku.label("surplus_ff_sku"),
+                surplus_our_qty.label("surplus_our_qty"),
+                surplus_our_sku.label("surplus_our_sku"),
             )
             .where(*point_filters)
-            .limit(_ROWS_CAP)
+            .group_by(AssemblyStockMismatchDaily.snapshot_date, AssemblyStockMismatchDaily.warehouse_id)
+            .order_by(AssemblyStockMismatchDaily.snapshot_date, AssemblyStockMismatchDaily.warehouse_id)
         )
     ).all()
-
-    acc: dict[tuple[date, int], dict[str, int]] = {}
-    for snap_date, wid, diff in rows:
-        cell = acc.setdefault(
-            (snap_date, wid),
-            {"surplus_ff_qty": 0, "surplus_ff_sku": 0, "surplus_our_qty": 0, "surplus_our_sku": 0},
-        )
-        if diff > 0:
-            cell["surplus_ff_qty"] += diff
-            cell["surplus_ff_sku"] += 1
-        elif diff < 0:
-            cell["surplus_our_qty"] += -diff
-            cell["surplus_our_sku"] += 1
 
     points = [
         {
             "snapshot_date": snap_date.isoformat(),
             "warehouse_id": wid,
-            "surplus_ff_qty": cell["surplus_ff_qty"],
-            "surplus_ff_sku": cell["surplus_ff_sku"],
-            "surplus_our_qty": cell["surplus_our_qty"],
-            "surplus_our_sku": cell["surplus_our_sku"],
-            "net_diff": cell["surplus_ff_qty"] - cell["surplus_our_qty"],
+            "surplus_ff_qty": int(ff_qty),
+            "surplus_ff_sku": int(ff_sku),
+            "surplus_our_qty": int(our_qty),
+            "surplus_our_sku": int(our_sku),
+            "net_diff": int(ff_qty) - int(our_qty),
         }
-        for (snap_date, wid), cell in acc.items()
+        for snap_date, wid, ff_qty, ff_sku, our_qty, our_sku in agg_rows
     ]
-    points.sort(key=lambda p: (p["snapshot_date"], p["warehouse_id"]))
 
     # Полное окно (без warehouse_id/category) — для справочников фильтра.
     wh_rows = (
@@ -302,6 +293,7 @@ async def get_history(
                 AssemblyStockMismatchDaily.snapshot_date >= since,
             )
             .distinct()
+            .order_by(AssemblyStockMismatchDaily.warehouse_id)
             .limit(2000)
         )
     ).all()
@@ -321,6 +313,7 @@ async def get_history(
                 AssemblyStockMismatchDaily.category.isnot(None),
             )
             .distinct()
+            .order_by(AssemblyStockMismatchDaily.category)
             .limit(500)
         )
     ).all()
@@ -369,21 +362,38 @@ async def get_changes(
     """StockMismatchChangesResponse-shape: журнал изменений, свежие дни сверху.
 
     См. docstring модуля — соседство по фактическим дням среза, не по календарю.
-    Буфер в 1 день ДО окна нужен только чтобы граничный день окна корректно
-    отличал «появился с нуля» от «продолжение расхождения, начатого вчера»;
-    события буферного дня в ответ не попадают (фильтр `>= since`).
+    Буфер ДО окна нужен только чтобы граничный день окна корректно отличал
+    «появился с нуля» от «продолжение расхождения, начатого раньше»; события
+    буферного дня в ответ не попадают (фильтр `>= since`). Буфер — НЕ 1
+    календарный день (если джоба пропустила день ровно на границе `since`,
+    такой буфер не захватит предыдущий реальный срез), а последний реальный
+    day-срез строго до `since` (с теми же опц. фильтрами warehouse_id/category):
+    так буфер несёт фактическое предыдущее состояние независимо от гэпов джобы.
     """
     since = msk_today() - timedelta(days=days - 1)
-    fetch_from = since - timedelta(days=1)
+
+    scope_filters = []
+    if warehouse_id is not None:
+        scope_filters.append(AssemblyStockMismatchDaily.warehouse_id == warehouse_id)
+    if category is not None:
+        scope_filters.append(AssemblyStockMismatchDaily.category == category)
+
+    prior_day = (
+        await db.execute(
+            select(func.max(AssemblyStockMismatchDaily.snapshot_date)).where(
+                AssemblyStockMismatchDaily.project_id == project_id,
+                AssemblyStockMismatchDaily.snapshot_date < since,
+                *scope_filters,
+            )
+        )
+    ).scalar()
+    fetch_from = prior_day or since
 
     filters = [
         AssemblyStockMismatchDaily.project_id == project_id,
         AssemblyStockMismatchDaily.snapshot_date >= fetch_from,
+        *scope_filters,
     ]
-    if warehouse_id is not None:
-        filters.append(AssemblyStockMismatchDaily.warehouse_id == warehouse_id)
-    if category is not None:
-        filters.append(AssemblyStockMismatchDaily.category == category)
 
     rows = (
         await db.execute(
@@ -398,6 +408,11 @@ async def get_changes(
                 AssemblyStockMismatchDaily.diff,
             )
             .where(*filters)
+            .order_by(
+                AssemblyStockMismatchDaily.snapshot_date,
+                AssemblyStockMismatchDaily.warehouse_id,
+                AssemblyStockMismatchDaily.barcode,
+            )
             .limit(_ROWS_CAP)
         )
     ).all()

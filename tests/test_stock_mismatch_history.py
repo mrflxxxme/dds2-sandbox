@@ -466,6 +466,45 @@ async def test_changes_unchanged_no_event(db_session, project, warehouse):
 
 
 @pytest.mark.asyncio
+async def test_changes_gap_at_window_boundary(db_session, project, warehouse):
+    """Джоба пропустила дни ровно на границе окна (гэп since-2..since-1) —
+    буфер обязан взять ПОСЛЕДНИЙ РЕАЛЬНЫЙ срез до окна (`since-3`), а не
+    календарный `since-1` (там среза не было, старый буфер его бы не увидел).
+
+    GAP1 висит непрерывно через гэп (тот же diff на since-3 и на since) —
+    должен НЕ читаться как «appeared» на границе окна (ложный сигнал старого
+    кода: буфер since-1 не находил since-3 → prev_diff считался 0).
+    RES-GAP — зеркальный кейс: последний раз виден на since-3, к `since`
+    пропал — должен корректно распознаться как «resolved» датой `since`
+    (старый код: since-3 вне буфера since-1 → SKU вне выборки → событие теряется).
+    """
+    today = msk_today()
+    since = today - timedelta(days=29)  # days=30 → since = today-29
+    before_gap = since - timedelta(days=3)  # последний реальный срез до окна
+
+    await _row(db_session, project.id, warehouse.id, before_gap, "GAP1", 25, ff_good=25, our_quantity=0)
+    await _row(db_session, project.id, warehouse.id, since, "GAP1", 25, ff_good=25, our_quantity=0)
+
+    await _row(db_session, project.id, warehouse.id, before_gap, "RES-GAP", 25, ff_good=25, our_quantity=0)
+    # RES-GAP отсутствует на `since` — сошёлся; другой SKU держит `since` как
+    # реально записанный день среза.
+    await _row(db_session, project.id, warehouse.id, since, "OTHER-GAP", 5, ff_good=5)
+
+    res = await get_changes(db_session, project.id, 30)
+
+    gap1_matches = [c for c in res["changes"] if c["barcode"] == "GAP1"]
+    assert gap1_matches == []  # продолжение того же diff через гэп — НЕ appeared
+
+    resolved_matches = [c for c in res["changes"] if c["barcode"] == "RES-GAP"]
+    assert len(resolved_matches) == 1
+    row = resolved_matches[0]
+    assert row["event"] == "resolved"
+    assert row["snapshot_date"] == since.isoformat()
+    assert row["prev_diff"] == 25
+    assert row["cur_diff"] == 0
+
+
+@pytest.mark.asyncio
 async def test_changes_project_isolation(db_session, project, other_project, warehouse):
     other = other_project
     other_wh = await _add(
