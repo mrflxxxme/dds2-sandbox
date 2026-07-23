@@ -10,7 +10,7 @@
 доп-услуг ФФ по конкретной сборке.
 
 Revision ID: ffb01_ff_billing
-Revises: wh09_wh_extra_cp
+Revises: asm791_shipped_as_boxes
 Create Date: 2026-07-23
 
 """
@@ -23,7 +23,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "ffb01_ff_billing"
-down_revision: str | None = "wh09_wh_extra_cp"
+down_revision: str | None = "asm791_shipped_as_boxes"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
