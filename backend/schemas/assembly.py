@@ -1086,6 +1086,81 @@ class LinkAnomaliesResponse(BaseModel):
     supply_discrepancies: list[SupplyDiscrepancyRow] = []
 
 
+# ─── Динамика расхождения остатков (stock mismatch dynamics) ───────────────
+# Вкладка «Динамика расхождения»: накопительные суточные снимки расхождения наш
+# склад vs ФФ-зеркало (модель AssemblyStockMismatchDaily) + журнал изменений
+# (появился/сошёлся/вырос/…). Зеркало TS-контракта: frontend-react/src/types/api.ts.
+
+
+class StockMismatchDynPoint(BaseModel):
+    """Суточный агрегат расхождения по одному складу (точка графика)."""
+
+    snapshot_date: str  # ISO YYYY-MM-DD (MSK-день среза)
+    warehouse_id: int
+    surplus_ff_qty: int  # суммарно у ФФ больше, штук
+    surplus_ff_sku: int
+    surplus_our_qty: int  # суммарно у нас больше, штук
+    surplus_our_sku: int
+    net_diff: int  # surplus_ff_qty − surplus_our_qty (нетто ФФ − наш)
+
+
+class StockMismatchDynWarehouse(BaseModel):
+    """Склад-кандидат для селектора (есть история расхождения в окне)."""
+
+    warehouse_id: int
+    warehouse_name: str | None
+    provider: str | None
+
+
+class StockMismatchHistoryResponse(BaseModel):
+    """История расхождения по дням: точки (склад × день) + справочники фильтров."""
+
+    points: list[StockMismatchDynPoint]
+    warehouses: list[StockMismatchDynWarehouse]  # селектор склада
+    categories: list[str]  # селектор категории (по данным окна)
+
+
+class StockMismatchChangeRow(BaseModel):
+    """Событие журнала изменений расхождения по SKU за день (срез vs предыдущий).
+
+    event: appeared — появился в расхождении (в пред. срезе строки не было);
+           resolved — сошёлся/пропал (был, стал 0 / строки нет);
+           grew — |diff| вырос в том же знаке; shrank — |diff| уменьшился;
+           flipped — сменил знак (у-нас ↔ у-ФФ). Храним обе стороны (ff_good /
+           our_quantity) до и после → видно, какая сторона двинулась.
+    """
+
+    snapshot_date: str  # ISO YYYY-MM-DD — день события
+    warehouse_id: int
+    warehouse_name: str | None
+    barcode: str
+    article_seller: str | None
+    name: str | None
+    category: str | None
+    event: str  # appeared | resolved | grew | shrank | flipped
+    prev_diff: int  # diff в предыдущем срезе (0 = строки не было)
+    cur_diff: int  # diff в этом срезе (0 = сошёлся/пропал)
+    delta: int  # cur_diff − prev_diff
+    prev_ff_good: int
+    cur_ff_good: int
+    prev_our_quantity: int
+    cur_our_quantity: int
+
+
+class StockMismatchChangesResponse(BaseModel):
+    """Журнал изменений расхождения (свежие дни сверху)."""
+
+    changes: list[StockMismatchChangeRow]
+
+
+class StockMismatchSnapshotResponse(BaseModel):
+    """Ответ ручного «Снять срез сейчас»: точки пересчитанного (сегодняшнего) дня."""
+
+    points: list[StockMismatchDynPoint]
+    warehouses: list[StockMismatchDynWarehouse]
+    snapshot_date: str | None  # день пересчитанного среза (None — нечего писать)
+
+
 # ─── Распределение остатков (stock distribution) ───────────────────────────
 # Вкладка «Распределение остатков»: «где сейчас товар» (100%). Зеркало TS-контракта:
 # frontend-react/src/types/api.ts, блок «Распределение остатков сборки».
