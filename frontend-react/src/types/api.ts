@@ -1137,8 +1137,15 @@ export interface Warehouse {
   counterparty_id?: number | null;
   counterparty_inn?: string | null;
   counterparty_name?: string | null;
+  extra_counterparties?: WarehouseExtraCounterparty[];
   created_at?: string;
   updated_at?: string;
+}
+
+export interface WarehouseExtraCounterparty {
+  id: number; // counterparty id
+  inn?: string | null;
+  name?: string | null;
 }
 
 export interface DeliveryTimeRow {

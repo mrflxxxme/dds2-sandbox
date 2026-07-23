@@ -214,6 +214,7 @@ from backend.models.warehouse import (
     StockTransferItem,
     TransferStatus,
     Warehouse,
+    WarehouseCounterparty,
     WarehouseDeliveryTime,
     WarehouseStock,
     WarehouseType,
@@ -432,6 +433,7 @@ __all__ = [
     "BrandNote",
     # Warehouse
     "Warehouse",
+    "WarehouseCounterparty",
     "WarehouseType",
     "InboundReceipt",
     "InboundReceiptItem",

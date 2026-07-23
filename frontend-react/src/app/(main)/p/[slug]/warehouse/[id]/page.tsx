@@ -269,6 +269,47 @@ function RequisitesTab({ warehouse, onChanged }: { warehouse: Warehouse; onChang
     const [error, setError] = useState('');
     const [message, setMessage] = useState('');
 
+    // Дополнительные контрагенты ФФ (поверх основного)
+    const extras = warehouse.extra_counterparties ?? [];
+    const [extraInn, setExtraInn] = useState('');
+    const [extraName, setExtraName] = useState('');
+    const [extraBusy, setExtraBusy] = useState(false);
+    const [extraError, setExtraError] = useState('');
+
+    const handleAddExtra = async () => {
+        const cleanInn = extraInn.trim();
+        if (!/^\d{10,12}$/.test(cleanInn)) {
+            setExtraError('ИНН должен быть 10 или 12 цифр');
+            return;
+        }
+        setExtraBusy(true);
+        setExtraError('');
+        try {
+            await api.addWarehouseExtraCounterparty(warehouse.id, { inn: cleanInn, name: extraName.trim() || null });
+            setExtraInn('');
+            setExtraName('');
+            onChanged();
+        } catch (e: unknown) {
+            setExtraError(e instanceof Error ? e.message : 'Ошибка добавления');
+        } finally {
+            setExtraBusy(false);
+        }
+    };
+
+    const handleRemoveExtra = async (cpId: number) => {
+        if (!confirm('Отвязать доп. контрагента от склада?')) return;
+        setExtraBusy(true);
+        setExtraError('');
+        try {
+            await api.removeWarehouseExtraCounterparty(warehouse.id, cpId);
+            onChanged();
+        } catch (e: unknown) {
+            setExtraError(e instanceof Error ? e.message : 'Ошибка');
+        } finally {
+            setExtraBusy(false);
+        }
+    };
+
     const handleSave = async () => {
         setSaving(true);
         setError('');
@@ -364,6 +405,80 @@ function RequisitesTab({ warehouse, onChanged }: { warehouse: Warehouse; onChang
                     {warehouse.counterparty_name ? ` · ${warehouse.counterparty_name}` : ''}
                 </div>
             )}
+
+            {/* ─── Дополнительные контрагенты ФФ ─────────────────────────── */}
+            <div style={{ marginTop: 32, borderTop: '1px solid var(--color-border)', paddingTop: 24 }}>
+                <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0, marginBottom: 8 }}>
+                    Дополнительные контрагенты ФФ
+                </h3>
+                <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 20 }}>
+                    Другие юр. лица, которые тоже относятся к этому складу. Их ИНН так же попадут в
+                    категорию «Фулфилмент» при импорте выписок.
+                </p>
+
+                {extras.length === 0 ? (
+                    <div style={{ fontSize: 13, color: 'var(--color-text-dim)', marginBottom: 16 }}>
+                        Пока нет дополнительных контрагентов.
+                    </div>
+                ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16, maxWidth: 700 }}>
+                        {extras.map(cp => (
+                            <div
+                                key={cp.id}
+                                style={{
+                                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                    gap: 12, padding: 12, background: 'var(--color-bg)', borderRadius: 8, fontSize: 13,
+                                }}
+                            >
+                                <span style={{ color: 'var(--color-text)' }}>
+                                    #{cp.id}
+                                    {cp.inn ? ` · ИНН ${cp.inn}` : ''}
+                                    {cp.name ? ` · ${cp.name}` : ''}
+                                </span>
+                                <button
+                                    className="btn btn-danger btn-sm"
+                                    onClick={() => handleRemoveExtra(cp.id)}
+                                    disabled={extraBusy}
+                                >
+                                    Отвязать
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 16, maxWidth: 700 }}>
+                    <div className="form-group">
+                        <label className="form-label">ИНН</label>
+                        <input
+                            className="form-input"
+                            value={extraInn}
+                            onChange={e => setExtraInn(e.target.value)}
+                            placeholder="10 или 12 цифр"
+                            maxLength={12}
+                        />
+                    </div>
+                    <div className="form-group">
+                        <label className="form-label">Название компании</label>
+                        <input
+                            className="form-input"
+                            value={extraName}
+                            onChange={e => setExtraName(e.target.value)}
+                            placeholder="ИП Мащенок Никита Сергеевич"
+                        />
+                    </div>
+                </div>
+
+                {extraError && (
+                    <div style={{ color: 'var(--color-danger)', fontSize: 13, marginTop: 12 }}>{extraError}</div>
+                )}
+
+                <div style={{ marginTop: 20 }}>
+                    <button className="btn btn-secondary btn-sm" onClick={handleAddExtra} disabled={extraBusy}>
+                        {extraBusy ? 'Сохранение...' : 'Добавить контрагента'}
+                    </button>
+                </div>
+            </div>
         </div>
     );
 }

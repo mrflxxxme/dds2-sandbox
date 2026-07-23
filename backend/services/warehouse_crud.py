@@ -12,6 +12,7 @@ from backend.models.counterparty import Counterparty
 from backend.models.enums import VehicleStatus
 from backend.models.warehouse import (
     Warehouse,
+    WarehouseCounterparty,
     WarehouseDeliveryTime,
     WarehouseStock,
 )
@@ -21,6 +22,36 @@ logger = logging.getLogger(__name__)
 
 
 # ─── Warehouses CRUD ────────────────────────────────────────────────────────
+
+
+async def _load_extra_counterparties(
+    db: AsyncSession, project_id: int, warehouse_ids: list[int]
+) -> dict[int, list[dict]]:
+    """Дополнительные контрагенты складов → {warehouse_id: [{id, inn, name}, ...]}.
+
+    Один запрос на все склады (без N+1). Только активные контрагенты.
+    """
+    if not warehouse_ids:
+        return {}
+    result = await db.execute(
+        select(
+            WarehouseCounterparty.warehouse_id,
+            Counterparty.id,
+            Counterparty.inn,
+            Counterparty.name,
+        )
+        .join(Counterparty, Counterparty.id == WarehouseCounterparty.counterparty_id)
+        .where(
+            WarehouseCounterparty.project_id == project_id,
+            WarehouseCounterparty.warehouse_id.in_(warehouse_ids),
+            Counterparty.is_deleted == False,  # noqa: E712
+        )
+        .order_by(WarehouseCounterparty.warehouse_id, WarehouseCounterparty.id)
+    )
+    out: dict[int, list[dict]] = {}
+    for wh_id, cp_id, cp_inn, cp_name in result.all():
+        out.setdefault(wh_id, []).append({"id": cp_id, "inn": cp_inn, "name": cp_name})
+    return out
 
 
 async def list_warehouses(db: AsyncSession, project_id: int) -> list:
@@ -78,6 +109,9 @@ async def list_warehouses(db: AsyncSession, project_id: int) -> list:
         wh.counterparty_inn = cp_inn
         wh.counterparty_name = cp_name
         warehouses.append(wh)
+    extra_map = await _load_extra_counterparties(db, project_id, [wh.id for wh in warehouses])
+    for wh in warehouses:
+        wh.extra_counterparties = extra_map.get(wh.id, [])
     return warehouses
 
 
@@ -124,6 +158,8 @@ async def get_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) ->
     wh, cp_inn, cp_name = row
     wh.counterparty_inn = cp_inn
     wh.counterparty_name = cp_name
+    extra_map = await _load_extra_counterparties(db, project_id, [wh.id])
+    wh.extra_counterparties = extra_map.get(wh.id, [])
     assert isinstance(wh, Warehouse)
     return wh
 
@@ -224,6 +260,120 @@ async def link_counterparty(
     # Mute unused import warnings when this helper isn't wired elsewhere yet
     _ = sa_text
     return wh
+
+
+async def _upsert_fulfillment_counterparty(db: AsyncSession, project_id: int, inn: str, name: str | None) -> Counterparty:
+    """Upsert a Counterparty by (project_id, inn), bumping primary_type OTHER→FULFILLMENT.
+
+    Shared by link_counterparty (primary) and add_extra_counterparty (additional).
+    Never overwrites a non-OTHER primary_type; updates name only if longer.
+    """
+    clean_inn = inn.strip()
+    cp_name = (name or "").strip() or clean_inn
+    existing = await db.execute(
+        select(Counterparty).where(
+            Counterparty.project_id == project_id,
+            Counterparty.inn == clean_inn,
+            Counterparty.is_deleted == False,  # noqa: E712
+        )
+    )
+    cp = existing.scalar_one_or_none()
+    if cp is None:
+        cp = Counterparty(
+            project_id=project_id,
+            inn=clean_inn,
+            name=cp_name,
+            primary_type="FULFILLMENT",
+            created_by_import=False,
+        )
+        db.add(cp)
+        await db.flush()
+    else:
+        if cp_name and len(cp_name) > len(cp.name or ""):
+            cp.name = cp_name
+        if cp.primary_type == "OTHER":
+            cp.primary_type = "FULFILLMENT"
+    return cp
+
+
+async def add_extra_counterparty(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    *,
+    inn: str,
+    name: str | None,
+) -> Warehouse | None:
+    """Привязать ДОПОЛНИТЕЛЬНОГО контрагента к складу (поверх основного).
+
+    Upsert контрагента как FULFILLMENT + идемпотентная вставка в link-таблицу.
+    Если контрагент уже привязан к складу (основным или доп.) — no-op.
+    """
+    from backend.cache import invalidate_project_reports
+
+    wh = await get_warehouse(db, project_id, warehouse_id)
+    if not wh:
+        return None
+
+    clean_inn = (inn or "").strip()
+    if not clean_inn:
+        return wh
+
+    cp = await _upsert_fulfillment_counterparty(db, project_id, clean_inn, name)
+
+    # Идемпотентно: не дублировать, если уже привязан этой же связью.
+    existing_link = await db.execute(
+        select(WarehouseCounterparty.id).where(
+            WarehouseCounterparty.project_id == project_id,
+            WarehouseCounterparty.warehouse_id == warehouse_id,
+            WarehouseCounterparty.counterparty_id == cp.id,
+        )
+    )
+    if existing_link.scalar_one_or_none() is None:
+        db.add(
+            WarehouseCounterparty(
+                project_id=project_id,
+                warehouse_id=warehouse_id,
+                counterparty_id=cp.id,
+            )
+        )
+
+    await db.commit()
+    await db.refresh(wh)
+    await invalidate_project_reports(project_id)
+    return await get_warehouse(db, project_id, warehouse_id)
+
+
+async def remove_extra_counterparty(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    counterparty_id: int,
+) -> Warehouse | None:
+    """Отвязать доп. контрагента от склада (hard-delete строки link-таблицы).
+
+    Контрагента (Counterparty) не трогаем — только связь. Основной контрагент
+    (`Warehouse.counterparty_id`) отвязывается отдельным эндпоинтом.
+    """
+    from sqlalchemy import delete as sa_delete
+
+    from backend.cache import invalidate_project_reports
+
+    wh = await get_warehouse(db, project_id, warehouse_id)
+    if not wh:
+        return None
+
+    await db.execute(
+        sa_delete(WarehouseCounterparty).where(
+            WarehouseCounterparty.project_id == project_id,
+            WarehouseCounterparty.warehouse_id == warehouse_id,
+            WarehouseCounterparty.counterparty_id == counterparty_id,
+        )
+    )
+    await db.commit()
+    await db.refresh(wh)
+    await invalidate_project_reports(project_id)
+    return await get_warehouse(db, project_id, warehouse_id)
 
 
 async def get_expected_vehicles(db: AsyncSession, project_id: int, warehouse_id: int) -> list:

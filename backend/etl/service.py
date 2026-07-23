@@ -67,6 +67,8 @@ def _upsert_counterparties_from_df(db: Session, df, project_id: int) -> tuple[di
 
     # INNs belonging to warehouses' counterparties → classify as FULFILLMENT on upsert.
     # Only promotes new rows or existing rows still at OTHER (manual categories preserved).
+    # Includes BOTH the warehouse's primary counterparty (warehouses.counterparty_id) AND
+    # additional ones bound via the warehouse_counterparty link table.
     fulfillment_inns: set[str] = set()
     wh_inn_rows = db.execute(
         text("""
@@ -74,6 +76,15 @@ def _upsert_counterparties_from_df(db: Session, df, project_id: int) -> tuple[di
             FROM warehouses wh
             JOIN counterparty cp ON cp.id = wh.counterparty_id
             WHERE wh.project_id = :pid
+              AND wh.is_deleted = false
+              AND cp.is_deleted = false
+              AND cp.inn IS NOT NULL
+            UNION
+            SELECT DISTINCT cp.inn
+            FROM warehouse_counterparty link
+            JOIN warehouses wh ON wh.id = link.warehouse_id
+            JOIN counterparty cp ON cp.id = link.counterparty_id
+            WHERE link.project_id = :pid
               AND wh.is_deleted = false
               AND cp.is_deleted = false
               AND cp.inn IS NOT NULL

@@ -32,6 +32,15 @@ class WarehouseUpdate(BaseModel):
     is_active: bool | None = None
 
 
+class WarehouseExtraCounterparty(BaseModel):
+    """Дополнительный контрагент склада (одна строка link-таблицы)."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: int  # counterparty id
+    inn: str | None = None
+    name: str | None = None
+
+
 class WarehouseSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -52,12 +61,20 @@ class WarehouseSchema(BaseModel):
     counterparty_id: int | None = None
     counterparty_inn: str | None = None
     counterparty_name: str | None = None
+    extra_counterparties: list[WarehouseExtraCounterparty] = []
 
 
 class WarehouseCounterpartyLink(BaseModel):
     """Body for PATCH /warehouses/{id}/counterparty."""
 
     inn: str | None = None
+    name: str | None = None
+
+
+class WarehouseExtraCounterpartyAdd(BaseModel):
+    """Body for POST /warehouses/{id}/counterparties — добавить доп. контрагента."""
+
+    inn: str
     name: str | None = None
 
 
