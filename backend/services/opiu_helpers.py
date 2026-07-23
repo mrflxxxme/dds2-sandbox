@@ -120,8 +120,8 @@ def build_opex_by_type_sql() -> str:
         WHERE t.project_id = :project_id
           AND t.is_deleted = false
           AND t.is_internal = false
-          AND t.date >= :date_from
-          AND t.date < (:date_to + INTERVAL '1 day')
+          AND t.date >= CAST(:date_from AS date)
+          AND t.date < CAST(:date_to AS date) + INTERVAL '1 day'
           AND UPPER(t.currency) <> 'CNY'
           AND c.is_deleted = false
           AND c.project_id = :project_id

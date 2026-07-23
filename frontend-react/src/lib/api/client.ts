@@ -282,7 +282,7 @@ export class ApiClient {
     async uploadFormData<T>(
         path: string,
         formData: FormData,
-        opts?: { retries?: number; retryDelayMs?: number },
+        opts?: { retries?: number; retryDelayMs?: number; timeoutMs?: number },
     ): Promise<T> {
         if (this.bounceExternalToFf()) {
             throw new Error('Внешний аккаунт фулфилмента: доступ только к ФФ-порталу');
@@ -290,6 +290,7 @@ export class ApiClient {
 
         const retries = opts?.retries ?? 0;
         const retryDelayMs = opts?.retryDelayMs ?? 1000;
+        const timeoutMs = opts?.timeoutMs;
 
         const headers: Record<string, string> = {};
         const token = this.getToken();
@@ -300,8 +301,18 @@ export class ApiClient {
         for (let attempt = 0; ; attempt++) {
             let res: Response;
             try {
-                res = await fetch(`${API_URL}${path}`, { method: 'POST', headers, body: formData });
+                res = await this.fetchWithTimeout(`${API_URL}${path}`, { method: 'POST', headers, body: formData }, timeoutMs);
             } catch (netErr) {
+                // Таймаут (AbortController) — терминальный, НЕ ретраим: сервер всё ещё
+                // молотит в фоне, повтор только копит нагрузку (прод-инцидент со скан-счётом
+                // 2026-07-23: залипший разбор держал DB-сессию → исчерпание пула).
+                if ((netErr as { name?: string })?.name === 'AbortError') {
+                    const e = new Error(
+                        `Превышено время ожидания ответа сервера (${Math.round((timeoutMs ?? 0) / 1000)} с). Попробуйте ещё раз или заполните реквизиты вручную.`,
+                    ) as Error & { status?: number };
+                    e.status = 0;
+                    throw e;
+                }
                 // Сетевой обрыв (напр. соединение сброшено при пересборке контейнеров) — транзиентно.
                 if (attempt < retries) { await this.sleep(retryDelayMs); continue; }
                 const e = netErr instanceof Error ? netErr : new Error('Ошибка сети');
@@ -315,7 +326,7 @@ export class ApiClient {
                 const refreshResult = await this.tryRefresh();
                 if (refreshResult === 'ok') {
                     headers['Authorization'] = `Bearer ${this.getToken()}`;
-                    res = await fetch(`${API_URL}${path}`, { method: 'POST', headers, body: formData });
+                    res = await this.fetchWithTimeout(`${API_URL}${path}`, { method: 'POST', headers, body: formData }, timeoutMs);
                 } else if (refreshResult === 'unavailable') {
                     throw new Error('Сервер временно недоступен. Попробуйте через минуту.');
                 }
@@ -343,6 +354,22 @@ export class ApiClient {
             const e = new Error(message) as Error & { status?: number };
             e.status = res.status;
             throw e;
+        }
+    }
+
+    /**
+     * `fetch` с опциональным таймаутом через AbortController. Без `timeoutMs` —
+     * обычный fetch (поведение не меняется). При срабатывании таймаута реджектит
+     * с `AbortError`, который вызывающий трактует как терминальный (без ретрая).
+     */
+    private async fetchWithTimeout(url: string, init: RequestInit, timeoutMs?: number): Promise<Response> {
+        if (!timeoutMs) return fetch(url, init);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            return await fetch(url, { ...init, signal: controller.signal });
+        } finally {
+            clearTimeout(timer);
         }
     }
 

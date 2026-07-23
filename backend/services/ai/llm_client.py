@@ -43,6 +43,7 @@ async def chat(
     temperature: float = 0.3,
     tool_choice: dict | None = None,
     enable_cache: bool = True,
+    timeout: float | None = None,
 ) -> anthropic.types.Message:
     """Send a chat request to Claude with optional tools.
 
@@ -51,6 +52,11 @@ async def chat(
     ``enable_cache`` — if True (default), marks system + tools with
     cache_control=ephemeral for prompt caching (~90% savings on repeat calls
     within 5-minute TTL). Disable for one-shot or rapidly-changing prompts.
+    ``timeout`` — если задан, ЖЁСТКИЙ потолок (сек) на всю операцию, включая
+    ретраи и backoff. Без него SDK-дефолт ~600с на попытку × ретраи → вызов
+    может висеть минуты (прод-инцидент со скан-счётом 2026-07-23: nginx
+    proxy_read_timeout=120с срабатывал раньше). Синхронные HTTP-хендлеры,
+    отдающие ответ пользователю, обязаны передавать бюджет < 120с.
     Retries on transient errors (429, 5xx) with exponential backoff.
     """
     client = get_client()
@@ -81,41 +87,53 @@ async def chat(
             kwargs["tools"] = tools
     if tool_choice and tools:
         kwargs["tool_choice"] = tool_choice
+    if timeout is not None:
+        # Пер-запросный потолок httpx: один зависший вызов не съест весь бюджет
+        # (SDK-дефолт read=600с). wait_for ниже добивает суммарный потолок по ретраям.
+        kwargs["timeout"] = timeout
 
-    last_exc: Exception | None = None
-    for attempt in range(_MAX_RETRIES):
-        try:
-            return await client.messages.create(**kwargs)  # type: ignore[return-value,no-any-return]
-        except anthropic.RateLimitError as exc:
-            last_exc = exc
-            delay = _BASE_DELAY * (2**attempt)
-            logger.warning(
-                "Anthropic rate limit (429), retry %d/%d in %.1fs",
-                attempt + 1,
-                _MAX_RETRIES,
-                delay,
-            )
-            await asyncio.sleep(delay)
-        except anthropic.InternalServerError as exc:
-            last_exc = exc
-            delay = _BASE_DELAY * (2**attempt)
-            logger.warning(
-                "Anthropic server error (%s), retry %d/%d in %.1fs",
-                exc.status_code,
-                attempt + 1,
-                _MAX_RETRIES,
-                delay,
-            )
-            await asyncio.sleep(delay)
-        except anthropic.APIConnectionError as exc:
-            last_exc = exc
-            delay = _BASE_DELAY * (2**attempt)
-            logger.warning(
-                "Anthropic connection error, retry %d/%d in %.1fs",
-                attempt + 1,
-                _MAX_RETRIES,
-                delay,
-            )
-            await asyncio.sleep(delay)
+    async def _send() -> anthropic.types.Message:
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                return await client.messages.create(**kwargs)  # type: ignore[return-value,no-any-return]
+            except anthropic.RateLimitError as exc:
+                last_exc = exc
+                delay = _BASE_DELAY * (2**attempt)
+                logger.warning(
+                    "Anthropic rate limit (429), retry %d/%d in %.1fs",
+                    attempt + 1,
+                    _MAX_RETRIES,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+            except anthropic.InternalServerError as exc:
+                last_exc = exc
+                delay = _BASE_DELAY * (2**attempt)
+                logger.warning(
+                    "Anthropic server error (%s), retry %d/%d in %.1fs",
+                    exc.status_code,
+                    attempt + 1,
+                    _MAX_RETRIES,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+            except anthropic.APIConnectionError as exc:
+                last_exc = exc
+                delay = _BASE_DELAY * (2**attempt)
+                logger.warning(
+                    "Anthropic connection error, retry %d/%d in %.1fs",
+                    attempt + 1,
+                    _MAX_RETRIES,
+                    delay,
+                )
+                await asyncio.sleep(delay)
 
-    raise last_exc  # type: ignore[misc]
+        raise last_exc  # type: ignore[misc]
+
+    # timeout — жёсткий потолок ВСЕЙ операции (все попытки + backoff). Отменяет
+    # in-flight запрос → быстро освобождает DB-сессию хендлера (иначе залипший
+    # разбор счёта держал пул до исчерпания — прод 2026-07-23).
+    if timeout is not None:
+        return await asyncio.wait_for(_send(), timeout=timeout)
+    return await _send()

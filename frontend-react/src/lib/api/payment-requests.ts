@@ -149,8 +149,11 @@ export function addPaymentRequestMethods(api: ApiClient) {
             formData.append('file', file);
             // Авто-повтор при обрыве/5xx: распознавание ничего не пишет в БД (идемпотентно),
             // а разовый рестарт backend (окно деплоя / OOM) отдаёт сырой 502 — переживаем тихо.
+            // timeoutMs < nginx proxy_read_timeout (120с): если разбор скан-счёта где-то
+            // залип, UI отдаёт понятное «превышено время ожидания» вместо вечного спиннера
+            // «Распознаю…» (бэкенд свою часть режет на 70с — этот таймаут только страховка).
             return api.uploadFormData<InvoiceParseResult>(
-                '/api/v1/payment-requests/parse-invoice', formData, { retries: 2, retryDelayMs: 3000 },
+                '/api/v1/payment-requests/parse-invoice', formData, { retries: 2, retryDelayMs: 3000, timeoutMs: 115_000 },
             );
         },
 

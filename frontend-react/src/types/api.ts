@@ -1907,6 +1907,8 @@ export interface WbSupplyState {
   pass_car_model: string | null;
   pass_car_number: string | null;
   pass_pallets: number | null;
+  /** способ отгрузки пропуска: false = паллеты, true = отдельные короба (boxTypeName) */
+  pass_as_boxes: boolean;
   // Зеркало назначенной машины заявки (read-only) — для префилла пропуска и
   // подсветки расхождений «машина заявки ↔ WB-пропуск» (F3).
   assembly_vehicle_info: string | null;
@@ -1914,6 +1916,8 @@ export interface WbSupplyState {
   assembly_driver_phone: string | null;
   // Локальное число паллет заявки — для баннера «паллеты ≠ WB» (F2).
   assembly_pallets_count: number | null;
+  /** единица заявки (короб/паллета) — дефолт способа отгрузки пропуска */
+  assembly_shipped_as_boxes: boolean;
 }
 
 // Компактная WB-сводка в строке списка заявок (F1/F2).
@@ -2020,6 +2024,8 @@ export interface WbPassUpdate {
   car_model?: string | null;
   car_number?: string | null;
   pallets?: number | null;
+  /** способ отгрузки: короба (true) / паллеты (false) */
+  as_boxes?: boolean | null;
 }
 
 export interface WbDriver {
