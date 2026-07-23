@@ -24,6 +24,7 @@ from backend.etl.sync_payments import (
     sync_customs_topup as _sync_customs_topup,
     sync_plan_payments as _sync_plan_payments,
 )
+from backend.etl.sync_ff_invoices import sync_ff_invoices as _sync_ff_invoices
 from backend.etl.sync_payment_requests import sync_payment_requests as _sync_payment_requests
 from backend.etl.sync_shipment_payments import sync_shipment_payments as _sync_shipment_payments
 from backend.etl.sync_wb_payouts import sync_wb_payouts as _sync_wb_payouts
@@ -372,6 +373,10 @@ def persist_df(db: Session, df, project_id: int, account_no: str) -> tuple[int, 
     # Прямая связка заборов с дебетом выписки (ИНН перевозчика + pickup_cost) —
     # ПОСЛЕ заявок: явная заявка забирает транзакцию первой.
     _sync_shipment_payments(db, project_id)
+    # Счета ФФ: авто-матч дебета по ИНН ФФ-юрлиц (уникальный кандидат) +
+    # пропагация PAID-заявок на счета — ПОСЛЕ заявок и заборов (они забирают
+    # транзакции первыми).
+    _sync_ff_invoices(db, project_id)
     # Реквизиты контрагентов из выписки (р/с) + тег CARRIER по отгрузкам.
     from backend.services.counterparty_enrich import enrich_counterparty_requisites
 

@@ -49,6 +49,7 @@ from backend.scheduler.jobs.draft_staleness_watch import check_all_projects_draf
 from backend.scheduler.jobs.health_check import health_monitor
 from backend.scheduler.jobs.heartbeat import heartbeat_ping
 from backend.scheduler.jobs.prewarm import prewarm_all_reports, prewarm_project  # noqa: F401
+from backend.scheduler.jobs.ff_storage_snapshot import snapshot_all_projects_ff_storage
 from backend.scheduler.jobs.stock_distribution_snapshot import snapshot_all_projects_stock_distribution
 from backend.scheduler.jobs.stock_mismatch_snapshot import snapshot_all_projects_stock_mismatch
 from backend.scheduler.jobs.supply_discrepancy import check_all_projects_supply_discrepancies
@@ -239,6 +240,18 @@ def start_scheduler():
         trigger=CronTrigger(hour=23, minute=50, timezone=MSK),
         id="stock_distribution_snapshot",
         name="Assembly stock distribution daily snapshot (23:50 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # FF storage snapshot: daily 23:40 MSK — посуточное начисление хранения ФФ
+    # (штуки→короба→паллеты на момент среза; до дневного среза распределения).
+    _scheduler.add_job(
+        snapshot_all_projects_ff_storage,
+        trigger=CronTrigger(hour=23, minute=40, timezone=MSK),
+        id="ff_storage_snapshot",
+        name="FF billing storage daily snapshot (23:40 MSK)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=3600,

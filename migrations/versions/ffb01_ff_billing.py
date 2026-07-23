@@ -70,7 +70,6 @@ def upgrade() -> None:
         sa.UniqueConstraint("project_id", "warehouse_id", "snapshot_date", name="uq_ff_storage_daily_day"),
     )
     op.create_index("ix_ff_storage_daily_wh_date", "ff_storage_daily", ["warehouse_id", "snapshot_date"])
-    op.create_index("ix_ff_storage_daily_project_id", "ff_storage_daily", ["project_id"])
 
     op.create_table(
         "ff_invoices",
@@ -106,7 +105,6 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint("amount > 0", name="ck_ff_invoices_amount_positive"),
     )
-    op.create_index("ix_ff_invoices_project_id", "ff_invoices", ["project_id"])
     op.create_index("ix_ff_invoices_project_status", "ff_invoices", ["project_id", "status"])
     op.create_index("ix_ff_invoices_warehouse_id", "ff_invoices", ["warehouse_id"])
     op.create_index("ix_ff_invoices_counterparty_id", "ff_invoices", ["counterparty_id"])
@@ -165,10 +163,8 @@ def downgrade() -> None:
     op.drop_index("ix_ff_invoices_counterparty_id", table_name="ff_invoices")
     op.drop_index("ix_ff_invoices_warehouse_id", table_name="ff_invoices")
     op.drop_index("ix_ff_invoices_project_status", table_name="ff_invoices")
-    op.drop_index("ix_ff_invoices_project_id", table_name="ff_invoices")
     op.drop_table("ff_invoices")
 
-    op.drop_index("ix_ff_storage_daily_project_id", table_name="ff_storage_daily")
     op.drop_index("ix_ff_storage_daily_wh_date", table_name="ff_storage_daily")
     op.drop_table("ff_storage_daily")
 

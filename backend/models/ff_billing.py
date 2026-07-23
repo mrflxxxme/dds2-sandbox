@@ -131,9 +131,9 @@ class FfStorageDaily(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
     __table_args__ = (
+        # project_id покрыт leftmost-колонкой uq_ff_storage_daily_day.
         UniqueConstraint("project_id", "warehouse_id", "snapshot_date", name="uq_ff_storage_daily_day"),
         Index("ix_ff_storage_daily_wh_date", "warehouse_id", "snapshot_date"),
-        Index("ix_ff_storage_daily_project_id", "project_id"),
     )
 
 
@@ -193,7 +193,7 @@ class FfInvoice(Base, TimestampMixin, SoftDeleteMixin):
 
     __table_args__ = (
         CheckConstraint("amount > 0", name="ck_ff_invoices_amount_positive"),
-        Index("ix_ff_invoices_project_id", "project_id"),
+        # project_id покрыт leftmost-колонкой ix_ff_invoices_project_status.
         Index("ix_ff_invoices_project_status", "project_id", "status"),
         Index("ix_ff_invoices_warehouse_id", "warehouse_id"),
         Index("ix_ff_invoices_counterparty_id", "counterparty_id"),

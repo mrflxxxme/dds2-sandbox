@@ -4,16 +4,16 @@ Pydantic schemas: FF billing (тарифы услуг ФФ, хранение п�
 
 API-контракт (роутер backend/routers/ff_billing.py, префикс /api/v1):
   Тарифы:
-    GET    /warehouses/{warehouse_id}/ff-tariffs                → list[FfTariffRow]
-    POST   /warehouses/{warehouse_id}/ff-tariffs                ← FfTariffPayload
+    GET    /warehouse/{warehouse_id}/ff-tariffs                → list[FfTariffRow]
+    POST   /warehouse/{warehouse_id}/ff-tariffs                ← FfTariffPayload
     PATCH  /ff-tariffs/{tariff_id}                              ← FfTariffUpdatePayload
     DELETE /ff-tariffs/{tariff_id}                              (soft)
   Хранение:
-    GET    /warehouses/{warehouse_id}/ff-storage-daily?date_from&date_to → list[FfStorageDailyRow]
-    POST   /warehouses/{warehouse_id}/ff-storage-daily/recompute ← FfStorageRecomputePayload
+    GET    /warehouse/{warehouse_id}/ff-storage-daily?date_from&date_to → list[FfStorageDailyRow]
+    POST   /warehouse/{warehouse_id}/ff-storage-daily/recompute ← FfStorageRecomputePayload
   Ожидаемая стоимость услуг ФФ по заявке сборки:
-    GET    /assembly/{request_id}/ff-expected-cost               → FfAssemblyExpectedCost
-    PATCH  /assembly/{request_id}/ff-custom-cost                 ← FfCustomCostPayload
+    GET    /warehouse/assembly/{request_id}/ff-expected-cost     → FfAssemblyExpectedCost
+    PATCH  /warehouse/assembly/{request_id}/ff-custom-cost       ← FfCustomCostPayload
   Счета:
     GET    /ff-invoices?warehouse_id&status&kind                 → FfInvoiceListResponse
     POST   /ff-invoices                                          ← FfInvoiceCreatePayload

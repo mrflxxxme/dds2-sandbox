@@ -7091,3 +7091,198 @@ export interface VibeStats {
   /** Когда CI последний раз обновлял данные. */
   last_ingest: string | null;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FF billing — тарифы услуг ФФ, хранение по дням, счета ФФ
+// (контракт: backend/schemas/ff_billing.py)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type FfServiceType = 'PALLETIZING' | 'BOX_PROCESSING' | 'STORAGE' | 'TRUCK_UNLOADING' | 'LOADING';
+export type FfTariffUnit = 'PALLET' | 'BOX';
+export type FfInvoiceKind = 'SHIPMENT' | 'STORAGE' | 'RECEIVING' | 'LOGISTICS' | 'MIXED';
+export type FfInvoiceStatus = 'NEW' | 'RECONCILED' | 'DISPUTED' | 'PAID';
+export type FfInvoiceLineKind = 'ASSEMBLY' | 'STORAGE' | 'RECEIVING' | 'LOGISTICS' | 'CUSTOM';
+
+/** Ставка услуги ФФ на складе (история через valid_from/valid_to).
+ *  Decimal-поля бэка приходят строкой — клиент (lib/api/ffBilling.ts) коэрсит в number. */
+export interface FfTariffRow {
+  id: number;
+  warehouse_id: number;
+  service_type: FfServiceType;
+  /** Только для LOADING: чем биллит склад. У прочих услуг null. */
+  unit: FfTariffUnit | null;
+  rate: number;
+  valid_from: string;
+  valid_to: string | null;
+}
+
+export interface FfTariffPayload {
+  service_type: FfServiceType;
+  unit?: FfTariffUnit | null;
+  rate: number;
+  /** null/не передано = с сегодня */
+  valid_from?: string | null;
+  valid_to?: string | null;
+}
+
+export interface FfTariffUpdatePayload {
+  unit?: FfTariffUnit | null;
+  rate?: number | null;
+  valid_from?: string | null;
+  valid_to?: string | null;
+}
+
+/** Суточное начисление хранения на ФФ-складе. */
+export interface FfStorageDailyRow {
+  snapshot_date: string;
+  units: number;
+  boxes: number;
+  pallets: number;
+  /** null = на дату среза не было тарифа STORAGE */
+  storage_rate: number | null;
+  storage_cost: number | null;
+}
+
+/** Компонент ожидаемой стоимости услуг ФФ по заявке сборки. */
+export interface FfExpectedComponent {
+  service_type: FfServiceType | 'CUSTOM';
+  /** PALLET | BOX | VEHICLE | null (CUSTOM) */
+  unit: string | null;
+  qty: number | null;
+  /** null = тариф не задан на складе */
+  rate: number | null;
+  /** qty × rate; null если нет тарифа */
+  cost: number | null;
+}
+
+export interface FfAssemblyExpectedCost {
+  assembly_request_id: number;
+  warehouse_id: number;
+  pallets: number;
+  boxes: number;
+  units: number;
+  components: FfExpectedComponent[];
+  custom_cost: number | null;
+  custom_cost_comment: string | null;
+  /** Σ cost компонент (null, если ни одного тарифа) */
+  total: number | null;
+  /** service_type без ставки на дату */
+  missing_tariffs: string[];
+}
+
+export interface FfCustomCostPayload {
+  /** null = очистить */
+  amount: number | null;
+  comment: string | null;
+}
+
+/** Счёт ФФ (строка списка). */
+export interface FfInvoiceRow {
+  id: number;
+  warehouse_id: number | null;
+  warehouse_name: string | null;
+  counterparty_id: number | null;
+  counterparty_name: string | null;
+  number: string | null;
+  invoice_date: string | null;
+  period_start: string | null;
+  period_end: string | null;
+  kind: FfInvoiceKind;
+  status: FfInvoiceStatus;
+  amount: number;
+  our_amount: number | null;
+  /** amount − our_amount */
+  diff: number | null;
+  payee_inn: string | null;
+  has_document: boolean;
+  payment_request_id: number | null;
+  matched_transaction_id: number | null;
+  matched_at: string | null;
+  created_at: string;
+}
+
+/** Строка разнесения счёта ФФ. */
+export interface FfInvoiceLineRow {
+  id: number;
+  kind: FfInvoiceLineKind;
+  assembly_request_id: number | null;
+  outbound_shipment_id: number | null;
+  inbound_receipt_id: number | null;
+  /** Номер заявки/приёмки для UI */
+  ref_number: string | null;
+  date_from: string | null;
+  date_to: string | null;
+  qty_units: number | null;
+  qty_boxes: number | null;
+  qty_pallets: number | null;
+  our_cost: number | null;
+  allocated_amount: number | null;
+  label: string | null;
+}
+
+export interface FfInvoiceDetail extends FfInvoiceRow {
+  comment: string | null;
+  original_filename: string | null;
+  lines: FfInvoiceLineRow[];
+}
+
+export interface FfInvoiceListResponse {
+  items: FfInvoiceRow[];
+  total: number;
+}
+
+export interface FfInvoiceCreatePayload {
+  warehouse_id?: number | null;
+  number?: string | null;
+  invoice_date?: string | null;
+  period_start?: string | null;
+  period_end?: string | null;
+  kind?: FfInvoiceKind;
+  amount: number;
+  payee_inn?: string | null;
+  comment?: string | null;
+}
+
+export interface FfInvoiceUpdatePayload {
+  warehouse_id?: number | null;
+  number?: string | null;
+  invoice_date?: string | null;
+  period_start?: string | null;
+  period_end?: string | null;
+  kind?: FfInvoiceKind | null;
+  amount?: number | null;
+  comment?: string | null;
+}
+
+/** Ответ upload: черновик счёта + что распознали (для формы-подтверждения). */
+export interface FfInvoiceUploadResponse {
+  invoice: FfInvoiceDetail;
+  /** Резолв ИНН → склад (null = не нашли) */
+  parsed_warehouse_id: number | null;
+  warnings: string[];
+}
+
+/** Дебет выписки по ИНН юрлиц склада — кандидат на привязку к счёту(ам). */
+export interface FfCandidatePayment {
+  transaction_id: number;
+  date: string;
+  amount: number;
+  counterparty: string | null;
+  inn: string | null;
+  purpose: string | null;
+  already_linked_invoice_ids: number[];
+}
+
+/** Привязка N счетов → 1 платёж (|Σ amount − дебет| ≤ 0.01 проверяет сервис). */
+export interface FfInvoicePaymentLinkPayload {
+  transaction_id: number;
+  invoice_ids: number[];
+}
+
+export interface FfInvoicePaymentUnlinkPayload {
+  invoice_ids: number[];
+}
+
+export interface FfInvoiceCreatePaymentRequestResponse {
+  payment_request_id: number;
+}
