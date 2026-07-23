@@ -83,6 +83,19 @@ from backend.models.fulfillment import (
     FulfillmentStock,
 )
 
+# FF billing (тарифы услуг ФФ, посуточное хранение, счета ФФ и сверка)
+from backend.models.ff_billing import (
+    FfInvoice,
+    FfInvoiceKind,
+    FfInvoiceLine,
+    FfInvoiceLineKind,
+    FfInvoiceStatus,
+    FfServiceType,
+    FfStorageDaily,
+    FfTariffUnit,
+    WarehouseTariff,
+)
+
 # FX Rates
 from backend.models.fx_rates import (
     FxRate,
@@ -383,6 +396,16 @@ __all__ = [
     "FulfillmentStatusEvent",
     "FulfillmentStock",
     "FfRequestKind",
+    # FF billing
+    "FfInvoice",
+    "FfInvoiceKind",
+    "FfInvoiceLine",
+    "FfInvoiceLineKind",
+    "FfInvoiceStatus",
+    "FfServiceType",
+    "FfStorageDaily",
+    "FfTariffUnit",
+    "WarehouseTariff",
     # Tax
     "TaxRate",
     # WB Finance

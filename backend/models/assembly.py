@@ -179,6 +179,11 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     pickup_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     pickup_time_slot: Mapped[str | None] = mapped_column(String(20), nullable=True)
     pickup_cost: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    # Ручная сумма доп-услуг ФФ по этой сборке (стрейч, маркировка и т.п. вне
+    # тарифной сетки склада) — слагаемое ожидаемой стоимости услуг ФФ при
+    # сверке счетов (см. services/ff_billing).
+    ff_custom_cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    ff_custom_cost_comment: Mapped[str | None] = mapped_column(String(300), nullable=True)
     delivery_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     vehicle_assigned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     shipped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
