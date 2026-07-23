@@ -12,6 +12,7 @@ send_order   — РЕАЛЬНОЕ создание заявки во внешн�
                audit-строку ``GazelkaOrder`` с исходом и выдержкой ответа.
 """
 
+import asyncio
 import html as _html
 import re
 from dataclasses import dataclass
@@ -1114,6 +1115,8 @@ async def _reconcile_active_order(
         try:
             if await wb_supply_service.try_autopush_pass_by_assembly(db, project_id, assembly_id):
                 stats["passed"] += 1
+        except asyncio.CancelledError:
+            raise
         except Exception:  # noqa: BLE001
             logger.warning("gazelka.sync_states.pass_push_failed", project_id=project_id, assembly_id=assembly_id)
 
@@ -1162,6 +1165,8 @@ async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, in
         info = _extract_logistics(plan, joins)
         try:
             await _reconcile_active_order(db, project_id, assembly_id, code, info, stats)
+        except asyncio.CancelledError:
+            raise
         except Exception:  # noqa: BLE001
             logger.warning(
                 "gazelka.sync_states.reconcile_failed",

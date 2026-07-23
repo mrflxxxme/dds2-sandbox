@@ -48,5 +48,7 @@ async def sync_all_projects_gazelka_states() -> None:
         try:
             async with AsyncSessionLocal() as db:
                 await asyncio.wait_for(sync_gazelka_states(db, project_id), timeout=300)
+        except asyncio.CancelledError:
+            raise
         except Exception:  # noqa: BLE001
             logger.warning("Gazelka states sync failed for project %d", project_id, exc_info=True)
