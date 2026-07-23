@@ -160,6 +160,10 @@ export default function AssemblyDraftPage() {
     // проекта для переключателя. Обновляется на смене черновика и после commit.
     const [draftsReserved, setDraftsReserved] = useState<DraftReserveMap>({});
     const [allDrafts, setAllDrafts] = useState<AssemblyDraft[]>([]);
+    // Список черновиков ЗАГРУЖЕН хотя бы раз: до этого foreignScopeCategories
+    // разово пуст — авто-синк матрицы стрельнул бы без чужих скоупов и
+    // спланировал бы бесскоупному черновику чужие категории (ревью LOW).
+    const [draftsLoaded, setDraftsLoaded] = useState(false);
     const [catModalOpen, setCatModalOpen] = useState(false);
     // Резерв ВСЕХ черновиков (без exclude текущего) — линза модалки «По категориям»:
     // она выбирает категории для НОВОГО черновика, срез/резерв текущего к ней не
@@ -434,6 +438,7 @@ export default function AssemblyDraftPage() {
             if (cancelledRef?.current) return;
             setDraftsReserved(res.reserved || {});
             setAllDrafts(drafts || []);
+            setDraftsLoaded(true);
         } catch { /* best-effort: без резерва работаем как раньше */ }
     }, [draftId]);
 
@@ -452,6 +457,12 @@ export default function AssemblyDraftPage() {
     const scopeFfId = draft?.distribution.scope_ff_id ?? null;
     const isScoped = !!(categoryScope && categoryScope.length > 0);
     const inScope = useMemo(() => inScopeOf(categoryScope, categoryOf), [categoryScope, categoryOf]);
+    // Категории живых ЧУЖИХ категорийных черновиков — владение категорией:
+    // бесскоупный черновик их не планирует (матрица получает пропом).
+    const foreignScopeCategories = useMemo(
+        () => allDrafts.filter(d => d.id !== draftId).flatMap(d => d.distribution.category_scope || []),
+        [allDrafts, draftId],
+    );
 
     // ЕДИНАЯ точка коррекции доступного ФФ: резерв других черновиков вычтен,
     // ФФ-ограничение скоупа применено. freeByNm / предбронь / пулы дозабора /
@@ -551,7 +562,13 @@ export default function AssemblyDraftPage() {
                 // Черновик, открытый в «Ручной раскладке», матрица синкает сама —
                 // не воюем с её локальным стейтом.
                 if (activeTab === 'matrix' && d.id === draftId) continue;
-                const o = await runDraftAutoSync(d, shared, categoryOf, classOf);
+                // Владение категорией: категории живых ЧУЖИХ категорийных черновиков
+                // бесскоупный черновик не планирует (дедуп по резерву ловил только
+                // занятый ФФ-сток — SKU с available=0 консервировался в обоих).
+                const foreignScopes = new Set(
+                    drafts.filter((x) => x.id !== d.id).flatMap((x) => x.distribution.category_scope || []),
+                );
+                const o = await runDraftAutoSync(d, shared, categoryOf, classOf, foreignScopes);
                 outcomes.push(o);
                 if (o.status === 'synced' && o.updated && o.draftId === draftId) {
                     healScopeRef.current = { ts: o.updated.updated_at, only: new Set(), fromSync: true };
@@ -957,6 +974,10 @@ export default function AssemblyDraftPage() {
                 }
             }
             setCatModalOpen(false);
+            // Резерв/список черновиков — СВЕЖИМИ до редиректа: авто-синк матрицы
+            // нового черновика стартует сразу, со stale-резервом он считал бы план
+            // без учёта только что созданного соседа (кросс-черновичный дубль).
+            await refreshReserved();
             showToast(`Черновик «${created.name}» создан — раскладка считается на «✏️ Ручной раскладке»`, 'success');
             const sp = new URLSearchParams(searchParams.toString());
             sp.set('draft', String(created.id));
@@ -965,7 +986,7 @@ export default function AssemblyDraftPage() {
         } catch (e: unknown) {
             showToast(e instanceof Error ? e.message : 'Ошибка создания категорийного черновика', 'error');
         }
-    }, [isScoped, draftId, rows, prebook, categoryOf, buildDistribution, searchParams, router, showToast]);
+    }, [isScoped, draftId, rows, prebook, categoryOf, buildDistribution, refreshReserved, searchParams, router, showToast]);
 
     // Долив строк из встроенной вкладки «Потребность» → перезагрузить черновик и
     // переключиться на вкладку 'draft', чтобы пользователь увидел добавленное.
@@ -1240,6 +1261,12 @@ export default function AssemblyDraftPage() {
         if (!accChanged && scopedMutation) return;
         consolidatingRef.current = true;
         let cancelled = false;
+        // CAS-токен = версия, которой соответствуют ЗАМЫКАНИЯ rows/prebook этого
+        // прогона. Живой draftVersionRef.current в момент PUT «узаконивал» запись
+        // от протухшего состояния: раннер промотировал паллету и applyDraft обновил
+        // ref, а летящая консолидация со старыми rows проходила CAS и откатывала
+        // промоцию через секунду (прод: пинг-понг событий 5144→5148 черновика 51).
+        const baseVersion = draftVersionRef.current;
         void (async () => {
             try {
                 // self-heal в полёте: считать сейчас — значит посчитать от устаревшего
@@ -1356,11 +1383,16 @@ export default function AssemblyDraftPage() {
                 if (toPrebookList.length) parts.push(`в ПРЕДБРОНЬ (хвосты / ⌛ / закрыто): ${toPrebookList.join(' · ')}`);
                 if (filledUpUnits > 0) parts.push(`хвосты добиты до целых коробов свободным ФФ (+${formatNumber(filledUpUnits, 0)} шт)`);
                 if (releasedUnits > 0) parts.push(`остатки меньше короба (добить нечем) возвращены на ФФ (−${formatNumber(releasedUnits, 0)} шт)`);
+                // Прогон отменён (deps сменились, пока считали) → не пишем вовсе:
+                // PUT от протухшего замыкания незачем даже пытаться (re-arm в finally).
+                if (cancelled) return;
                 let updated;
                 try {
                     updated = await api.updateAssemblyDraft(draftId, {
                         distribution: { ...buildDistribution(), rows: newRows, prebook: newPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames },
-                        base_updated_at: draftVersionRef.current || undefined,
+                        // СТРОГО baseVersion (версия замыканий), НЕ живой draftVersionRef:
+                        // конкурентная запись (промоция раннера) → честный 409 → перечитка.
+                        base_updated_at: baseVersion || undefined,
                         event: { event_type: 'ACCEPTANCE_SYNC', summary: `Синхронизация с приёмкой WB — ${parts.join(' | ') || 'переупаковка без смены складов'}` },
                     });
                 } catch (e) {
@@ -2684,6 +2716,9 @@ export default function AssemblyDraftPage() {
                         ffNameById={new Map(warehouses.map(w => [w.id, w.name]))}
                         reserved={draftsReserved}
                         scopeCategories={categoryScope}
+                        // null = список черновиков ещё не загружен: авто-синк
+                        // матрицы ждёт (иначе разово пустые чужие скоупы).
+                        foreignScopeCategories={draftsLoaded ? foreignScopeCategories : null}
                         scopeFfId={scopeFfId}
                         categoryOf={categoryOf}
                         classOf={classOf}

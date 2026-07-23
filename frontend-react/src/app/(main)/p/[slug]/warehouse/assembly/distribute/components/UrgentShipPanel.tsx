@@ -52,6 +52,16 @@ function DaysBadge({ row }: { row: UrgentShipRow }) {
     );
 }
 
+/** Σ tgt по nm для набора строк (rows или prebook — раздельно). */
+function sumByNm(rs: AssemblyDraftRow[]): Map<number, number> {
+    const m = new Map<number, number>();
+    for (const r of rs) {
+        const qty = Object.values(r.tgt).reduce((s, v) => s + (v || 0), 0);
+        if (qty > 0) m.set(r.nm_id, (m.get(r.nm_id) || 0) + qty);
+    }
+    return m;
+}
+
 /** % локализации: цвет от цели распределения (по умолчанию 75%). */
 function LocPct({ pct, target }: { pct: number | null; target: number }) {
     if (pct === null) return <span style={{ color: 'var(--color-text-dim)' }}>—</span>;
@@ -90,15 +100,15 @@ export default function UrgentShipPanel({ slug, rows, prebook, stockNeed, reserv
 
     useEffect(() => { load(); }, [load]);
 
+    // rows и prebook считаются РАЗДЕЛЬНО: предбронь — тоже план черновика (коробы
+    // ждут паллету), но в заявки пока не едет — колонка «В черновике» показывает
+    // полную сумму с пометкой предбронной доли, а не сливает их молча.
+    const prebookQtyByNm = useMemo(() => sumByNm(prebook ?? []), [prebook]);
     const draftQtyByNm = useMemo(() => {
-        const m = new Map<number, number>();
-        // rows + prebook: предбронь — тоже план черновика (коробы ждут паллету).
-        for (const r of [...rows, ...(prebook ?? [])]) {
-            const qty = Object.values(r.tgt).reduce((s, v) => s + (v || 0), 0);
-            if (qty > 0) m.set(r.nm_id, (m.get(r.nm_id) || 0) + qty);
-        }
+        const m = sumByNm(rows);
+        for (const [nm, qty] of prebookQtyByNm) m.set(nm, (m.get(nm) || 0) + qty);
         return m;
-    }, [rows, prebook]);
+    }, [rows, prebookQtyByNm]);
 
     // Плечо поставки = средняя сборка на ФФ + средняя доставка до склада WB.
     const leadDays = useMemo(() => {
@@ -121,9 +131,9 @@ export default function UrgentShipPanel({ slug, rows, prebook, stockNeed, reserv
                     return res > 0 ? { ...a, stocks_rf: Math.max(0, (a.stocks_rf ?? 0) - res) } : a;
                 })
                 : scoped;
-            return buildUrgentShip({ articles: adjusted, draftQtyByNm, locPctByNm: locMap, leadDays, trendDays: TREND_DAYS, ppbOf });
+            return buildUrgentShip({ articles: adjusted, draftQtyByNm, prebookQtyByNm, locPctByNm: locMap, leadDays, trendDays: TREND_DAYS, ppbOf });
         },
-        [articles, draftQtyByNm, locMap, leadDays, inScope, reservedByNm, ppbOf],
+        [articles, draftQtyByNm, prebookQtyByNm, locMap, leadDays, inScope, reservedByNm, ppbOf],
     );
 
     const locTarget = stockNeed?.summary?.localization_target ?? 75;
@@ -230,7 +240,15 @@ export default function UrgentShipPanel({ slug, rows, prebook, stockNeed, reserv
                                     <td style={{ padding: '5px 8px', color: 'var(--color-text-muted)' }}>{r.subject || '—'}</td>
                                     <td style={{ padding: '5px 8px', textAlign: 'right' }}><LocPct pct={r.locPct} target={locTarget} /></td>
                                     <td style={{ padding: '5px 8px', textAlign: 'center' }}><DaysBadge row={r} /></td>
-                                    <td style={{ padding: '5px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>{formatNumber(r.draftQty, 0)} шт</td>
+                                    <td style={{ padding: '5px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                        {formatNumber(r.draftQty, 0)} шт
+                                        {r.prebookQty > 0 && (
+                                            <div style={{ fontSize: 10.5, color: 'var(--color-text-muted)' }}
+                                                title="Доля в предброни: спланирована, но ждёт целую паллету/приёмку — в заявки пока не едет">
+                                                🅿 {formatNumber(r.prebookQty, 0)} в предброни
+                                            </div>
+                                        )}
+                                    </td>
                                     <td style={{ padding: '5px 8px', textAlign: 'right', whiteSpace: 'nowrap', color: r.inAssembly > 0 ? 'var(--color-text)' : 'var(--color-text-dim)' }}>{formatNumber(r.inAssembly, 0)}</td>
                                     <td style={{ padding: '5px 8px', textAlign: 'right', whiteSpace: 'nowrap', color: r.inTransit > 0 ? 'var(--color-text)' : 'var(--color-text-dim)' }}>{formatNumber(r.inTransit, 0)}</td>
                                     <td style={{ padding: '5px 8px', textAlign: 'right', whiteSpace: 'nowrap', color: r.wbStock > 0 ? 'var(--color-text)' : 'var(--color-danger)', fontWeight: r.wbStock > 0 ? 400 : 700 }}>{formatNumber(r.wbStock, 0)}</td>

@@ -9,7 +9,7 @@ import { DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS } from '@/lib/constant
 import { Toast } from '@/components';
 import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams';
 import { subtractReserveFromArticles, restrictArticlesToFf, reservedForBarcode, type DraftReserveMap } from '@/lib/assembly/draftReserve';
-import { inScopeOf } from '@/lib/assembly/categoryCompat';
+import { filterArticlesByCategoryScope } from '@/lib/assembly/categoryCompat';
 import { scopedNormalizeDraft } from '@/lib/utils/scopedNormalizeDraft';
 import { makeAutoSyncNormalizePair } from '@/lib/assembly/autoSyncNormalize';
 import { netOutInTransit } from '@/lib/assembly/draftAutoSyncRunner';
@@ -139,6 +139,12 @@ interface DraftMatrixViewProps {
     reserved?: DraftReserveMap;
     /** Категорийный скоуп черновика: расчёт/таблица только по этим категориям. */
     scopeCategories?: string[] | null;
+    /** Категории живых ЧУЖИХ категорийных черновиков: бесскоупный черновик их
+     *  не планирует вовсе (владение категорией эксклюзивно — иначе оба черновика
+     *  строили план на один и тот же сток). На скоупнутый черновик не влияет.
+     *  null — список черновиков страницы ещё НЕ загружен: авто-синк ждёт
+     *  (пустые «чужие скоупы» ≠ их отсутствие, ревью LOW 2026-07-23). */
+    foreignScopeCategories?: string[] | null;
     /** Ограничение ФФ-источника скоупленного черновика (id склада). */
     scopeFfId?: number | null;
     /** Эффективная категория per nm (override ?? предмет WB) — для скоупа. */
@@ -152,7 +158,7 @@ interface DraftMatrixViewProps {
  *  напрямую с автосейвом; «⟳ Пересчитать от потребности» пишет живой расчёт
  *  (need-канал + новинки cold-start с гвардом пересорта) заменой по SKU:
  *  целые паллеты → строки, хвосты → предбронь. */
-export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, reserved, scopeCategories, scopeFfId, categoryOf, classOf, readyPkgWbs }: DraftMatrixViewProps) {
+export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, reserved, scopeCategories, foreignScopeCategories, scopeFfId, categoryOf, classOf, readyPkgWbs }: DraftMatrixViewProps) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -308,14 +314,18 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
 
     // Артикулы со свободным ФФ-остатком — источник раскладки черновика.
     // Коррекции ДО отсева: (1) резерв других черновиков вычтен из available;
-    // (2) ФФ-ограничение скоупа (available чужих складов = 0); (3) категорийный
-    // скоуп — чужие категории вообще не участвуют (ни в расчёте, ни в таблице).
-    const articles = useMemo<StockNeedArticle[]>(() => {
-        let corrected = subtractReserveFromArticles(stockNeed?.articles ?? [], reserved);
+    // (2) ФФ-ограничение скоупа (available чужих складов = 0); (3) владение
+    // категорией — свой скоуп (позитивный) ИЛИ минус категории чужих скоупов
+    // (бесскоупный черновик не дублирует план категорийных). Билдер вынесен из
+    // memo, чтобы runAutoSync мог пересобрать статьи от СВЕЖЕГО резерва перед PUT.
+    const buildArticlesFor = useCallback((res: DraftReserveMap | null | undefined): StockNeedArticle[] => {
+        let corrected = subtractReserveFromArticles(stockNeed?.articles ?? [], res);
         corrected = restrictArticlesToFf(corrected, scopeFfId);
-        if (scopeCategories?.length && categoryOf) {
-            const inSc = inScopeOf(scopeCategories, categoryOf);
-            corrected = corrected.filter(a => inSc(a.nm_id));
+        if (categoryOf) {
+            corrected = filterArticlesByCategoryScope(
+                corrected, scopeCategories, categoryOf,
+                foreignScopeCategories?.length ? new Set(foreignScopeCategories) : undefined,
+            );
         }
         const out: StockNeedArticle[] = [];
         for (const a of corrected) {
@@ -323,7 +333,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
             if (avail > 0) out.push(a);
         }
         return out;
-    }, [stockNeed, reserved, scopeFfId, scopeCategories, categoryOf]);
+    }, [stockNeed, scopeFfId, scopeCategories, foreignScopeCategories, categoryOf]);
+    const articles = useMemo<StockNeedArticle[]>(() => buildArticlesFor(reserved), [buildArticlesFor, reserved]);
 
     // ─── Авто-раскладка: потребность × ФФ-сток → приёмка → коробы/паллеты ────
     const computeDistribution = useCallback(async (signal: AbortSignal) => {
@@ -1272,9 +1283,18 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
             // Ячейки prebook_origin (дозабор/«Оставить так») — ручные решения уровня
             // (nm × склад): синк их не откатывает (расчёт про них не знает).
             const preserve = new Set<string>(dist?.prebook_origin ?? []);
+            // СВЕЖИЙ резерв других черновиков перед записью: проп страницы мог
+            // протухнуть (carve только что создал категорийный черновик, чужой
+            // синк занял сток) — пул добора/промоции не должен трогать чужое.
+            // Сбой — best-effort: остаёмся на статьях от пропа.
+            let liveArticles = articles;
+            try {
+                const freshReserved = await api.getDraftsReserved(draftId);
+                liveArticles = buildArticlesFor(freshReserved.reserved || {});
+            } catch { /* резерв из пропа */ }
             // «Один мир»: план не дублирует уже едущее — иначе серверный транзит-гейт
             // резал прирост и демотировал направления целиком в предбронь (качель).
-            const netted = await netOutInTransit(shipRows, effPrebook, articles, { nmPpb, nmPpbByWh, nmBoxSize, palletOverrides }, classOf ?? (() => '*'));
+            const netted = await netOutInTransit(shipRows, effPrebook, liveArticles, { nmPpb, nmPpbByWh, nmBoxSize, palletOverrides }, classOf ?? (() => '*'));
             // Ре-нормализация смёрженного плана: направления с ✋/unowned-строками
             // после подстановки замороженных объёмов теряли целость паллет, а хвост
             // висел в rows (прод 2026-07-21). Двусторонний клапан (2026-07-22):
@@ -1288,7 +1308,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                 classOf: classOf ?? (() => '*'),
             };
             const plan = buildAutoSyncPlan(dist ?? {}, netted.rows, netted.prebook, guarded, curManual, preserve,
-                makeAutoSyncNormalizePair(normCtx, articles, readyPkgWbs ?? new Set()));
+                makeAutoSyncNormalizePair(normCtx, liveArticles, readyPkgWbs ?? new Set()));
             if (!plan) {
                 if (trigger === 'manual') showToast('План уже соответствует расчёту', 'success');
                 return;
@@ -1323,7 +1343,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
         } finally {
             setWriting(false);
         }
-    }, [writing, distRows, draftId, guardByNm, shipRows, effPrebook, articles, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides, classOf, readyPkgWbs, flushDraftSave, showToast, onDraftChanged]);
+    }, [writing, distRows, draftId, guardByNm, shipRows, effPrebook, articles, buildArticlesFor, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides, classOf, readyPkgWbs, flushDraftSave, showToast, onDraftChanged]);
 
     // Авто-запуск синка: один раз за заход, когда готовы И расчёт, И черновик.
     const autoSyncDoneRef = useRef(false);
@@ -1334,9 +1354,15 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
         // авто-синк персистил бы непроверенный план на закрытые склады. Ручной
         // «⟳ Обновить сейчас» остаётся доступен (осознанное действие).
         if (acceptanceNote?.failed) return;
+        // Детерминизм скоупов: пока страница не загрузила список черновиков
+        // (foreignScopeCategories === null), бесскоупный черновик не знает чужих
+        // категорий — авто-синк спланировал бы их себе (кросс-черновичный дубль).
+        // Ждём загрузки (эффект перезайдёт по смене пропа); ручной
+        // «⟳ Обновить сейчас» не гейтим — осознанное действие.
+        if (foreignScopeCategories === null) return;
         autoSyncDoneRef.current = true;
         void runAutoSync('auto');
-    }, [distRows, draftRows, runAutoSync, acceptanceNote]);
+    }, [distRows, draftRows, runAutoSync, acceptanceNote, foreignScopeCategories]);
 
     // ─── «⇄ Слить склад в склад»: весь план колонки-источника → в цель ───
     // Гейт per (SKU × упаковка) — тот же, что у степпера: приём цели открыт И лимит

@@ -16,8 +16,9 @@ from decimal import Decimal
 from typing import cast
 
 from fastapi import HTTPException
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from backend.cache import invalidate_cache
 from backend.models.assembly import (
@@ -27,6 +28,7 @@ from backend.models.assembly import (
     AssemblyStatus,
 )
 from backend.models.cost import Nomenclature
+from backend.models.warehouse import WarehouseStock
 from backend.schemas.assembly_draft import (
     AssemblyDraftCommitResponse,
     AssemblyDraftCreate,
@@ -237,9 +239,14 @@ async def get_drafts_reserved(
     (не Pydantic): в проде встречается explicit null вместо [] / {} — модельная
     валидация items его не переживает, поэтому везде `.get(k) or []` / `or {}`.
     Пустые баркоды и qty ≤ 0 пропускаются.
+
+    Перф: зовётся на КАЖДЫЙ PUT черновика (гейт ёмкости `_clamp_to_ff_capacity`),
+    поэтому load_only(id, distribution) — коду нужен только JSONB, остальные
+    колонки полного ORM-объекта не тащим (ORDER BY/WHERE работают на уровне SQL).
     """
     query = (
         select(AssemblyDraft)
+        .options(load_only(AssemblyDraft.id, AssemblyDraft.distribution))
         .where(
             AssemblyDraft.project_id == project_id,
             AssemblyDraft.is_deleted == False,  # noqa: E712 — SQLAlchemy expression
@@ -390,6 +397,10 @@ async def update_draft(
 
     before_distribution = copy.deepcopy(draft.distribution) if payload.event is not None else None
 
+    capacity_cut = 0
+    capacity_cut_by_article: dict[str, int] = {}
+    capacity_before: dict | None = None
+
     if payload.name is not None:
         draft.name = payload.name
     if payload.distribution is not None:
@@ -411,6 +422,21 @@ async def update_draft(
             await _subtract_in_transit(db, project_id, payload.distribution, baseline)
         except Exception:
             logger.warning("draft %s: in-transit гейт пропущен (ошибка выборки)", draft_id, exc_info=True)
+        # Гейт ёмкости ФФ: план (rows+prebook) per (barcode, ФФ) не может
+        # превышать физику склада — сток минус активные заявки минус резерв
+        # других черновиков. Сознательно БЕЗ baseline (в отличие от дельта-гейта
+        # выше): применяется и к уже сохранённому плану, иначе «храповик» —
+        # SKU, выпавший из расчёта фронта, консервировал бы фантом навечно.
+        # Fail-open: сбой выборки не валит автосейв.
+        try:
+            # Снапшот ДО среза — before_distribution аудит-события CAPACITY_TRIM
+            # (пишется ниже, после commit, ТОЛЬКО при фактическом срезе).
+            capacity_before = payload.distribution.model_dump()
+            capacity_cut, capacity_cut_by_article = await _clamp_to_ff_capacity(
+                db, project_id, draft_id, payload.distribution
+            )
+        except Exception:
+            logger.warning("draft %s: ff-capacity гейт пропущен (ошибка выборки)", draft_id, exc_info=True)
         draft.distribution = payload.distribution.model_dump()
     if payload.comment is not None:
         draft.comment = payload.comment
@@ -436,6 +462,34 @@ async def update_draft(
             await db.refresh(draft)
         except Exception:
             logger.warning("Failed to log draft event for draft_id=%s", draft_id, exc_info=True)
+
+    if capacity_cut > 0:
+        from backend.services.assembly.draft_history import log_draft_event
+
+        # Аудит молчаливого среза: гейт ёмкости РЕАЛЬНО урезал план → событие
+        # CAPACITY_TRIM с разбивкой по артикулам и снапшотом ДО среза. Логируется
+        # ПОСЛЕ payload.event (срез — самый поздний слой этого PUT: его откат
+        # вернёт несрезанный план, следующий откат — состояние до PUT).
+        # Best-effort: сбой лога не валит PUT (черновик уже сохранён).
+        top = sorted(capacity_cut_by_article.items(), key=lambda kv: (-kv[1], kv[0]))
+        parts = ", ".join(f"{art} ×{qty}" for art, qty in top[:5]) + (", …" if len(top) > 5 else "")
+        try:
+            await log_draft_event(
+                db,
+                project_id,
+                draft_id,
+                "CAPACITY_TRIM",
+                summary=(
+                    f"⚖ Ёмкость ФФ: срезано {capacity_cut} шт ({parts}) — "
+                    "сток минус сборка минус резерв других черновиков"
+                ),
+                before_distribution=capacity_before,
+                draft_updated_at=draft.updated_at,
+                changed_by=changed_by,
+            )
+            await db.refresh(draft)
+        except Exception:
+            logger.warning("Failed to log CAPACITY_TRIM event for draft_id=%s", draft_id, exc_info=True)
     return draft
 
 
@@ -1658,6 +1712,223 @@ async def _subtract_in_transit(
             demoted,
         )
     return sub_rows + sub_pb
+
+
+# Статусы «товар забронирован на ФФ активной заявкой» — ровно как in-assembly
+# в warehouse_need_service. Без SHIPPED (отгрузка уже списала сток ФФ) и без
+# PRE_DISTRIBUTED (товар машины ещё не приехал на ФФ и в стоке не лежит).
+_FF_CAPACITY_ACTIVE_STATUSES: tuple[AssemblyStatus, ...] = (
+    AssemblyStatus.PENDING,
+    AssemblyStatus.IN_PROGRESS,
+    AssemblyStatus.READY,
+    AssemblyStatus.VEHICLE_ASSIGNED,
+)
+
+
+async def _fetch_ff_stock_by_barcode(
+    db: AsyncSession,
+    project_id: int,
+    ff_ids: list[int],
+    barcodes: list[str],
+) -> dict[tuple[str, str], int]:
+    """Σ warehouse_stock.quantity per (barcode, ff_id-строка) — join через
+    nomenclature (как rf_stock в warehouse_need_service)."""
+    result = await db.execute(
+        select(
+            WarehouseStock.warehouse_id,
+            Nomenclature.barcode,
+            func.sum(WarehouseStock.quantity).label("qty"),
+        )
+        .join(Nomenclature, Nomenclature.id == WarehouseStock.nomenclature_id)
+        .where(
+            WarehouseStock.project_id == project_id,
+            # project_id и на nomenclature (iron rule 1): FK-join сам по себе не
+            # скоупит тенанта, а фильтр включает uq-индекс (project_id, barcode).
+            Nomenclature.project_id == project_id,
+            WarehouseStock.warehouse_id.in_(ff_ids),
+            Nomenclature.barcode.in_(barcodes),
+        )
+        .group_by(WarehouseStock.warehouse_id, Nomenclature.barcode)
+    )
+    return {(str(bc), str(wh_id)): int(qty or 0) for wh_id, bc, qty in result.all()}
+
+
+def _cut_row_src_at_ff(row: AssemblyDraftRow, ff_key: str, amount: int) -> int:
+    """Срезать до `amount` штук из row.src[ff_key], ужав tgt с крупнейших целей
+    до Σsrc (carve, Σsrc == Σtgt — зеркало `_subtract_in_transit_rows`).
+    Возвращает фактически срезанное."""
+    have = int((row.src or {}).get(ff_key, 0) or 0)
+    cut = min(have, amount)
+    if cut <= 0:
+        return 0
+    row.src[ff_key] = have - cut
+    excess = sum((row.tgt or {}).values()) - sum((row.src or {}).values())
+    for wh in sorted(row.tgt or {}, key=lambda k: -row.tgt[k]):
+        if excess <= 0:
+            break
+        take = min(row.tgt[wh], excess)
+        row.tgt[wh] -= take
+        excess -= take
+    row.src = {k: v for k, v in row.src.items() if v > 0}
+    row.tgt = {k: v for k, v in row.tgt.items() if v > 0}
+    return cut
+
+
+async def _clamp_to_ff_capacity(
+    db: AsyncSession,
+    project_id: int,
+    draft_id: int,
+    distribution: AssemblyDraftDistribution,
+) -> tuple[int, dict[str, int]]:
+    """Server-side гейт ЁМКОСТИ ФФ: план черновика (rows[].src + prebook[].src)
+    per (barcode, ФФ) клампится к физике склада. Возвращает
+    (Σ срезано, срез по артикулу {vendor_code|barcode → шт}) — разбивка идёт
+    в summary события истории CAPACITY_TRIM (пишет вызывающий update_draft).
+
+        cap = max(0, сток − в_сборке − резерв_других_черновиков)
+
+    где сток = warehouse_stock ФФ, в_сборке = активные заявки этого ФФ
+    (_FF_CAPACITY_ACTIVE_STATUSES), резерв других = get_drafts_reserved
+    (rows+prebook+handed чужих черновиков).
+
+    В отличие от дельта-гейта `_subtract_in_transit` — БЕЗ baseline: гейт
+    применяется и когда входящий план == уже сохранённый. Иначе «храповик»:
+    SKU с available=0 выпадает из articles расчёта на фронте → calc не владеет
+    nm → его rows/prebook консервируются навечно, а транзит-гейт режет только
+    прирост (прод 2026-07-22: divan_darkblue — сток 8 целиком в заявке ASM-858,
+    черновик держал ещё 8; швабра EP-800 — 402 обещанных из 282 физических).
+
+    Порядок среза излишка: prebook (не-as_is/не-manual) → rows (не-as_is/
+    не-manual) → as_is и ✋ manual в последнюю очередь. Физика важнее ручных
+    решений: фантом с ✋ — всё равно фантом, срезается тоже. Пустые строки
+    удаляются. Строки без barcode не гейтуются (не сматчить со стоком).
+
+    Урезанное в ROWS направление больше не гарантированно целые паллеты —
+    его остаток демотируется в предбронь `_demote_directions_to_prebook`
+    (тот же канон, что после `_subtract_in_transit`); as_is и ✋ manual
+    хелпер не трогает.
+
+    Fast-path: пустой planned (нет rows/prebook src) → выход БЕЗ единого
+    запроса к БД — гейт крутится на каждом PUT (автосейв матрицы).
+    """
+    planned: dict[tuple[str, str], int] = {}
+    for r in list(distribution.rows or []) + list(distribution.prebook or []):
+        if not r.barcode:
+            continue
+        for ff_key, q in (r.src or {}).items():
+            qi = int(q or 0)
+            if qi <= 0:
+                continue
+            key = (r.barcode, str(ff_key))
+            planned[key] = planned.get(key, 0) + qi
+    if not planned:
+        return 0, {}
+
+    ff_ids_set: set[int] = set()
+    for _, ff_key in planned:
+        try:
+            ff_ids_set.add(int(ff_key))
+        except ValueError:
+            continue  # мусорный ключ src — такие пары не гейтуем
+    if not ff_ids_set:
+        return 0, {}
+    ff_ids = sorted(ff_ids_set)
+    barcodes = sorted({bc for bc, _ in planned})
+
+    stock = await _fetch_ff_stock_by_barcode(db, project_id, ff_ids, barcodes)
+
+    asm_result = await db.execute(
+        select(
+            AssemblyRequest.warehouse_id,
+            AssemblyRequestItem.barcode,
+            func.sum(AssemblyRequestItem.quantity).label("qty"),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequestItem.project_id == project_id,
+            AssemblyRequest.is_deleted == False,  # noqa: E712 — SQLAlchemy expression
+            AssemblyRequest.status.in_([s.value for s in _FF_CAPACITY_ACTIVE_STATUSES]),
+            AssemblyRequest.warehouse_id.in_(ff_ids),
+            AssemblyRequestItem.barcode.in_(barcodes),
+        )
+        .group_by(AssemblyRequest.warehouse_id, AssemblyRequestItem.barcode)
+    )
+    in_assembly = {(str(bc), str(wh_id)): int(qty or 0) for wh_id, bc, qty in asm_result.all()}
+
+    reserved_others = await get_drafts_reserved(db, project_id, exclude_draft_id=draft_id)
+
+    manual = set(distribution.manual_nms or [])
+
+    def _cut_last(r: AssemblyDraftRow) -> bool:
+        return bool(r.as_is) or r.nm_id in manual
+
+    # Порядок среза: предбронь (хвосты) → rows (авто), ручные решения последними.
+    buckets: list[list[AssemblyDraftRow]] = [
+        [r for r in (distribution.prebook or []) if not _cut_last(r)],
+        [r for r in (distribution.rows or []) if not _cut_last(r)],
+        [r for r in (distribution.prebook or []) if _cut_last(r)]
+        + [r for r in (distribution.rows or []) if _cut_last(r)],
+    ]
+
+    # id() строк, живущих в rows: демоция целости паллет касается ТОЛЬКО их
+    # (срез предброни на целость rows не влияет — предбронь уже хвосты).
+    rows_ids = {id(r) for r in (distribution.rows or [])}
+
+    total_cut = 0
+    cut_by_article: dict[str, int] = {}
+    touched_dirs: set[tuple[str, str]] = set()  # (package_type, WB-склад) урезанных rows
+    emptied: set[int] = set()  # id() срезанных в ноль строк — удаляем только их
+    summary: list[str] = []
+    for (bc, ff_key), plan_qty in sorted(planned.items()):
+        cap = max(
+            0,
+            stock.get((bc, ff_key), 0)
+            - in_assembly.get((bc, ff_key), 0)
+            - int((reserved_others.get(bc) or {}).get(ff_key, 0) or 0),
+        )
+        excess = plan_qty - cap
+        if excess <= 0:
+            continue
+        summary.append(f"{bc}@ff{ff_key}: план {plan_qty} > cap {cap}, срез {excess}")
+        for bucket in buckets:
+            if excess <= 0:
+                break
+            for row in bucket:
+                if excess <= 0:
+                    break
+                if (row.barcode or "") != bc:
+                    continue
+                before_tgt = dict(row.tgt or {})
+                cut = _cut_row_src_at_ff(row, ff_key, excess)
+                if cut <= 0:
+                    continue
+                excess -= cut
+                total_cut += cut
+                art = row.vendor_code or row.barcode or str(row.nm_id)
+                cut_by_article[art] = cut_by_article.get(art, 0) + cut
+                if id(row) in rows_ids:
+                    pkg = row.package_type or "BOX"
+                    for wh, q in before_tgt.items():
+                        if (row.tgt or {}).get(wh, 0) < int(q or 0):
+                            touched_dirs.add((pkg, wh))
+                if sum((row.src or {}).values()) <= 0:
+                    emptied.add(id(row))
+    if not total_cut:
+        return 0, {}
+    distribution.rows = [r for r in (distribution.rows or []) if id(r) not in emptied]
+    distribution.prebook = [r for r in (distribution.prebook or []) if id(r) not in emptied]
+    # Канон «rows = целые паллеты»: остаток урезанного направления уезжает в
+    # предбронь (как после транзит-гейта) — фронт-консолидация поднимет обратно
+    # собравшиеся целые паллеты.
+    demoted = _demote_directions_to_prebook(distribution, touched_dirs)
+    if demoted:
+        logger.info(
+            "ff-capacity гейт: %d шт остатков урезанных направлений демотированы в предбронь",
+            demoted,
+        )
+    logger.info("ff-capacity гейт: draft %s срезано %d шт (%s)", draft_id, total_cut, "; ".join(summary))
+    return total_cut, cut_by_article
 
 
 def _reconcile_handed_with_rows(distribution: AssemblyDraftDistribution) -> bool:

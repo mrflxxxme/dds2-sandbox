@@ -93,6 +93,23 @@ async def setup_test_data(db_session, project, other_project):
             )
     await db_session.commit()
 
+    # Щедрый ФФ-сток обоих баркодов на обоих ФФ: гейт ёмкости update_draft
+    # (`_clamp_to_ff_capacity`) нейтрален — этот файл тестирует CRUD/commit,
+    # физику стока проверяет tests/test_assembly_ff_capacity_gate.py.
+    for barcode in (TEST_BARCODE_1, TEST_BARCODE_2):
+        await db_session.execute(
+            text(
+                "INSERT INTO warehouse_stock (project_id, warehouse_id, nomenclature_id, barcode, "
+                "quantity, in_transit, defect_quantity, defect_in_transit, updated_at) "
+                "SELECT :pid, w.id, n.id, :bc, 100000, 0, 0, 0, NOW() "
+                "FROM warehouses w "
+                "JOIN nomenclature n ON n.project_id = :pid AND n.barcode = :bc "
+                "WHERE w.project_id = :pid AND w.name IN ('Source FF A', 'Source FF B')"
+            ),
+            {"pid": PROJECT_ID, "bc": barcode},
+        )
+    await db_session.commit()
+
     yield
 
 

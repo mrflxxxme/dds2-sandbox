@@ -47,6 +47,9 @@ _SNAPSHOT_EVENTS: tuple[DraftEventType | str, ...] = (
     "AUTO_SYNC",
     "ACCEPTANCE_SYNC",
     "REMOVE_ROWS",
+    # Аудит гейта ёмкости ФФ (update_draft): before = план ДО среза. Откат вернёт
+    # несрезанный план — следующий PUT прогонит его через гейт заново (не дыра).
+    "CAPACITY_TRIM",
 )
 _HISTORY_LIMIT = 200
 

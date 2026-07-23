@@ -31,7 +31,7 @@ import { subtractReserveFromArticles, restrictArticlesToFf } from '@/lib/assembl
 import { inTransitMap, subtractInTransitFromRows } from '@/lib/assembly/reconcileInTransit';
 import { scopedNormalizeDraft } from '@/lib/utils/scopedNormalizeDraft';
 import type { NormalizeDraftCtx } from '@/lib/utils/normalizeDraft';
-import { inScopeOf, type CategoryOf } from '@/lib/assembly/categoryCompat';
+import { filterArticlesByCategoryScope, type CategoryOf } from '@/lib/assembly/categoryCompat';
 import { allocatePairs } from '@/lib/utils/assemblyPreview';
 import { parseBoxSize } from '@/lib/utils/boxPallet';
 import { NEED_ANALYSIS_DAYS, NEED_SUPPLY_DAYS } from '@/lib/assembly/needParams';
@@ -171,6 +171,38 @@ export async function loadAutoSyncSharedData(reuse?: AutoSyncReuse): Promise<Aut
 const sumUnits = (rows: AssemblyDraftRow[]): number =>
     rows.reduce((s, r) => s + Object.values(r.tgt || {}).reduce((a, v) => a + (v || 0), 0), 0);
 
+/** Позиция батча проверки приёмки WB. */
+export interface AcceptanceCheckItem {
+    nm_id: number;
+    barcode: string;
+    distribution: Record<string, number>;
+}
+
+/**
+ * Дополнительные позиции батча приёмки — ТОЛЬКО из предброни черновика
+ * (✋/unowned/чужая категория — SKU вне расчёта): readyPkgWbs нужен обратной
+ * промоции целых паллет предбронь→rows, а она смотрит только направления
+ * предброни. Rows-SKU вне расчёта приёмку не потребляют (демоция идёт не по
+ * ней) — их включение лишь выедало квоту WB 6/мин (ревью MEDIUM 2026-07-23).
+ * Дедуп с уже проверяемыми расчётными SKU — через `checkedKeys`.
+ */
+export function collectExtraAcceptanceItems(
+    prebook: AssemblyDraftRow[],
+    checkedKeys: ReadonlySet<string>,
+): AcceptanceCheckItem[] {
+    const extraByKey = new Map<string, AcceptanceCheckItem>();
+    for (const r of prebook) {
+        const key = `${r.nm_id}::${r.barcode}`;
+        if (!r.barcode || checkedKeys.has(key)) continue;
+        const acc = extraByKey.get(key) ?? { nm_id: r.nm_id, barcode: r.barcode, distribution: {} };
+        for (const [wb, q] of Object.entries(r.tgt || {})) {
+            if ((q || 0) > 0) acc.distribution[wb] = (acc.distribution[wb] || 0) + (q || 0);
+        }
+        if (Object.keys(acc.distribution).length > 0) extraByKey.set(key, acc);
+    }
+    return [...extraByKey.values()];
+}
+
 /** Геометрия для нормализации плана (карты раннера/матрицы). */
 export interface PlanGeometry {
     nmPpb: Map<number, number | null>;
@@ -244,6 +276,10 @@ export async function runDraftAutoSync(
     shared: AutoSyncSharedData,
     categoryOf: CategoryOf,
     classOf: (nm: number) => string,
+    /** Категории из category_scope ВСЕХ живых ЧУЖИХ черновиков: бесскоупный
+     *  черновик их не планирует — владение категорией эксклюзивно (иначе
+     *  кросс-черновичный дубль: 402 обещанных из 282 физических, прод 2026-07-22). */
+    foreignScopeCategories?: ReadonlySet<string>,
 ): Promise<DraftSyncOutcome> {
     const base: DraftSyncOutcome = { draftId: draft.id, name: draft.name, status: 'skipped' };
     try {
@@ -253,10 +289,7 @@ export async function runDraftAutoSync(
         const scopeFfId = draft.distribution.scope_ff_id ?? null;
         let articles: StockNeedArticle[] = subtractReserveFromArticles(shared.stockNeed.articles ?? [], reserved);
         articles = restrictArticlesToFf(articles, scopeFfId);
-        if (scope?.length) {
-            const inSc = inScopeOf(scope, categoryOf);
-            articles = articles.filter((a) => inSc(a.nm_id));
-        }
+        articles = filterArticlesByCategoryScope(articles, scope, categoryOf, foreignScopeCategories);
         articles = articles.filter((a) =>
             Object.values(a.rf_stocks || {}).reduce((s, st) => s + Math.max(0, Number(st?.available) || 0), 0) > 0);
         if (articles.length === 0) return { ...base, reason: 'no-articles' };
@@ -284,11 +317,20 @@ export async function runDraftAutoSync(
         // Готовые к сдаче направления по той же живой приёмке — для обратной промоции
         // целых паллет из предброни (без данных множество пусто → «нет данных ≠ готов»).
         let readyPkgWbs = new Set<string>();
-        if (autoSkus.length > 0) {
+        // Приёмку проверяем И по SKU ПРЕДБРОНИ вне расчёта (✋/unowned/чужая
+        // категория): readyPkgWbs только от расчётных SKU не знал направлений таких
+        // строк — их целые паллеты в предброни раннер не промотировал никогда
+        // (прод: швабра 59 кор «вечно в предброни», хотя страничная консолидация,
+        // проверяющая собственную предбронь черновика, направление видела готовым).
+        // Только prebook: rows-SKU промоцию не питают, а батч ест квоту WB 6/мин.
+        const checkedKeys = new Set(autoSkus.map((s) => `${s.nm_id}::${s.barcode}`));
+        const accItems = [
+            ...autoSkus.map((s) => ({ nm_id: s.nm_id, barcode: s.barcode, distribution: s.target })),
+            ...collectExtraAcceptanceItems(draft.distribution.prebook ?? [], checkedKeys),
+        ];
+        if (accItems.length > 0) {
             try {
-                const resp = await api.checkWbAcceptance({
-                    items: autoSkus.map((s) => ({ nm_id: s.nm_id, barcode: s.barcode, distribution: s.target })),
-                });
+                const resp = await api.checkWbAcceptance({ items: accItems });
                 for (const it of resp.items) {
                     const splits = it.splits?.length
                         ? it.splits.map((sp) => ({ package_type: sp.package_type, distribution: sp.distribution }))

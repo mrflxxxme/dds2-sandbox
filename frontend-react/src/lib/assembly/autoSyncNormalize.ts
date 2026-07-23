@@ -62,7 +62,13 @@ export function readyPkgWbsFromAvailability(
     return out;
 }
 
-/** normalizePair для `buildAutoSyncPlan` (страничный раннер и матрица). */
+/** normalizePair для `buildAutoSyncPlan` (страничный раннер и матрица).
+ *  КОНТРАКТ: геометрия `baseCtx` (ppbOf/ppbAt/boxSizeOf) обязана покрывать ВСЕ nm
+ *  пары rows+prebook (карты getBoxMultiplicity/getPalletBoxesBySize — полные,
+ *  НЕ срез articles): промоция уже-целых паллет работает и для SKU вне articles
+ *  (✋/unowned/чужая категория — прод: швабра 59 кор). `articles` задаёт ТОЛЬКО
+ *  пул свободного ФФ — добор хвостов чужим SKU не положен, без геометрии
+ *  SKU не трогается (fail-closed). Закреплено тестами autoSyncNormalize.test.ts. */
 export function makeAutoSyncNormalizePair(
     baseCtx: NormalizeDraftCtx,
     articles: StockNeedArticle[],
