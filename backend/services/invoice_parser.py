@@ -813,8 +813,12 @@ async def extract_requisites_vision_pages(
 
     from backend.services.ai.llm_client import chat
 
+    # В vision шлём лишь первые _VISION_MAX_PAGES страниц: реквизиты получателя на 1-й
+    # странице счёта, а тяжёлый multi-image payload давит узкий РФ-прокси (не отвечает за
+    # таймаут). Хвост в vision не идёт; его типы ниже дефолтятся в INVOICE (едет со счётом).
+    vision_imgs = images[: invoice_split._VISION_MAX_PAGES]
     content: list[dict] = []
-    for img in images:
+    for img in vision_imgs:
         b64 = base64.standard_b64encode(invoice_split.image_to_jpeg(img)).decode("ascii")
         content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
     content.append({"type": "text", "text": "Извлеки реквизиты ПОЛУЧАТЕЛЯ со страницы-счёта и определи тип каждой страницы."})
