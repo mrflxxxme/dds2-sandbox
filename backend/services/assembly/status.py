@@ -75,39 +75,74 @@ async def _resolve_carrier(db: AsyncSession, project_id: int, inn: str | None, n
     return cp.id
 
 
+# Газелька-агрегатор в разных источниках зовётся по-разному («Газель-Ка» из портала,
+# «Газелька» вручную и т.п.). Все варианты — ОДИН контрагент: матчим по маркеру, чтобы
+# бэкфилл не плодил дубли, даже если survivor переименован (см. слияние 2026-07-23).
+_GAZELKA_MARKER = "газел"
+
+
+def _pick_carrier(rows: list[Counterparty]) -> Counterparty | None:
+    """Из кандидатов предпочесть CARRIER с ИНН → любой CARRIER → любой."""
+    return (
+        next((c for c in rows if c.primary_type == "CARRIER" and (c.inn or "").strip()), None)
+        or next((c for c in rows if c.primary_type == "CARRIER"), None)
+        or (rows[0] if rows else None)
+    )
+
+
+async def _create_carrier(db: AsyncSession, project_id: int, name: str) -> int:
+    cp = Counterparty(project_id=project_id, name=name, primary_type="CARRIER", created_by_import=False)
+    db.add(cp)
+    await db.flush()
+    return cp.id
+
+
 async def _resolve_carrier_by_name(db: AsyncSession, project_id: int, name: str | None) -> int | None:
     """Найти/создать перевозчика ПО ИМЕНИ (когда ИНН нет — источник Газелька: у неё
-    только название организации). Уникальность Counterparty — по ИНН, имя не уникально,
-    поэтому берём точное совпадение (case-insensitive), предпочитая существующего
-    CARRIER; иначе создаём. Так у отгрузки всегда есть перевозчик (в листе оплаты не «—»).
+    только название организации). Уникальность Counterparty — по ИНН, имя не уникально.
+
+    Газельные имена («Газель-Ка»/«Газелька»/…) сводим к ОДНОМУ контрагенту по маркеру
+    «газел» (не по точному имени) — чтобы разные написания и переименованный survivor не
+    плодили дубли. Прочие перевозчики — точное совпадение имени, иначе создаём.
+    Так у отгрузки всегда есть перевозчик (в листе оплаты не «—»).
     """
     clean = (name or "").strip()
     if not clean:
         return None
+    norm = clean.lower().replace("ё", "е")
+
+    if _GAZELKA_MARKER in norm:
+        res = await db.execute(
+            select(Counterparty)
+            .where(
+                Counterparty.project_id == project_id,
+                func.lower(Counterparty.name).like(f"%{_GAZELKA_MARKER}%"),
+                Counterparty.is_deleted == False,  # noqa: E712
+            )
+            .limit(20)
+        )
+        cp = _pick_carrier(list(res.scalars().all()))
+        if cp is not None:
+            if cp.primary_type == "OTHER":
+                cp.primary_type = "CARRIER"
+            return cp.id
+        return await _create_carrier(db, project_id, clean)
+
     res = await db.execute(
         select(Counterparty)
         .where(
             Counterparty.project_id == project_id,
-            func.lower(Counterparty.name) == clean.lower(),
+            func.lower(Counterparty.name) == norm,
             Counterparty.is_deleted == False,  # noqa: E712
         )
         .limit(10)
     )
-    rows = res.scalars().all()
-    cp = next((c for c in rows if c.primary_type == "CARRIER"), rows[0] if rows else None)
+    cp = _pick_carrier(list(res.scalars().all()))
     if cp is not None:
         if cp.primary_type == "OTHER":
             cp.primary_type = "CARRIER"
         return cp.id
-    cp = Counterparty(
-        project_id=project_id,
-        name=clean,
-        primary_type="CARRIER",
-        created_by_import=False,
-    )
-    db.add(cp)
-    await db.flush()
-    return cp.id
+    return await _create_carrier(db, project_id, clean)
 
 
 # --- Helpers (used by crud.py via from .status import _log_status_change) ---
