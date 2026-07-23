@@ -47,6 +47,8 @@ class WbSupplyState(BaseModel):
     pass_car_model: str | None = None
     pass_car_number: str | None = None
     pass_pallets: int | None = None
+    # Способ отгрузки пропуска: False = паллеты, True = отдельные короба (boxTypeName).
+    pass_as_boxes: bool = False
     # Зеркало назначенной машины заявки (read-only) — для префилла пропуска и
     # подсветки расхождений «машина заявки ↔ WB-пропуск» (F3). Заполняется
     # сервисом из AssemblyRequest, в самой таблице wb-поставки не хранится.
@@ -55,6 +57,8 @@ class WbSupplyState(BaseModel):
     assembly_driver_phone: str | None = None
     # Локальное число паллет заявки — для баннера «паллеты ≠ WB» (F2).
     assembly_pallets_count: int | None = None
+    # Единица заявки (короб/паллета) — дефолт способа отгрузки пропуска в UI.
+    assembly_shipped_as_boxes: bool = False
 
 
 class WbPreorderCreate(BaseModel):
@@ -79,6 +83,7 @@ class WbPassUpdate(BaseModel):
     car_model: str | None = None
     car_number: str | None = None
     pallets: int | None = None
+    as_boxes: bool | None = None  # способ отгрузки: короба (True) / паллеты (False)
 
 
 class WbSupplyStateBrief(BaseModel):

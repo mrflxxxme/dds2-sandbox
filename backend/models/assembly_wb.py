@@ -113,6 +113,12 @@ class AssemblyWbSupply(Base, TimestampMixin):
     pass_car_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     pass_car_number: Mapped[str | None] = mapped_column(String(30), nullable=True)
     pass_pallets: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Способ отгрузки пропуска (setTRNDetails.boxTypeName): False = паллеты («pallets»),
+    # True = отдельные короба («box»). pass_pallets в обоих случаях = число единиц.
+    # По умолчанию берётся из AssemblyRequest.shipped_as_boxes (sync_pass_from_vehicle).
+    pass_as_boxes: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
 
     # Снимок ФАКТИЧЕСКОГО пропуска из кабинета WB (trn_details), синкается
     # sync_all_states. Нужен для сверки нашего пропуска (pass_*) с кабинетным без

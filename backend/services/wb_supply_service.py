@@ -328,6 +328,7 @@ async def get_state(db: AsyncSession, project_id: int, assembly_id: int) -> WbSu
         "assembly_vehicle_brand": assembly.vehicle_brand,
         "assembly_driver_phone": assembly.driver_phone,
         "assembly_pallets_count": assembly.pallets_count,
+        "assembly_shipped_as_boxes": assembly.shipped_as_boxes,
     }
     # Авто-адопция: если это НЕ DDS-реплей (нет preorder_id), а у заявки есть
     # забронированная FBO-поставка — показываем её как BOOKED с supply_id из FBO.
@@ -543,6 +544,8 @@ async def save_pass(
     link.pass_car_model = data.get("car_model")
     link.pass_car_number = data.get("car_number")
     link.pass_pallets = data.get("pallets")
+    if data.get("as_boxes") is not None:
+        link.pass_as_boxes = bool(data.get("as_boxes"))
     await db.commit()
     # pass_pallets кормит блок «Расхождение поставок ФФ» (pallet_mismatch) — гасим кэш.
     await invalidate_cache("reports:assembly_link_anomalies")
@@ -633,6 +636,8 @@ async def sync_pass_from_vehicle(
 
     if link.pass_pallets is None and assembly.pallets_count:
         link.pass_pallets = assembly.pallets_count
+        # Способ отгрузки пропуска по умолчанию = единица заявки (короба/паллеты).
+        link.pass_as_boxes = assembly.shipped_as_boxes
 
 
 async def create_preorder(
@@ -854,6 +859,7 @@ async def push_pass(db: AsyncSession, project_id: int, assembly_id: int) -> Asse
             car_number=car_number,
             phone=phone,
             pallets=pallets,
+            as_boxes=link.pass_as_boxes,
         )
         link.barcode_id = barcode_id
         link.sync_status = WbSupplySyncStatus.PASSED.value
@@ -957,6 +963,7 @@ async def try_autopush_pass(
             car_number=car_number,
             phone=phone,
             pallets=pallets,
+            as_boxes=link.pass_as_boxes,
         )
         # Снимок как в push_pass: только что записали пропуск в WB.
         link.barcode_id = int(barcode_id)
