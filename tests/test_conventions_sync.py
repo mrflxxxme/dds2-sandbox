@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 BACKEND = Path(__file__).parent.parent / "backend"
 SCRIPTS = Path(__file__).parent.parent / "scripts"
 FRONTEND = Path(__file__).parent.parent / "frontend-react"
@@ -166,6 +168,10 @@ class TestCachePrefixSync:
 def _find_frontend_page_keys() -> set[str]:
     """Extract page keys from SECTION_PAGES in the team page component."""
     team_page = FRONTEND / "src" / "app" / "(main)" / "p" / "[slug]" / "team" / "page.tsx"
+    # Backend-CI гоняет pytest в контейнере без frontend-react (build-контекст
+    # только backend/ + tests/) — гард работает в полном дереве (локально/pre-push).
+    if not team_page.exists():
+        pytest.skip("frontend-react вне контекста backend-CI — гард выполняется в полном дереве")
     content = team_page.read_text()
     # Isolate the SECTION_PAGES object literal (other `key:` occurrences in the
     # file are TanStack column defs, not permission keys).
