@@ -75,6 +75,41 @@ async def _resolve_carrier(db: AsyncSession, project_id: int, inn: str | None, n
     return cp.id
 
 
+async def _resolve_carrier_by_name(db: AsyncSession, project_id: int, name: str | None) -> int | None:
+    """Найти/создать перевозчика ПО ИМЕНИ (когда ИНН нет — источник Газелька: у неё
+    только название организации). Уникальность Counterparty — по ИНН, имя не уникально,
+    поэтому берём точное совпадение (case-insensitive), предпочитая существующего
+    CARRIER; иначе создаём. Так у отгрузки всегда есть перевозчик (в листе оплаты не «—»).
+    """
+    clean = (name or "").strip()
+    if not clean:
+        return None
+    res = await db.execute(
+        select(Counterparty)
+        .where(
+            Counterparty.project_id == project_id,
+            func.lower(Counterparty.name) == clean.lower(),
+            Counterparty.is_deleted == False,  # noqa: E712
+        )
+        .limit(10)
+    )
+    rows = res.scalars().all()
+    cp = next((c for c in rows if c.primary_type == "CARRIER"), rows[0] if rows else None)
+    if cp is not None:
+        if cp.primary_type == "OTHER":
+            cp.primary_type = "CARRIER"
+        return cp.id
+    cp = Counterparty(
+        project_id=project_id,
+        name=clean,
+        primary_type="CARRIER",
+        created_by_import=False,
+    )
+    db.add(cp)
+    await db.flush()
+    return cp.id
+
+
 # --- Helpers (used by crud.py via from .status import _log_status_change) ---
 
 
@@ -386,6 +421,91 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
     await invalidate_cache("reports:assembly_link_anomalies")
     await invalidate_cache("reports:warehouse_need")
     return req
+
+
+async def apply_gazelka_logistics(
+    db: AsyncSession,
+    project_id: int,
+    request_id: int,
+    *,
+    car_number: str | None,
+    car_model: str | None,
+    driver_phone: str | None,
+    driver_first_name: str | None,
+    driver_last_name: str | None,
+    carrier_name: str | None,
+    pickup_cost: Decimal | None,
+    delivery_date: date | None,
+    pickup_date: date | None = None,
+    promote: bool = True,
+) -> str | None:
+    """Газелька назначила машину/водителя → зеркалим реквизиты в сборку и WB-пропуск.
+
+    Вызывается фоновым синком Газельки (`gazelka_service.sync_gazelka_states`): у
+    Gazelka-связанных заявок логистику ведёт агрегатор, ручной `assign_vehicle`
+    заблокирован — поэтому машину «назначаем» отсюда, данными из кабинета перевозчика.
+
+    Работает ТОЛЬКО в READY/VEHICLE_ASSIGNED (иначе no-op: заявка уже уехала/отменена).
+    При `promote` и READY переводит READY→VEHICLE_ASSIGNED («Машина назначена»), чтобы
+    логист не путался. Реквизиты — источник истины Газельки: перезаписываем непустыми
+    значениями; `pickup_cost` из тарифа → уедет в снимок отгрузки (лист оплаты). Пропуск
+    зеркалим через `sync_pass_from_vehicle`; занос в кабинет WB — отдельным
+    `try_autopush_pass_by_assembly` у вызывающего. Возвращает новый статус или None.
+    """
+    from .crud import get_assembly_request
+
+    req = await get_assembly_request(db, project_id, request_id)
+    if not req:
+        return None
+    st = AssemblyStatus(req.status)
+    if st not in (AssemblyStatus.READY, AssemblyStatus.VEHICLE_ASSIGNED):
+        return None  # SHIPPED/DELIVERED/CANCELLED — товар уже уехал, не трогаем
+
+    if car_number:
+        req.vehicle_info = car_number
+    if car_model:
+        req.vehicle_brand = car_model
+    if driver_phone:
+        req.driver_phone = driver_phone
+    if driver_first_name:
+        req.driver_first_name = driver_first_name
+    if driver_last_name:
+        req.driver_last_name = driver_last_name
+    # Перевозчик Газельки — по имени (ИНН нет). В листе оплаты не должно быть пустого
+    # перевозчика («—» запрещён): резолвим/создаём Counterparty и кладём в снимок отгрузки.
+    if carrier_name:
+        cp_id = await _resolve_carrier_by_name(db, project_id, carrier_name)
+        if cp_id is not None:
+            req.counterparty_id = cp_id
+    if pickup_cost is not None:
+        req.pickup_cost = pickup_cost
+    if delivery_date is not None:
+        req.delivery_date = delivery_date
+    if pickup_date is not None:
+        req.pickup_date = pickup_date
+
+    if promote and st == AssemblyStatus.READY:
+        req.status = AssemblyStatus.VEHICLE_ASSIGNED
+        req.vehicle_assigned_at = utcnow()
+        await _log_status_change(
+            db, project_id, req.id, AssemblyStatus.READY, AssemblyStatus.VEHICLE_ASSIGNED,
+            changed_by="gazelka", comment="Газелька: машина назначена",
+        )
+
+    # Зеркалим реквизиты в WB-пропуск (best-effort, без commit — коммитим ниже).
+    from backend.services import wb_supply_service
+
+    try:
+        await wb_supply_service.sync_pass_from_vehicle(db, project_id, req)
+    except Exception:  # noqa: BLE001
+        logger.warning("apply_gazelka_logistics: sync_pass_from_vehicle failed", request_id=req.id)
+
+    await db.commit()
+    await db.refresh(req)
+    await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
+    return req.status
 
 
 async def unassign_vehicle(db: AsyncSession, project_id: int, request_id: int) -> AssemblyRequest:

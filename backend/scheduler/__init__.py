@@ -28,6 +28,7 @@ from backend.scheduler.jobs.fbo_supplies import (
 )
 from backend.scheduler.jobs.ab_tests import ab_tests_tick_all_projects
 from backend.scheduler.jobs.fulfillment_sync import sync_all_fulfillment_warehouses
+from backend.scheduler.jobs.gazelka_sync import sync_all_projects_gazelka_states
 from backend.scheduler.jobs.funnel import (
     ad_anomaly_check,
     ad_nm_backfill_tick,
@@ -317,6 +318,18 @@ def start_scheduler():
         id="fbo_supplies_sync",
         name="FBO supplies sync (every 30min)",
         replace_existing=True,
+        misfire_grace_time=600,
+    )
+
+    # Gazelka order states sync: every 15 min — «Машина назначена» из кабинета перевозчика,
+    # авто-занос WB-пропуска (водитель/ТС), авто-шип по статусу «В маршруте» (тариф→стоимость).
+    _scheduler.add_job(
+        sync_all_projects_gazelka_states,
+        trigger=IntervalTrigger(minutes=15),
+        id="gazelka_states_sync",
+        name="Gazelka order states sync (every 15min)",
+        replace_existing=True,
+        max_instances=1,
         misfire_grace_time=600,
     )
 

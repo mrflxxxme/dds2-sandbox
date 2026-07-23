@@ -19,15 +19,18 @@ from backend.services.gazelka_service import (
     _attach_suggestion,
     _clean_date,
     _default_marketplace,
+    _extract_logistics,
     _extract_wb_numbers,
     _find_created_plan,
     _match_warehouse,
     _options_from_form,
+    _parse_rate,
     _payload_from_request,
     _plan_ids,
     _plan_matches_payload,
     _prefill_from_assembly,
     _row_from_plan,
+    _split_driver_name,
     _status_label,
     _validate_schedule,
     _values_from_plan,
@@ -697,3 +700,198 @@ async def test_promote_vehicle_assigned_noop_without_candidates(monkeypatch):
     db.execute = AsyncMock()
     assert await gazelka_service._promote_vehicle_assigned(db, 4, set()) == set()
     db.execute.assert_not_awaited()  # пустой вход — ни одного запроса в БД
+
+
+# ─── Фоновый синк статусов (машина назначена / пропуск / авто-шип) ───────────
+
+
+def test_split_driver_name_last_first_order():
+    # Кабинет отдаёт «Фамилия Имя Отчество» — first = имя, last = фамилия
+    assert _split_driver_name("Дейнекин Андрей Геннадьевич") == ("Андрей", "Дейнекин")
+    assert _split_driver_name("Иванов") == (None, "Иванов")
+    assert _split_driver_name("  ") == (None, None)
+    assert _split_driver_name(None) == (None, None)
+
+
+def test_parse_rate_strips_thousand_separators():
+    assert _parse_rate("6 500") == Decimal("6500")
+    assert _parse_rate("6\xa0500,50") == Decimal("6500.50")
+    assert _parse_rate("") is None
+    assert _parse_rate(None) is None
+
+
+def _active_joins() -> dict:
+    return {
+        "routes": {"5": {"id": "5", "driver_id": "9", "vehicle_id": "3", "carrier_id": "1", "date": "2026-07-23"}},
+        "drivers": {"9": {"id": "9", "name": "Дейнекин Андрей Геннадьевич", "phone": "+79001234567"}},
+        "vehicles": {"3": {"id": "3", "vehicle_make": "Мерседес", "vehicle_number": "Х392РМ37"}},
+        "carriers": {"1": {"id": "1", "organization": "ИП Иванов"}},
+    }
+
+
+def test_extract_logistics_pulls_driver_vehicle_rate():
+    plan = {"id": "77", "status": "31", "route_id": "5", "rate": "6 500", "delivery_date": "2026-07-24"}
+    info = _extract_logistics(plan, _active_joins())
+    assert info.car_number == "Х392РМ37"
+    assert info.car_model == "Мерседес"
+    assert (info.driver_first, info.driver_last) == ("Андрей", "Дейнекин")
+    assert info.driver_phone == "+79001234567"
+    assert info.carrier == "ИП Иванов"
+    assert info.pickup_cost == Decimal("6500")
+    assert info.delivery_date == date(2026, 7, 24)
+    assert info.has_vehicle is True
+
+
+def test_extract_logistics_no_route_no_vehicle():
+    info = _extract_logistics({"id": "77", "status": "2"}, _active_joins())
+    assert info.has_vehicle is False
+    assert info.car_number is None
+
+
+class _FakeActiveClient:
+    """Клиент Газельки для синка: async-контекст + authenticate + fetch_active."""
+
+    def __init__(self, data: dict):
+        self._data = data
+
+    async def __aenter__(self) -> "_FakeActiveClient":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def authenticate(self) -> None:
+        return None
+
+    async def fetch_active(self) -> dict:
+        return self._data
+
+
+def _patch_sync(monkeypatch, plan: dict, linked: dict) -> tuple:
+    """Замокать окружение sync_gazelka_states, вернуть моки downstream-вызовов."""
+    from backend.services import wb_supply_service
+    from backend.services.assembly import status as assembly_status
+
+    # fetch_active отдаёт справочники СПИСКАМИ (joins строит sync сам из data.get(k))
+    lists = {k: list(v.values()) for k, v in _active_joins().items()}
+    data = {"plans": [plan], **lists, "marketplaces": []}
+    monkeypatch.setattr(gazelka_service, "_get_key_or_none", AsyncMock(return_value=object()))
+    monkeypatch.setattr(gazelka_service, "_client_from_key", lambda key: _FakeActiveClient(data))
+    monkeypatch.setattr(gazelka_service, "_linked_map", AsyncMock(return_value=linked))
+
+    apply_mock = AsyncMock(return_value="VEHICLE_ASSIGNED")
+    ship_mock = AsyncMock()
+    pass_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(assembly_status, "apply_gazelka_logistics", apply_mock)
+    monkeypatch.setattr(assembly_status, "ship_request", ship_mock)
+    monkeypatch.setattr(wb_supply_service, "try_autopush_pass_by_assembly", pass_mock)
+    return apply_mock, ship_mock, pass_mock
+
+
+async def test_sync_states_ships_and_pushes_pass_on_in_route(monkeypatch):
+    """«В маршруте» (31): реквизиты+пропуск+тариф зеркалятся, сборка отгружается."""
+    plan = {"id": "77", "status": "31", "route_id": "5", "rate": "6 500", "delivery_date": "2026-07-24"}
+    apply_mock, ship_mock, pass_mock = _patch_sync(monkeypatch, plan, {"77": (646, "ASM-1", "READY")})
+
+    stats = await gazelka_service.sync_gazelka_states(MagicMock(), 4)
+
+    assert stats == {"assigned": 1, "passed": 1, "shipped": 1}
+    kw = apply_mock.await_args.kwargs
+    assert kw["car_number"] == "Х392РМ37"
+    assert kw["car_model"] == "Мерседес"
+    assert kw["carrier_name"] == "ИП Иванов"  # перевозчик уедет в отгрузку (не «—»)
+    assert kw["pickup_cost"] == Decimal("6500")
+    assert kw["promote"] is True
+    ship_mock.assert_awaited_once()
+    assert ship_mock.await_args.kwargs.get("allow_gazelka_ready") is True
+    pass_mock.assert_awaited_once()
+
+
+async def test_sync_states_assigns_but_no_ship_on_accepted(monkeypatch):
+    """«Принята в работу» (3): машина назначается + пропуск, но НЕ отгружаем."""
+    plan = {"id": "77", "status": "3", "route_id": "5", "rate": "6 500"}
+    apply_mock, ship_mock, pass_mock = _patch_sync(monkeypatch, plan, {"77": (646, "ASM-1", "READY")})
+
+    stats = await gazelka_service.sync_gazelka_states(MagicMock(), 4)
+
+    assert stats == {"assigned": 1, "passed": 1, "shipped": 0}
+    apply_mock.assert_awaited_once()
+    ship_mock.assert_not_awaited()
+
+
+async def test_sync_states_skips_unlinked_orders(monkeypatch):
+    """Заявка портала без связанной сборки — не трогаем ничего."""
+    plan = {"id": "77", "status": "31", "route_id": "5", "rate": "6 500"}
+    apply_mock, ship_mock, pass_mock = _patch_sync(monkeypatch, plan, {})  # linked пуст
+
+    stats = await gazelka_service.sync_gazelka_states(MagicMock(), 4)
+
+    assert stats == {"assigned": 0, "passed": 0, "shipped": 0}
+    apply_mock.assert_not_awaited()
+    ship_mock.assert_not_awaited()
+
+
+async def test_sync_states_ship_idempotent_swallows_value_error(monkeypatch):
+    """Повторный синк уже отгруженной: ship_request кидает ValueError → глушим, синк живёт."""
+    plan = {"id": "77", "status": "31", "route_id": "5", "rate": "6 500"}
+    apply_mock, ship_mock, pass_mock = _patch_sync(monkeypatch, plan, {"77": (646, "ASM-1", "READY")})
+    ship_mock.side_effect = ValueError("Invalid status transition: SHIPPED -> SHIPPED")
+
+    stats = await gazelka_service.sync_gazelka_states(MagicMock(), 4)
+
+    assert stats["shipped"] == 0  # отгрузка не засчитана, но исключение не всплыло
+    ship_mock.assert_awaited_once()
+
+
+async def test_sync_states_no_integration_returns_zero(monkeypatch):
+    monkeypatch.setattr(gazelka_service, "_get_key_or_none", AsyncMock(return_value=None))
+    stats = await gazelka_service.sync_gazelka_states(MagicMock(), 4)
+    assert stats == {"assigned": 0, "passed": 0, "shipped": 0}
+
+
+# ─── Перевозчик Газельки по имени (ИНН нет — в листе оплаты не «—») ───────────
+
+
+async def test_resolve_carrier_by_name_reuses_existing_carrier():
+    from backend.services.assembly.status import _resolve_carrier_by_name
+
+    existing = SimpleNamespace(id=12, primary_type="CARRIER", name="ИП Иванов")
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [existing])))
+    db.add = MagicMock()
+    db.flush = AsyncMock()
+
+    cid = await _resolve_carrier_by_name(db, 4, "ИП Иванов")
+
+    assert cid == 12
+    db.add.assert_not_called()  # существующего не дублируем
+
+
+async def test_resolve_carrier_by_name_creates_when_absent():
+    from backend.services.assembly.status import _resolve_carrier_by_name
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])))
+    created: dict = {}
+
+    def _add(obj):
+        obj.id = 99
+        created["cp"] = obj
+
+    db.add = MagicMock(side_effect=_add)
+    db.flush = AsyncMock()
+
+    cid = await _resolve_carrier_by_name(db, 4, "  ИП Новый  ")
+
+    assert cid == 99
+    assert created["cp"].name == "ИП Новый"  # trimmed
+    assert created["cp"].primary_type == "CARRIER"
+
+
+async def test_resolve_carrier_by_name_empty_returns_none():
+    from backend.services.assembly.status import _resolve_carrier_by_name
+
+    db = MagicMock()
+    db.execute = AsyncMock()
+    assert await _resolve_carrier_by_name(db, 4, "  ") is None
+    db.execute.assert_not_awaited()

@@ -399,6 +399,7 @@ function ActiveTable({ items, onTtn, ttnLoading, linkProps }: ActiveTableProps) 
                         <th>ТС</th>
                         <th>Адрес доставки</th>
                         <th>Дата сдачи</th>
+                        <th style={{ textAlign: 'right' }}>Стоимость</th>
                         <th></th>
                     </tr>
                 </thead>
@@ -439,6 +440,9 @@ function ActiveTable({ items, onTtn, ttnLoading, linkProps }: ActiveTableProps) 
                             </td>
                             <td style={{ whiteSpace: 'nowrap' }}>
                                 {row.delivery_date ? formatDate(row.delivery_date) : '—'}
+                            </td>
+                            <td style={{ textAlign: 'right', fontWeight: 600 }}>
+                                {row.rate ? `${formatNumber(Number(row.rate), 0)} ₽` : '—'}
                             </td>
                             <td>
                                 <button
