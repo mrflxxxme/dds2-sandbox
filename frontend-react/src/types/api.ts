@@ -2079,6 +2079,10 @@ export interface AssemblyRequest {
   counterparty_id?: number | null;
   carrier_inn?: string | null;
   carrier_name?: string | null;
+  /** логистику оказывает склад забора (перевозчик = контрагент склада-источника) */
+  logistics_by_warehouse?: boolean;
+  /** контрагент склада-источника; null → у склада не задан контрагент (гейт чекбокса) */
+  warehouse_counterparty_id?: number | null;
   package_type?: PackageType;
   /** WB-сводка поставки (F1/F2): статус в кабинете + паллеты пропуска. null — не заведена */
   wb_supply?: WbSupplyStateBrief | null;
@@ -3055,6 +3059,41 @@ export interface LogisticsAnalyticsResponse {
   dest_pallet_cells: LogisticsDestBucketCell[];
   cost_points: LogisticsCostPoint[];
   anomalies: LogisticsAnomaly[];
+}
+
+// Стоимость логистики ₽/шт и ₽/короб по категории/бренду + динамика.
+// Denominator-note: Decimal-поля приходят строкой — перед formatNumber коэрсить Number().
+export interface LogisticsCostPerUnitRow {
+  name: string;
+  units: number;
+  boxes: number;
+  total_cost: number;
+  cost_per_unit: number | null;
+  cost_per_box: number | null;
+}
+
+export interface LogisticsCostPerUnitPoint extends LogisticsCostPerUnitRow {
+  period: string;
+}
+
+export interface LogisticsCostPerUnitSummary {
+  total_cost: number;
+  total_units: number;
+  total_boxes: number;
+  cost_per_unit: number | null;
+  cost_per_box: number | null;
+  shipments: number;
+}
+
+export interface LogisticsCostPerUnitResponse {
+  summary: LogisticsCostPerUnitSummary;
+  by_category: LogisticsCostPerUnitRow[];
+  by_brand: LogisticsCostPerUnitRow[];
+  dynamics: LogisticsCostPerUnitPoint[];
+  brands_available: string[];
+  categories_available: string[];
+  group_by: string;
+  truncated: boolean;
 }
 
 export interface LogisticsShipmentRow {

@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type {
-    Warehouse, InboundReceipt, OutboundShipment,
+    Warehouse, InboundReceipt, OutboundShipment, AssemblyRequest,
     WarehouseStockRow, StockMovement, StockTransfer, DeliveryTimesResponse,
     DefectMarkOperation, VehicleStatus,
     FulfillmentStatus, FulfillmentProviderId, FfStocksResponse, FfStockRow, FfBoxPack, FfNomenclatureOption, FfRequestRow, FfRequestKind, FfStatusEvent, FfSyncRun, FfUnlinkedAssembly,
@@ -36,8 +36,8 @@ function countActionableTransfers(transfers: StockTransfer[], warehouseId: numbe
 
 /* ─── Main page ────────────────────────────────────────────────────────────── */
 
-type WarehouseTab = 'all' | 'receipts' | 'shipments' | 'transfers' | 'stock' | 'defects' | 'delivery' | 'requisites' | 'fulfillment';
-const WAREHOUSE_TABS: WarehouseTab[] = ['all', 'receipts', 'shipments', 'transfers', 'stock', 'defects', 'delivery', 'requisites', 'fulfillment'];
+type WarehouseTab = 'all' | 'receipts' | 'shipments' | 'assemblies' | 'transfers' | 'stock' | 'defects' | 'delivery' | 'requisites' | 'fulfillment';
+const WAREHOUSE_TABS: WarehouseTab[] = ['all', 'receipts', 'shipments', 'assemblies', 'transfers', 'stock', 'defects', 'delivery', 'requisites', 'fulfillment'];
 
 // Под-вкладки раздела «Фулфилмент» — вложенная навигация внутри одной вкладки.
 type FfSubTab = 'stocks' | 'boxes' | 'assembly' | 'inbound' | 'history' | 'sync';
@@ -88,6 +88,7 @@ export default function WarehouseDetailPage() {
     const [shipmentCount, setShipmentCount] = useState(0);
     const [transferCount, setTransferCount] = useState(0);
     const [defectCount, setDefectCount] = useState(0);
+    const [assemblyCount, setAssemblyCount] = useState(0);
 
     // No modals — all create/detail views are separate pages
 
@@ -143,6 +144,7 @@ export default function WarehouseDetailPage() {
     const tabs = [
         { key: 'receipts' as const, label: 'Приёмки', count: receiptCount },
         ...(isFulfillment ? [{ key: 'shipments' as const, label: 'Отгрузки', count: shipmentCount }] : []),
+        ...(isFulfillment ? [{ key: 'assemblies' as const, label: 'Заявки на отправку', count: assemblyCount }] : []),
         { key: 'transfers' as const, label: 'Перемещения', count: transferCount },
         { key: 'stock' as const, label: 'Остатки и статистика' },
         { key: 'defects' as const, label: 'Брак', count: defectCount },
@@ -227,6 +229,13 @@ export default function WarehouseDetailPage() {
                     warehouseId={warehouseId}
                     warehouseType={warehouse.warehouse_type}
                     onCountChange={setShipmentCount}
+                />
+            )}
+            {tab === 'assemblies' && (
+                <AssembliesTab
+                    warehouseId={warehouseId}
+                    slug={slug}
+                    onCountChange={setAssemblyCount}
                 />
             )}
             {tab === 'transfers' && (
@@ -1070,6 +1079,75 @@ function ShipmentsTab({ warehouseId, warehouseType, onCountChange }: {
             {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
 
             <TanStackDataTable columns={cols} data={shipments} emptyText="Нет отгрузок" emptyIcon="📤" onRowClick={(row) => router.push(`/p/${slug}/warehouse/${warehouseId}/shipment/${row.id}`)} />
+        </>
+    );
+}
+
+/* ─── Tab: Заявки на отправку (история связей склада-источника) ──────────── */
+
+function AssembliesTab({ warehouseId, slug, onCountChange }: {
+    warehouseId: number;
+    slug: string;
+    onCountChange: (n: number) => void;
+}) {
+    const router = useRouter();
+    const [rows, setRows] = useState<AssemblyRequest[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        setError('');
+        try {
+            // Все заявки склада-источника (вкл. архивные) — история связей склада с
+            // отправками на WB и привязками к ФФ-заявкам. Эндпоинт уже обогащает ff-связью.
+            const r = await api.getAssemblyRequests({ warehouse_id: warehouseId, view: 'all' });
+            setRows(r.items);
+            onCountChange(r.total);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setLoading(false);
+    }, [warehouseId, onCountChange]);
+
+    useEffect(() => { load(); }, [load]);
+
+    const statusBadge = (s: string) => (
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-muted)' }}>
+            {FF_LINKED_STATUS_LABELS[s] || s}
+        </span>
+    );
+
+    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
+
+    const cols: Column[] = [
+        { key: 'number', label: '№' },
+        { key: 'status', label: 'Статус', render: (v: string) => statusBadge(v) },
+        {
+            key: 'effective_wb_warehouse', label: 'Склад WB',
+            render: (_: unknown, row: AssemblyRequest) => row.effective_wb_warehouse || row.wb_warehouse_name || '—',
+        },
+        { key: 'wb_supply_name', label: 'Поставка WB', render: (v: string | undefined) => v || '—' },
+        {
+            key: 'ff_request_number', label: '№ ФФ-заявки',
+            render: (v: string | null | undefined) => v || '—',
+        },
+        { key: 'actual_ready_date', label: 'Готова', format: 'date' },
+        { key: 'shipped_at', label: 'Отгружена', format: 'date' },
+        { key: 'created_at', label: 'Создана', format: 'date' },
+    ];
+
+    return (
+        <>
+            {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
+            <TanStackDataTable
+                columns={cols}
+                data={rows}
+                emptyText="Нет заявок на отправку с этого склада"
+                emptyIcon="🚚"
+                exportName="warehouse_assemblies"
+                onRowClick={(row) => router.push(`/p/${slug}/warehouse/assembly/${row.id}`)}
+            />
         </>
     );
 }

@@ -4,7 +4,7 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
-import type { AssemblyRequest, Warehouse, WarehouseStockRow, WbFboSupply, WbFboSupplyItem } from '@/types/api';
+import type { AssemblyRequest, PackageType, Warehouse, WarehouseStockRow, WbFboSupply, WbFboSupplyItem } from '@/types/api';
 
 interface FormItem {
     barcode: string;
@@ -28,6 +28,7 @@ export default function AssemblyEditPage() {
     const [estimatedReadyDate, setEstimatedReadyDate] = useState('');
     const [palletsCount, setPalletsCount] = useState<number>(1);
     const [palletWeightKg, setPalletWeightKg] = useState<number>(0);
+    const [packageType, setPackageType] = useState<PackageType>('BOX');
     const [comment, setComment] = useState('');
     const [wbWarehouseName, setWbWarehouseName] = useState('');
     const [formItems, setFormItems] = useState<FormItem[]>([{ barcode: '', quantity: 1 }]);
@@ -83,6 +84,7 @@ export default function AssemblyEditPage() {
                 setEstimatedReadyDate(data.estimated_ready_date || '');
                 setPalletsCount(data.pallets_count);
                 setPalletWeightKg(data.pallet_weight_kg);
+                setPackageType(data.package_type ?? 'BOX');
                 setComment(data.comment || '');
                 setWbWarehouseName(data.wb_warehouse_name_manual || '');
 
@@ -189,6 +191,10 @@ export default function AssemblyEditPage() {
 
     const selectedWarehouse = warehouses.find(w => w.id === warehouseId) || null;
     const totalWeight = palletsCount * palletWeightKg;
+    // Единица поставки: короб (BOX) или паллета (моно/суперсейф) — подписи полей.
+    const isBoxUnit = packageType === 'BOX';
+    const unitCountLabel = isBoxUnit ? 'Короба' : 'Палеты';
+    const unitWeightLabel = isBoxUnit ? 'Вес 1 короба (кг)' : 'Вес 1 палеты (кг)';
     const canEditItems = assembly && !['SHIPPED', 'DELIVERED', 'CLOSED', 'CANCELLED'].includes(assembly.status);
 
     // ─── Item management ──────────────────────────────────────────────────
@@ -250,6 +256,7 @@ export default function AssemblyEditPage() {
                 estimated_ready_date: estimatedReadyDate || null,
                 pallets_count: palletsCount,
                 pallet_weight_kg: palletWeightKg,
+                package_type: packageType,
                 comment: comment || null,
                 ...(canEditItems ? { items: filledItems.map(i => ({ barcode: i.barcode, quantity: i.quantity })) } : {}),
             });
@@ -453,10 +460,24 @@ export default function AssemblyEditPage() {
                         </div>
                     </div>
 
-                    {/* Pallets */}
+                    {/* Тип поставки (единица: короб / монопаллета / суперсейф) */}
+                    <div className="form-group">
+                        <label className="form-label">Тип поставки</label>
+                        <select
+                            className="form-input"
+                            value={packageType}
+                            onChange={e => setPackageType(e.target.value as PackageType)}
+                        >
+                            <option value="BOX">Короб</option>
+                            <option value="MONOPALLET">Монопаллета</option>
+                            <option value="SUPERSAFE">Суперсейф</option>
+                        </select>
+                    </div>
+
+                    {/* Единица поставки: короба или паллеты (подписи по «Тип поставки») */}
                     <div style={{ display: 'flex', gap: 12 }}>
                         <div className="form-group" style={{ flex: 1 }}>
-                            <label className="form-label">Палеты</label>
+                            <label className="form-label">{unitCountLabel}</label>
                             <input
                                 className="form-input"
                                 type="number"
@@ -466,7 +487,7 @@ export default function AssemblyEditPage() {
                             />
                         </div>
                         <div className="form-group" style={{ flex: 1 }}>
-                            <label className="form-label">Вес 1 палеты (кг)</label>
+                            <label className="form-label">{unitWeightLabel}</label>
                             <input
                                 className="form-input"
                                 type="number"
