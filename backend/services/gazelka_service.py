@@ -1131,6 +1131,20 @@ async def _reconcile_active_order(
         except ValueError:
             pass
 
+    # 3. Бэкфилл: сборки, отгруженные ДО фичи (авто-шип по приёмке WB из READY), ушли в снимок
+    #    отгрузки без тарифа/перевозчика. Пока заявка видна в кабинете — дозаполняем пустой снимок
+    #    (в листе оплаты не «—»). Идемпотентно: заполненный снимок не трогаем.
+    if info.pickup_cost is not None:
+        try:
+            if await assembly_status.backfill_gazelka_shipment_cost(
+                db, project_id, assembly_id, info.pickup_cost, info.carrier
+            ):
+                stats["cost_backfilled"] += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning("gazelka.sync_states.backfill_failed", project_id=project_id, assembly_id=assembly_id)
+
 
 async def _auto_link_unmatched(
     db: AsyncSession,
@@ -1195,7 +1209,7 @@ async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, in
       – статус «В маршруте» (код 31) → авто-шип сборки (тариф → стоимость забора).
     Сбой одной заявки не роняет синк остальных.
     """
-    stats = {"autolinked": 0, "assigned": 0, "passed": 0, "shipped": 0}
+    stats = {"autolinked": 0, "assigned": 0, "passed": 0, "shipped": 0, "cost_backfilled": 0}
     key = await _get_key_or_none(db, project_id)
     if key is None:
         return stats
