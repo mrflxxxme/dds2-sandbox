@@ -757,7 +757,7 @@ async def send_order(
 # ─── Списки заявок из портала (read) ─────────────────────────────────────────
 
 # Коды статусов портала (best-effort; неизвестные показываем как «Статус N»)
-_STATUS_LABELS = {"2": "Запланирована", "3": "Принята в работу", "31": "В маршруте"}
+_STATUS_LABELS = {"2": "Запланирована", "3": "Принята в работу", "31": "В маршруте", "4": "Завершена"}
 _MONO_LABELS = {
     "1": "Моно", "2": "Микс", "3": "Суперсейф", "4": "КГТ", "5": "FBS", "6": "Транзит", "7": "Питание",
 }
@@ -1129,17 +1129,99 @@ async def _reconcile_active_order(
         except ValueError:
             pass
 
+    # 3. Бэкфилл: сборки, отгруженные ДО фичи (авто-шип по приёмке WB из READY), ушли в снимок
+    #    отгрузки без тарифа/перевозчика. Пока заявка видна в кабинете — дозаполняем пустой снимок
+    #    (в листе оплаты не «—»). Идемпотентно: заполненный снимок не трогаем.
+    await _backfill_cost(db, project_id, assembly_id, info, stats)
+
+
+async def _backfill_cost(
+    db: AsyncSession,
+    project_id: int,
+    assembly_id: int,
+    info: _GazelkaLogistics,
+    stats: dict[str, int],
+) -> None:
+    """Дозаполнить пустой снимок отгрузки тарифом/перевозчиком заявки (best-effort)."""
+    if info.pickup_cost is None:
+        return
+    from backend.services.assembly import status as assembly_status
+
+    try:
+        if await assembly_status.backfill_gazelka_shipment_cost(
+            db, project_id, assembly_id, info.pickup_cost, info.carrier
+        ):
+            stats["cost_backfilled"] += 1
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.warning("gazelka.sync_states.backfill_failed", project_id=project_id, assembly_id=assembly_id)
+
+
+async def _auto_link_unmatched(
+    db: AsyncSession,
+    project_id: int,
+    plans: list[dict],
+    supply_idx: dict[str, tuple[int, str]],
+    linked: dict[str, tuple[int, str | None, str | None]],
+) -> int:
+    """Авто-связать заявки портала со сборкой по № поставки WB — без клика «Сопоставить».
+
+    Логист заводит заявки прямо в кабинете Газельки (SENT-записей нет, всё матчилось руками).
+    Здесь связываем автоматически, но ТОЛЬКО при ОДНОЗНАЧНОМ совпадении: № поставки заявки
+    указывает ровно на одну нашу сборку, и та ещё не связана с другой заявкой (не переклеиваем).
+    Пишем MATCHED (как ручной матч) → дальше синк подхватит машину/пропуск/отгрузку.
+    Мутирует ``linked`` на месте (добавляет новые связи для последующего reconcile).
+    """
+    if not supply_idx:
+        return 0
+    linked_assemblies = {aid for aid, _num, _st in linked.values()}
+    created = 0
+    for plan in plans:
+        gid = str(plan.get("id") or "")
+        if not gid or gid in linked:
+            continue
+        hit: tuple[int, str] | None = None
+        for num in _extract_wb_numbers(plan.get("supply_id")):
+            cand = supply_idx.get(num)
+            if cand:
+                hit = cand
+                break
+        if hit is None:
+            continue
+        aid, number = hit
+        if aid in linked_assemblies:
+            continue  # сборка уже связана с другой заявкой Газельки — не переклеиваем
+        db.add(
+            GazelkaOrder(
+                project_id=project_id,
+                assembly_request_id=aid,
+                status=GazelkaOrderStatus.MATCHED,
+                gazelka_ref=gid,
+                payload={"_autolink": True},
+                created_by="gazelka",
+            )
+        )
+        linked[gid] = (aid, number, None)
+        linked_assemblies.add(aid)
+        created += 1
+    if created:
+        await db.commit()
+        logger.info("gazelka.sync_states.autolinked", project_id=project_id, count=created)
+    return created
+
 
 async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, int]:
-    """Фоновый синк активных заявок Газельки (шедулер). Best-effort, без исключений наружу.
+    """Фоновый синк заявок Газельки (шедулер). Best-effort, без исключений наружу.
 
-    Для СВЯЗАННЫХ заявок из кабинета перевозчика:
-      • назначена машина/водитель → сборка READY→VEHICLE_ASSIGNED + реквизиты + WB-пропуск
+    • Авто-связь несвязанных заявок (planned+active) со сборкой по № поставки WB.
+    • Для СВЯЗАННЫХ заявок из кабинета перевозчика:
+      – назначена машина/водитель → сборка READY→VEHICLE_ASSIGNED + реквизиты + WB-пропуск
         (авто-занос в кабинет, как при ручном назначении машины);
-      • статус «В маршруте» (код 31) → авто-шип сборки (тариф → стоимость забора).
+      – статус «В маршруте» (код 31) → авто-шип сборки (тариф → стоимость забора).
     Сбой одной заявки не роняет синк остальных.
     """
-    stats = {"assigned": 0, "passed": 0, "shipped": 0}
+    stats = {"autolinked": 0, "assigned": 0, "passed": 0, "shipped": 0, "cost_backfilled": 0}
     key = await _get_key_or_none(db, project_id)
     if key is None:
         return stats
@@ -1147,11 +1229,18 @@ async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, in
         async with _client_from_key(key) as client:
             await client.authenticate()
             data = await client.fetch_active()
+            planned = await client.fetch_planned()
+            completed = await client.fetch_completed()
     except (GazelkaApiError, httpx.HTTPError, CircuitOpenError, ValueError) as e:
         logger.warning("gazelka.sync_states.unavailable", project_id=project_id, error=str(e))
         return stats
 
     linked = await _linked_map(db, project_id)
+    # Авто-связь по № поставки: запланированные + активные + завершённые (заведённые в кабинете руками).
+    supply_idx = await _assembly_supply_index(db, project_id)
+    all_plans = (planned.get("plans") or []) + (data.get("plans") or []) + (completed.get("plans") or [])
+    stats["autolinked"] = await _auto_link_unmatched(db, project_id, all_plans, supply_idx, linked)
+
     joins = {
         k: {str(r.get("id")): r for r in (data.get(k) or [])}
         for k in ("routes", "drivers", "vehicles", "carriers")
@@ -1174,8 +1263,62 @@ async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, in
                 assembly_id=assembly_id,
                 gazelka_id=str(plan.get("id") or ""),
             )
+
+    # Бэкфилл стоимости из ЗАВЕРШЁННЫХ: заявки, ушедшие из «Активных» (отгружены до фичи),
+    # несут тариф на странице «Завершённые» → дозаполняем пустой снимок отгрузки.
+    completed_joins = {
+        k: {str(r.get("id")): r for r in (completed.get(k) or [])}
+        for k in ("routes", "drivers", "vehicles", "carriers")
+    }
+    for plan in completed.get("plans") or []:
+        lk = linked.get(str(plan.get("id") or ""))
+        if not lk:
+            continue
+        info = _extract_logistics(plan, completed_joins)
+        try:
+            await _backfill_cost(db, project_id, lk[0], info, stats)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "gazelka.sync_states.completed_backfill_failed",
+                project_id=project_id,
+                gazelka_id=str(plan.get("id") or ""),
+            )
+
     logger.info("gazelka.sync_states", project_id=project_id, **stats)
     return stats
+
+
+async def list_completed(db: AsyncSession, project_id: int) -> GazelkaOrderList:
+    """Завершённые заявки из кабинета Газельки: ``/customer/orders?completed=1``.
+
+    Тот же встроенный JSON, что у «Активных» (водитель/ТС/перевозчик/тариф + статус),
+    с пометкой связи с нашей сборкой. У портала это отдельная страница «Завершённые заявки».
+    """
+    key = await _get_key(db, project_id)
+    try:
+        async with _client_from_key(key) as client:
+            await client.authenticate()
+            data = await client.fetch_completed()
+    except GazelkaApiError as e:
+        raise GazelkaServiceError(str(e), status_code=e.status_code) from e
+    except (httpx.HTTPError, CircuitOpenError, ValueError) as e:
+        raise GazelkaServiceError(f"Газелька недоступна: {e}", status_code=502) from e
+
+    linked = await _linked_map(db, project_id)
+    supply_idx = await _assembly_supply_index(db, project_id)
+    mkts = data.get("marketplaces") or []
+    joins = {
+        k: {str(r.get("id")): r for r in (data.get(k) or [])}
+        for k in ("routes", "drivers", "vehicles", "carriers", "places")
+    }
+    rows = []
+    for p in data.get("plans") or []:
+        row = _row_from_plan(p, mkts, linked, editable=False, joins=joins)
+        _attach_suggestion(row, p, supply_idx)
+        rows.append(row)
+    return GazelkaOrderList(items=rows, count=len(rows))
 
 
 async def get_ttn(db: AsyncSession, project_id: int, plan_id: str) -> tuple[bytes, str]:

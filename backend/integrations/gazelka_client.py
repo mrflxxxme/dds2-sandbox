@@ -531,6 +531,20 @@ class GazelkaClient:
             for key in ("plans", "routes", "drivers", "vehicles", "carriers", "places", "marketplaces")
         }
 
+    async def fetch_completed(self) -> dict[str, list[dict]]:
+        """Завершённые заявки: тот же ``/customer/orders`` + ``?completed=1``.
+
+        Структура встроенного JSON идентична активным (plans/routes/drivers/vehicles/
+        carriers), заявки несут ``rate`` — по ним восстанавливаем стоимость забора у
+        сборок, отгруженных до появления синка (заявка уже ушла из «Активных»).
+        """
+        async with self._circuit:
+            text = await self._get_authed(f"/customer/orders/{self.customer_id}?completed=1")
+        return {
+            key: _extract_json_array(text, key)
+            for key in ("plans", "routes", "drivers", "vehicles", "carriers", "places", "marketplaces")
+        }
+
     async def fetch_ttn(self, plan_id: str | int) -> tuple[bytes, str]:
         """Печатная форма (упаковочный лист/ТТН) одной заявки: /print-labels?ids[]=ID."""
         pid = _validate_plan_id(plan_id)

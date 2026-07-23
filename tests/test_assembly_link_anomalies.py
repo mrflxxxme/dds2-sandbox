@@ -743,6 +743,129 @@ async def test_stock_mismatch_project_isolation(db_session, project, other_proje
     assert res["stock_mismatch"] == []
 
 
+# ─── (g2) stock_mismatch — досчёт логистики в транзите (паритет с list_stocks) ─
+
+
+async def _logistics_transit(
+    db_session,
+    project_id,
+    warehouse_id,
+    barcode,
+    qty,
+    nomenclature_id,
+    *,
+    status=AssemblyStatus.IN_PROGRESS,
+    stage_code="logistics_works",
+    is_completed=False,
+):
+    """Сборка в пред-отгрузочном статусе + привязанная ФФ-заявка на стадии списания
+    логистики: skladbot уже списал ff_good, но груз физически на складе и наш сток
+    его держит. Такой объём list_stocks досчитывает к ff_good — stock_mismatch тоже.
+    """
+    doc = await _make_assembly(db_session, project_id, warehouse_id, status=status, items=())
+    db_session.add(
+        AssemblyRequestItem(
+            project_id=project_id,
+            assembly_request_id=doc.id,
+            nomenclature_id=nomenclature_id,
+            barcode=barcode,
+            quantity=qty,
+        )
+    )
+    await db_session.commit()
+    await _make_ff(
+        db_session,
+        project_id,
+        warehouse_id,
+        provider="skladbot",
+        kind="assembly",
+        assembly_request_id=doc.id,
+        stage_code=stage_code,
+        is_completed=is_completed,
+    )
+    return doc
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_logistics_in_transit_added_to_ff(db_session, project, warehouse):
+    """Товар в стадии списания логистики (skladbot) досчитывается к ff_good → ложная
+    недостача «у нас больше» гасится; остаётся только реальное расхождение."""
+    await _integrate(db_session, project.id, warehouse.id)
+    # SKU A: ff-зеркало просело на 40 из-за списания логистики (наш сток держит).
+    bc_a = f"20{_uid()}"
+    nom_a = await _nom(db_session, project.id, bc_a)
+    await _ff_stock(db_session, project.id, warehouse.id, bc_a, 60, nomenclature_id=nom_a.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom_a.id, bc_a, 100)
+    await _logistics_transit(db_session, project.id, warehouse.id, bc_a, 40, nom_a.id)
+    # SKU B: реальное расхождение (у ФФ больше на 10) — должно остаться.
+    bc_b = f"20{_uid()}"
+    nom_b = await _nom(db_session, project.id, bc_b)
+    await _ff_stock(db_session, project.id, warehouse.id, bc_b, 30, nomenclature_id=nom_b.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom_b.id, bc_b, 20)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    assert row is not None
+    # SKU A сошёлся (60 + 40 логистики == 100) → фантом «у нас больше» ушёл.
+    assert row["surplus_our_qty"] == 0
+    assert row["surplus_our_sku"] == 0
+    assert row["surplus_ff_qty"] == 10
+    assert row["net_diff"] == 10
+    assert row["sku_total"] == 1
+    assert [r["barcode"] for r in row["rows"]] == [bc_b]
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_logistics_in_transit_partial(db_session, project, warehouse):
+    """Досчёт меньше разрыва → остаётся честный остаточный дифф (у нас больше)."""
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 60, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 100)
+    await _logistics_transit(db_session, project.id, warehouse.id, bc, 25, nom.id)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    assert row is not None
+    assert row["rows"][0]["ff_good"] == 85  # 60 + 25 логистики
+    assert row["rows"][0]["diff"] == -15
+    assert row["surplus_our_qty"] == 15
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_logistics_not_counted_when_shipped(db_session, project, warehouse):
+    """SHIPPED-сборка (наш сток уже списан) НЕ досчитывается — иначе ложный излишек."""
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 60, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 100)
+    await _logistics_transit(db_session, project.id, warehouse.id, bc, 40, nom.id, status=AssemblyStatus.SHIPPED)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    assert row is not None
+    assert row["surplus_our_qty"] == 40  # без досчёта
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_logistics_not_counted_wrong_stage(db_session, project, warehouse):
+    """Заявка не на стадии списания логистики не досчитывается (migfull/wmscelicom без
+    стадии logistics_works — пустой досчёт, их расхождения фикс не трогает)."""
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 60, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 100)
+    await _logistics_transit(db_session, project.id, warehouse.id, bc, 40, nom.id, stage_code="new")
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    assert row is not None
+    assert row["surplus_our_qty"] == 40  # стадия не logistics_works → без досчёта
+
+
 # ─── (h) fbo списки поставок (разворот) ──────────────────────────────────────
 
 
