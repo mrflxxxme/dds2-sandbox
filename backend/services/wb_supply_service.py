@@ -321,6 +321,11 @@ async def get_state(db: AsyncSession, project_id: int, assembly_id: int) -> WbSu
             assembly_request_id=assembly_id,
             sync_status=WbSupplySyncStatus.NONE.value,
             boxes=[],
+            # server_default/Python default колонки применяется лишь на flush, а
+            # транзиентную (не сохранённую) связь мы валидируем сразу → pass_as_boxes
+            # был бы None и ронял model_validate (bool). Дефолтим способ отгрузки из
+            # заявки (как sync_pass_from_vehicle), иначе — паллеты (False).
+            pass_as_boxes=bool(assembly.shipped_as_boxes),
         )
     state = WbSupplyState.model_validate(link)
     updates: dict = {
