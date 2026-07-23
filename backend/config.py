@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     TELEGRAM_USE_POLLING: bool = False  # True for local dev (no public URL)
     TELEGRAM_PROXY: str = ""  # HTTP proxy for Telegram API (e.g. http://user:pass@host:port)
 
+    # Google service account (сводка «Проблемные товары» → Google-таблица).
+    # Путь к JSON-ключу сервисного аккаунта; пусто = слать только xlsx-файл.
+    GOOGLE_SA_JSON_PATH: str = ""
+
     # CORS
     CORS_ORIGINS: str = "http://localhost:8501,http://localhost:3000"
 

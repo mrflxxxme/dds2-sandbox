@@ -64,6 +64,7 @@ from backend.scheduler.jobs.wb_reviews_sync import sync_all_projects_wb_feedback
 from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
 from backend.scheduler.jobs.wb_prices_sync import sync_all_projects_wb_prices
 from backend.scheduler.jobs.measurements_digest import send_measurement_digests
+from backend.scheduler.jobs.problem_digest import send_problem_digests
 from backend.scheduler.jobs.wb_measurements import sync_all_projects_wb_measurements
 from backend.scheduler.jobs.wb_stocks import sync_all_projects_wb_remains, sync_all_projects_wb_stocks
 from backend.scheduler.jobs.wb_supply_states import sync_all_projects_wb_supply_states
@@ -473,6 +474,18 @@ def start_scheduler():
         trigger=CronTrigger(hour=9, minute=0, timezone=MSK),
         id="measurements_digest",
         name="WB measurements daily digest (09:00 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # Сводка «Проблемные товары» в Telegram: 09:30 MSK — проекты с включённой
+    # настройкой ads_problem_digest (выручка + текст + xlsx по брендам; пн — доп. недельный файл).
+    _scheduler.add_job(
+        send_problem_digests,
+        trigger=CronTrigger(hour=9, minute=30, timezone=MSK),
+        id="problem_digest",
+        name="Ads problem products digest (09:30 MSK)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=3600,
