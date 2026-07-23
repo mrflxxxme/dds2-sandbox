@@ -521,6 +521,12 @@ def extract_requisites_from_text(
 # дёшево (задача простая, текстовая). Доверие к р/с гейтится контроль-ключом по БИК.
 
 _LLM_MODEL = "claude-haiku-4-5-20251001"
+# Жёсткий потолок vision/LLM-вызова: разбор счёта идёт синхронно в HTTP-ответ, а
+# nginx рвёт upstream на 120с (proxy_read_timeout). Без бюджета скан-счёт зависал
+# на минуты и держал DB-сессию → исчерпание пула (прод-инцидент 2026-07-23).
+# 70с < 120с с запасом на растеризацию/сеть; при таймауте вызывающий уходит в
+# мягкий фолбэк (regex для текста / предупреждение для скана), а не роняет запрос.
+_LLM_TIMEOUT_S = 70.0
 
 _LLM_SYSTEM = (
     "Ты извлекаешь платёжные реквизиты ПОЛУЧАТЕЛЯ из текста российского счёта на оплату.\n"
@@ -745,6 +751,7 @@ async def extract_requisites_llm(
         max_tokens=1024,
         temperature=0,
         tool_choice={"type": "tool", "name": "extract_requisites"},
+        timeout=_LLM_TIMEOUT_S,
     )
     block = next((b for b in msg.content if getattr(b, "type", None) == "tool_use"), None)
     data = getattr(block, "input", None)  # ToolUseBlock.input — getattr обходит union-тип content-блоков
@@ -780,6 +787,7 @@ async def extract_requisites_vision(
         max_tokens=1024,
         temperature=0,
         tool_choice={"type": "tool", "name": "extract_requisites"},
+        timeout=_LLM_TIMEOUT_S,
     )
     block = next((b for b in msg.content if getattr(b, "type", None) == "tool_use"), None)
     data = getattr(block, "input", None)  # ToolUseBlock.input — getattr обходит union-тип content-блоков
@@ -819,6 +827,7 @@ async def extract_requisites_vision_pages(
         max_tokens=1024,
         temperature=0,
         tool_choice={"type": "tool", "name": "extract_invoice_and_pages"},
+        timeout=_LLM_TIMEOUT_S,
     )
     block = next((b for b in msg.content if getattr(b, "type", None) == "tool_use"), None)
     data = getattr(block, "input", None)  # ToolUseBlock.input — getattr обходит union-тип content-блоков
