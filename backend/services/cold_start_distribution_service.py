@@ -384,23 +384,32 @@ async def fetch_in_transit_by_nm(
     резерв — такой же «уже едет», как PENDING. Источник «одного мира» для
     reconcile черновика: то, что уже едет/зарезервировано на склад, не должно
     повторно предлагаться к отправке (прод-кейс «швабры апл» 2026-07-10).
+
+    Склад: РУЧНОЕ имя заявки первым, при NULL — имя склада привязанной
+    WB-поставки. Manual-first — сознательная, закреплённая тестами семантика
+    (ручное имя = последняя воля юзера); target_label в warehouse_need_service
+    берёт наоборот (имя поставки первым) — паритета порядков НЕТ. Раньше
+    NULL → '?' → skip: заявки, привязанные к поставке без ручного имени, были
+    невидимы всем вычетам (слепое пятно транзита, аудит 2026-07-22).
     """
     if not nm_ids:
         return {}
     sql = text(
         """
         SELECT n.article_wb AS nm_id,
-               COALESCE(ar.wb_warehouse_name_manual, '?') AS wb_target,
+               COALESCE(ar.wb_warehouse_name_manual, s.warehouse_name, '?') AS wb_target,
                SUM(ari.quantity) AS qty
         FROM assembly_request_items ari
         JOIN assembly_requests ar ON ar.id = ari.assembly_request_id
         JOIN nomenclature n ON n.id = ari.nomenclature_id
+        LEFT JOIN wb_fbo_supplies s
+               ON s.id = ar.wb_fbo_supply_id AND s.project_id = :project_id
         WHERE ari.project_id = :project_id
           AND n.project_id = :project_id
           AND n.article_wb = ANY(:nm_ids)
           AND ar.is_deleted = false
           AND ar.status = ANY(:statuses)
-        GROUP BY n.article_wb, ar.wb_warehouse_name_manual
+        GROUP BY n.article_wb, ar.wb_warehouse_name_manual, s.warehouse_name
         """
     )
     result = await db.execute(

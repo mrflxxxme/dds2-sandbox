@@ -54,6 +54,15 @@ class TestWarehouseToDistrict:
     def test_unknown_warehouse(self) -> None:
         assert warehouse_to_district("Несуществующий склад") == DISTRICT_UNKNOWN
 
+    def test_podolsk_4_has_coords_and_district(self) -> None:
+        """«Подольск 4» — реальный WB-склад (заявки/поставки на него существуют),
+        но отсутствовал в WAREHOUSE_COORDS → settings/get_all_warehouses не
+        отдавал его чекбокс и геомеханика была слепа (аудит 2026-07-22)."""
+        from backend.services.warehouse_geo import WAREHOUSE_COORDS
+
+        assert "Подольск 4" in WAREHOUSE_COORDS
+        assert warehouse_to_district("Подольск 4") == DISTRICT_CENTRAL
+
     def test_none_or_empty(self) -> None:
         assert warehouse_to_district(None) == DISTRICT_UNKNOWN
         assert warehouse_to_district("") == DISTRICT_UNKNOWN

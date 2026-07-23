@@ -84,3 +84,30 @@ export function inScopeOf(
     if (set.size === 0) return () => true;
     return (nm: number) => set.has(categoryOf(nm));
 }
+
+/**
+ * ВЛАДЕНИЕ КАТЕГОРИЕЙ: срез статей расчёта по скоупу черновика.
+ *  • свой скоуп есть → только свои категории (позитивный фильтр, как раньше);
+ *  • скоупа нет → МИНУС категории живых категорийных черновиков
+ *    (`foreignScopeCategories`) — их планируют владельцы, бесскоупный черновик
+ *    не дублирует план даже при свободном ФФ-стоке (прод 2026-07-22: швабра
+ *    EP-800 — 402 обещанных из 282 физических двумя черновиками).
+ * Обе стороны матчат категорию ОДНОЙ функцией принадлежности (`inScopeOf`) —
+ * override/предмет резолвятся одинаково. Чистая.
+ */
+export function filterArticlesByCategoryScope<T extends { nm_id: number }>(
+    articles: T[],
+    scope: string[] | null | undefined,
+    categoryOf: CategoryOf,
+    foreignScopeCategories?: ReadonlySet<string> | null,
+): T[] {
+    if (scope?.length) {
+        const inSc = inScopeOf(scope, categoryOf);
+        return articles.filter((a) => inSc(a.nm_id));
+    }
+    if (foreignScopeCategories && foreignScopeCategories.size > 0) {
+        const inForeign = inScopeOf([...foreignScopeCategories], categoryOf);
+        return articles.filter((a) => !inForeign(a.nm_id));
+    }
+    return articles;
+}

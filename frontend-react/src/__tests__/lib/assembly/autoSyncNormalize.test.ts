@@ -75,6 +75,43 @@ describe('makeAutoSyncNormalizePair — обратная промоция пре
     });
 });
 
+describe('makeAutoSyncNormalizePair — промоция SKU ВНЕ articles (прод: швабра 59 кор)', () => {
+    // Геометрия задана ТОЛЬКО для nm 9 (ppb=2, короб 60x40x50, 10 кор/пал →
+    // паллета = 20 шт). nm 9 в articles НЕ входит (available=0 после вычета
+    // резерва) — промоция уже-целых паллет обязана работать от shared-геометрии,
+    // без пула ФФ (добор хвостов чужим SKU не нужен).
+    const geoCtx: NormalizeDraftCtx = {
+        ppbOf: (nm) => (nm === 9 ? 2 : null),
+        boxSizeOf: (nm) => (nm === 9 ? '60x40x50' : null),
+        overrides: { '60x40x50': 10 },
+    };
+
+    it('59 коробов × ppb=2 готового направления → 5 целых паллет в rows, хвост 9 коробов в предброни', () => {
+        const pair = makeAutoSyncNormalizePair(geoCtx, [], new Set(['BOX::Коледино']));
+        const out = pair([], [row(9, { 'Коледино': 118 }, { '5': 118 })]); // 59 коробов
+        expect(out.rows.reduce((s, r) => s + (r.tgt['Коледино'] || 0), 0)).toBe(100); // floor(59/10)=5 паллет
+        expect(out.prebook.reduce((s, r) => s + (r.tgt['Коледино'] || 0), 0)).toBe(18); // 9 коробов
+    });
+
+    it('SKU вне articles БЕЗ геометрии не трогается (fail-closed сохраняется)', () => {
+        const pair = makeAutoSyncNormalizePair(geoCtx, [], new Set(['BOX::Коледино']));
+        const out = pair([], [row(8, { 'Коледино': 118 }, { '5': 118 })]); // nm 8: ни ppb, ни размера
+        expect(out.rows).toHaveLength(0);
+        expect(out.prebook.reduce((s, r) => s + (r.tgt['Коледино'] || 0), 0)).toBe(118);
+    });
+
+    it('фикс-поинт: повторный прогон от собственного результата стабилен', () => {
+        const pair = makeAutoSyncNormalizePair(geoCtx, [], new Set(['BOX::Коледино']));
+        const first = pair([], [row(9, { 'Коледино': 118 }, { '5': 118 })]);
+        const second = pair(first.rows, first.prebook);
+        const total = (o: { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] }) => ({
+            rows: o.rows.reduce((s, r) => s + (r.tgt['Коледино'] || 0), 0),
+            prebook: o.prebook.reduce((s, r) => s + (r.tgt['Коледино'] || 0), 0),
+        });
+        expect(total(second)).toEqual(total(first));
+    });
+});
+
 describe('buildFreePoolByNm', () => {
     it('вычитает занятое переданным планом из available', () => {
         const pool = buildFreePoolByNm(

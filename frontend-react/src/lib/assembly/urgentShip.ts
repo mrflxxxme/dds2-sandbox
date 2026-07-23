@@ -27,8 +27,10 @@ export interface UrgentShipRow {
     loss: number;
     /** Локализация артикула, % (null — нет данных). */
     locPct: number | null;
-    /** Штук в черновике (0 для сегмента «вне черновика»). */
+    /** Штук в черновике ВСЕГО (строки + предбронь; 0 для сегмента «вне черновика»). */
     draftQty: number;
+    /** Из них в ПРЕДБРОНИ (ждут целую паллету/приёмку — в заявки пока не едут). */
+    prebookQty: number;
     /** Остаток на складах WB, шт. */
     wbStock: number;
     /** В созданных сборках (ещё не отгружены), шт. */
@@ -73,8 +75,11 @@ export function classifyUrgency(daysLeft: number): UrgencyBucket | null {
 
 export function buildUrgentShip(params: {
     articles: StockAnalyticsArticle[];
-    /** nm_id → штук в строках черновика (Σ tgt). */
+    /** nm_id → штук в черновике ВСЕГО (строки + предбронь, Σ tgt). */
     draftQtyByNm: ReadonlyMap<number, number>;
+    /** nm_id → штук в ПРЕДБРОНИ (доля draftQtyByNm) — для честной колонки
+     *  «В черновике»: предбронь спланирована, но в заявки ещё не едет. */
+    prebookQtyByNm?: ReadonlyMap<number, number>;
     /** nm_id → % локализации (getLocalizationSkus). */
     locPctByNm?: ReadonlyMap<number, number>;
     /** Плечо поставки в днях (сборка ФФ + доставка до WB). */
@@ -86,7 +91,7 @@ export function buildUrgentShip(params: {
      *  кратности). Без него — прежнее поведение: всё в missing. */
     ppbOf?: (nm: number) => number | null | undefined;
 }): UrgentShipSummary {
-    const { articles, draftQtyByNm, locPctByNm, leadDays, trendDays = 7, ppbOf } = params;
+    const { articles, draftQtyByNm, prebookQtyByNm, locPctByNm, leadDays, trendDays = 7, ppbOf } = params;
 
     const inDraft: UrgentShipRow[] = [];
     const missing: UrgentShipRow[] = [];
@@ -116,6 +121,9 @@ export function buildUrgentShip(params: {
             loss: Math.round(dailyRevenue * gapDays),
             locPct: locPctByNm?.get(a.nm_id) ?? null,
             draftQty,
+            // Кламп draftQty: карты считаются из одного черновика, но защищаемся
+            // от рассинхрона вызывающего (предбронь не может превышать итог).
+            prebookQty: Math.min(draftQty, prebookQtyByNm?.get(a.nm_id) ?? 0),
             wbStock: a.stocks_wb ?? 0,
             inAssembly: a.in_assembly ?? 0,
             inTransit: a.in_transit ?? 0,

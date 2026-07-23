@@ -132,3 +132,37 @@ describe('buildUrgentShip · ppbOf', () => {
         expect(s.noPpb).toHaveLength(0);
     });
 });
+
+describe('buildUrgentShip · сплит rows/prebook («В черновике» честный)', () => {
+    it('prebookQtyByNm делит draftQty: итог прежний, prebookQty — доля предброни', () => {
+        const s = buildUrgentShip({
+            articles: [art({ nm_id: 1, stocks_rf: 0 })],
+            draftQtyByNm: new Map([[1, 50]]),       // строки 30 + предбронь 20
+            prebookQtyByNm: new Map([[1, 20]]),
+            leadDays: LEAD,
+        });
+        expect(s.inDraft).toHaveLength(1);
+        expect(s.inDraft[0].draftQty).toBe(50);     // полная сумма — как раньше
+        expect(s.inDraft[0].prebookQty).toBe(20);   // из них в предброни
+    });
+
+    it('без prebookQtyByNm — prebookQty=0 (обратная совместимость)', () => {
+        const s = buildUrgentShip({
+            articles: [art({ nm_id: 1, stocks_rf: 0 })],
+            draftQtyByNm: new Map([[1, 50]]),
+            leadDays: LEAD,
+        });
+        expect(s.inDraft[0].prebookQty).toBe(0);
+    });
+
+    it('SKU только в предброни: draftQty === prebookQty, всё равно inDraft', () => {
+        const s = buildUrgentShip({
+            articles: [art({ nm_id: 1, stocks_rf: 0 })],
+            draftQtyByNm: new Map([[1, 20]]),
+            prebookQtyByNm: new Map([[1, 20]]),
+            leadDays: LEAD,
+        });
+        expect(s.inDraft[0].draftQty).toBe(20);
+        expect(s.inDraft[0].prebookQty).toBe(20);
+    });
+});

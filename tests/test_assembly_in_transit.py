@@ -59,8 +59,9 @@ async def _make_request(
     nom: Nomenclature,
     *,
     status: AssemblyStatus,
-    wb_name: str,
+    wb_name: str | None,
     qty: int,
+    wb_supply_id: int | None = None,
 ) -> AssemblyRequest:
     doc = await _add(
         db_session,
@@ -70,6 +71,7 @@ async def _make_request(
             number=f"A-{_uid()[:6]}",
             status=status.value,
             wb_warehouse_name_manual=wb_name,
+            wb_fbo_supply_id=wb_supply_id,
             pallets_count=1,
             pallet_weight_kg=Decimal("10.00"),
         ),
@@ -85,6 +87,24 @@ async def _make_request(
         ),
     )
     return doc
+
+
+async def _give_stock(db_session, project_id: int, warehouse_id: int, nom: Nomenclature, qty: int = 10_000) -> None:
+    """Щедрый ФФ-сток, чтобы гейт ёмкости (`_clamp_to_ff_capacity`) в
+    update_draft оставался нейтральным — тесты ниже проверяют ИМЕННО
+    транзит-гейт (`_subtract_in_transit`)."""
+    from backend.models.warehouse import WarehouseStock
+
+    db_session.add(
+        WarehouseStock(
+            project_id=project_id,
+            warehouse_id=warehouse_id,
+            nomenclature_id=nom.id,
+            barcode=nom.barcode,
+            quantity=qty,
+        )
+    )
+    await db_session.commit()
 
 
 @pytest.mark.asyncio
@@ -104,6 +124,51 @@ async def test_in_transit_includes_pd_and_active_canonized(db_session, project, 
 
     out = await fetch_in_transit_by_nm(db_session, project.id, [nm_id])
     assert out == {nm_id: {"Самара (Новосемейкино)": 30, "Сарапул": 24}}
+
+
+@pytest.mark.asyncio
+async def test_in_transit_falls_back_to_supply_warehouse_name(db_session, project, ff_warehouse):
+    """Слепое пятно транзита: заявка привязана к WB-поставке, ручного имени
+    склада нет (NULL) → склад берётся из wb_fbo_supplies.warehouse_name
+    (COALESCE). Раньше NULL → '?' → skip: такие заявки были невидимы всем
+    вычетам. Ручное имя, если задано, побеждает имя поставки."""
+    from backend.models.wb_fbo import WbFboSupply
+    from backend.utils.time import utcnow
+
+    nm_id = 897_100_000 + int(_uid()[:4], 16)
+    nom = await _nom(db_session, project.id, nm_id)
+    async def _supply(warehouse_name: str) -> WbFboSupply:
+        return await _add(
+            db_session,
+            WbFboSupply(
+                project_id=project.id,
+                wb_supply_id=f"WB-{_uid()[:6]}",
+                created_at_wb=utcnow(),
+                warehouse_name=warehouse_name,
+            ),
+        )
+
+    # NULL manual + поставка → склад из поставки (канонизация тоже работает)
+    supply_a = await _supply("Новосемейкино")
+    await _make_request(
+        db_session, project.id, ff_warehouse.id, nom,
+        status=AssemblyStatus.IN_PROGRESS, wb_name=None, qty=30, wb_supply_id=supply_a.id,
+    )
+    # manual задан → побеждает имя поставки (поставка ДРУГАЯ: уникальный индекс
+    # запрещает две заявки одного ФФ на одну поставку)
+    supply_b = await _supply("Казань")
+    await _make_request(
+        db_session, project.id, ff_warehouse.id, nom,
+        status=AssemblyStatus.PENDING, wb_name="Сарапул", qty=5, wb_supply_id=supply_b.id,
+    )
+    # NULL manual и без поставки → по-прежнему невидима ('?' → skip)
+    await _make_request(
+        db_session, project.id, ff_warehouse.id, nom,
+        status=AssemblyStatus.PENDING, wb_name=None, qty=7,
+    )
+
+    out = await fetch_in_transit_by_nm(db_session, project.id, [nm_id])
+    assert out == {nm_id: {"Самара (Новосемейкино)": 30, "Сарапул": 5}}
 
 
 @pytest.mark.asyncio
@@ -151,6 +216,7 @@ async def test_update_draft_gate_subtracts_in_transit(db_session, project, ff_wa
 
     nm_id = 896_300_000 + int(_uid()[:4], 16)
     nom = await _nom(db_session, project.id, nm_id)
+    await _give_stock(db_session, project.id, ff_warehouse.id, nom)
     # Уже едет: 30 на Самару (имя заявки — «Новосемейкино»), 24 на Сарапул (резерв машины).
     await _make_request(db_session, project.id, ff_warehouse.id, nom, status=AssemblyStatus.IN_PROGRESS, wb_name="Новосемейкино", qty=30)
     await _make_request(db_session, project.id, ff_warehouse.id, nom, status=AssemblyStatus.PRE_DISTRIBUTED, wb_name="Сарапул", qty=24)
@@ -207,6 +273,7 @@ async def test_update_draft_gate_no_transit_untouched(db_session, project, ff_wa
 
     nm_id = 896_400_000 + int(_uid()[:4], 16)
     nom = await _nom(db_session, project.id, nm_id)
+    await _give_stock(db_session, project.id, ff_warehouse.id, nom)
     draft = await assembly_draft_service.create_draft(
         db_session, project.id, AssemblyDraftCreate(name="Чисто", distribution=AssemblyDraftDistribution())
     )
@@ -243,6 +310,7 @@ async def test_gate_idempotent_on_resave(db_session, project, ff_warehouse):
 
     nm_id = 896_500_000 + int(_uid()[:4], 16)
     nom = await _nom(db_session, project.id, nm_id)
+    await _give_stock(db_session, project.id, ff_warehouse.id, nom)
     # Едет 100 на Казань — больше, чем весь план черновика.
     await _make_request(db_session, project.id, ff_warehouse.id, nom, status=AssemblyStatus.IN_PROGRESS, wb_name="Казань", qty=100)
 
@@ -291,6 +359,7 @@ async def test_gate_subtracts_only_increase(db_session, project, ff_warehouse):
 
     nm_id = 896_600_000 + int(_uid()[:4], 16)
     nom = await _nom(db_session, project.id, nm_id)
+    await _give_stock(db_session, project.id, ff_warehouse.id, nom)
     await _make_request(db_session, project.id, ff_warehouse.id, nom, status=AssemblyStatus.IN_PROGRESS, wb_name="Казань", qty=100)
 
     draft = await assembly_draft_service.create_draft(
@@ -346,6 +415,7 @@ async def test_gate_growth_without_transit_untouched(db_session, project, ff_war
 
     nm_id = 896_700_000 + int(_uid()[:4], 16)
     nom = await _nom(db_session, project.id, nm_id)
+    await _give_stock(db_session, project.id, ff_warehouse.id, nom)
     await _make_request(db_session, project.id, ff_warehouse.id, nom, status=AssemblyStatus.IN_PROGRESS, wb_name="Казань", qty=100)
 
     draft = await assembly_draft_service.create_draft(
@@ -404,6 +474,7 @@ async def test_gate_respects_manual_nms(db_session, project, ff_warehouse):
 
     nm_id = 896_800_000 + int(_uid()[:4], 16)
     nom = await _nom(db_session, project.id, nm_id)
+    await _give_stock(db_session, project.id, ff_warehouse.id, nom)
     # Уже едет 26 в Электросталь.
     await _make_request(db_session, project.id, ff_warehouse.id, nom, status=AssemblyStatus.IN_PROGRESS, wb_name="Электросталь", qty=26)
 
@@ -445,6 +516,8 @@ async def test_gate_manual_exemption_is_per_nm(db_session, project, ff_warehouse
     nm_auto = nm_manual + 1
     nom_m = await _nom(db_session, project.id, nm_manual)
     nom_a = await _nom(db_session, project.id, nm_auto)
+    await _give_stock(db_session, project.id, ff_warehouse.id, nom_m)
+    await _give_stock(db_session, project.id, ff_warehouse.id, nom_a)
     await _make_request(db_session, project.id, ff_warehouse.id, nom_m, status=AssemblyStatus.IN_PROGRESS, wb_name="Электросталь", qty=26)
     await _make_request(db_session, project.id, ff_warehouse.id, nom_a, status=AssemblyStatus.IN_PROGRESS, wb_name="Электросталь", qty=26)
 
@@ -498,6 +571,9 @@ async def test_gate_demotes_partial_direction_remains_to_prebook(db_session, pro
     nom_a = await _nom(db_session, project.id, nm_a)
     nom_b = await _nom(db_session, project.id, nm_b)
     nom_c = await _nom(db_session, project.id, nm_c)
+    await _give_stock(db_session, project.id, ff_warehouse.id, nom_a)
+    await _give_stock(db_session, project.id, ff_warehouse.id, nom_b)
+    await _give_stock(db_session, project.id, ff_warehouse.id, nom_c)
     # Транзит покрывает ВЕСЬ план SKU A на ЕКБ.
     await _make_request(
         db_session, project.id, ff_warehouse.id, nom_a,

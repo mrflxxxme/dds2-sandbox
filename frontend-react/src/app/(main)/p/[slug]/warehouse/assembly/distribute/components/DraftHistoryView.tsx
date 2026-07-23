@@ -18,6 +18,7 @@ const EVENT_LABELS: Record<string, string> = {
     MATRIX_EDIT: '✏️ Правка раскладки',
     AUTO_SYNC: '⟳ Авто-синк с расчётом',
     ACCEPTANCE_SYNC: '🔄 Синхронизация с приёмкой WB',
+    CAPACITY_TRIM: '⚖ Срез по ёмкости ФФ',
     COMMIT_REQUEST: '🚚 Создание заявки',
 };
 const eventLabel = (t: string): string => EVENT_LABELS[t] ?? `🕘 ${t}`;
