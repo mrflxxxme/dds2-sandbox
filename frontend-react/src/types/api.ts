@@ -5414,17 +5414,36 @@ export interface AssemblyDraftClearResponse {
   kept_scoped: string[];
 }
 
-export interface AssemblyDraftUpdate {
+interface AssemblyDraftUpdateBase {
   name?: string | null;
-  distribution?: AssemblyDraftDistribution | null;
   comment?: string | null;
-  /** Если задано — бэк логирует событие истории со снапшотом черновика (для отката). */
-  event?: DraftEventLog;
-  /** CAS фоновых писателей: updated_at, от которого строился distribution.
-   *  Не совпал с БД → 409 DRAFT_VERSION_CONFLICT (клиент перечитывает, не пишет).
-   *  Явные действия юзера шлют без версии — последняя воля побеждает. */
-  base_updated_at?: string;
 }
+
+/** Событие-«последняя воля юзера» (явный клик в UI) — может писать без CAS-токена. */
+export type DraftUserWillEvent = DraftEventLog & { event_type: 'PREBOOK_TOPUP' | 'MATRIX_WRITE' | 'MATRIX_EDIT' };
+
+/** Контракт CAS (зеркало серверного, прод 2026-07-23 «5-й возврат»): PUT с
+ *  `distribution` обязан нести `base_updated_at` — версию, от которой строился
+ *  distribution (НЕ живой ref! протухшее замыкание с живым ref «узаконивало»
+ *  затирание конкурентной промоции). Не совпала с БД → 409 DRAFT_VERSION_CONFLICT,
+ *  клиент перечитывает. Исключение — явные действия юзера (DraftUserWillEvent):
+ *  последняя воля побеждает, токен опционален. Тип делает пропуск токена у
+ *  фоновой записи ошибкой компиляции. */
+export type AssemblyDraftUpdate =
+  // never-гард: без него полностью-опциональная ветка работала бы catch-all'ом
+  // для НЕ-литеральных присваиваний (spread/переменная минуют excess-property
+  // check) — и «distribution без токена» проскальзывал бы мимо контракта.
+  | (AssemblyDraftUpdateBase & { distribution?: never; base_updated_at?: never; event?: never })
+  | (AssemblyDraftUpdateBase & {
+      distribution: AssemblyDraftDistribution;
+      base_updated_at: string;
+      event?: DraftEventLog;
+    })
+  | (AssemblyDraftUpdateBase & {
+      distribution: AssemblyDraftDistribution;
+      base_updated_at?: string;
+      event: DraftUserWillEvent;
+    });
 
 export interface AssemblyDraftCommitResponse {
   created_request_ids: number[];

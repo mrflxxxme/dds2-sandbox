@@ -652,7 +652,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
             // ✕ — ручное решение «не отправлять»: помечаем SKU ручным, иначе
             // авто-синк с расчётом вернул бы его на следующем заходе.
             const withManual = [...new Set([...(removed.distribution?.manual_nms ?? []), nm])];
-            const d = await api.updateAssemblyDraft(draftId, { distribution: { ...removed.distribution, manual_nms: withManual } });
+            // CAS от версии ответа remove: конкурентная фоновая запись между двумя
+            // вызовами → 409 (ошибка-тост, юзер повторит), а не молчаливое затирание.
+            const d = await api.updateAssemblyDraft(draftId, {
+                distribution: { ...removed.distribution, manual_nms: withManual },
+                base_updated_at: removed.updated_at,
+            });
             draftDistRef.current = d.distribution ?? null;
             setDraftRowsState(d.distribution?.rows ?? []);
             setDraftPrebook(d.distribution?.prebook ?? []);
@@ -1508,7 +1513,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
         try {
             const cur = await api.getAssemblyDraft(draftId);
             const without = (cur.distribution?.manual_nms ?? []).filter((x) => x !== nm);
-            const d = await api.updateAssemblyDraft(draftId, { distribution: { ...cur.distribution, manual_nms: without } });
+            // CAS от версии свежего GET — между GET и PUT черновик могла записать
+            // другая вкладка/фон: 409 честнее молчаливого full-replace.
+            const d = await api.updateAssemblyDraft(draftId, {
+                distribution: { ...cur.distribution, manual_nms: without },
+                base_updated_at: cur.updated_at,
+            });
             draftDistRef.current = d.distribution ?? null;
             setManualNms(new Set(without));
             await runAutoSync('manual');

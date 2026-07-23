@@ -594,6 +594,11 @@ export default function AssemblyDraftPage() {
             if (synced.length > 0) {
                 showToast(`⟳ Авто-синк с потребностью: ${synced.map((o) => `«${o.name}» ${formatNumber(o.before ?? 0, 0)} → ${formatNumber(o.after ?? 0, 0)} шт`).join(' · ')}`, 'success');
                 void refreshReserved();
+                // ЕДИНЫЙ снапшот приёмки: раннер только что сверялся с ЖИВОЙ приёмкой —
+                // форсим рефетч prebookAcceptance, иначе консолидация страницы ещё до
+                // 10 минут спорила бы с ним устаревшим снапшотом (пинг-понг промоции:
+                // раннер промотировал по живой приёмке, страница демотировала по старой).
+                setAccRefreshTick((t) => t + 1);
             }
         } catch (e) {
             setPageSync({ running: false, lastAt: Date.now(), note: '⚠ Авто-синк не удался — повтор через час' });
@@ -727,6 +732,8 @@ export default function AssemblyDraftPage() {
     // ─── Save draft (manual + autosave) ──────────────────────────────────
     const saveDraft = useCallback(async (silent = false): Promise<boolean> => {
         if (!draftId) return false;
+        // Версия ЗАМЫКАНИЯ этого рендера — rows/prebook ниже соответствуют ей.
+        const baseVersion = draft?.updated_at;
         // Re-shipment guard (stale page / second tab): reconcile against server and
         // drop rows a partial commit already turned into AssemblyRequests.
         let effectiveRows = rows;
@@ -756,14 +763,26 @@ export default function AssemblyDraftPage() {
         const json = JSON.stringify(dist);
         if (json === lastSavedJsonRef.current && !silent) return true;
 
+        // CAS от версии ЗАМЫКАНИЯ (draft этого рендера), НЕ живого draftVersionRef:
+        // фоновая запись (промоция консолидации) обновляла ref, и висящий автосейв
+        // со старыми rows легально затирал её (прод 2026-07-23, «5-й возврат»).
+        if (!baseVersion) return false;   // черновик ещё не загружен — писать нечего
         setSaving(true);
         try {
             const updated = await api.updateAssemblyDraft(draftId, {
                 name, distribution: dist, comment: comment || null,
-                base_updated_at: draftVersionRef.current || undefined,
+                base_updated_at: baseVersion,
             });
             lastSavedJsonRef.current = JSON.stringify(updated.distribution);
             draftVersionRef.current = updated.updated_at;
+            // Продвигаем источник CAS-замыкания (draft.updated_at): без этого
+            // следующий автосейв шёл бы со СВОЕЙ прошлой версией и стабильно
+            // ловил 409 с потерей правок (ревью CRITICAL). Только setDraft, НЕ
+            // applyDraft — rows/prebook не трогаем, правки во время PUT живут.
+            // Пустой heal-scope на новую версию: сейв уже нормализован этим же
+            // конвейером → self-heal по ней = дешёвый no-op, не полный рескан.
+            healScopeRef.current = { ts: updated.updated_at, only: new Set() };
+            setDraft(updated);
             if (!silent) showToast('Черновик сохранён', 'success');
             return true;
         } catch (e: unknown) {
@@ -779,7 +798,7 @@ export default function AssemblyDraftPage() {
         } finally {
             setSaving(false);
         }
-    }, [draftId, buildDistribution, name, comment, rows, prebook, geomState, normalizeLocal, showToast]);
+    }, [draftId, draft?.updated_at, buildDistribution, name, comment, rows, prebook, geomState, normalizeLocal, applyDraft, showToast]);
 
     const ensureSaved = useCallback(() => saveDraft(true), [saveDraft]);
 
@@ -1078,7 +1097,11 @@ export default function AssemblyDraftPage() {
             };
             const units = keptRows.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
             const pbUnits = newPrebook.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
-            const updated = await api.updateAssemblyDraft(draftId, { distribution: dist });
+            // CAS: заполнение строит dist от prebook/draft этого рендера — токен той же
+            // версии. Конкурентная фоновая запись → 409 → перечитка и повторный клик.
+            const baseVersion = draft?.updated_at;
+            if (!baseVersion) { showToast('Черновик ещё не загружен — попробуйте ещё раз', 'error'); return; }
+            const updated = await api.updateAssemblyDraft(draftId, { distribution: dist, base_updated_at: baseVersion });
             applyDraft(updated);
             showToast(
                 `Черновик: ${formatNumber(keptRows.length, 0)} строк · Σ ${formatNumber(units, 0)} шт`
@@ -1087,12 +1110,19 @@ export default function AssemblyDraftPage() {
                 'success',
             );
         } catch (e: unknown) {
+            if (isVersionConflict(e)) {
+                // Черновик записали в фоне, пока считали заполнение — перечитываем
+                // и просим повторить (свежая база; молча перезатирать нельзя).
+                try { if (draftId) applyDraft(await api.getAssemblyDraft(draftId)); } catch { /* ignore */ }
+                showToast('Черновик обновился в фоне — данные перечитаны, нажмите «Заполнить» ещё раз', 'error');
+                return;
+            }
             showToast(e instanceof Error ? e.message : 'Ошибка заполнения черновика', 'error');
         } finally {
             setFillSignal(0);   // сброс сигнала, чтобы повторный расчёт не само-запускался
             setFilling(false);
         }
-    }, [draftId, prebook, buildDistribution, applyDraft, showToast, geomState, nmPpb, buildNormalizeCtx, inScope]);
+    }, [draftId, draft?.updated_at, prebook, buildDistribution, applyDraft, showToast, geomState, nmPpb, buildNormalizeCtx, inScope]);
 
     // ── БЕЗ КРАТНОСТИ: артикулы со стоком на ФФ, у которых нет данных «шт/короб». ──
     // По правилу юзера НЕ участвуют в расчёте (fill/add их отфильтровывают): россыпью
@@ -1386,13 +1416,16 @@ export default function AssemblyDraftPage() {
                 // Прогон отменён (deps сменились, пока считали) → не пишем вовсе:
                 // PUT от протухшего замыкания незачем даже пытаться (re-arm в finally).
                 if (cancelled) return;
+                // Без известной базы фоновая запись запрещена (сервер отбил бы 409
+                // DRAFT_VERSION_REQUIRED) — черновик ещё не загружен, писать нечего.
+                if (!baseVersion) return;
                 let updated;
                 try {
                     updated = await api.updateAssemblyDraft(draftId, {
                         distribution: { ...buildDistribution(), rows: newRows, prebook: newPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames },
                         // СТРОГО baseVersion (версия замыканий), НЕ живой draftVersionRef:
                         // конкурентная запись (промоция раннера) → честный 409 → перечитка.
-                        base_updated_at: baseVersion || undefined,
+                        base_updated_at: baseVersion,
                         event: { event_type: 'ACCEPTANCE_SYNC', summary: `Синхронизация с приёмкой WB — ${parts.join(' | ') || 'переупаковка без смены складов'}` },
                     });
                 } catch (e) {
@@ -1442,6 +1475,10 @@ export default function AssemblyDraftPage() {
         redistSigRef.current = sig;
         redistBusyRef.current = true;
         let cancelled = false;
+        // CAS-токен = версия ЗАМЫКАНИЙ prebook этого прогона (как в консолидации):
+        // живой draftVersionRef в момент PUT «узаконивал» запись от протухшего
+        // состояния и затирал конкурентную промоцию (прод 2026-07-23, «5-й возврат»).
+        const baseVersion = draftVersionRef.current;
         void (async () => {
             try {
                 while (selfHealBusyRef.current || consolidatingRef.current) await new Promise((r) => setTimeout(r, 120));
@@ -1467,11 +1504,12 @@ export default function AssemblyDraftPage() {
                 for (const r of prebook) for (const [wb, q] of Object.entries(r.tgt)) before[wb] = (before[wb] || 0) + (q || 0);
                 const after: Record<string, number> = {};
                 for (const r of merged) for (const [wb, q] of Object.entries(r.tgt)) after[wb] = (after[wb] || 0) + (q || 0);
+                if (!baseVersion) return;   // черновик ещё не загружен — фоновой записи нечего защищать
                 let updated;
                 try {
                     updated = await api.updateAssemblyDraft(draftId, {
                         distribution: { ...buildDistribution(), prebook: merged },
-                        base_updated_at: draftVersionRef.current || undefined,
+                        base_updated_at: baseVersion,
                     });
                 } catch (e) {
                     if (isVersionConflict(e)) {
