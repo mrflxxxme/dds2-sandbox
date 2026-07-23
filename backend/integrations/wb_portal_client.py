@@ -575,9 +575,15 @@ class WbPortalClient:
         car_number: str,
         phone: str,
         pallets: int,
+        as_boxes: bool = False,
         barcode_prefix: str = "WB-GI-",
     ) -> None:
-        """Сохранить пропуск (водитель/авто/паллеты)."""
+        """Сохранить пропуск (водитель/авто/кол-во единиц).
+
+        as_boxes — способ отгрузки в кабинете WB: True → «отдельные короба»
+        (boxTypeName="box"), False → «на паллете» (boxTypeName="pallets"). `pallets`
+        в обоих случаях = число единиц (коробов или паллет).
+        """
         await self._call(
             {
                 "barcodeId": barcode_id,
@@ -588,7 +594,7 @@ class WbPortalClient:
                 "carNumber": car_number,
                 "supplyId": supply_id,
                 "number": pallets,
-                "boxTypeName": "pallets",
+                "boxTypeName": "box" if as_boxes else "pallets",
                 "supplierAssignUUID": None,
                 "phone": normalize_ru_phone(phone),
             },

@@ -99,6 +99,7 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType, o
     const [carModel, setCarModel] = useState('');
     const [carNumber, setCarNumber] = useState('');
     const [pallets, setPallets] = useState<number | ''>('');
+    const [passAsBoxes, setPassAsBoxes] = useState(false);
     const [drivers, setDrivers] = useState<WbDriver[]>([]);
 
     // Box editor (local)
@@ -127,6 +128,8 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType, o
             setCarModel(st.pass_car_model ?? '');
             setCarNumber(st.pass_car_number ?? '');
             setPallets(st.pass_pallets ?? '');
+            // Способ отгрузки: сохранённый в пропуске, иначе дефолт из единицы заявки.
+            setPassAsBoxes(st.pass_as_boxes ?? st.assembly_shipped_as_boxes ?? false);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         } finally {
@@ -318,7 +321,7 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType, o
         !driverFirst.trim() && 'Имя',
         !driverLast.trim() && 'Фамилия',
         !driverPhone.trim() && 'Телефон',
-        (pallets === '' || Number(pallets) <= 0) && 'Кол-во паллет',
+        (pallets === '' || Number(pallets) <= 0) && (passAsBoxes ? 'Кол-во коробов' : 'Кол-во паллет'),
         !carModel.trim() && 'Марка авто',
         !carNumber.trim() && 'Госномер',
     ].filter((v): v is string => typeof v === 'string');
@@ -708,10 +711,21 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType, o
                             />
                         </div>
                         <div className="form-group">
+                            <label className="form-label">Способ отгрузки</label>
+                            <select
+                                className="form-input"
+                                value={passAsBoxes ? 'box' : 'pallets'}
+                                onChange={(e) => setPassAsBoxes(e.target.value === 'box')}
+                            >
+                                <option value="pallets">На паллете</option>
+                                <option value="box">Отдельные короба</option>
+                            </select>
+                        </div>
+                        <div className="form-group">
                             <label className="form-label">
-                                Кол-во паллет<Req />
+                                {passAsBoxes ? 'Кол-во коробов' : 'Кол-во паллет'}<Req />
                                 {palletsMismatch && (
-                                    <span title={`В заявке: ${formatNumber(asmPallets ?? 0, 0)} паллет`} style={{ marginLeft: 6, color: 'var(--color-warning)', cursor: 'help' }}>⚠</span>
+                                    <span title={`В заявке: ${formatNumber(asmPallets ?? 0, 0)} ${passAsBoxes ? 'коробов' : 'паллет'}`} style={{ marginLeft: 6, color: 'var(--color-warning)', cursor: 'help' }}>⚠</span>
                                 )}
                             </label>
                             <input
@@ -770,6 +784,7 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType, o
                                         car_model: carModel,
                                         car_number: carNumber,
                                         pallets: pallets === '' ? null : pallets,
+                                        as_boxes: passAsBoxes,
                                     }),
                                 )
                             }
