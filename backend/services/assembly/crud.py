@@ -1408,9 +1408,13 @@ async def update_assembly_request(
     project_id: int,
     request_id: int,
     payload: AssemblyRequestUpdate,
+    changed_by: str | None = None,
 ) -> AssemblyRequest:
     """
     Update editable fields.
+
+    `changed_by` — отображаемое имя автора правки; пишется в историю
+    стоимости перевозки при фактическом изменении pickup_cost (ASM-785).
     """
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
@@ -1506,6 +1510,19 @@ async def update_assembly_request(
 
     # Vehicle & cost fields — editable in any non-cancelled status (including SHIPPED/DELIVERED)
     if payload.pickup_cost is not None:
+        # Логируем правку стоимости перевозки в историю (старая→новая + автор),
+        # только когда цена реально изменилась (ASM-785).
+        if payload.pickup_cost != req.pickup_cost:
+            from .status import _log_pickup_cost_change
+
+            await _log_pickup_cost_change(
+                db,
+                project_id,
+                req.id,
+                old_cost=req.pickup_cost,
+                new_cost=payload.pickup_cost,
+                changed_by=changed_by,
+            )
         req.pickup_cost = payload.pickup_cost
     if payload.vehicle_info is not None:
         req.vehicle_info = payload.vehicle_info
