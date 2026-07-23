@@ -2455,6 +2455,53 @@ _PRESHIP_ASSEMBLY_STATUSES = (
 )
 
 
+async def _logistics_in_transit_multi(
+    db: AsyncSession, project_id: int, warehouse_ids: list[int]
+) -> dict[int, dict[str, tuple[int, int | None]]]:
+    """Батч-версия `_logistics_in_transit_by_barcode` по многим складам за один запрос.
+
+    Возвращает {warehouse_id: {barcode: (qty, nomenclature_id)}}. Используется для
+    кросс-складской сводки расхождений (`link_anomalies._stock_mismatch`), где надо
+    досчитать логистику по каждому ФФ-складу, не дёргая запрос N раз.
+    """
+    if not warehouse_ids:
+        return {}
+    result = await db.execute(
+        select(
+            FulfillmentRequest.warehouse_id,
+            AssemblyRequestItem.barcode,
+            AssemblyRequestItem.nomenclature_id,
+            func.sum(AssemblyRequestItem.quantity),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .join(FulfillmentRequest, FulfillmentRequest.assembly_request_id == AssemblyRequest.id)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id.in_(warehouse_ids),
+            FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
+            FulfillmentRequest.stage_code.in_(LOGISTICS_WRITEOFF_STAGE_CODES),
+            FulfillmentRequest.is_completed == False,  # noqa: E712
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted == False,  # noqa: E712
+            AssemblyRequest.status.in_(_PRESHIP_ASSEMBLY_STATUSES),
+        )
+        .group_by(
+            FulfillmentRequest.warehouse_id,
+            AssemblyRequestItem.barcode,
+            AssemblyRequestItem.nomenclature_id,
+        )
+    )
+    out: dict[int, dict[str, tuple[int, int | None]]] = {}
+    for wid, barcode, nom_id, qty in result.all():
+        if not barcode:
+            continue
+        by_bc = out.setdefault(wid, {})
+        prev = by_bc.get(barcode)
+        add = int(qty or 0)
+        by_bc[barcode] = (prev[0] + add, prev[1] or nom_id) if prev else (add, nom_id)
+    return out
+
+
 async def _logistics_in_transit_by_barcode(
     db: AsyncSession, project_id: int, warehouse_id: int
 ) -> dict[str, tuple[int, int | None]]:
@@ -2467,34 +2514,8 @@ async def _logistics_in_transit_by_barcode(
     сборка в пред-отгрузочном статусе, её состав досчитываем к остатку ФФ в
     расхождении (иначе ложная недостача). Возвращает {barcode: (qty, nomenclature_id)}.
     """
-    result = await db.execute(
-        select(
-            AssemblyRequestItem.barcode,
-            AssemblyRequestItem.nomenclature_id,
-            func.sum(AssemblyRequestItem.quantity),
-        )
-        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
-        .join(FulfillmentRequest, FulfillmentRequest.assembly_request_id == AssemblyRequest.id)
-        .where(
-            FulfillmentRequest.project_id == project_id,
-            FulfillmentRequest.warehouse_id == warehouse_id,
-            FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
-            FulfillmentRequest.stage_code.in_(LOGISTICS_WRITEOFF_STAGE_CODES),
-            FulfillmentRequest.is_completed == False,  # noqa: E712
-            AssemblyRequest.project_id == project_id,
-            AssemblyRequest.is_deleted == False,  # noqa: E712
-            AssemblyRequest.status.in_(_PRESHIP_ASSEMBLY_STATUSES),
-        )
-        .group_by(AssemblyRequestItem.barcode, AssemblyRequestItem.nomenclature_id)
-    )
-    out: dict[str, tuple[int, int | None]] = {}
-    for barcode, nom_id, qty in result.all():
-        if not barcode:
-            continue
-        prev = out.get(barcode)
-        add = int(qty or 0)
-        out[barcode] = (prev[0] + add, prev[1] or nom_id) if prev else (add, nom_id)
-    return out
+    multi = await _logistics_in_transit_multi(db, project_id, [warehouse_id])
+    return multi.get(warehouse_id, {})
 
 
 async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> dict:

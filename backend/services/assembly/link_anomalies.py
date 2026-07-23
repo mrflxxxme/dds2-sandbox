@@ -363,6 +363,7 @@ async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list
                 "nomenclature_id": nom_id,
                 "name": None,
                 "ff_good": 0,
+                "ff_logistics": 0,
                 "our_quantity": 0,
                 "our_defect": 0,
             }
@@ -392,6 +393,18 @@ async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list
             c["our_defect"] += wr.defect_quantity
         if c["nomenclature_id"] is None and wr.nomenclature_id is not None:
             c["nomenclature_id"] = wr.nomenclature_id
+
+    # Досчёт логистики к ff_good (паритет с fulfillment_service.list_stocks): товар,
+    # который провайдер (skladbot) списал из годного на стадии «Указание вида работ
+    # логистики», но физически на складе, а сборка ещё не отгружена (наш сток держит).
+    # Без досчёта показывает ложную недостачу «у нас больше». Провайдер-специфично:
+    # у migfull/wmscelicom стадии logistics_works нет → досчёт пустой, их не трогает.
+    transit = await fulfillment_service._logistics_in_transit_multi(db, project_id, ff_wh_list)
+    for wid, by_bc in transit.items():
+        for barcode, (qty, nom_id) in by_bc.items():
+            c = _cell(wid, barcode, nom_id)
+            c["ff_good"] += qty
+            c["ff_logistics"] += qty
 
     # Резолв article_seller/brand одним запросом (без N+1).
     nom_ids = {c["nomenclature_id"] for c in cells.values() if c["nomenclature_id"]}
