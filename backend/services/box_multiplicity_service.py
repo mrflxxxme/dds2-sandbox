@@ -506,10 +506,14 @@ async def get_box_multiplicity_table(
             target = in_transit_map if row.status == AssemblyStatus.SHIPPED else in_assembly_map
             target[nm] = target.get(nm, 0) + qty
 
-    # WB warehouses сток — сумма по всем WB-складам проекта.
+    # WB warehouses сток — сумма по всем WB-складам проекта
+    # (кроме 🔥-игнорируемых: их сток — фантом сгоревшего склада).
     wb_stock_map: dict[int, int] = {}
     if nm_ids:
-        wb_result = await db.execute(
+        from backend.services.settings_service import get_stock_ignored_set
+
+        ignored = await get_stock_ignored_set(db, project_id)
+        wb_stmt = (
             select(
                 WbWarehouseStock.nm_id,
                 func.coalesce(func.sum(WbWarehouseStock.quantity), 0).label("qty"),
@@ -520,6 +524,9 @@ async def get_box_multiplicity_table(
             )
             .group_by(WbWarehouseStock.nm_id)
         )
+        if ignored:
+            wb_stmt = wb_stmt.where(WbWarehouseStock.warehouse_name.notin_(sorted(ignored)))
+        wb_result = await db.execute(wb_stmt)
         for row in wb_result:  # type: ignore[assignment]
             wb_stock_map[row.nm_id] = int(row.qty or 0)
 

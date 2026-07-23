@@ -110,6 +110,28 @@ describe('refs.getExcludedWarehouses / setExcludedWarehouses', () => {
     });
 });
 
+describe('refs.getStockIgnoredWarehouses / setStockIgnoredWarehouses', () => {
+    it('GETs stock-ignored warehouse list', async () => {
+        const spy = mockFetch(['Краснодар', 'Невинномысск']);
+        const api = makeApi();
+        const result = await api.getStockIgnoredWarehouses();
+        expect(result).toContain('Краснодар');
+        expect(spy.mock.calls[0][0]).toContain('/api/v1/refs/stock-ignored-warehouses');
+    });
+
+    it('PUTs new stock-ignored list with {warehouses} body', async () => {
+        const spy = mockFetch({ ok: true, stock_ignored: ['Краснодар'] });
+        const api = makeApi();
+        const result = await api.setStockIgnoredWarehouses(['Краснодар']);
+        expect(result.stock_ignored).toEqual(['Краснодар']);
+        const [url, init] = spy.mock.calls[0];
+        expect(url).toContain('/api/v1/refs/stock-ignored-warehouses');
+        expect((init as RequestInit).method).toBe('PUT');
+        const body = JSON.parse((init as RequestInit).body as string);
+        expect(body.warehouses).toEqual(['Краснодар']);
+    });
+});
+
 describe('refs.getProductTags', () => {
     it('GETs /api/v1/refs/tags', async () => {
         const spy = mockFetch([{ id: 1, name: 'Бестселлер', color: '#ff0000' }]);

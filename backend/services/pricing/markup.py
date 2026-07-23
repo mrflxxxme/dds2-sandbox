@@ -140,13 +140,20 @@ def _resolve_cost(nm_id: int, meta: dict, avg_costs: dict[str, float], overrides
 
 
 async def _load_wb_stock_map(db: AsyncSession, pid: int) -> dict[int, int]:
-    """nm_id → остаток на складах ВБ (Σ quantity_full, включая товар в пути)."""
-    rows = await db.execute(
+    """nm_id → остаток на складах ВБ (Σ quantity_full, включая товар в пути;
+    без 🔥-игнорируемых складов — их сток фантомный)."""
+    from backend.services.settings_service import get_stock_ignored_set
+
+    ignored = await get_stock_ignored_set(db, pid)
+    stmt = (
         select(WbWarehouseStock.nm_id, func.sum(WbWarehouseStock.quantity_full).label("qty"))
         .where(WbWarehouseStock.project_id == pid)
         .group_by(WbWarehouseStock.nm_id)
         .limit(_MAX_ROWS)
     )
+    if ignored:
+        stmt = stmt.where(WbWarehouseStock.warehouse_name.notin_(sorted(ignored)))
+    rows = await db.execute(stmt)
     return {r.nm_id: int(r.qty or 0) for r in rows}
 
 

@@ -102,6 +102,7 @@ class AssemblyRequestCreate(BaseModel):
     estimated_ready_date: date | None = None
     pallets_count: int
     pallet_weight_kg: Decimal
+    shipped_as_boxes: bool = False  # единица: паллеты (False) или короба (True)
     comment: str | None = None
     wb_warehouse_name_manual: str | None = None
     package_type: PackageTypeStr = "BOX"
@@ -114,6 +115,7 @@ class AssemblyRequestUpdate(BaseModel):
     estimated_ready_date: date | None = None
     pallets_count: int | None = None
     pallet_weight_kg: Decimal | None = None
+    shipped_as_boxes: bool | None = None  # единица: паллеты (False) или короба (True)
     comment: str | None = None
     wb_warehouse_name_manual: str | None = None
     package_type: PackageTypeStr | None = None
@@ -293,6 +295,7 @@ class AssemblyRequestResponse(BaseModel):
     actual_ready_date: date | None = None
     pallets_count: int
     pallet_weight_kg: Decimal
+    shipped_as_boxes: bool = False  # единица: паллеты (False) или короба (True)
     total_weight_kg: Decimal | None = None  # computed: pallets x weight (тара, ручной)
     # True — «Общий вес» показан как РАСЧЁТНЫЙ (ручной не задан): нетто + тара коробов.
     weight_is_estimated: bool = False

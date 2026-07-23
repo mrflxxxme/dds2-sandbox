@@ -56,7 +56,7 @@ from backend.schemas.assembly_draft import (
 )
 from backend.services import assembly_draft_service
 from backend.services.localization_tariff import get_ktr, status_label
-from backend.services.settings_service import get_excluded_warehouses
+from backend.services.settings_service import get_excluded_warehouses, get_stock_ignored_set
 from backend.services.stock_forecast_service import classify_traffic_light, compute_days_left
 from backend.services.warehouse_district import (
     DISTRICT_LABELS,
@@ -367,6 +367,16 @@ async def forecast_draft_load(
 
         incoming = {nm: {wh: q for wh, q in d.items() if _is_open(wh)} for nm, d in incoming.items()}
         stock = {nm: {wh: q for wh, q in d.items() if _is_open(wh)} for nm, d in stock.items()}
+
+    # 🔥 Сгоревшие склады (stock_ignored): их ОСТАТКАМ не верим (фантом), но
+    # входящую поставку/спрос не трогаем — флаг независим от excluded.
+    stock_ignored = await get_stock_ignored_set(db, project_id)
+    if stock_ignored:
+        ign = {_strip_parens(n) for n in stock_ignored}
+        stock = {
+            nm: {wh: q for wh, q in d.items() if _strip_parens(wh) not in ign}
+            for nm, d in stock.items()
+        }
 
     lead = lead_time.total_days
 

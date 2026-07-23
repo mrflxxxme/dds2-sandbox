@@ -14,6 +14,7 @@ from pathlib import Path
 
 BACKEND = Path(__file__).parent.parent / "backend"
 SCRIPTS = Path(__file__).parent.parent / "scripts"
+FRONTEND = Path(__file__).parent.parent / "frontend-react"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -148,4 +149,46 @@ class TestCachePrefixSync:
         stale = invalidated - cached - PHASE2_PENDING
         assert not stale, (
             f"Prefixes in invalidate_project_reports() but no @cached: {stale}. " f"Remove them from backend/cache.py."
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. RBAC page keys — frontend permission checkboxes ⊆ backend ALL_PAGES
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# The team page (frontend) renders a checkbox per page key; on save it POSTs the
+# selected keys, and update_member_role() rejects the whole request (HTTP 400) if
+# any key is absent from backend ALL_PAGES. A frontend-only key thus silently
+# breaks "Save" for any member whose selection includes it — the exact prod bug
+# that stranded the "Генератор ШК" (barcode-labels) key under «Склад».
+
+
+def _find_frontend_page_keys() -> set[str]:
+    """Extract page keys from SECTION_PAGES in the team page component."""
+    team_page = FRONTEND / "src" / "app" / "(main)" / "p" / "[slug]" / "team" / "page.tsx"
+    content = team_page.read_text()
+    # Isolate the SECTION_PAGES object literal (other `key:` occurrences in the
+    # file are TanStack column defs, not permission keys).
+    match = re.search(r"const SECTION_PAGES.*?=\s*\{(.*?)\n\};", content, re.DOTALL)
+    assert match, "SECTION_PAGES literal not found in team/page.tsx"
+    block = match.group(1)
+    return set(re.findall(r"key:\s*'([^']+)'", block))
+
+
+class TestRbacPageKeySync:
+    def test_frontend_page_keys_are_known_to_backend(self):
+        """Every permission checkbox key must be in backend ALL_PAGES.
+
+        Otherwise saving a member's access explodes with HTTP 400
+        «Неизвестные страницы: …» and the Save button appears dead.
+        """
+        from backend.rbac import ALL_PAGES
+
+        frontend_keys = _find_frontend_page_keys()
+        assert frontend_keys, "Frontend page-key scan found nothing — regex broken?"
+        unknown = frontend_keys - set(ALL_PAGES)
+        assert not unknown, (
+            f"Frontend team-page permission keys missing from backend ALL_PAGES: {unknown}. "
+            f"Add them to ALL_PAGES (and the matching SECTION_PAGES group) in backend/rbac.py, "
+            f"else update_member_role() returns 400 and 'Сохранить' silently fails."
         )

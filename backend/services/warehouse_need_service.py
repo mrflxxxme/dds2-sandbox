@@ -313,13 +313,26 @@ async def get_warehouse_need(
 
     # Excluded warehouses apply to BOTH modes — used to skip e.g. all SC (sorting
     # centers) from per-WB demand. Stored already-normalized (no parens).
-    from backend.services.settings_service import get_excluded_warehouses
+    from backend.services.settings_service import (
+        get_excluded_warehouses,
+        get_stock_ignored_set,
+    )
 
     excluded_list = await get_excluded_warehouses(db, project_id)
     excluded_set = {_normalize_wb_warehouse(w) for w in excluded_list if w}
     if excluded_set:
         open_warehouses = [w for w in open_warehouses if w not in excluded_set]
         logger.info("Excluded warehouses for project %s: %s", project_id, sorted(excluded_set))
+
+    # 🔥 Сгоревшие склады (stock_ignored_warehouses): их остаткам WB не верим
+    # (фантом), поэтому ниже они выкидываются ТОЛЬКО из stock_lookup (покрытие).
+    # СПРОС с них сохраняется (заказы реальные), целью отгрузки они остаются —
+    # флаг независим от excluded, из open_warehouses не вырезаем.
+    stock_ignored_set = await get_stock_ignored_set(db, project_id)
+    if stock_ignored_set:
+        logger.info(
+            "Stock-ignored warehouses for project %s: %s", project_id, sorted(stock_ignored_set)
+        )
 
     # Дополнительно отсекаем склады закрытые ПО ПРИЁМКЕ WB — индивидуальная
     # квота / 0 free+paid дней в 14 для всех package_types. Из cached snapshot
@@ -518,7 +531,9 @@ async def get_warehouse_need(
 
     for r in wh_result:  # type: ignore[assignment]
         wh_norm = _normalize_wb_warehouse(r.warehouse_name)
-        if not wh_norm or wh_norm in excluded_set:
+        # 🔥 stock_ignored: фантомный сток сгоревшего склада не входит в покрытие
+        # (stock_lookup → wb_stock_total); спрос выше этим фильтром не затронут.
+        if not wh_norm or wh_norm in excluded_set or wh_norm in stock_ignored_set:
             continue
         key = (wh_norm, r.nm_id)
         # Several physical sub-warehouses can collapse into one normalized name;

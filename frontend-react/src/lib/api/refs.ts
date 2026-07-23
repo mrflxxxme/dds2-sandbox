@@ -41,6 +41,10 @@ export function addRefMethods(api: ApiClient) {
         getAllWbWarehouses() { return api.request<Array<{ name: string; lat: number; lng: number; is_sorting_center?: boolean }>>('GET', '/api/v1/refs/warehouses'); },
         getExcludedWarehouses() { return api.request<string[]>('GET', '/api/v1/refs/excluded-warehouses'); },
         setExcludedWarehouses(warehouses: string[]) { return api.request<{ ok: boolean; excluded: string[] }>('PUT', '/api/v1/refs/excluded-warehouses', { warehouses }); },
+        // 🔥 Сгоревшие/потерянные склады WB: их остатки не учитываются в расчётах (потребность/запас/срочность),
+        // но страницы «факта» (Остатки по складам, Сводные) показывают их как есть. Независим от excluded-warehouses.
+        getStockIgnoredWarehouses() { return api.request<string[]>('GET', '/api/v1/refs/stock-ignored-warehouses'); },
+        setStockIgnoredWarehouses(warehouses: string[]) { return api.request<{ ok: boolean; stock_ignored: string[] }>('PUT', '/api/v1/refs/stock-ignored-warehouses', { warehouses }); },
         // Whitelist складов, куда можно делать предзаявку без приёмочного лимита (⌛). Склад вне списка вырезается из расчёта.
         getPreorderAllowedWarehouses() { return api.request<string[]>('GET', '/api/v1/refs/preorder-allowed-warehouses'); },
         setPreorderAllowedWarehouses(warehouses: string[]) { return api.request<{ ok: boolean; preorder_allowed: string[] }>('PUT', '/api/v1/refs/preorder-allowed-warehouses', { warehouses }); },

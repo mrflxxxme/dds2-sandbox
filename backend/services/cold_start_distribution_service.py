@@ -24,7 +24,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select, text
+from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.warehouse import Warehouse, WarehouseType
@@ -38,7 +38,7 @@ from backend.schemas.cold_start import (
     DistributeResponse,
     SkuInfo,
 )
-from backend.services.settings_service import get_excluded_warehouses
+from backend.services.settings_service import get_excluded_warehouses, get_stock_ignored_set
 from backend.services.warehouse_district import (
     DISTRICT_LABELS,
     DISTRICT_ORDER,
@@ -263,12 +263,20 @@ async def fetch_warehouse_traffic(db: AsyncSession, project_id: int, window_days
     return {row["warehouse_name"]: row["cnt"] for row in result.mappings()}
 
 
+# 🔥 Сгоревшие склады (stock_ignored): их сток — фантом, вырезаем из wb_qty.
+# Пустой список — фильтр не подставляется вовсе (:param binding, expanding).
+_WB_IGNORED_SQL = " AND wws.warehouse_name NOT IN :ignored"
+
+
 async def fetch_sku(db: AsyncSession, project_id: int, nm_id: int) -> dict | None:
     """Возвращает информацию по SKU (article_seller, brand, rf_qty, wb_qty).
 
     rf_qty — суммарный остаток на ФФ (warehouse_stock).
-    wb_qty — текущий остаток на всех WB-складах (wb_warehouse_stocks).
+    wb_qty — текущий остаток на всех WB-складах (wb_warehouse_stocks),
+    без 🔥-игнорируемых складов.
     """
+    ignored = sorted(await get_stock_ignored_set(db, project_id))
+    ignored_filter = _WB_IGNORED_SQL if ignored else ""
     sql = text(
         """
         SELECT n.id AS internal_id,
@@ -286,7 +294,9 @@ async def fetch_sku(db: AsyncSession, project_id: int, nm_id: int) -> dict | Non
                  (SELECT SUM(wws.quantity)
                   FROM wb_warehouse_stocks wws
                   WHERE wws.nm_id = n.article_wb AND wws.project_id = :project_id
-                    AND wws.quantity > 0),
+                    AND wws.quantity > 0"""
+        + ignored_filter
+        + """),
                  0
                ) AS wb_qty
         FROM nomenclature n
@@ -294,7 +304,11 @@ async def fetch_sku(db: AsyncSession, project_id: int, nm_id: int) -> dict | Non
         LIMIT 1
         """
     )
-    result = await db.execute(sql, {"project_id": project_id, "nm_id": nm_id})
+    params: dict[str, Any] = {"project_id": project_id, "nm_id": nm_id}
+    if ignored:
+        sql = sql.bindparams(bindparam("ignored", expanding=True))
+        params["ignored"] = ignored
+    result = await db.execute(sql, params)
     row = result.mappings().first()
     return dict(row) if row else None
 
@@ -857,6 +871,8 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
     SKU только с WB-остатком (без ФФ) тоже НЕ включаются — товар уже на WB,
     распределять с ФФ нечего.
     """
+    ignored = sorted(await get_stock_ignored_set(db, project_id))
+    ignored_filter = _WB_IGNORED_SQL if ignored else ""
     sql = text(
         """
         SELECT n.id AS internal_id,
@@ -881,14 +897,18 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
                COALESCE(
                  (SELECT SUM(wws.quantity) FROM wb_warehouse_stocks wws
                   WHERE wws.nm_id = n.article_wb AND wws.project_id = :project_id
-                    AND wws.quantity > 0),
+                    AND wws.quantity > 0"""
+        + ignored_filter
+        + """),
                  0
                ) AS wb_qty,
                COALESCE(
                  (SELECT jsonb_object_agg(wws.warehouse_name, wws.quantity)
                   FROM wb_warehouse_stocks wws
                   WHERE wws.nm_id = n.article_wb AND wws.project_id = :project_id
-                    AND wws.quantity > 0),
+                    AND wws.quantity > 0"""
+        + ignored_filter
+        + """),
                  '{}'::jsonb
                ) AS wb_by_wh,
                COALESCE(
@@ -919,7 +939,11 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
         WHERE n.project_id = :project_id
         """
     )
-    result = await db.execute(sql, {"project_id": project_id})
+    params: dict[str, Any] = {"project_id": project_id}
+    if ignored:
+        sql = sql.bindparams(bindparam("ignored", expanding=True))
+        params["ignored"] = ignored
+    result = await db.execute(sql, params)
     rows = list(result.mappings())
     out: list[dict] = []
     for r in rows:
