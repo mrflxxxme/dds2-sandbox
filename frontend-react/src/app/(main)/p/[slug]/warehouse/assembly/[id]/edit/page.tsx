@@ -468,7 +468,18 @@ export default function AssemblyEditPage() {
                         <select
                             className="form-input"
                             value={shippedAsBoxes ? 'boxes' : 'pallets'}
-                            onChange={e => setShippedAsBoxes(e.target.value === 'boxes')}
+                            onChange={e => {
+                                const toBoxes = e.target.value === 'boxes';
+                                setShippedAsBoxes(toBoxes);
+                                // При переключении на короба — автоподстановка числа коробов
+                                // из состава заявки (Σ ⌈кол-во/кратность⌉ по позициям);
+                                // обратно — восстановление исходного числа паллет.
+                                if (toBoxes) {
+                                    if (assembly?.boxes_count) setPalletsCount(assembly.boxes_count);
+                                } else if (assembly) {
+                                    setPalletsCount(assembly.pallets_count);
+                                }
+                            }}
                         >
                             <option value="pallets">Паллеты</option>
                             <option value="boxes">Короба</option>

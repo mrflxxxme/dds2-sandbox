@@ -258,6 +258,11 @@ class OutboundShipment(Base, TimestampMixin, SoftDeleteMixin):
     delivery_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     pallets_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pallet_weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    # Единица поставки — снимок с заявки при отгрузке (False = паллеты, True = короба).
+    # Чтобы «История отправок»/«Оплаты» показывали единицу забора (коробов vs паллет).
+    shipped_as_boxes: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
 
     # ─── Связка забора с банковской выпиской ───────────────────────────────
     # «Этот забор оплачен транзакцией X» БЕЗ заявки на оплату: авто (матчер
