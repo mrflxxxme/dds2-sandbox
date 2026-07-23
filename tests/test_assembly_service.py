@@ -48,6 +48,7 @@ from backend.services.assembly_service import (
     get_assembly_attempts,
     get_assembly_request,
     get_logistics_analytics,
+    get_logistics_cost_per_unit,
     get_pickup_cost_history,
     list_assembly_requests,
     mark_ready,
@@ -2962,3 +2963,65 @@ class TestCancelStatusRecheck:
             )
         ).scalar()
         assert qty_after == qty_before  # фантомного возврата стока нет
+
+
+class TestLogisticsCostPerUnit:
+    """Стоимость логистики ₽/шт и ₽/короб по категории/бренду + динамика."""
+
+    async def _ship_with_cost(self, db_session, pickup_cost) -> AssemblyRequest:
+        req = await _create_test_request(db_session)  # позиция: TEST_BARCODE_1 = 5 шт
+        req = await mark_ready(db_session, PROJECT_ID, req.id)
+        req = await assign_vehicle(
+            db_session,
+            PROJECT_ID,
+            req.id,
+            AssignVehicle(
+                vehicle_info="Truck COST-1",
+                vehicle_brand="GAZ",
+                driver_phone="+79990000000",
+                pickup_date="2026-03-22",
+                pickup_time_slot="08:00-12:00",
+                pickup_cost=pickup_cost,
+                delivery_date="2026-03-23",
+            ),
+        )
+        return await ship_request(db_session, PROJECT_ID, req.id)
+
+    async def test_cost_per_unit_basic(self, db_session):
+        """₽/шт = pickup_cost / Σштук; total_cost сходится с pickup_cost."""
+        await self._ship_with_cost(db_session, Decimal("10000"))
+
+        res = await get_logistics_cost_per_unit(db_session, PROJECT_ID, group_by="day")
+        s = res["summary"]
+        assert s["shipments"] == 1
+        assert s["total_units"] == 5
+        assert Decimal(str(s["total_cost"])) == Decimal("10000")
+        assert Decimal(str(s["cost_per_unit"])) == Decimal("2000")  # 10000 / 5
+        # У тестовых ШК нет кратности короба → короба не считаются.
+        assert s["total_boxes"] == 0
+        assert s["cost_per_box"] is None
+        # По одному срезу на бренд и категорию (фолбэки), одна точка динамики.
+        assert len(res["by_brand"]) == 1
+        assert len(res["by_category"]) == 1
+        assert len(res["dynamics"]) == 1
+        assert Decimal(str(res["by_category"][0]["cost_per_unit"])) == Decimal("2000")
+
+    async def test_category_filter_excludes_nonmatching(self, db_session):
+        """Фильтр по несуществующей категории → пустой срез (0 штук)."""
+        await self._ship_with_cost(db_session, Decimal("5000"))
+
+        res = await get_logistics_cost_per_unit(
+            db_session, PROJECT_ID, categories=["Электроника"], group_by="day"
+        )
+        assert res["summary"]["total_units"] == 0
+        assert res["by_category"] == []
+        # Но справочник доступных категорий периода наполнен (для селекта фильтра).
+        assert "Без категории" in res["categories_available"]
+
+    async def test_isolation_by_project(self, db_session):
+        """Отгрузка чужого проекта не попадает в срез."""
+        await self._ship_with_cost(db_session, Decimal("7000"))
+
+        res_other = await get_logistics_cost_per_unit(db_session, OTHER_PROJECT_ID, group_by="day")
+        assert res_other["summary"]["shipments"] == 0
+        assert res_other["summary"]["total_units"] == 0

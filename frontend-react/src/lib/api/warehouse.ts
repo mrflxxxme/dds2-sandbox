@@ -78,6 +78,7 @@ import type {
     InboundReceipt,
     CostForecastResponse,
     LogisticsAnalyticsResponse,
+    LogisticsCostPerUnitResponse,
     LogisticsShipmentListResponse,
     OutboundShipment,
     RefreshFromFboResponse,
@@ -579,6 +580,17 @@ export function addWarehouseMethods(api: ApiClient) {
             }
             const qs = query.toString();
             return api.request<LogisticsAnalyticsResponse>('GET', `/api/v1/warehouse/assembly/shipments/analytics${qs ? `?${qs}` : ''}`);
+        },
+        /** Стоимость логистики ₽/шт и ₽/короб по категории/бренду + динамика за период. */
+        getLogisticsCostPerUnit(params?: { date_from?: string; date_to?: string; warehouse_ids?: string; brands?: string; categories?: string; group_by?: 'day' | 'week' | 'month' }) {
+            const query = new URLSearchParams();
+            if (params) {
+                Object.entries(params).forEach(([k, v]) => {
+                    if (v !== undefined && v !== null && v !== '') query.set(k, String(v));
+                });
+            }
+            const qs = query.toString();
+            return api.request<LogisticsCostPerUnitResponse>('GET', `/api/v1/warehouse/assembly/shipments/cost-per-unit${qs ? `?${qs}` : ''}`);
         },
         /** Построчная история отправок за период (весь набор — клиентская сортировка по всему периоду). */
         getShipmentsList(params?: { date_from?: string; date_to?: string; warehouse_ids?: string; brands?: string; carrier_id?: number; dest_warehouse?: string }) {

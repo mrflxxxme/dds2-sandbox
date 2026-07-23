@@ -47,6 +47,7 @@ from backend.schemas.assembly import (
     JointSibling,
     LinkAnomaliesResponse,
     LogisticsAnalyticsResponse,
+    LogisticsCostPerUnitResponse,
     LogisticsShipmentListResponse,
     PreDistAdvanceResult,
     PreDistributionCreate,
@@ -542,6 +543,34 @@ async def get_logistics_analytics(
         warehouse_ids=wh_ids,
         brands=brand_list,
         carrier_id=carrier_id,
+    )
+
+
+@router.get("/shipments/cost-per-unit", response_model=LogisticsCostPerUnitResponse)
+async def get_logistics_cost_per_unit(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    warehouse_ids: str | None = Query(None, description="Comma-separated warehouse IDs"),
+    brands: str | None = Query(None, description="Comma-separated brand names"),
+    categories: str | None = Query(None, description="Comma-separated category names"),
+    group_by: str = Query("month", description="day | week | month"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Стоимость логистики ₽/шт и ₽/короб в разрезе категории и бренда + динамика за
+    период (по дате отгрузки). Данные из заборов (pickup_cost) и позиций отгрузок."""
+    wh_ids = _parse_warehouse_ids(warehouse_ids)
+    brand_list = [x.strip() for x in brands.split(",") if x.strip()] if brands else None
+    cat_list = [x.strip() for x in categories.split(",") if x.strip()] if categories else None
+    return await assembly_service.get_logistics_cost_per_unit(
+        db,
+        project.id,
+        date_from=date_from,
+        date_to=date_to,
+        warehouse_ids=wh_ids,
+        brands=brand_list,
+        categories=cat_list,
+        group_by=group_by,
     )
 
 

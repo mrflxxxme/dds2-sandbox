@@ -840,6 +840,225 @@ async def get_logistics_analytics(
     }
 
 
+# --- Стоимость логистики ₽/шт и ₽/короб по категории/бренду + динамика --------
+
+# Кап отгрузок для агрегации ₽/шт (период шире — режем + флаг truncated).
+_COST_PER_UNIT_SHIPMENTS_LIMIT = 8000
+_NO_BRAND = "Без бренда"
+_NO_CATEGORY = "Без категории"
+
+
+def _period_bucket(d: date, group_by: str) -> str:
+    """Ключ временного ряда по дате отгрузки: day → YYYY-MM-DD, week → понедельник
+    недели (YYYY-MM-DD), month → YYYY-MM."""
+    if group_by == "day":
+        return d.isoformat()
+    if group_by == "week":
+        return (d - timedelta(days=d.weekday())).isoformat()
+    return f"{d.year:04d}-{d.month:02d}"  # month (дефолт)
+
+
+@cached(prefix="reports:logistics_cost_per_unit", ttl=300)
+async def get_logistics_cost_per_unit(
+    db: AsyncSession,
+    project_id: int,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    warehouse_ids: list[int] | None = None,
+    brands: list[str] | None = None,
+    categories: list[str] | None = None,
+    group_by: str = "month",
+) -> dict:
+    """Стоимость логистики (забора) НА ШТУКУ и НА КОРОБ в разрезе категории и бренда,
+    плюс динамика за период.
+
+    `pickup_cost` — стоимость перевозки на ВСЮ отгрузку. Разносим по позициям: ₽/шт
+    забора = pickup_cost / Σштук, ₽/короб = pickup_cost / Σкоробов (короб = ⌈кол-во /
+    кратность⌉ per (склад отгрузки, ШК); позиции без кратности в короба не идут). Каждая
+    позиция несёт долю стоимости пропорционально штукам (unit-alloc) и коробам (box-alloc);
+    агрегат по категории/бренду/периоду = Σдоли / Σштук(коробов). `total_cost` — unit-alloc
+    (покрывает ВСЕ штуки, включая позиции без кратности).
+
+    Фильтры brands/categories применяются НА УРОВНЕ ПОЗИЦИИ: в срез попадают только позиции
+    нужного бренда/категории, но знаменатель ₽/шт забора считается по ПОЛНОМУ составу
+    отгрузки (стоимость единицы забора от фильтра не зависит). Категория — эффективная
+    (`CategoryOverride ?? Nomenclature.subject`).
+    """
+    from .draft_category_history import _category_by_nm
+    from .weight import resolve_box_qty_by_warehouse
+
+    if group_by not in ("day", "week", "month"):
+        group_by = "month"
+
+    base_filters = _logistics_base_filters(
+        project_id,
+        date_from=date_from,
+        date_to=date_to,
+        warehouse_ids=warehouse_ids,
+        brands=None,  # бренд фильтруем на уровне позиции (ниже), не сабквери по всей отгрузке
+        carrier_id=None,
+    )
+    ship_q = (
+        select(
+            OutboundShipment.id,
+            OutboundShipment.pickup_cost,
+            OutboundShipment.shipped_date,
+            OutboundShipment.warehouse_id,
+        )
+        .join(AssemblyRequest, OutboundShipment.assembly_request_id == AssemblyRequest.id)
+        .where(*base_filters, OutboundShipment.pickup_cost.isnot(None))
+        .order_by(OutboundShipment.shipped_date.desc().nullslast(), OutboundShipment.id.desc())
+        .limit(_COST_PER_UNIT_SHIPMENTS_LIMIT + 1)
+    )
+    ship_rows = (await db.execute(ship_q)).all()
+    truncated = len(ship_rows) > _COST_PER_UNIT_SHIPMENTS_LIMIT
+    ship_rows = ship_rows[:_COST_PER_UNIT_SHIPMENTS_LIMIT]
+
+    empty = {
+        "summary": {"total_cost": Decimal("0"), "total_units": 0, "total_boxes": 0,
+                    "cost_per_unit": None, "cost_per_box": None, "shipments": 0},
+        "by_category": [], "by_brand": [], "dynamics": [],
+        "brands_available": [], "categories_available": [], "group_by": group_by,
+        "truncated": False,
+    }
+    if not ship_rows:
+        return empty
+
+    ship_meta = {r.id: (r.pickup_cost, r.shipped_date, r.warehouse_id) for r in ship_rows}
+    ship_ids = list(ship_meta.keys())
+
+    items_q = select(
+        OutboundShipmentItem.shipment_id,
+        OutboundShipmentItem.nomenclature_id,
+        OutboundShipmentItem.barcode,
+        OutboundShipmentItem.quantity,
+    ).where(
+        OutboundShipmentItem.shipment_id.in_(ship_ids),
+        OutboundShipmentItem.project_id == project_id,
+    )
+    item_rows = (await db.execute(items_q)).all()
+
+    # Бренд по nomenclature_id; категория — через article_wb (nm_id) с override.
+    nom_ids = {r.nomenclature_id for r in item_rows if r.nomenclature_id is not None}
+    brand_by_nom: dict[int, str] = {}
+    art_by_nom: dict[int, int] = {}
+    if nom_ids:
+        noms = await db.execute(
+            select(Nomenclature.id, Nomenclature.brand, Nomenclature.article_wb).where(
+                Nomenclature.project_id == project_id, Nomenclature.id.in_(nom_ids)
+            )
+        )
+        for nid, brand, art in noms.all():
+            brand_by_nom[int(nid)] = (brand or "").strip() or _NO_BRAND
+            if art is not None:
+                art_by_nom[int(nid)] = int(art)
+    cat_by_art = await _category_by_nm(db, project_id, set(art_by_nom.values()))
+
+    def _category_of(nom_id: int | None) -> str:
+        art = art_by_nom.get(nom_id) if nom_id is not None else None
+        return cat_by_art.get(art) or _NO_CATEGORY if art is not None else _NO_CATEGORY
+
+    # Кратность короба per (склад отгрузки, ШК).
+    wh_to_barcodes: dict[int, list[str]] = {}
+    for r in item_rows:
+        wh_to_barcodes.setdefault(ship_meta[r.shipment_id][2], []).append(r.barcode)
+    box_qty = await resolve_box_qty_by_warehouse(db, project_id, wh_to_barcodes)
+
+    items_by_ship: dict[int, list] = {}
+    for r in item_rows:
+        items_by_ship.setdefault(r.shipment_id, []).append(r)
+
+    brand_set = set(brands) if brands else None
+    cat_set = set(categories) if categories else None
+
+    def _new_acc() -> dict:
+        return {"units": 0, "boxes": 0, "cost_unit": Decimal("0"), "cost_box": Decimal("0")}
+
+    by_category: dict[str, dict] = {}
+    by_brand: dict[str, dict] = {}
+    dynamics: dict[str, dict] = {}
+    brands_seen: set[str] = set()
+    cats_seen: set[str] = set()
+    tot = _new_acc()
+    shipments_counted = 0
+
+    for sid, (pickup_cost, shipped_date, wh_id) in ship_meta.items():
+        raw = items_by_ship.get(sid) or []
+        if not raw or pickup_cost is None:
+            continue
+        # Знаменатели по ПОЛНОМУ составу отгрузки (стоимость единицы забора).
+        enriched: list[tuple[int, int, str, str]] = []
+        total_units = 0
+        total_boxes = 0
+        for i in raw:
+            q = int(i.quantity or 0)
+            if q <= 0:
+                continue
+            bq = box_qty.get((wh_id, i.barcode))
+            b = -(-q // bq) if (bq and bq > 0) else 0
+            enriched.append((q, b, brand_by_nom.get(i.nomenclature_id, _NO_BRAND), _category_of(i.nomenclature_id)))
+            total_units += q
+            total_boxes += b
+        if total_units <= 0:
+            continue
+        cost = Decimal(pickup_cost)
+        unit_cost = cost / total_units
+        box_cost = (cost / total_boxes) if total_boxes > 0 else None
+        pkey = _period_bucket(shipped_date, group_by) if shipped_date else "—"
+        shipments_counted += 1
+        for q, b, brand, category in enriched:
+            brands_seen.add(brand)
+            cats_seen.add(category)
+            if brand_set is not None and brand not in brand_set:
+                continue
+            if cat_set is not None and category not in cat_set:
+                continue
+            u_cost = unit_cost * q
+            b_cost = (box_cost * b) if box_cost is not None else Decimal("0")
+            for bucket, key in ((by_category, category), (by_brand, brand), (dynamics, pkey)):
+                acc = bucket.setdefault(key, _new_acc())
+                acc["units"] += q
+                acc["boxes"] += b
+                acc["cost_unit"] += u_cost
+                acc["cost_box"] += b_cost
+            tot["units"] += q
+            tot["boxes"] += b
+            tot["cost_unit"] += u_cost
+            tot["cost_box"] += b_cost
+
+    def _row(name: str, acc: dict) -> dict:
+        return {
+            "name": name,
+            "units": acc["units"],
+            "boxes": acc["boxes"],
+            "total_cost": acc["cost_unit"],
+            "cost_per_unit": (acc["cost_unit"] / acc["units"]) if acc["units"] > 0 else None,
+            "cost_per_box": (acc["cost_box"] / acc["boxes"]) if acc["boxes"] > 0 else None,
+        }
+
+    by_category_rows = sorted((_row(k, v) for k, v in by_category.items()), key=lambda r: r["total_cost"], reverse=True)
+    by_brand_rows = sorted((_row(k, v) for k, v in by_brand.items()), key=lambda r: r["total_cost"], reverse=True)
+    dynamics_rows = [{**_row(k, v), "period": k} for k, v in sorted(dynamics.items())]
+    return {
+        "summary": {
+            "total_cost": tot["cost_unit"],
+            "total_units": tot["units"],
+            "total_boxes": tot["boxes"],
+            "cost_per_unit": (tot["cost_unit"] / tot["units"]) if tot["units"] > 0 else None,
+            "cost_per_box": (tot["cost_box"] / tot["boxes"]) if tot["boxes"] > 0 else None,
+            "shipments": shipments_counted,
+        },
+        "by_category": by_category_rows,
+        "by_brand": by_brand_rows,
+        "dynamics": dynamics_rows,
+        "brands_available": sorted(brands_seen),
+        "categories_available": sorted(cats_seen),
+        "group_by": group_by,
+        "truncated": truncated,
+    }
+
+
 async def get_logistics_shipments(
     db: AsyncSession,
     project_id: int,

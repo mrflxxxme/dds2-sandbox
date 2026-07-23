@@ -10,6 +10,7 @@ import KpiCard from '@/components/KpiCard';
 import type { Column } from '@/components/DataTable';
 import type { AssemblyRequest, AssemblyStatus, LogisticsAnalyticsResponse, LogisticsRouteStat, LogisticsShipmentRow, LogisticsAnomalyType, CostForecastResponse, CostForecastWarehouse, GazelkaConfig } from '@/types/api';
 import LogisticsCostByPallets from './components/LogisticsCostByPallets';
+import LogisticsCostPerUnit from './components/LogisticsCostPerUnit';
 import LogisticsCarriers from './components/LogisticsCarriers';
 import LogisticsAnomalies from './components/LogisticsAnomalies';
 import CreatePaymentRequestModal from './components/CreatePaymentRequestModal';
@@ -18,7 +19,7 @@ import GazelkaModal from './components/GazelkaModal';
 import GazelkaOrdersTab from './components/GazelkaOrdersTab';
 
 // Сегменты аналитики истории отправок.
-type AnalyticsView = 'overview' | 'pallets' | 'carriers' | 'anomalies' | 'matrix';
+type AnalyticsView = 'overview' | 'pallets' | 'per_unit' | 'carriers' | 'anomalies' | 'matrix';
 
 const ANOMALY_BADGE: Record<LogisticsAnomalyType, { label: string; className: string }> = {
     no_cost: { label: 'нет цены', className: 'badge-secondary' },
@@ -1409,6 +1410,7 @@ export default function LogisticsPage() {
                                 {([
                                     ['overview', 'Обзор'],
                                     ['pallets', 'Стоимость и паллеты'],
+                                    ['per_unit', 'Стоимость ₽/шт'],
                                     ['carriers', 'Подрядчики'],
                                     ['anomalies', `Аномалии${analyticsData.anomalies.length ? ` (${analyticsData.anomalies.length})` : ''}`],
                                     ['matrix', 'Матрица маршрутов'],
@@ -1456,6 +1458,14 @@ export default function LogisticsPage() {
                                     points={analyticsData.cost_points}
                                     byDestination={analyticsData.by_destination}
                                     destCells={analyticsData.dest_pallet_cells}
+                                />
+                            )}
+
+                            {analyticsView === 'per_unit' && (
+                                <LogisticsCostPerUnit
+                                    dateFrom={analyticsDateFrom}
+                                    dateTo={analyticsDateTo}
+                                    brand={analyticsBrand}
                                 />
                             )}
 

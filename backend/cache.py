@@ -159,6 +159,7 @@ async def invalidate_project_reports(project_id: int):
         "funnel:tariff_map",
         "funnel:avg_buyout",
         "reports:logistics_analytics_v2",
+        "reports:logistics_cost_per_unit",
         "reports:logistics_forecast",
         "reports:assembly_flow",
         "reports:assembly_link_anomalies",
