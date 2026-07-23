@@ -106,6 +106,19 @@ async def gazelka_active(
         raise HTTPException(status_code=e.status_code, detail=str(e)) from e
 
 
+@router.get("/completed", response_model=GazelkaOrderList)
+async def gazelka_completed(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> GazelkaOrderList:
+    """Завершённые заявки (из наших данных — у портала архива нет): отгруженные сборки
+    со снимком водителя/ТС/тарифа/перевозчика на момент отгрузки."""
+    try:
+        return await gazelka_service.list_completed(db, project.id)
+    except GazelkaServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+
+
 @router.get("/order/{plan_id}/ttn")
 async def gazelka_ttn(
     plan_id: int,

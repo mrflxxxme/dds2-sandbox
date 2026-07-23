@@ -462,11 +462,81 @@ function ActiveTable({ items, onTtn, ttnLoading, linkProps }: ActiveTableProps) 
     );
 }
 
+// ─── Completed table (из наших данных — у портала архива нет) ─────────────────
+
+function CompletedTable({ items }: { items: GazelkaOrderRow[] }) {
+    if (items.length === 0) {
+        return (
+            <div style={{ padding: '32px', textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                Нет завершённых заявок
+            </div>
+        );
+    }
+    return (
+        <div style={{ overflow: 'auto' }}>
+            <table className="data-table" style={{ fontSize: 13 }}>
+                <thead>
+                    <tr>
+                        <th>№ Газельки</th>
+                        <th>Сборка</th>
+                        <th>Статус</th>
+                        <th>Перевозчик</th>
+                        <th>Водитель</th>
+                        <th>ТС</th>
+                        <th>Адрес доставки</th>
+                        <th>Дата отгрузки</th>
+                        <th style={{ textAlign: 'right' }}>Стоимость</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {items.map(row => (
+                        <tr key={row.gazelka_id}>
+                            <td style={{ whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                {row.gazelka_id}
+                            </td>
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                                {row.linked_assembly_number
+                                    ? <span className="badge badge-success" style={{ fontSize: 11 }}>наша {row.linked_assembly_number}</span>
+                                    : '—'}
+                            </td>
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                                <span className={`badge ${statusBadgeClass(row.status_label || row.status)}`}>
+                                    {row.status_label || row.status}
+                                </span>
+                            </td>
+                            <td>{row.carrier || '—'}</td>
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                                {row.driver_name || '—'}
+                                {row.driver_phone && (
+                                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)', fontFamily: 'monospace' }}>
+                                        {row.driver_phone}
+                                    </div>
+                                )}
+                            </td>
+                            <td>{row.vehicle || '—'}</td>
+                            <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.delivery_address ?? undefined}>
+                                {row.delivery_address || '—'}
+                            </td>
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                                {row.delivery_date ? formatDate(row.delivery_date) : '—'}
+                            </td>
+                            <td style={{ textAlign: 'right', fontWeight: 600 }}>
+                                {row.rate ? `${formatNumber(Number(row.rate), 0)} ₽` : '—'}
+                            </td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
+    );
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function GazelkaOrdersTab() {
     const [planned, setPlanned] = useState<GazelkaOrderRow[]>([]);
     const [active, setActive] = useState<GazelkaOrderRow[]>([]);
+    const [completed, setCompleted] = useState<GazelkaOrderRow[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
@@ -491,10 +561,12 @@ export default function GazelkaOrdersTab() {
         Promise.all([
             api.getGazelkaPlanned(),
             api.getGazelkaActive(),
-        ]).then(([p, a]: [GazelkaOrderList, GazelkaOrderList]) => {
+            api.getGazelkaCompleted(),
+        ]).then(([p, a, c]: [GazelkaOrderList, GazelkaOrderList, GazelkaOrderList]) => {
             if (controller.signal.aborted) return;
             setPlanned(p.items);
             setActive(a.items);
+            setCompleted(c.items);
         }).catch((e: unknown) => {
             if (controller.signal.aborted) return;
             setError(e instanceof Error ? e.message : 'Ошибка загрузки данных Газельки');
@@ -644,6 +716,18 @@ export default function GazelkaOrdersTab() {
                             ttnLoading={ttnLoading}
                             linkProps={linkProps}
                         />
+                    </div>
+
+                    {/* ── Завершённые (из наших данных) ── */}
+                    <div className="glass-card" style={{ marginTop: 20, padding: 0, overflow: 'hidden' }}>
+                        <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>Завершённые</h3>
+                            <span className="badge badge-secondary">{completed.length}</span>
+                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                отгруженные заявки (у портала архива нет — данные наши)
+                            </span>
+                        </div>
+                        <CompletedTable items={completed} />
                     </div>
                 </>
             )}

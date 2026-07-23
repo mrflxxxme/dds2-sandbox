@@ -508,6 +508,63 @@ async def apply_gazelka_logistics(
     return req.status
 
 
+async def backfill_gazelka_shipment_cost(
+    db: AsyncSession,
+    project_id: int,
+    request_id: int,
+    pickup_cost: Decimal | None,
+    carrier_name: str | None,
+) -> bool:
+    """Дозаполнить тариф/перевозчика в снимке отгрузки уже ОТГРУЖЕННОЙ газельной сборки.
+
+    Заявки, отгруженные ДО появления синка (авто-шип по приёмке WB прямо из READY), ушли в
+    ``OutboundShipment`` без тарифа — машину им не назначали, ``pickup_cost`` был пуст. Пока
+    заявка ещё видна в кабинете Газельки, синк берёт её тариф/перевозчика и дозаполняет ПУСТОЙ
+    снимок (не перетирая заполненное вручную) → строка в листе оплаты перестаёт быть «—».
+    Только для отгруженных (SHIPPED/DELIVERED/CLOSED) — активные идут штатным путём. Best-effort.
+    """
+    from .crud import get_assembly_request
+
+    req = await get_assembly_request(db, project_id, request_id)
+    if not req or AssemblyStatus(req.status) not in (
+        AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED, AssemblyStatus.CLOSED,
+    ):
+        return False
+    if not req.outbound_shipment_id:
+        return False
+    os_row = (
+        await db.execute(
+            select(OutboundShipment).where(
+                OutboundShipment.id == req.outbound_shipment_id,
+                OutboundShipment.project_id == project_id,
+                OutboundShipment.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+    if os_row is None:
+        return False
+
+    changed = False
+    if os_row.pickup_cost is None and pickup_cost is not None:
+        os_row.pickup_cost = pickup_cost
+        if req.pickup_cost is None:
+            req.pickup_cost = pickup_cost
+        changed = True
+    if os_row.counterparty_id is None and carrier_name:
+        cp_id = await _resolve_carrier_by_name(db, project_id, carrier_name)
+        if cp_id is not None:
+            os_row.counterparty_id = cp_id
+            if req.counterparty_id is None:
+                req.counterparty_id = cp_id
+            changed = True
+
+    if changed:
+        await db.commit()
+        await invalidate_cache("reports:assembly_flow")
+        await invalidate_cache("reports:balance")
+    return changed
+
+
 async def unassign_vehicle(db: AsyncSession, project_id: int, request_id: int) -> AssemblyRequest:
     """VEHICLE_ASSIGNED -> READY. Clear vehicle info, return to ready for shipping."""
     from .crud import get_assembly_request

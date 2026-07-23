@@ -872,6 +872,9 @@ export function addWarehouseMethods(api: ApiClient) {
         getGazelkaActive() {
             return api.request<import('@/types/api').GazelkaOrderList>('GET', '/api/v1/gazelka/active');
         },
+        getGazelkaCompleted() {
+            return api.request<import('@/types/api').GazelkaOrderList>('GET', '/api/v1/gazelka/completed');
+        },
         getGazelkaEditDraft(planId: number) {
             return api.request<import('@/types/api').GazelkaEditDraft>('GET', `/api/v1/gazelka/order/${planId}/edit`);
         },
