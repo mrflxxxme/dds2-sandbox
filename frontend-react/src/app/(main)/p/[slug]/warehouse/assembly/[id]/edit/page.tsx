@@ -191,10 +191,6 @@ export default function AssemblyEditPage() {
 
     const selectedWarehouse = warehouses.find(w => w.id === warehouseId) || null;
     const totalWeight = palletsCount * palletWeightKg;
-    // Единица поставки: короб (BOX) или паллета (моно/суперсейф) — подписи полей.
-    const isBoxUnit = packageType === 'BOX';
-    const unitCountLabel = isBoxUnit ? 'Короба' : 'Палеты';
-    const unitWeightLabel = isBoxUnit ? 'Вес 1 короба (кг)' : 'Вес 1 палеты (кг)';
     const canEditItems = assembly && !['SHIPPED', 'DELIVERED', 'CLOSED', 'CANCELLED'].includes(assembly.status);
 
     // ─── Item management ──────────────────────────────────────────────────
@@ -460,24 +456,10 @@ export default function AssemblyEditPage() {
                         </div>
                     </div>
 
-                    {/* Тип поставки (единица: короб / монопаллета / суперсейф) */}
-                    <div className="form-group">
-                        <label className="form-label">Тип поставки</label>
-                        <select
-                            className="form-input"
-                            value={packageType}
-                            onChange={e => setPackageType(e.target.value as PackageType)}
-                        >
-                            <option value="BOX">Короб</option>
-                            <option value="MONOPALLET">Монопаллета</option>
-                            <option value="SUPERSAFE">Суперсейф</option>
-                        </select>
-                    </div>
-
-                    {/* Единица поставки: короба или паллеты (подписи по «Тип поставки») */}
+                    {/* Pallets */}
                     <div style={{ display: 'flex', gap: 12 }}>
                         <div className="form-group" style={{ flex: 1 }}>
-                            <label className="form-label">{unitCountLabel}</label>
+                            <label className="form-label">Палеты</label>
                             <input
                                 className="form-input"
                                 type="number"
@@ -487,7 +469,7 @@ export default function AssemblyEditPage() {
                             />
                         </div>
                         <div className="form-group" style={{ flex: 1 }}>
-                            <label className="form-label">{unitWeightLabel}</label>
+                            <label className="form-label">Вес 1 палеты (кг)</label>
                             <input
                                 className="form-input"
                                 type="number"
