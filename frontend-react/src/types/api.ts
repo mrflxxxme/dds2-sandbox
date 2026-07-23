@@ -5286,6 +5286,68 @@ export interface DraftCategoryHistoryResponse {
   points: DraftCategoryHistoryPoint[];
 }
 
+/* ─── Динамика расхождения остатков (mismatch flow-analytics) ─── */
+
+/** Точка дневного среза расхождения остатков одного склада (пишет джоба снапшота). */
+export interface StockMismatchDynPoint {
+  /** ISO-дата (без времени) снятого среза */
+  snapshot_date: string;
+  warehouse_id: number;
+  /** суммарно у ФФ больше на этот день, штук */
+  surplus_ff_qty: number;
+  /** на скольких SKU у ФФ больше */
+  surplus_ff_sku: number;
+  /** суммарно у нас больше на этот день, штук */
+  surplus_our_qty: number;
+  /** на скольких SKU у нас больше */
+  surplus_our_sku: number;
+  /** surplus_ff_qty - surplus_our_qty (нетто ФФ − наш) */
+  net_diff: number;
+}
+
+/** Склад в справочнике истории расхождения (для селекта и подписи серий графика). */
+export interface StockMismatchDynWarehouse {
+  warehouse_id: number;
+  warehouse_name: string | null;
+  provider: string | null;
+}
+
+export interface StockMismatchHistoryResponse {
+  points: StockMismatchDynPoint[];
+  warehouses: StockMismatchDynWarehouse[];
+  categories: string[];
+}
+
+/** Событие изменения расхождения по конкретному SKU между двумя соседними срезами. */
+export interface StockMismatchChangeRow {
+  snapshot_date: string;
+  warehouse_id: number;
+  warehouse_name: string | null;
+  barcode: string;
+  article_seller: string | null;
+  name: string | null;
+  category: string | null;
+  /** "appeared" | "resolved" | "grew" | "shrank" | "flipped" */
+  event: string;
+  prev_diff: number;
+  cur_diff: number;
+  delta: number;
+  prev_ff_good: number;
+  cur_ff_good: number;
+  prev_our_quantity: number;
+  cur_our_quantity: number;
+}
+
+export interface StockMismatchChangesResponse {
+  changes: StockMismatchChangeRow[];
+}
+
+export interface StockMismatchSnapshotResponse {
+  points: StockMismatchDynPoint[];
+  warehouses: StockMismatchDynWarehouse[];
+  snapshot_date: string | null;
+}
+
 /** Ответ POST /assembly/drafts/{id}/clear: очищенный черновик + судьба категорийных
  *  (имена удалённых и оставленных из-за переданных на ФФ юнитов). */
 export interface AssemblyDraftClearResponse {
