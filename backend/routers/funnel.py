@@ -835,6 +835,110 @@ async def set_campaigns_schedule(
     return {"settings": settings}
 
 
+# ─── Сводка «Проблемные товары» (Telegram, 09:30 МСК) ────────────────────────
+
+
+@router.get("/problem-digest/settings")
+async def get_problem_digest_settings(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Настройка сводки проблемных товаров (рассылает scheduler-джоба problem_digest)."""
+    from backend.services.funnel.problem_digest import get_digest_settings
+
+    return await get_digest_settings(db, project.id)
+
+
+class ProblemDigestSettingsRequest(BaseModel):
+    enabled: bool | None = None
+    chat_ids: list[int] | None = None
+    exclude_brands: list[str] | None = None
+    turnover_days: int | None = Field(None, ge=1, le=3650)
+    margin_pct: float | None = Field(None, ge=-100, le=100)
+    drr_pct: float | None = Field(None, ge=0, le=1000)
+    no_ads_stock_days: int | None = Field(None, ge=1, le=3650)
+    wb_low_days: int | None = Field(None, ge=1, le=365)
+    top_n: int | None = Field(None, ge=5, le=200)
+
+
+@router.post("/problem-digest/settings", dependencies=[Depends(rate_limit_write)])
+async def set_problem_digest_settings(
+    body: ProblemDigestSettingsRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Обновить настройку сводки (merge: передавать только изменяемые поля)."""
+    from backend.services.funnel.problem_digest import set_digest_settings
+
+    patch = body.model_dump(exclude_none=True)
+    return await set_digest_settings(db, project.id, patch)
+
+
+async def _build_problem_digest(db: AsyncSession, project: Project, kind: str) -> dict:
+    import pytz
+
+    from backend.services.funnel.problem_digest import (
+        MSK,
+        build_daily_digest,
+        build_weekly_digest,
+        get_digest_settings,
+    )
+    from backend.utils.time import utcnow
+
+    if kind not in ("daily", "weekly"):
+        raise HTTPException(400, "kind должен быть daily или weekly")
+    cfg = await get_digest_settings(db, project.id)
+    now_msk = utcnow().replace(tzinfo=pytz.UTC).astimezone(MSK)
+    build = build_daily_digest if kind == "daily" else build_weekly_digest
+    return await build(db, project, cfg, now_msk)
+
+
+@router.get("/problem-digest/preview")
+async def preview_problem_digest(
+    kind: str = Query("daily"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Скачать xlsx сводки без отправки в Telegram (проверка формата)."""
+    from urllib.parse import quote
+
+    from fastapi.responses import Response
+
+    payload = await _build_problem_digest(db, project, kind)
+    return Response(
+        content=payload["xlsx"],
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(payload['filename'])}"},
+    )
+
+
+@router.post("/problem-digest/send-now", dependencies=[Depends(rate_limit_write)])
+async def send_problem_digest_now(
+    kind: str = Query("daily"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Прислать сводку в настроенные чаты прямо сейчас (тест, не дожидаясь 09:30)."""
+    from backend.integrations.telegram_bot import bot
+    from backend.scheduler.jobs.problem_digest import _send_to_chat
+    from backend.services.funnel.problem_digest import get_digest_settings
+
+    if not bot:
+        raise HTTPException(503, "Telegram-бот не инициализирован (нет токена)")
+    cfg = await get_digest_settings(db, project.id)
+    if not cfg["chat_ids"]:
+        raise HTTPException(400, "В настройке сводки нет chat_ids — добавьте чат")
+    payload = await _build_problem_digest(db, project, kind)
+    from backend.services.funnel.problem_digest import attach_sheet_link
+
+    await attach_sheet_link(db, project.id, cfg, payload)
+    sent = 0
+    for chat_id in cfg["chat_ids"]:
+        await _send_to_chat(bot, chat_id, payload)
+        sent += 1
+    return {"ok": True, "sent": sent}
+
+
 class CampaignStateRequest(BaseModel):
     active: bool  # True — запустить/возобновить, False — поставить на паузу
 

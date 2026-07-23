@@ -1,0 +1,108 @@
+# ruff: noqa: RUF002, RUF003
+"""Scheduler job: сводка «Проблемные товары» в Telegram (09:30 MSK).
+
+Для каждого проекта с включённой настройкой `ads_problem_digest` шлём в
+указанные чаты короткий текст + xlsx-файл (лист на бренд). По понедельникам
+дополнительно — недельная сводка (прошлая неделя против позапрошлой).
+Ошибки одного проекта/чата не роняют рассылку остальным.
+"""
+
+import asyncio
+import json
+import logging
+
+import pytz
+from sqlalchemy import select
+
+from backend.database import AsyncSessionLocal
+from backend.models import Project
+from backend.models.refs import ProjectSetting
+from backend.services.funnel.problem_digest import (
+    DIGEST_SETTINGS_KEY,
+    attach_sheet_link,
+    build_daily_digest,
+    build_weekly_digest,
+    sanitize_settings,
+)
+from backend.utils.time import utcnow
+
+logger = logging.getLogger("dds.scheduler.problem_digest")
+
+MSK = pytz.timezone("Europe/Moscow")
+
+
+async def _enabled_projects() -> list[tuple[int, dict]]:
+    """Проекты с включённой сводкой: [(project_id, cfg)]."""
+    async with AsyncSessionLocal() as db:
+        rows = (
+            await db.execute(select(ProjectSetting).where(ProjectSetting.key == DIGEST_SETTINGS_KEY))
+        ).scalars().all()
+    out: list[tuple[int, dict]] = []
+    for ps in rows:
+        try:
+            cfg = sanitize_settings(json.loads(ps.value or "{}"))
+        except (TypeError, ValueError):
+            continue
+        if cfg["enabled"] and cfg["chat_ids"]:
+            out.append((ps.project_id, cfg))
+    return out
+
+
+async def send_problem_digests() -> None:
+    """Разослать ежедневную (и по понедельникам недельную) сводку проблемных товаров."""
+    targets = await _enabled_projects()
+    if not targets:
+        logger.info("Problem digest: no enabled projects, skipping")
+        return
+
+    from backend.integrations.telegram_bot import bot
+
+    if not bot:
+        logger.warning("Problem digest: bot not initialized, skipping")
+        return
+
+    now_msk = utcnow().replace(tzinfo=pytz.UTC).astimezone(MSK)
+    is_monday = now_msk.weekday() == 0
+
+    sent = errors = 0
+    for project_id, cfg in targets:
+        try:
+            async with AsyncSessionLocal() as db:
+                project = await db.get(Project, project_id)
+                if not project:
+                    continue
+                payloads = [await build_daily_digest(db, project, cfg, now_msk)]
+                if is_monday:
+                    payloads.append(await build_weekly_digest(db, project, cfg, now_msk))
+                for payload in payloads:
+                    await attach_sheet_link(db, project_id, cfg, payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Problem digest: build failed (project=%s)", project_id)
+            errors += 1
+            continue
+
+        for chat_id in cfg["chat_ids"]:
+            for payload in payloads:
+                try:
+                    sent += await _send_to_chat(bot, chat_id, payload)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Problem digest: send failed (project=%s, chat=%s)", project_id, chat_id)
+                    errors += 1
+
+    logger.info("Problem digest complete: sent=%d, errors=%d", sent, errors)
+
+
+async def _send_to_chat(bot, chat_id: int, payload: dict) -> int:
+    """Текст + документ в один чат. Возвращает 1 (для счётчика отправок)."""
+    from aiogram.types import BufferedInputFile
+
+    await bot.send_message(chat_id=chat_id, text=payload["text"], parse_mode="HTML")
+    await bot.send_document(
+        chat_id=chat_id,
+        document=BufferedInputFile(payload["xlsx"], filename=payload["filename"]),
+    )
+    return 1
