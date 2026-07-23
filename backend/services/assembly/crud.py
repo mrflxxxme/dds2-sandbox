@@ -529,6 +529,7 @@ async def _build_response(
         "estimated_ready_date": request.estimated_ready_date,
         "actual_ready_date": request.actual_ready_date,
         "pallets_count": request.pallets_count,
+        "shipped_as_boxes": request.shipped_as_boxes,
         "pallet_weight_kg": request.pallet_weight_kg,
         "total_weight_kg": total_weight,
         "weight_is_estimated": weight_is_estimated,
@@ -1331,6 +1332,7 @@ async def create_assembly_request(
         estimated_ready_date=payload.estimated_ready_date,
         pallets_count=payload.pallets_count,
         pallet_weight_kg=payload.pallet_weight_kg,
+        shipped_as_boxes=getattr(payload, "shipped_as_boxes", False) or False,
         comment=payload.comment,
         wb_warehouse_name_manual=wb_wh_manual,
         package_type=getattr(payload, "package_type", None) or "BOX",
@@ -1503,6 +1505,8 @@ async def update_assembly_request(
         req.pallets_count = payload.pallets_count
     if payload.pallet_weight_kg is not None:
         req.pallet_weight_kg = payload.pallet_weight_kg
+    if payload.shipped_as_boxes is not None:
+        req.shipped_as_boxes = payload.shipped_as_boxes
     if payload.comment is not None:
         req.comment = payload.comment
     if payload.estimated_ready_date is not None:

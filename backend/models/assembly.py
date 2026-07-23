@@ -145,6 +145,12 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     # Pallets & weight
     pallets_count: Mapped[int] = mapped_column(Integer, nullable=False)
     pallet_weight_kg: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    # Единица поставки: False = паллеты (по умолчанию), True = короба. Меняет только
+    # ЕДИНИЦУ измерения pallets_count/pallet_weight_kg и подписи в UI («Короба»/«Вес 1
+    # короба» vs «Палеты»). НЕ связано с package_type (тип приёмки WB canBox/canMono).
+    shipped_as_boxes: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
 
     # Ручная раскладка коробов по паллетам («Раскладка по паллетам» на деталке).
     # NULL = «авто» (раскладка считается на лету из pallets_count/геометрии);

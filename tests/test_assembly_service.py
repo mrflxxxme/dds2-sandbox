@@ -282,6 +282,22 @@ class TestCreateAssemblyRequest:
         assert loaded.items[0].barcode == TEST_BARCODE_1
         assert loaded.items[0].quantity == 5
 
+    async def test_shipped_as_boxes_default_and_toggle(self, db_session):
+        """Единица поставки: по умолчанию паллеты (False); update переключает; поле в ответе."""
+        req = await _create_test_request(db_session)
+        loaded = await get_assembly_request(db_session, PROJECT_ID, req.id)
+        assert loaded is not None
+        assert loaded.shipped_as_boxes is False  # дефолт — паллеты, не связано с package_type
+
+        await update_assembly_request(
+            db_session, PROJECT_ID, req.id, AssemblyRequestUpdate(shipped_as_boxes=True)
+        )
+        loaded = await get_assembly_request(db_session, PROJECT_ID, req.id)
+        assert loaded.shipped_as_boxes is True
+
+        resp = await _build_response(db_session, loaded)
+        assert resp["shipped_as_boxes"] is True
+
     async def test_create_nonexistent_barcode(self, db_session):
         """2. Create with non-existent barcode -> ValueError."""
         wh_id = await _get_fulfillment_wh_id(db_session)

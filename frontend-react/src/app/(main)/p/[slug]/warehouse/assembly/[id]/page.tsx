@@ -521,6 +521,9 @@ export default function AssemblyDetailPage() {
     const canEditFields = assembly && assembly.status !== 'CANCELLED';
     const canEditAlways = assembly && assembly.status !== 'CANCELLED';
     const canEditFbo = assembly && ['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED'].includes(assembly.status);
+    // Единица поставки — паллета/короб (отдельное поле shipped_as_boxes, НЕ package_type).
+    const unitCountLabel = assembly?.shipped_as_boxes ? 'Короба' : 'Палеты';
+    const unitWeightLabel = assembly?.shipped_as_boxes ? 'Вес 1 короба' : 'Вес 1 палеты';
 
     const handleFieldSave = async (field: string, value: number | string) => {
         if (!assembly) return;
@@ -1001,14 +1004,14 @@ export default function AssemblyDetailPage() {
                     />
                     <InfoField label="Дата готовности (факт)" value={formatDate(assembly.actual_ready_date)} />
                     <EditableInfoField
-                        label="Палеты"
+                        label={unitCountLabel}
                         value={String(assembly.pallets_count || '')}
                         displayValue={String(assembly.pallets_count)}
                         type="number"
                         editable={!!canEditAlways}
                         onSave={(v) => handleFieldSave('pallets_count', Number(v))}
                     />
-                    <InfoField label="Вес 1 палеты" value={assembly.pallet_weight_kg ? formatNumber(assembly.pallet_weight_kg, 1) + ' кг' : '\u2014'} />
+                    <InfoField label={unitWeightLabel} value={assembly.pallet_weight_kg ? formatNumber(assembly.pallet_weight_kg, 1) + ' кг' : '\u2014'} />
                     <InfoField label="Общий вес" value={assembly.total_weight_kg ? formatNumber(assembly.total_weight_kg, 1) + ' кг' : '\u2014'} />
                     <InfoField
                         label="Вес товаров (расчёт)"

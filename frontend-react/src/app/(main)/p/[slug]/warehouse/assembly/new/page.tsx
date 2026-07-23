@@ -27,6 +27,7 @@ export default function AssemblyNewPage() {
     const [estimatedReadyDate, setEstimatedReadyDate] = useState('');
     const [palletsCount, setPalletsCount] = useState<number>(1);
     const [palletWeightKg, setPalletWeightKg] = useState<number>(0);
+    const [shippedAsBoxes, setShippedAsBoxes] = useState<boolean>(false);
     const [comment, setComment] = useState('');
     const [wbWarehouseName, setWbWarehouseName] = useState('');
     const [packageType, setPackageType] = useState<PackageType>('BOX');
@@ -205,6 +206,9 @@ export default function AssemblyNewPage() {
 
     const selectedWarehouse = warehouses.find(w => w.id === warehouseId) || null;
     const totalWeight = palletsCount * palletWeightKg;
+    // Единица поставки — паллета/короб. Подписи полей количества/веса переключаются.
+    const unitCountLabel = shippedAsBoxes ? 'Короба' : 'Палеты';
+    const unitWeightLabel = shippedAsBoxes ? 'Вес 1 короба (кг)' : 'Вес 1 палеты (кг)';
 
     // ─── Item management ──────────────────────────────────────────────────
 
@@ -269,6 +273,7 @@ export default function AssemblyNewPage() {
                 estimated_ready_date: estimatedReadyDate || undefined,
                 pallets_count: palletsCount,
                 pallet_weight_kg: palletWeightKg,
+                shipped_as_boxes: shippedAsBoxes,
                 package_type: packageType,
                 comment: comment || undefined,
                 items: filledItems.map(i => ({ barcode: i.barcode, quantity: i.quantity })),
@@ -476,10 +481,23 @@ export default function AssemblyNewPage() {
                         </div>
                     </div>
 
-                    {/* Pallets */}
+                    {/* Единица поставки: паллеты или короба */}
+                    <div className="form-group">
+                        <label className="form-label">Единица поставки</label>
+                        <select
+                            className="form-input"
+                            value={shippedAsBoxes ? 'boxes' : 'pallets'}
+                            onChange={e => setShippedAsBoxes(e.target.value === 'boxes')}
+                        >
+                            <option value="pallets">Паллеты</option>
+                            <option value="boxes">Короба</option>
+                        </select>
+                    </div>
+
+                    {/* Количество единиц + вес (подписи по «Единица поставки») */}
                     <div style={{ display: 'flex', gap: 12 }}>
                         <div className="form-group" style={{ flex: 1 }}>
-                            <label className="form-label">Палеты</label>
+                            <label className="form-label">{unitCountLabel}</label>
                             <input
                                 className="form-input"
                                 type="number"
@@ -489,7 +507,7 @@ export default function AssemblyNewPage() {
                             />
                         </div>
                         <div className="form-group" style={{ flex: 1 }}>
-                            <label className="form-label">Вес 1 палеты (кг)</label>
+                            <label className="form-label">{unitWeightLabel}</label>
                             <input
                                 className="form-input"
                                 type="number"
