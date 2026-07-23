@@ -889,6 +889,33 @@ async def test_sync_states_autolinks_by_wb_supply_number(monkeypatch):
     ship_mock.assert_not_awaited()
 
 
+async def test_list_completed_maps_shipment_snapshot(monkeypatch):
+    """Завершённые строятся из наших данных: снимок отгрузки → строка (дедуп по ref)."""
+    monkeypatch.setattr(gazelka_service, "_get_key", AsyncMock(return_value=object()))
+    # порядок колонок select: ref, id, number, status, dfn, dln, dest, sup, cost,
+    # vinfo, vbrand, dphone, shipped, ddate, carrier
+    older = ("330662", 945, "ASM-774", "SHIPPED", "Иван", "Петров", "Невинномысск",
+             "40842600", None, None, None, None, None, None, None)  # SENT (перекроется)
+    newer = ("330662", 945, "ASM-774", "SHIPPED", "Иван", "Петров", "Невинномысск",
+             "40842600", Decimal("15624"), "Х392РМ37", "Мерседес", "+79001112233",
+             date(2026, 7, 22), None, "ИП Иванов")
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=SimpleNamespace(all=lambda: [older, newer]))
+
+    res = await gazelka_service.list_completed(db, 4)
+
+    assert res.count == 1  # дедуп по gazelka_ref
+    row = res.items[0]
+    assert row.gazelka_id == "330662"
+    assert row.status_label == "Отгружена"
+    assert row.linked_assembly_number == "ASM-774"
+    assert row.driver_name == "Петров Иван"  # Фамилия Имя
+    assert row.vehicle == "Мерседес Х392РМ37"
+    assert row.rate == "15624"
+    assert row.carrier == "ИП Иванов"
+    assert row.delivery_date == "2026-07-22"
+
+
 async def test_sync_states_autolink_skips_already_linked_assembly(monkeypatch):
     """Сборка уже связана с другой заявкой → авто-связь НЕ переклеивает на новую."""
     planned = {"id": "330662", "status": "2", "supply_id": "40842600"}

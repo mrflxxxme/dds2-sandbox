@@ -38,6 +38,8 @@ from backend.cache import invalidate_cache
 from backend.integrations.resilience import CircuitOpenError
 from backend.models import GazelkaOrder, GazelkaOrderStatus, IntegrationKey, Warehouse
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
+from backend.models.counterparty import Counterparty
+from backend.models.warehouse import OutboundShipment
 from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.gazelka import (
     GazelkaConfigResponse,
@@ -1236,6 +1238,82 @@ async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, in
             )
     logger.info("gazelka.sync_states", project_id=project_id, **stats)
     return stats
+
+
+async def list_completed(db: AsyncSession, project_id: int) -> GazelkaOrderList:
+    """Завершённые заявки Газельки — из НАШИХ данных.
+
+    У портала архива нет: кабинет показывает только «Запланированные» + «Активные», а
+    выполненные оттуда исчезают (проверено — разделов completed/history/archive у них нет).
+    Поэтому источник — связанные заявки (``GazelkaOrder`` SENT/MATCHED), чья сборка уже
+    отгружена (SHIPPED/DELIVERED/CLOSED). Реквизиты — снимок отгрузки (``OutboundShipment``),
+    захваченный синком на момент «В маршруте» (водитель/ТС/тариф/перевозчик), — он не пропадёт
+    вместе с заявкой в кабинете.
+    """
+    await _get_key(db, project_id)  # интеграция должна быть настроена
+    _COMPLETED = [AssemblyStatus.SHIPPED.value, AssemblyStatus.DELIVERED.value, AssemblyStatus.CLOSED.value]
+    rows = await db.execute(
+        select(
+            GazelkaOrder.gazelka_ref,
+            AssemblyRequest.id,
+            AssemblyRequest.number,
+            AssemblyRequest.status,
+            AssemblyRequest.driver_first_name,
+            AssemblyRequest.driver_last_name,
+            OutboundShipment.destination,
+            OutboundShipment.wb_supply_id,
+            OutboundShipment.pickup_cost,
+            OutboundShipment.vehicle_info,
+            OutboundShipment.vehicle_brand,
+            OutboundShipment.driver_phone,
+            OutboundShipment.shipped_date,
+            OutboundShipment.delivery_date,
+            Counterparty.name,
+        )
+        .join(AssemblyRequest, AssemblyRequest.id == GazelkaOrder.assembly_request_id)
+        .join(
+            OutboundShipment,
+            OutboundShipment.id == AssemblyRequest.outbound_shipment_id,
+            isouter=True,
+        )
+        .join(Counterparty, Counterparty.id == AssemblyRequest.counterparty_id, isouter=True)
+        .where(
+            GazelkaOrder.project_id == project_id,
+            GazelkaOrder.status.in_([GazelkaOrderStatus.SENT, GazelkaOrderStatus.MATCHED]),
+            GazelkaOrder.gazelka_ref.isnot(None),
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.status.in_(_COMPLETED),
+        )
+        .order_by(GazelkaOrder.id)  # last-wins dedup по gazelka_ref (ручной матч поверх отправки)
+        .limit(500)
+    )
+    by_ref: dict[str, GazelkaOrderRow] = {}
+    for (
+        ref, aid, number, ast, dfn, dln,
+        dest, sup, cost, vinfo, vbrand, dphone, shipped, ddate, carrier,
+    ) in rows.all():
+        driver = " ".join(p for p in (dln, dfn) if p) or None
+        vehicle = " ".join(p for p in (vbrand, vinfo) if p) or None
+        day = shipped or ddate
+        by_ref[str(ref)] = GazelkaOrderRow(
+            gazelka_id=str(ref),
+            status=str(ast),
+            status_label=_assembly_status_label(ast) or str(ast),
+            delivery_date=day.isoformat() if day else None,
+            delivery_address=dest,
+            supply_id=sup,
+            rate=str(cost) if cost is not None else None,
+            carrier=carrier,
+            driver_name=driver,
+            driver_phone=dphone,
+            vehicle=vehicle,
+            editable=False,
+            linked_assembly_id=aid,
+            linked_assembly_number=number,
+            linked_assembly_status=_assembly_status_label(ast),
+        )
+    items = sorted(by_ref.values(), key=lambda r: r.delivery_date or "", reverse=True)
+    return GazelkaOrderList(items=items, count=len(items))
 
 
 async def get_ttn(db: AsyncSession, project_id: int, plan_id: str) -> tuple[bytes, str]:
