@@ -327,17 +327,20 @@ def build_tg_text(
     Проблемные товары в тексте не перечисляем — они в приложенном xlsx
     и Google-таблице (решение юзера 23.07).
     """
+    from html import escape
+
     revenue = revenue or {}
     total = sum(d["total"] for d in revenue.values())
-    lines = [f"📊 <b>{title}</b>", ""]
-    lines.append(f"💰 <b>Выручка {revenue_label or ''} — {rub_short(total)}</b>")
+    lines = [f"📊 <b>{escape(title)}</b>", ""]
+    lines.append(f"💰 <b>Выручка {escape(revenue_label or '')} — {rub_short(total)}</b>")
     for brand, data in sorted(revenue.items(), key=lambda kv: -kv[1]["total"]):
         if data["total"] <= 0:
             continue
-        lines.append(f"<b>{brand}</b> — {rub_short(data['total'])}")
+        # Бренды/категории приходят из WB-карточек — сырые & и < ломают parse_mode=HTML
+        lines.append(f"<b>{escape(brand)}</b> — {rub_short(data['total'])}")
         subjects = sorted(((k, v) for k, v in data["subjects"].items() if v > 0), key=lambda kv: -kv[1])
         for subject, s in subjects[:5]:
-            lines.append(f"   • {subject} — {rub_short(s)}")
+            lines.append(f"   • {escape(subject)} — {rub_short(s)}")
         rest = subjects[5:]
         if rest:
             lines.append(f"   • прочие ({len(rest)}) — {rub_short(sum(v for _, v in rest))}")
