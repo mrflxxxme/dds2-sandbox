@@ -3,8 +3,15 @@ groups:
   - name: dds_alerts
     rules:
       # ─── API ─────────────────────────────────────────────────────────────
+      # `sum()` обязателен: без него числитель и знаменатель матчатся по всем
+      # лейблам (включая status) → серия делится сама на себя, всегда 100%,
+      # и алерт срабатывает от одной 5xx при любом объёме успешного трафика.
+      # Гейт по знаменателю глушит ночной шум (1 ошибка из 5 запросов ≠ инцидент).
       - alert: HighErrorRate
-        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+            / sum(rate(http_requests_total[5m])) > 0.05
+          and sum(rate(http_requests_total[5m])) > 0.1
         for: 5m
         labels:
           severity: critical
@@ -72,8 +79,13 @@ groups:
         annotations:
           summary: "Redis memory > 80%"
 
+      # Гейт `> 1 оп/сек` (≈300 операций за окно): на низком трафике пара
+      # промахов из десятка операций честно даёт <50% и алерт флапает.
       - alert: RedisCacheHitRateLow
-        expr: rate(redis_keyspace_hits_total[5m]) / (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m])) < 0.5
+        expr: |
+          rate(redis_keyspace_hits_total[5m])
+            / (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m])) < 0.5
+          and (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m])) > 1
         for: 10m
         labels:
           severity: info

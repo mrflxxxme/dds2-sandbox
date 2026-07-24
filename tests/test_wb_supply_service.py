@@ -1154,3 +1154,70 @@ async def test_sync_supply_id_autopushes_when_pass_ready(db_session, monkeypatch
     link = await wb_supply_service.sync_supply_id(db_session, PROJECT_ID, ASSEMBLY_ID)
     assert link.sync_status == WbSupplySyncStatus.PASSED.value
     assert client.trn_saved is not None
+
+
+# ─── Bulk preorder (фоновый батч, по одной с паузой) ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_bulk_preorder_skips_created_and_queues_rest(db_session, monkeypatch):
+    """Уже заведённая (preorder_id, не ERROR) скипается с пометкой; несуществующая —
+    ошибка в результатах; остальные уходят в фоновый прогон (замокан)."""
+    import asyncio
+
+    from backend.models.assembly_wb import AssemblyWbSupply
+
+    wh_id = (
+        await db_session.execute(
+            text("SELECT warehouse_id FROM assembly_requests WHERE id = :i"), {"i": ASSEMBLY_ID}
+        )
+    ).scalar()
+    req2 = AssemblyRequest(
+        project_id=PROJECT_ID,
+        warehouse_id=wh_id,
+        number="WBSUP-2",
+        status=AssemblyStatus.IN_PROGRESS,
+        pallets_count=1,
+        pallet_weight_kg=Decimal("10.00"),
+        wb_warehouse_name_manual=WH_NAME,
+    )
+    db_session.add(req2)
+    await db_session.flush()
+    db_session.add(
+        AssemblyWbSupply(
+            project_id=PROJECT_ID,
+            assembly_request_id=req2.id,
+            preorder_id=555,
+            sync_status=WbSupplySyncStatus.PREORDER.value,
+        )
+    )
+    await db_session.commit()
+
+    ran: list = []
+
+    async def fake_run(project_id, todo):
+        ran.append((project_id, todo))
+
+    monkeypatch.setattr(wb_supply_service, "_run_bulk_preorder", fake_run)
+    wb_supply_service._bulk_preorder_jobs.clear()
+
+    job = await wb_supply_service.start_bulk_preorder(db_session, PROJECT_ID, [ASSEMBLY_ID, req2.id, 999_999_999])
+    assert job["total"] == 3
+    by_id = {r["assembly_id"]: r for r in job["results"]}
+    assert by_id[req2.id]["ok"] is True and "Уже заведена" in by_id[req2.id]["note"]
+    assert by_id[999_999_999]["ok"] is False
+    assert job["running"] is True
+    await asyncio.sleep(0)  # даём create_task стартовать fake_run
+    assert ran == [(PROJECT_ID, [(ASSEMBLY_ID, "WBSUP-1")])]
+    wb_supply_service._bulk_preorder_jobs.clear()
+
+
+@pytest.mark.asyncio
+async def test_bulk_preorder_conflicts_while_running(db_session):
+    """Второй запуск при живом батче → WbSupplyError (роутер отдаёт 409)."""
+    wb_supply_service._bulk_preorder_jobs[PROJECT_ID] = {"running": True}
+    try:
+        with pytest.raises(WbSupplyError, match="уже идёт"):
+            await wb_supply_service.start_bulk_preorder(db_session, PROJECT_ID, [ASSEMBLY_ID])
+    finally:
+        wb_supply_service._bulk_preorder_jobs.clear()

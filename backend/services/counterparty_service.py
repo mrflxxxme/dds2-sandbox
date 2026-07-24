@@ -34,7 +34,7 @@ from backend.schemas.counterparty import (
     CounterpartyTransactionItem,
     CounterpartyUpdate,
 )
-from backend.storage import get_minio
+from backend.storage import download_file, get_minio
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -1202,6 +1202,35 @@ class CounterpartyService:
             .limit(500)
         )
         return list(res.scalars().all())
+
+    async def download_document(
+        self,
+        *,
+        doc_id: int,
+        counterparty_id: int,
+        project_id: int,
+    ) -> tuple[bytes, str, str]:
+        """Return (bytes, filename, content_type) for a document. Project-scoped.
+
+        Streams through the backend (no presigned URL) so access stays strictly
+        project-scoped. Raises 404 if missing, 503 if MinIO is down.
+        """
+        res = await self.db.execute(
+            select(CounterpartyDocument).where(
+                CounterpartyDocument.id == doc_id,
+                CounterpartyDocument.counterparty_id == counterparty_id,
+                CounterpartyDocument.project_id == project_id,
+                CounterpartyDocument.is_deleted == False,  # noqa: E712
+            )
+        )
+        doc = res.scalar_one_or_none()
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        data = await download_file(doc.minio_path)
+        if data is None:
+            raise HTTPException(status_code=503, detail="Файл недоступен (MinIO)")
+        return data, doc.original_filename or "document", doc.mime_type or "application/octet-stream"
 
     async def delete_document(
         self,

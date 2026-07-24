@@ -2102,6 +2102,40 @@ class TestAvailableStockValidation:
             )
 
 
+    async def test_deficit_error_lists_holding_requests(self, db_session):
+        """Текст дефицита расшифровывает, КАКИЕ заявки держат резерв (номер×кол-во).
+
+        Без расшифровки «на складе 88, в работе 132» выглядит бессмыслицей
+        (резерв больше остатка) и вводит в заблуждение.
+        """
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        req_a = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id,
+                wb_fbo_supply_id=None,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=80)],
+            ),
+        )
+        with pytest.raises(ValueError, match="Недостаточно доступных остатков") as exc_info:
+            await create_assembly_request(
+                db_session,
+                PROJECT_ID,
+                AssemblyRequestCreate(
+                    warehouse_id=wh_id,
+                    wb_fbo_supply_id=None,
+                    pallets_count=1,
+                    pallet_weight_kg=Decimal("10.00"),
+                    items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=30)],
+                ),
+            )
+        msg = str(exc_info.value)
+        assert f"{req_a.number}×80" in msg
+
+
 # --- FF link: ff_link filter + batch enrichment (R2) ------------------------
 
 

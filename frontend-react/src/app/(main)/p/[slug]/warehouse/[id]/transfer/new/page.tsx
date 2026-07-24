@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
+import { mergeRowsByBarcode } from '@/lib/utils/transferRows';
 import type { Nomenclature, Warehouse } from '@/types/api';
 
 /* ─── Nomenclature lookup helper ──────────────────────────────────────────── */
@@ -101,13 +102,16 @@ export default function NewTransferPage() {
         if (!text.includes('\t') && !text.includes('\n')) return;
         e.preventDefault();
         const lines = text.trim().split('\n').map(l => l.split('\t'));
-        const newRows: ItemRow[] = [];
+        const parsed: ItemRow[] = [];
         for (const cols of lines) {
             if (cols.length < 2) continue;
             const barcode = cols[0].trim();
             const qty = cols[1].trim().replace(',', '.').replace(/[^\d]/g, '');
-            if (barcode && qty) newRows.push({ barcode, quantity: qty });
+            if (barcode && qty) parsed.push({ barcode, quantity: qty });
         }
+        // Схлопываем дубли ШК из склейки нескольких источников: одна строка на ШК
+        // с суммарным количеством — иначе остаток списывается многократно и send падает.
+        const newRows = mergeRowsByBarcode(parsed).map(m => ({ barcode: m.barcode, quantity: String(m.quantity) }));
         if (newRows.length > 0) setRows([...newRows, emptyItemRow(), emptyItemRow()]);
     };
 
@@ -149,20 +153,19 @@ export default function NewTransferPage() {
     const handleCreate = async () => {
         if (!toWarehouseId) { setError('Выберите склад назначения'); return; }
         if (filledRows.length === 0) { setError('Добавьте хотя бы одну позицию'); return; }
-        const items = filledRows.map(r => ({
-            barcode: r.barcode.trim(),
-            quantity: parseInt(r.quantity) || 0,
-        }));
-        const zero = items.filter(it => it.quantity <= 0);
+        const zero = filledRows.filter(r => (parseInt(r.quantity, 10) || 0) <= 0);
         if (zero.length > 0) {
-            setError(`Количество должно быть больше нуля: ${zero.map(it => it.barcode).join(', ')}`);
+            setError(`Количество должно быть больше нуля: ${zero.map(r => r.barcode.trim()).join(', ')}`);
             return;
         }
-        // Предвалидация остатков — иначе send упадёт уже после создания черновика
+        // Схлопываем дубли ШК и валидируем по СУММЕ на штрихкод, а не построчно:
+        // одна строка «52 ≤ остатка» проходит, а сумма трёх таких строк — нет,
+        // и тогда backend-send падает построчным «have 0».
+        const items = mergeRowsByBarcode(filledRows);
         const availMap = isDefect ? defectMap : stockMap;
         const over = items.filter(it => it.quantity > (availMap[it.barcode] || 0));
         if (over.length > 0) {
-            setError(`Недостаточно остатка: ${over.map(it => `${it.barcode} (есть ${formatNumber(availMap[it.barcode] || 0)})`).join(', ')}`);
+            setError(`Недостаточно остатка: ${over.map(it => `${it.barcode} (нужно ${formatNumber(it.quantity)}, есть ${formatNumber(availMap[it.barcode] || 0)})`).join(', ')}`);
             return;
         }
         setSaving(true);

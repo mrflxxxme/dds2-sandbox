@@ -33,6 +33,7 @@ from backend.models.mixins import SoftDeleteMixin
 | Импорт файлов / ETL | `etl/` (парсеры VTB, WB) |
 | WB HTTP-клиент | `integrations/wb_api.py` (+ `resilience.py`) |
 | Фулфилмент (skladbot.ru, wmscelicom, migfull) | `integrations/skladbot_client.py`, `integrations/wmscelicom_client.py`, `integrations/migfull_client.py`, `services/fulfillment_service.py`, `routers/fulfillment.py`, job `scheduler/jobs/fulfillment_sync.py` |
+| FF billing (тарифы, хранение, счета) | `models/ff_billing.py`, `schemas/ff_billing.py`, `services/ff_billing/`, `routers/ff_billing.py`, `etl/sync_ff_invoices.py`, job `scheduler/jobs/ff_storage_snapshot.py` |
 | Telegram-бот | `integrations/telegram_bot.py` |
 | Фоновые задачи | `scheduler/jobs/` |
 | Кэш | `cache.py` |
@@ -56,6 +57,7 @@ from backend.models.mixins import SoftDeleteMixin
 | `Warehouse`, `WarehouseStock` | `models/warehouse.py` | склад |
 | `FulfillmentStock`, `FulfillmentRequest` | `models/fulfillment.py` | зеркало остатков/заявок внешнего ФФ (skladbot, wmscelicom, migfull) |
 | `Account`, `CategoryRef` | `models/refs.py` | справочники |
+| `WarehouseTariff`, `FfStorageDaily`, `FfInvoice`, `FfInvoiceLine` | `models/ff_billing.py` | тарифы услуг ФФ, хранение, счета |
 
 ## Тесты
 `make test` · `test-fast` · `test-changed` · `test-unit` · `lint`. Прямо: `docker compose exec backend pytest tests/ -x --tb=short`.

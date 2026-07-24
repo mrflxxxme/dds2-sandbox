@@ -7640,3 +7640,8 @@ export interface SupplierDebtOverview {
   items: SupplierDebtItem[];
   unassigned_ordered: number;
 }
+
+export interface AutoDistributeResult {
+  assigned: number;
+  finance: SupplierFinance;
+}

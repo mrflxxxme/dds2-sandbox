@@ -79,15 +79,20 @@
   («Тульское отделение N8604 ПАО Сбербанк») оставались без банка и к/с.
 - `faktura_payment.py` — `create_payment_draft`: authenticate→get_accounts→build body→
   validate_payment→persist `bank_guid` ДО save→save_payment→DRAFT_CREATED. Идемпотентно по guid.
-- `etl/sync_payment_requests.py` — **матчер заявок**: хук в `persist_df` (sync). На каждый синк
+- `etl/sync_payment_requests.py` — **матчер заявок на оплату** (1-й в цепи): хук в `persist_df` (sync). На каждый синк
   выписки ищет дебет (expense>0) с `inn==payee_inn` и `|expense−amount|≤0.01` в дата-окне
   → DRAFT_CREATED→PAID. Consumed-once, Decimal-сравнение, пустой ИНН пропускается.
-- `etl/sync_shipment_payments.py` — **матчер заборов** (хук в `persist_df` ПОСЛЕ матчера заявок,
+- `etl/sync_shipment_payments.py` — **матчер заборов** (2-й: хук в `persist_df` ПОСЛЕ матчера заявок,
   чтобы явная заявка забрала транзакцию первой): отгруженный/сданный забор без активной заявки
   → ищет дебет с `inn==Counterparty.inn перевозчика` и `|expense−pickup_cost|≤0.01` (окно
   `shipped_date−7д … сегодня+1`) → проставляет `OutboundShipment.matched_transaction_id`. Тот же
   advisory-lock-namespace и union-consumed-set (заявки ∪ заборы), что не даёт занять транзакцию дважды.
   Бейдж «✅ Оплачено (авто)» в листе логиста для заборов БЕЗ заявки.
+- `etl/sync_ff_invoices.py` — **матчер счетов ФФ** (3-й: хук в `persist_df` ПОСЛЕ матчеров заявок/заборов).
+  На каждый дебет выписки: если ИНН = ИНН юрлица ФФ-склада, сумма совпадает (±0.01), дата в окне ±45 дн, 
+  И ровно ОДИН кандидат-счёт (`FfInvoice`, не PAID) → авто-PAID + `matched_transaction_id`. 
+  Пропагация: счёт с `payment_request_id`, чья заявка перешла PAID → счёт PAID (matched_at из PR).
+  Категория счета = FULFILLMENT (см. `DOMAIN_FULFILLMENT.md::FF billing`).
 - `payment_request_service.get_counterparty_reconciliation` — **сверка** на карточке перевозчика:
   его заборы (оплачено через заявку/авто-/ручную связку / не оплачено) + **ВСЕ платежи из выписки**
   на ИНН перевозчика (кроме занятых формальной заявкой), каждый с привязанными заборами
