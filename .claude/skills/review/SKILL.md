@@ -1,5 +1,6 @@
 ---
-description: "Фан-аут ревью DDS2: по diff-путям спавнит профильных субагентов (Opus 4.8) параллельно и сводит вердикт."
+name: review
+description: "Фан-аут ревью DDS2 по diff: по изменённым путям спавнит профильных субагентов (Opus 4.8) параллельно и сводит единый вердикт APPROVE/WARNING/BLOCK. Запускай ПРОАКТИВНО после написания или изменения кода в backend/ или frontend-react/, до коммита. Для тяжёлого/ultracode-прогона — Workflow({name:'review-deep'})."
 ---
 
 # /review — параллельное ревью по diff
@@ -21,7 +22,7 @@ description: "Фан-аут ревью DDS2: по diff-путям спавнит
 | `migrations/**`, `backend/models/**`, `*.sql`, alembic | **+ database-reviewer** |
 | `backend/auth*`, `backend/rbac.py`, `backend/utils/crypto*`, `text(`-SQL, пользовательский ввод | **+ security-reviewer** |
 | `backend/routers/**`, новый endpoint, массовые выборки (`.scalars().all()`) | **+ performance-optimizer** |
-| `backend/routers/**` + `backend/schemas/**` (контракт API изменился) | **+ api-designer** |
+| `backend/routers/** ` + `backend/schemas/**` (контракт API изменился) | **+ api-designer** |
 
 ## 3. Спавн — параллельно, на Opus 4.8
 Подними выбранных агентов **одним сообщением** (параллельно). Ревьюеры сидят на `model: opus` во frontmatter (env-override `CLAUDE_CODE_SUBAGENT_MODEL` из settings убран намеренно — он глушил per-agent выбор модели); при сомнении можно продублировать `model: opus` в вызове.
