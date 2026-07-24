@@ -19,6 +19,7 @@ from backend.etl.master_logic import (
     RE_LOGISTICS,
     RE_UNK,
     enrich_purpose,
+    normalize_invoice_no,
 )
 
 # ─── RE_CONTRACT ──────────────────────────────────────────────────────────────
@@ -381,3 +382,42 @@ class TestEnrichPurpose:
         assert result["unk_number"] is None
         assert result["event_type2_override"] is None
         assert result["loan_payment_type"] is None
+
+
+# ─── normalize_invoice_no ─────────────────────────────────────────────────────
+
+
+class TestNormalizeInvoiceNo:
+    """Tests for machine invoice_no normalization (matching against invoice_id)."""
+
+    def test_simple(self):
+        assert normalize_invoice_no("CC20260038") == ["CC20260038"]
+
+    def test_composite_plus(self):
+        assert normalize_invoice_no("CC20260033+BZ-260402+HD-W20260328-1") == [
+            "CC20260033",
+            "BZ-260402",
+            "HD-W20260328-1",
+        ]
+
+    def test_cyrillic_homoglyph(self):
+        # Real prod value: «СС20260036» with Cyrillic С → Latin CC
+        assert normalize_invoice_no("СС20260036") == ["CC20260036"]
+
+    def test_whitespace_trim(self):
+        assert normalize_invoice_no("  BZ-260402\t\t ") == ["BZ-260402"]
+
+    def test_leading_space(self):
+        assert normalize_invoice_no(" 20260317-260401") == ["20260317-260401"]
+
+    def test_dedup(self):
+        assert normalize_invoice_no("BZ-260402+BZ-260402") == ["BZ-260402"]
+
+    def test_lowercase_upper(self):
+        assert normalize_invoice_no("bz-260402") == ["BZ-260402"]
+
+    def test_none(self):
+        assert normalize_invoice_no(None) == []
+
+    def test_empty(self):
+        assert normalize_invoice_no("") == []

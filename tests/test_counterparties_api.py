@@ -328,3 +328,22 @@ async def test_upload_document_too_large(client, auth_headers):
         headers=headers,
     )
     assert resp.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_download_document_missing_404(client, auth_headers):
+    """GET download for a non-existent doc returns 404 (routing + project-scoping)."""
+    headers, _ = await _project_headers(client, auth_headers)
+
+    create_resp = await client.post(
+        "/api/v1/counterparties",
+        json={"inn": _inn(), "name": "КА Скачать", "primary_type": "OTHER"},
+        headers=headers,
+    )
+    cp_id = create_resp.json()["id"]
+
+    resp = await client.get(
+        f"/api/v1/counterparties/{cp_id}/documents/999999/download",
+        headers=headers,
+    )
+    assert resp.status_code == 404

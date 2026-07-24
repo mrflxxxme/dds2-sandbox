@@ -8,7 +8,18 @@ import type {
     LoanPayment,
     LoanDirection,
     LoanStatus,
+    LoanEntityType,
     LoanPaymentMatch,
+    LoanExtend,
+    Loan,
+    LoanDashboard,
+    LoanByLenderResponse,
+    LoanForecastResponse,
+    LenderAccessCreate,
+    LenderAccessCreated,
+    LenderAccessInfo,
+    LenderAccessListResponse,
+    LoanImportResult,
 } from '@/types/api';
 
 export function addLoanMethods(api: ApiClient) {
@@ -18,6 +29,7 @@ export function addLoanMethods(api: ApiClient) {
             direction?: LoanDirection;
             status?: LoanStatus;
             counterparty_id?: number;
+            entity_type?: LoanEntityType;
             limit?: number;
             offset?: number;
         }) {
@@ -25,6 +37,7 @@ export function addLoanMethods(api: ApiClient) {
             if (params?.direction) q.set('direction', params.direction);
             if (params?.status) q.set('status', params.status);
             if (params?.counterparty_id != null) q.set('counterparty_id', String(params.counterparty_id));
+            if (params?.entity_type) q.set('entity_type', params.entity_type);
             if (params?.limit != null) q.set('limit', String(params.limit));
             if (params?.offset != null) q.set('offset', String(params.offset));
             const qs = q.toString();
@@ -45,11 +58,58 @@ export function addLoanMethods(api: ApiClient) {
             return api.request<LoanDetail>('PATCH', `/api/v1/loans/${id}`, data);
         },
 
+        extendLoan(id: number, data: LoanExtend) {
+            return api.request<Loan>('POST', `/api/v1/loans/${id}/extend`, data);
+        },
+
         // ─── Loan Payments ────────────────────────────────────────────────────
         matchLoanTransaction(loanId: number, data: LoanPaymentMatch) {
             return api.request<LoanPayment>(
                 'POST', `/api/v1/loans/${loanId}/payments/match`, data
             );
+        },
+
+        // ─── Analytics ────────────────────────────────────────────────────────
+        loanDashboard() {
+            return api.request<LoanDashboard>('GET', '/api/v1/loans/dashboard');
+        },
+
+        loansByLender() {
+            return api.request<LoanByLenderResponse>('GET', '/api/v1/loans/by-lender');
+        },
+
+        loanForecast(horizonMonths = 12) {
+            return api.request<LoanForecastResponse>(
+                'GET', `/api/v1/loans/forecast?horizon_months=${horizonMonths}`
+            );
+        },
+
+        // ─── Lender portal access (admin) ─────────────────────────────────────
+        listLenderAccess() {
+            return api.request<LenderAccessListResponse>('GET', '/api/v1/loans/lenders/access');
+        },
+
+        createLenderAccess(data: LenderAccessCreate) {
+            return api.request<LenderAccessCreated>('POST', '/api/v1/loans/lenders/access', data);
+        },
+
+        resetLenderPassword(counterpartyId: number) {
+            return api.request<LenderAccessCreated>(
+                'POST', `/api/v1/loans/lenders/access/${counterpartyId}/reset`
+            );
+        },
+
+        revokeLenderAccess(counterpartyId: number) {
+            return api.request<LenderAccessInfo>(
+                'POST', `/api/v1/loans/lenders/access/${counterpartyId}/revoke`
+            );
+        },
+
+        // ─── Excel import ─────────────────────────────────────────────────────
+        importLoans(file: File) {
+            const form = new FormData();
+            form.append('file', file);
+            return api.uploadFormData<LoanImportResult>('/api/v1/loans/import', form);
         },
     };
 }

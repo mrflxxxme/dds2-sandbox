@@ -188,6 +188,22 @@ export default function CounterpartyDetailPage() {
         setDocuments(docs => docs.filter(d => d.id !== docId));
     };
 
+    const handleDocDownload = async (doc: CounterpartyDocument) => {
+        try {
+            const blob = await api.downloadCounterpartyDocument(id, doc.id);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = doc.original_filename || 'document';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка скачивания');
+        }
+    };
+
     if (loading && !detail) {
         return (
             <div className="animate-in">
@@ -557,15 +573,14 @@ export default function CounterpartyDetailPage() {
                                             </div>
                                         </div>
                                         <div style={{ display: 'flex', gap: 8 }}>
-                                            <a
-                                                href={doc.minio_path_signed_url}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
+                                            <button
+                                                type="button"
                                                 className="btn btn-secondary btn-sm"
                                                 style={{ padding: '2px 8px', fontSize: 11 }}
+                                                onClick={() => handleDocDownload(doc)}
                                             >
                                                 Скачать
-                                            </a>
+                                            </button>
                                             <button
                                                 className="btn btn-danger btn-sm"
                                                 style={{ padding: '2px 8px', fontSize: 11 }}

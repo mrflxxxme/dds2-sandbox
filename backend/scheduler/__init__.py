@@ -59,6 +59,7 @@ from backend.scheduler.jobs.wb_finance import (
 )
 from backend.scheduler.jobs.cbr_bic_sync import sync_cbr_bic_directory
 from backend.scheduler.jobs.faktura_statement_sync import sync_all_projects_faktura_statements
+from backend.scheduler.jobs.vtb_statement_sync import sync_all_projects_vtb_statements
 from backend.scheduler.jobs.wb_goods_returns_sync import sync_all_projects_wb_returns
 from backend.scheduler.jobs.wb_reviews_sync import sync_all_projects_wb_feedbacks
 from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
@@ -544,6 +545,19 @@ def start_scheduler():
         trigger=CronTrigger(hour="6,12,18,23", minute=0, timezone=MSK),
         id="faktura_statement_sync",
         name="Faktura statement sync (06/12/18/23 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # VTB «Интеграционный Банк-Клиент» (H2H) statement auto-sync: 3×/day — 07/13/19 MSK.
+    # Активна только для проектов с ключом IntegrationKey(service="vtb_ibk"); пока ключа
+    # нет — no-op. Заливает в тот же ETL, что и ручной импорт ВТБ. Дедуп по txn_id.
+    _scheduler.add_job(
+        sync_all_projects_vtb_statements,
+        trigger=CronTrigger(hour="7,13,19", minute=15, timezone=MSK),
+        id="vtb_statement_sync",
+        name="VTB ИБК statement sync (07/13/19 MSK)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=3600,

@@ -38,6 +38,7 @@ class CounterpartyType(str, enum.Enum):
     SUPPLIER = "SUPPLIER"
     FULFILLMENT = "FULFILLMENT"
     CARRIER = "CARRIER"
+    TRADING_HOUSE = "TRADING_HOUSE"  # посредник: платим только ему, он рассчитывается с фабриками
     CUSTOMS_BROKER = "CUSTOMS_BROKER"
     DESIGNER = "DESIGNER"
     LEGAL = "LEGAL"
@@ -48,6 +49,14 @@ class CounterpartyType(str, enum.Enum):
     GOVERNMENT = "GOVERNMENT"
     AFFILIATED = "AFFILIATED"
     OTHER = "OTHER"
+
+
+class IdentifierKind(str, enum.Enum):
+    """Kind of statement-matching identifier registered for a counterparty."""
+
+    CONTRACT = "CONTRACT"  # внешнеторговый контракт (CONTRACT 20250707) — ключ для CNY/SWIFT
+    ACCOUNT = "ACCOUNT"  # расчётный/корр. счёт контрагента
+    INN = "INN"  # ИНН (для рублёвых контрагентов)
 
 
 class DocType(str, enum.Enum):
@@ -101,6 +110,10 @@ class Counterparty(Base, TimestampMixin, SoftDeleteMixin):
         back_populates="counterparty",
         foreign_keys="CounterpartyDocument.counterparty_id",
     )
+    identifiers: Mapped[list["CounterpartyIdentifier"]] = relationship(
+        back_populates="counterparty",
+        foreign_keys="CounterpartyIdentifier.counterparty_id",
+    )
 
     # ─── Table args ──────────────────────────────────────────────────
 
@@ -148,4 +161,45 @@ class CounterpartyDocument(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_counterparty_document_project_id", "project_id"),
         # Partial index created via CONCURRENTLY in migration:
         #   ix_counterparty_document_cp  (counterparty_id) WHERE is_deleted = false
+    )
+
+
+# ─── CounterpartyIdentifier ──────────────────────────────────────────────────
+
+
+class CounterpartyIdentifier(Base, TimestampMixin, SoftDeleteMixin):
+    """
+    A statement-matching identifier registered for a counterparty.
+
+    Lets one counterparty (supplier / trading house / carrier) own SEVERAL
+    contracts and accounts — the single ``contract_number``/``bank_account``
+    columns on Counterparty can't express that. A bank-statement row is resolved
+    to this counterparty when its parsed ``contract_number`` (kind=CONTRACT),
+    ``counterparty_account`` (kind=ACCOUNT) or ``inn`` (kind=INN) equals ``value``.
+
+    Partial unique on (project_id, kind, value) WHERE is_deleted=false ensures
+    one identifier resolves to exactly one counterparty; re-create must restore
+    the soft-deleted row, not INSERT (SoftDelete + unique mine).
+    """
+
+    __tablename__ = "counterparty_identifier"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    counterparty_id: Mapped[int] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    value: Mapped[str] = mapped_column(String(100), nullable=False)
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)  # информативно (CNY/RUB/USD)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    counterparty: Mapped["Counterparty"] = relationship(
+        back_populates="identifiers",
+        foreign_keys=[counterparty_id],
+    )
+
+    __table_args__ = (
+        Index("ix_counterparty_identifier_project_id", "project_id"),
+        # Partial unique/index created via CONCURRENTLY in migration:
+        #   uq_counterparty_identifier_value  UNIQUE (project_id, kind, value) WHERE is_deleted = false
+        #   ix_counterparty_identifier_cp     (counterparty_id) WHERE is_deleted = false
     )

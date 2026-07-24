@@ -310,7 +310,7 @@ describe('counterparty documents', () => {
     it('uploadCounterpartyDocument uses FormData', async () => {
         const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
             ok: true, status: 201,
-            json: async () => ({ id: 1, counterparty_id: 3, doc_type: 'CONTRACT', minio_path_signed_url: 'https://x', original_filename: 't.pdf', file_size: 100, mime_type: 'application/pdf', uploaded_at: '2025-01-01' }),
+            json: async () => ({ id: 1, counterparty_id: 3, doc_type: 'CONTRACT', original_filename: 't.pdf', file_size: 100, mime_type: 'application/pdf', uploaded_at: '2025-01-01' }),
         } as Response);
 
         const api = makeApi();
@@ -321,5 +321,20 @@ describe('counterparty documents', () => {
         expect(String(url)).toContain('/api/v1/counterparties/3/documents');
         expect((init as RequestInit).method).toBe('POST');
         expect((init as RequestInit).body).toBeInstanceOf(FormData);
+    });
+
+    it('downloadCounterpartyDocument GETs the download endpoint and returns a Blob', async () => {
+        const blob = new Blob(['pdf-bytes'], { type: 'application/pdf' });
+        const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+            ok: true, status: 200,
+            blob: async () => blob,
+        } as unknown as Response);
+
+        const api = makeApi();
+        const out = await api.downloadCounterpartyDocument(3, 99);
+
+        const [url] = fetchSpy.mock.calls[0];
+        expect(String(url)).toContain('/api/v1/counterparties/3/documents/99/download');
+        expect(out).toBe(blob);
     });
 });

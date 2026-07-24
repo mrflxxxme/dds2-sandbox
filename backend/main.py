@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from backend.auth import ensure_default_admin, get_current_user, require_admin
+from backend.auth import ensure_default_admin, get_current_user, require_admin, require_internal
 from backend.config import settings
 from backend.database import AsyncSessionLocal, async_engine
 from backend.routers import (
@@ -38,6 +38,7 @@ from backend.routers import (
     import_txn,
     integrations,
     integrations_faktura,
+    lender_portal,
     loans,
     localization,
     measurements,
@@ -300,6 +301,8 @@ async def block_external_users(request: Request, call_next):
     ff_allowed = (
         path == "/api/v1/ff"
         or path.startswith("/api/v1/ff/")
+        or path == "/api/v1/lender"
+        or path.startswith("/api/v1/lender/")
         or path == "/api/v1/auth"
         or path.startswith("/api/v1/auth/")
     )
@@ -319,7 +322,7 @@ async def block_external_users(request: Request, call_next):
 
                 return JSONResponse(
                     status_code=403,
-                    content={"detail": "Внешний аккаунт фулфилмента: доступ только к ФФ-порталу"},
+                    content={"detail": "Внешний аккаунт: доступ только к внешнему порталу"},
                 )
     return await call_next(request)
 
@@ -671,6 +674,13 @@ app.include_router(
     loans.router,
     prefix="/api/v1",
     tags=["Loans"],
+    dependencies=[Depends(require_internal)],  # internal-only (defense-in-depth vs ext accounts)
+)
+# Лендер-портал внешнего заёмщика — кросс-проектный, скоуп по контрагентам внутри роутера.
+app.include_router(
+    lender_portal.router,
+    prefix="/api/v1",
+    tags=["Lender Portal"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

@@ -143,6 +143,15 @@ async def get_dashboard_summary(
     return await reports_service.get_dashboard_summary(db, project.id, date_from, date_to)
 
 
+@router.get("/dashboard_operations", dependencies=[Depends(require_role(page="dashboard"))])
+async def get_dashboard_operations(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cross-domain action-center counters for the dashboard «Требуют внимания» block."""
+    return await reports_service.get_dashboard_operations(db, project.id)
+
+
 @router.get("/dashboard_daily_filtered", dependencies=[Depends(require_role(page="dashboard"))])
 async def get_dashboard_daily_filtered(
     date_from: date | None = Query(None),

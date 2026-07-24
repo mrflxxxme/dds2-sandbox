@@ -82,6 +82,37 @@ Generic-слой зеркалирования данных фулфилмент-
 - **Коды стадий skladbot ≠ названия** (тип 851, живые пробы 2026-06-11): `cargo_pickup`=«Забор груза» → `delivery_to_the_marketplace_warehouse`=«Указание обьема груза v2» (!) → «Указание виды работ логистики» (код неизвестен — живых примеров не было). Орфография провайдера гуляет («обьема»/«объема», «виды работ») — классификатор матчит и код, и title-маркеры.
 - **migfull: строки приёмок содержат служебные грузоместа** («ФФ грузовое место — короб…», в т.ч. с пометкой «выявленный брак») вперемешку с товарами — фильтровать по name-маркеру при подсчётах. В строках заявок (`lines`) у `product` нет ШК — только guid (поле `product.gtin` приходит, но у «Натали» всегда `null` — ШК живёт лишь в `barcodes[]` карточки); резолв через зеркало остатков. Товар без остатка в зеркало не попал → в деталке приёмки **И отгрузки** строка висела бы «не опознанной»: `get_request_detail` дотягивает ШК живой карточкой (`_migfull_resolve_detail_barcodes`: для guid без ШК в зеркале — `GET /products/{guid}`, короб сводится к россыпи, cap `_ENRICH_DETAIL_CAP`, ошибки деталку не валят). Приёмка тянет клиента всегда (состав — живые lines); **отгрузка — best-effort** (состав из raw; клиент строится только если ключ есть, после disconnect деталка работает из зеркала+raw).
 
+## FF billing — тарифы услуг, посуточное хранение, счета ФФ
+
+**Механика** (зеркалит паттерн заявок на оплату логиста, но для услуг ФФ):
+1. **Тарифы** (`WarehouseTariff`, ffb01): на каждом ФФ-складе — своя сетка тарифов 5 услуг (паллетирование ₽/паллета, обработка коробки ₽/короб, хранение ₽/паллета/день, выгрузка фуры ₽/машина, погрузка ₽/паллета или ₽/короб). unit только для LOADING; у прочих услуг фиксирован типом. История через valid_from/valid_to.
+2. **Посуточное хранение** (`FfStorageDaily`, снимает штуки→короба→паллеты на момент среза):
+   - Джоба `scheduler/jobs/ff_storage_snapshot.py` (23:40 MSK) пишет суточные начисления на ФФ-складе: qty штук/коробов/паллет + стоимость (тариф на дату × паллеты).
+   - Источник штук: `FulfillmentStock` (интегрированные складские ФФ) либо fallback `WarehouseStock` для неинтегрированных (апл/хамза).
+   - Конверсия qty→boxes→pallets через `box_multiplicity_service` (как в Листе логиста) и `pallet_boxes_by_size` (по ФО).
+   - Кратность фиксируется НА МОМЕНТ среза, защита истории от последующих правок.
+3. **Ожидаемая стоимость услуг по заявке** (`FfAssemblyExpectedCost`, вкладка заявки сборки):
+   - Рассчёт компонент: отправка (паллетирование + обработка коробок + погрузка на основе `AssemblyRequest.ff_custom_warehouse`), приёмка (если есть bound-приёмка ФФ).
+   - Если нет тарифа — компонент возвращается с `cost=NULL`, lista итого = сумма известных компонент.
+   - Переопределение (`AssemblyRequest.ff_custom_cost` + `ff_custom_cost_comment`) — ручное override, забивает рассчёты.
+4. **Счета ФФ** (`FfInvoice` + `FfInvoiceLine`, схемы `FfInvoiceCreatePayload`, эндпоинты `ff-invoices`):
+   - Загрузка счёта от ФФ (multipart PDF/Excel): парс реквизитов, выяснение склада по ИНН юрлиц (NULL если неоднозначно — требует ручного выбора).
+   - Сверка счёта = пересборка строк (`reconcile`) по якорям (заявка сборки / дни хранения / приёмка / забор): сравнение нашего расчёта vs счётные строки, статус NEW→RECONCILED|DISPUTED.
+   - Созданиe заявки на оплату (`create-payment-request`) с category=FULFILLMENT.
+   - Два способа матчинга с оплатой: (1) через заявку (`payment_request_id`, ручной/авто процесс заявок); (2) прямой линк дебета выписки (`matched_transaction_id`, авто-матчер счетов).
+5. **Авто-матчер счетов** (`etl/sync_ff_invoices.py`, хук в `persist_df` ПОСЛЕ матчеров заявок/заборов):
+   - На каждый дебет выписки: если ИНН = ИНН юрлица ФФ-склада проекта, сумма совпадает (±0.01) и в окне ±45 дн, И ровно ОДИН кандидат-счёт → авто-PAID.
+   - Пропагация: счёт с payment_request_id, чья заявка PAID → счёт PAID (matched_at из PR).
+   - Потреблённые дебеты не матчятся; счёт с активной заявкой идёт через заявочный поток.
+
+| Таблица | Назначение | Ключ |
+|---------|-----------|-----|
+| `warehouse_tariffs` | тарифы услуг ФФ на складе | `(project_id, warehouse_id, service_type)` с историей valid_from/valid_to |
+| `ff_storage_daily` | посуточные начисления хранения | `(project_id, warehouse_id, snapshot_date)` |
+| `ff_invoices` | счета от ФФ | `(project_id, is_deleted)` + FK `payment_request_id` + FK `matched_transaction_id` |
+| `ff_invoice_lines` | разнесение счёта по якорям | FK→`ff_invoices` (CASCADE); один якорь по kind: assembly_request_id / inbound_receipt_id / outbound_shipment_id / date_from/date_to |
+| `AssemblyRequest` колонки | override стоимости + comment | `ff_custom_cost` (Numeric 18,2, NULL), `ff_custom_cost_comment` (text, NULL) |
+
 ## Файлы
 - `backend/integrations/skladbot_client.py` — httpx-клиент (Bearer, 429→RateLimitError, circuit breaker). PUSH: `resolve_products` (GET /v1/requests/products, чанки по 20, is_main_barcode-приоритет) + `create_request` (POST /v1/requests, БЕЗ retry); константа `DELIVERY_REQUEST_TYPE_ID=851`.
 - `backend/integrations/wmscelicom_client.py` — httpx-клиент wmscelicom (токен в path, normalize_base_url, circuit breaker).
@@ -92,6 +123,14 @@ Generic-слой зеркалирования данных фулфилмент-
 - Frontend: на странице заявки на сборку `warehouse/assembly/[id]` кнопка «📦 Создать заявку на ФФ» (виден при подключённом skladbot, статусах PENDING..VEHICLE_ASSIGNED, без связанной ФФ-заявки) → диалог (склад МП/даты/тип поставки, предзаполнен из заявки) → `api.createFfRequestFromAssembly`.
 - `backend/scheduler/jobs/fulfillment_sync.py` — периодический синк (worker). Интервал — `settings.FULFILLMENT_SYNC_INTERVAL_MINUTES` (дефолт 60). **Тиринг расписания (прод):** FAST 10 мин для складов 5 и 1, SLOW 30 мин для склада 2, DEFAULT 60 мин для остальных — задаётся `FULFILLMENT_SYNC_*` env на сервисе `worker` в **`docker-compose.app.yml`** (это файл, который реально деплоит прод: `cd-production.yml` запускает `docker compose -f docker-compose.app.yml up -d`). Раньше переменные жили только в `docker-compose.prod.yml` (деплой его НЕ использует), поэтому авто-синк гонял всё по DEFAULT 60 мин вместо 10 мин у приоритетных складов. **Меняя интервалы/списки складов — правь `docker-compose.app.yml`.** Локально основной scheduler выключен (`SCHEDULER_ENABLED=false`); опционально поднимается **fulfillment-only scheduler** (`FULFILLMENT_SYNC_ENABLED=true`, см. `start_scheduler`/`_start_fulfillment_only_scheduler`) в два контура: быстрый (`FULFILLMENT_SYNC_WAREHOUSE_IDS` @ `FULFILLMENT_SYNC_INTERVAL_MINUTES`) и медленный (`FULFILLMENT_SYNC_SLOW_WAREHOUSE_IDS` @ `FULFILLMENT_SYNC_SLOW_INTERVAL_MINUTES`, пересечение с быстрым исключается). Сужение по складам обязательно — иначе синк всех ~2k замаскированных FF-ключей прод-копии = шторм ошибок.
 - `frontend-react/src/app/(main)/p/[slug]/warehouse/[id]/page.tsx` — вкладки «ФФ остатки / ФФ сборка / ФФ приёмки / ФФ история / ФФ синхронизация» (последняя, `ff-sync`, журнал прогонов из `sync-runs`) + блок подключения в «Реквизитах». Хелперы истории (`ffEventSummary`/`ffEventBadge`) — в `ff-shared.tsx`; деталка заявки показывает её срез истории.
+- `backend/services/fulfillment_service.py::create_ff_request_from_assembly` — PUSH нашей сборки в skladbot (резолв → POST → зеркало+связь); схемы `FfCreateRequestPayload`/`FfPushAssemblyResult`. Тесты — `tests/test_fulfillment_push.py`.
+- `backend/models/ff_billing.py` — модели `WarehouseTariff`, `FfStorageDaily`, `FfInvoice`, `FfInvoiceLine`, enums `FfServiceType`, `FfTariffUnit`, `FfInvoiceKind`, `FfInvoiceStatus`, `FfInvoiceLineKind` (миграция ffb01).
+- `backend/schemas/ff_billing.py` — Pydantic схемы API (~20 эндпоинтов).
+- `backend/services/ff_billing/` — сервисы `tariffs_service.py` (CRUD тарифов), `storage_service.py` (посуточное начисление), `expected_cost_service.py` (расчёт стоимости по заявке), `invoices_service.py` (upload/сверка/матчинг счетов).
+- `backend/routers/ff_billing.py` — роутер `/api/v1`: GET/POST/PATCH/DELETE тарифов, GET хранения, GET/PATCH ожидаемой стоимости заявки, CRUD счетов.
+- `backend/etl/sync_ff_invoices.py` — матчер счетов ФФ в `persist_df` (хук ПОСЛЕ sync_payment_requests/sync_shipment_payments).
+- `backend/scheduler/jobs/ff_storage_snapshot.py` — джоба посуточного снимка хранения (23:40 MSK).
+- Frontend: вкладка заявки сборки `FfExpectedCostCard.tsx` (ожидаемая стоимость + override), вкладка склада `FfBillingTab.tsx` (тарифы + хранение), вкладка `ff-invoices/` (управление счетами).
 
 ## migfull-портал — создание заявки на отгрузку (write через браузер)
 У migfull НЕТ write-API → создаём заявку как браузер на портале (Filament v5 / Livewire 3), отдельный `IntegrationKey(service="migfull_portal")` (логин/пароль; НЕ путать с read-only `service="migfull"` Bearer-API).

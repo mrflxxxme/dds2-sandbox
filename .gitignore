@@ -27,6 +27,8 @@ backend/*_mockup.png
 .claude/.session-counter
 .claude/.cache/
 .claude/scheduled_tasks.lock
+.claude/.pre-compact-latest.log
+.claude/.last-review.log
 nginx/ssl/
 
 # Node modules в корне (frontend-react/node_modules игнорится отдельно)
@@ -52,3 +54,10 @@ scripts/*_probe.py
 
 # Локальный dev-compose worktree (ускорения, не для прода)
 /wt-dev.yml
+
+# КриптоПро CSP дистрибутив (лицензионный бинарь — НЕ коммитим; для prod-сборки доставляется отдельно)
+docker/cryptopro/*.tgz
+docker/cryptopro/linux-amd64_deb/
+
+# Локальный пайплайн WB-отчётов (SQL/сборка HTML→PDF) — вне продукта
+/analytics-local/

@@ -1,0 +1,72 @@
+'use client';
+
+import { useState } from 'react';
+import { lenderLogin } from '@/lib/api/lender';
+
+export default function LenderLoginPage() {
+    const [username, setUsername] = useState('');
+    const [password, setPassword] = useState('');
+    const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError('');
+        setLoading(true);
+        try {
+            await lenderLogin(username, password);
+            window.location.href = '/lender';
+        } catch (err: unknown) {
+            setError(err instanceof Error ? err.message : 'Ошибка входа');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="auth-page">
+            <div className="auth-card animate-in">
+                <div className="auth-logo">DDS · Займы</div>
+                <div className="auth-title">Личный кабинет</div>
+                <div className="auth-subtitle">Вход для займодавца</div>
+
+                {error && <div className="auth-error">{error}</div>}
+
+                <form className="auth-form" onSubmit={handleSubmit}>
+                    <div className="form-group">
+                        <label className="form-label">Логин</label>
+                        <input
+                            className="form-input"
+                            type="text"
+                            placeholder="Логин"
+                            value={username}
+                            onChange={(e) => setUsername(e.target.value)}
+                            required
+                            autoFocus
+                            autoCapitalize="none"
+                        />
+                    </div>
+                    <div className="form-group">
+                        <label className="form-label">Пароль</label>
+                        <input
+                            className="form-input"
+                            type="password"
+                            placeholder="Введите пароль"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            required
+                        />
+                    </div>
+                    <button
+                        type="submit"
+                        className="btn btn-primary"
+                        disabled={loading}
+                        style={{ width: '100%', padding: '12px', fontSize: '15px', marginTop: 4 }}
+                    >
+                        {loading ? 'Вход…' : 'Войти'}
+                    </button>
+                </form>
+            </div>
+        </div>
+    );
+}

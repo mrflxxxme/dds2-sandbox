@@ -27,6 +27,7 @@ from backend.etl.sync_payments import (
 from backend.etl.sync_ff_invoices import sync_ff_invoices as _sync_ff_invoices
 from backend.etl.sync_payment_requests import sync_payment_requests as _sync_payment_requests
 from backend.etl.sync_shipment_payments import sync_shipment_payments as _sync_shipment_payments
+from backend.etl.sync_supplier_payments import sync_supplier_payments as _sync_supplier_payments
 from backend.etl.sync_wb_payouts import sync_wb_payouts as _sync_wb_payouts
 from backend.models import (
     Account,
@@ -381,6 +382,10 @@ def persist_df(db: Session, df, project_id: int, account_no: str) -> tuple[int, 
     from backend.services.counterparty_enrich import enrich_counterparty_requisites
 
     enrich_counterparty_requisites(db, project_id)
+
+    # Атрибуция строк выписки поставщику/торгдому/логисту/займу по контракту+счёту
+    # (перебивает ошибочную INN-привязку к «БАНК ВТБ» на CNY/SWIFT-платежах).
+    _sync_supplier_payments(db, project_id)
 
     return inserted, skipped
 

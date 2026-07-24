@@ -49,6 +49,17 @@ from backend.schemas.supply_chain import (
     VehicleStatusUpdate,
     VehicleUpdate,
 )
+from backend.schemas.counterparty import (
+    AssignMachineRequest,
+    AutoDistributeResponse,
+    BulkAssignMachineRequest,
+    LinkPaymentRequest,
+    MachinePlanRequest,
+    SupplierDebtOverviewResponse,
+    SupplierFinanceResponse,
+    SupplierIdentifierCreate,
+)
+from backend.services.supplier_debt_service import SupplierDebtService
 from backend.services.supply_chain import (
     factory_orders,
     supplier_catalog,
@@ -71,6 +82,142 @@ router = APIRouter(prefix="/supply-chain")
 
 
 # ─── Factory Orders ──────────────────────────────────────────────────────────
+
+
+@router.get("/debt-overview", response_model=SupplierDebtOverviewResponse)
+async def supplier_debt_overview(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Долг поставщикам: Заказано (загруженные машины) − Оплачено (выписка) по контрагенту."""
+    data = await SupplierDebtService(db).get_overview(project.id)
+    return SupplierDebtOverviewResponse.model_validate(data)
+
+
+@router.get("/suppliers/{supplier_id}/finance", response_model=SupplierFinanceResponse)
+async def supplier_finance(
+    supplier_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Финансы карточки поставщика: долг + наши оплаты + кандидаты на ручную привязку."""
+    data = await SupplierDebtService(db).get_supplier_finance(project.id, supplier_id)
+    return SupplierFinanceResponse.model_validate(data)
+
+
+@router.post("/suppliers/{supplier_id}/link-payment", dependencies=[Depends(rate_limit_write)])
+async def supplier_link_payment(
+    supplier_id: int,
+    payload: LinkPaymentRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Привязать платёж из выписки к поставщику вручную (которого матчер не поймал)."""
+    return await SupplierDebtService(db).link_payment(project.id, supplier_id, payload.transaction_id)
+
+
+@router.post("/suppliers/{supplier_id}/unlink-payment", dependencies=[Depends(rate_limit_write)])
+async def supplier_unlink_payment(
+    supplier_id: int,
+    payload: LinkPaymentRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Отвязать ранее привязанный платёж от поставщика (отмена)."""
+    return await SupplierDebtService(db).unlink_payment(project.id, supplier_id, payload.transaction_id)
+
+
+@router.post("/suppliers/{supplier_id}/assign-machine", dependencies=[Depends(rate_limit_write)])
+async def supplier_assign_payment_machine(
+    supplier_id: int,
+    payload: AssignMachineRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Привязать оплату к конкретной машине (order_no=null → снять)."""
+    return await SupplierDebtService(db).assign_payment_machine(
+        project.id, supplier_id, payload.transaction_id, payload.order_no
+    )
+
+
+@router.post(
+    "/suppliers/{supplier_id}/assign-machine-bulk",
+    response_model=SupplierFinanceResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def supplier_assign_payments_machine_bulk(
+    supplier_id: int,
+    payload: BulkAssignMachineRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Привязать несколько оплат к одной машине (order_no=null → снять у всех)."""
+    return await SupplierDebtService(db).assign_payments_machine_bulk(
+        project.id, supplier_id, payload.transaction_ids, payload.order_no
+    )
+
+
+@router.post(
+    "/suppliers/{supplier_id}/machine-plan",
+    response_model=SupplierFinanceResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def supplier_set_machine_plan(
+    supplier_id: int,
+    payload: MachinePlanRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Плановая дата оплаты остатка по машине (remaining_due_date=null → снять)."""
+    return await SupplierDebtService(db).set_machine_plan(
+        project.id, supplier_id, payload.order_no, payload.remaining_due_date
+    )
+
+
+@router.post(
+    "/suppliers/{supplier_id}/auto-distribute",
+    response_model=AutoDistributeResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def supplier_auto_distribute(
+    supplier_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Авто-разнести неразмеченные оплаты по машинам (однозначные совпадения: инвойс/сумма)."""
+    return await SupplierDebtService(db).auto_distribute_machines(project.id, supplier_id)
+
+
+@router.post(
+    "/suppliers/{supplier_id}/identifiers",
+    response_model=SupplierFinanceResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def supplier_add_identifier(
+    supplier_id: int,
+    payload: SupplierIdentifierCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Завести поставщику контракт/счёт/ИНН → авто-привязка совпавших платежей."""
+    return await SupplierDebtService(db).add_identifier(
+        project.id, supplier_id, payload.kind, payload.value, payload.currency
+    )
+
+
+@router.delete(
+    "/suppliers/{supplier_id}/identifiers/{identifier_id}",
+    response_model=SupplierFinanceResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def supplier_delete_identifier(
+    supplier_id: int,
+    identifier_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Убрать идентификатор поставщика (уже привязанные платежи остаются)."""
+    return await SupplierDebtService(db).delete_identifier(project.id, supplier_id, identifier_id)
 
 
 @router.get("/factory-orders")

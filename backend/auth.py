@@ -141,6 +141,23 @@ async def get_current_user(
     return user
 
 
+async def require_internal(
+    user: User = Depends(get_current_user),
+) -> User:
+    """Reject external (FF / lender portal) accounts.
+
+    Defense-in-depth for internal-only APIs (e.g. /loans admin endpoints): even if
+    the `ext`-claim middleware choke-point were bypassed, an external account still
+    cannot reach internal data. External accounts have their own scoped routers.
+    """
+    if getattr(user, "is_external", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Доступ только для внутренних аккаунтов",
+        )
+    return user
+
+
 async def require_admin(
     user: User = Depends(get_current_user),
 ) -> User:

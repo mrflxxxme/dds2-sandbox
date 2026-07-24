@@ -3,6 +3,7 @@ name: code-reviewer
 description: "Ревью кода DDS2 на качество, безопасность и соответствие конвенциям. Используй ПРОАКТИВНО после написания/изменения кода."
 tools: ["Read", "Grep", "Glob", "Bash"]
 model: opus
+memory: project
 ---
 
 # Code Reviewer — DDS2

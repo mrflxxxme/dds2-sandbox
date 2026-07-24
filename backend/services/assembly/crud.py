@@ -128,6 +128,15 @@ async def _try_force_enrich_supply(
 
 # --- Helpers ----------------------------------------------------------------
 
+# Статусы, в которых заявка удерживает резерв стока (учитываются как «в работе»
+# при расчёте доступного остатка). SHIPPED резерв не держит — сток уже списан OUTBOUND.
+_RESERVING_STATUSES = [
+    AssemblyStatus.PENDING,
+    AssemblyStatus.IN_PROGRESS,
+    AssemblyStatus.READY,
+    AssemblyStatus.VEHICLE_ASSIGNED,
+]
+
 
 async def _validate_stock_for_ship(
     db: AsyncSession,
@@ -217,14 +226,7 @@ async def _validate_available_for_assembly(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted.is_(False),
-            AssemblyRequest.status.in_(
-                [
-                    AssemblyStatus.PENDING,
-                    AssemblyStatus.IN_PROGRESS,
-                    AssemblyStatus.READY,
-                    AssemblyStatus.VEHICLE_ASSIGNED,
-                ]
-            ),
+            AssemblyRequest.status.in_(_RESERVING_STATUSES),
             AssemblyRequestItem.nomenclature_id.in_(nom_ids),
         )
         .group_by(AssemblyRequestItem.nomenclature_id)
@@ -256,6 +258,32 @@ async def _validate_available_for_assembly(
     nom_result = await db.execute(select(Nomenclature).where(Nomenclature.id.in_(deficit_nom_ids)))
     nom_map = {n.id: n for n in nom_result.scalars().all()}
 
+    # Расшифровка «в работе»: какие заявки держат резерв по дефицитным позициям.
+    # Без неё сообщение «на складе 88, в работе 132» вводит в заблуждение
+    # (резерв может превышать остаток, напр. зависшая неотгруженная заявка).
+    holders_q = (
+        select(
+            AssemblyRequestItem.nomenclature_id,
+            AssemblyRequest.number,
+            func.sum(AssemblyRequestItem.quantity).label("qty"),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.warehouse_id == warehouse_id,
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.status.in_(_RESERVING_STATUSES),
+            AssemblyRequestItem.nomenclature_id.in_(deficit_nom_ids),
+        )
+        .group_by(AssemblyRequestItem.nomenclature_id, AssemblyRequest.number)
+        .order_by(func.sum(AssemblyRequestItem.quantity).desc(), AssemblyRequest.number)
+    )
+    if exclude_request_id is not None:
+        holders_q = holders_q.where(AssemblyRequest.id != exclude_request_id)
+    holders_map: dict[int, list[tuple[str, int]]] = {}
+    for r in (await db.execute(holders_q)).all():
+        holders_map.setdefault(r.nomenclature_id, []).append((r.number, r.qty))
+
     deficits: list[dict] = []
     for nom_id in deficit_nom_ids:
         nom = nom_map.get(nom_id)
@@ -272,6 +300,7 @@ async def _validate_available_for_assembly(
                 "have": available,
                 "stock": stock,
                 "reserved": reserved,
+                "holders": holders_map.get(nom_id, []),
             }
         )
     return deficits
@@ -279,11 +308,20 @@ async def _validate_available_for_assembly(
 
 def _format_deficit_error(deficits: list[dict]) -> str:
     """Format deficit list into a human-readable Russian error message."""
-    lines = [
-        f"  {d['name']} (ШК {d['barcode']}): нужно {d['need']}, доступно {d['have']} "
-        f"(на складе {d['stock']}, в работе {d['reserved']})"
-        for d in deficits
-    ]
+    lines = []
+    for d in deficits:
+        line = (
+            f"  {d['name']} (ШК {d['barcode']}): нужно {d['need']}, доступно {d['have']} "
+            f"(на складе {d['stock']}, в работе {d['reserved']}"
+        )
+        holders = d.get("holders") or []
+        if holders:
+            shown = holders[:6]
+            line += " — " + ", ".join(f"{number}×{qty}" for number, qty in shown)
+            if len(holders) > len(shown):
+                line += f" и ещё {len(holders) - len(shown)}"
+        line += ")"
+        lines.append(line)
     return f"Недостаточно доступных остатков ({len(deficits)} поз.):\n" + "\n".join(lines)
 
 
