@@ -8,10 +8,11 @@ wb_funnel_daily (тот же источник, что у фильтров вор
 
 import html
 from collections import Counter
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
+import pytz
 from sqlalchemy import String, cast, distinct, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,9 +21,18 @@ from backend.models.integrations import WbFunnelDaily
 from backend.models.wb_measurements import WbMeasurementPenalty, WbWarehouseMeasurement
 
 
+_MSK = pytz.timezone("Europe/Moscow")
+
+
 def _day_bounds(date_from: date | None, date_to: date | None) -> tuple[datetime | None, datetime | None]:
-    df = datetime.combine(date_from, time.min, tzinfo=timezone.utc) if date_from else None
-    dt = datetime.combine(date_to, time.max, tzinfo=timezone.utc) if date_to else None
+    """Границы периода в МСК (WB-замеры и кабинет живут по Москве).
+
+    `measured_at`/`penalty_date` хранятся в UTC, но «день» пользователь и WB
+    понимают по МСК. Раньше границы строились в UTC → ранне-утренние по МСК
+    замеры (00:00–03:00 МСК = 21:00–00:00 UTC пред. суток) выпадали из выборки.
+    """
+    df = _MSK.localize(datetime.combine(date_from, time.min)) if date_from else None
+    dt = _MSK.localize(datetime.combine(date_to, time.max)) if date_to else None
     return df, dt
 
 

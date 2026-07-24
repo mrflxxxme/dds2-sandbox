@@ -98,9 +98,15 @@ async def send_problem_digests() -> None:
 
 async def _send_to_chat(bot, chat_id: int, payload: dict) -> int:
     """Текст + документ в один чат. Возвращает 1 (для счётчика отправок)."""
+    from aiogram.exceptions import TelegramBadRequest
     from aiogram.types import BufferedInputFile
 
-    await bot.send_message(chat_id=chat_id, text=payload["text"], parse_mode="HTML")
+    try:
+        await bot.send_message(chat_id=chat_id, text=payload["text"], parse_mode="HTML")
+    except TelegramBadRequest:
+        # Невалидная HTML-разметка (экзотика в названиях) — доставляем без форматирования
+        logger.warning("Problem digest: HTML parse failed (chat=%s), retrying as plain text", chat_id)
+        await bot.send_message(chat_id=chat_id, text=payload["text"])
     await bot.send_document(
         chat_id=chat_id,
         document=BufferedInputFile(payload["xlsx"], filename=payload["filename"]),
