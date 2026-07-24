@@ -18,7 +18,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "loan02_loan_entity_extend"
-down_revision = "cbr01_cbr_bic_directory"
+down_revision = "asm794_pass_as_boxes"
 branch_labels = None
 depends_on = None
 

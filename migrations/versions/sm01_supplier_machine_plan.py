@@ -13,7 +13,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "sm01_supplier_machine_plan"
-down_revision = "prb01_payment_request_brand"
+down_revision = "ci01_counterparty_identifier"
 branch_labels = None
 depends_on = None
 

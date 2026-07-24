@@ -14,7 +14,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "ci01_counterparty_identifier"
-down_revision = "pay07_payment_request_general"
+down_revision = "loan02_loan_entity_extend"
 branch_labels = None
 depends_on = None
 
