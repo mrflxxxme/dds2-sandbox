@@ -7353,27 +7353,6 @@ export interface DashboardOperations {
 
 /* ─── Loans: дашборд/аналитика/лендер-портал + финансы поставщиков (порт f6fcfd35) ─── */
 export type LoanEntityType = 'PHYSICAL' | 'IP';
-export type LoanPaymentType =
-  | 'DISBURSEMENT'
-  | 'PRINCIPAL_REPAY'
-  | 'INTEREST_PAY'
-  | 'PENALTY';
-// NB: backend Numeric/Decimal fields arrive over the wire as STRINGS — wrap with
-// Number() before formatNumber()/arithmetic in components (see rules/learnings).
-
-export interface LoanShort {
-  id: number;
-  direction: LoanDirection;
-  principal: number;
-  currency: string;
-  rate?: number | null;
-  contract_number?: string;
-  contract_date?: string;
-  start_date: string;
-  maturity_date: string | null;
-  status: LoanStatus;
-}
-
 export interface LoanExtend {
   new_rate?: number | null;
   new_start_date?: string | null;
