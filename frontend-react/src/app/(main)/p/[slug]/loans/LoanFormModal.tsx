@@ -57,10 +57,16 @@ export default function LoanFormModal({
     const [error, setError] = useState('');
 
     useEffect(() => {
-        if (mode === 'create') {
-            api.listCounterparties({ limit: 500 }).then((r) => setCps(r.items)).catch(() => {});
-        }
-    }, [mode]);
+        if (mode !== 'create') return;
+        // Server-side search (debounced) so borrowers beyond the first 500 stay reachable;
+        // surface load failures instead of silently swallowing them.
+        const handle = setTimeout(() => {
+            api.listCounterparties({ q: cpSearch || undefined, limit: 500 })
+                .then((r) => setCps(r.items))
+                .catch(() => setError('Не удалось загрузить список заёмщиков'));
+        }, 250);
+        return () => clearTimeout(handle);
+    }, [mode, cpSearch]);
 
     const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setForm((f) => ({ ...f, [k]: v }));
 

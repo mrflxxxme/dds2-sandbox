@@ -35,6 +35,10 @@ SERVICE = "vtb_ibk"
 DEFAULT_LOOKBACK_DAYS = 14
 _POLL_ATTEMPTS = 30
 _POLL_SLEEP_SEC = 2.0
+# Cooperative deadline for the blocking account×day walk. The executor thread is NOT
+# cancellable, so the job's wait_for(900) cannot stop it — this budget (< 900, with margin
+# for one in-flight ~90s HTTP call) lets the loop exit itself and persist partial data.
+_SYNC_BUDGET_SEC = 780
 
 
 async def _get_vtb_key(db: AsyncSession, project_id: int) -> IntegrationKey:
@@ -99,7 +103,9 @@ def _fetch_day_rows(
     return rows
 
 
-def _run_vtb_blocking(project_id: int, config: dict, date_from: date, date_to: date) -> tuple[int, int, int]:
+def _run_vtb_blocking(
+    project_id: int, config: dict, date_from: date, date_to: date, deadline: float | None = None
+) -> tuple[int, int, int, bool]:
     """Sync-side (thread-executor): обход счёт×день через КриптоПро → persist_df."""
     import pandas as pd
 
@@ -116,18 +122,27 @@ def _run_vtb_blocking(project_id: int, config: dict, date_from: date, date_to: d
 
     days = [date_from + timedelta(days=i) for i in range((date_to - date_from).days + 1)]
     norm_rows: list[dict] = []
+    partial = False
     for acc in accounts:
         for day in days:
+            if deadline is not None and time.monotonic() > deadline:
+                logger.warning(
+                    "VTB: sync budget exhausted — persisting partial statement (project %d)", project_id
+                )
+                partial = True
+                break
             norm_rows.extend(
                 _fetch_day_rows(
                     endpoint=endpoint, custid=custid, thumb=thumb, uid=uid, kbopid=kbopid,
                     account=str(acc["account"]), bic=str(acc.get("bic") or ""), day=day,
                 )
             )
+        if partial:
+            break
 
     fetched = len(norm_rows)
     if not norm_rows:
-        return 0, 0, fetched
+        return 0, 0, fetched, partial
 
     with SyncSessionLocal() as db:
         for acc in accounts:
@@ -139,7 +154,7 @@ def _run_vtb_blocking(project_id: int, config: dict, date_from: date, date_to: d
         inserted, skipped = persist_df(db, df, project_id, primary)
         db.commit()
     _invalidate_reports_sync(project_id)
-    return inserted, skipped, fetched
+    return inserted, skipped, fetched, partial
 
 
 async def sync_vtb_statement(
@@ -162,12 +177,15 @@ async def sync_vtb_statement(
         date_to = date.today()
         date_from = date_to - timedelta(days=lookback_days)
         loop = asyncio.get_running_loop()
-        inserted, skipped, fetched = await loop.run_in_executor(
-            None, _run_vtb_blocking, project_id, config, date_from, date_to
+        deadline = time.monotonic() + _SYNC_BUDGET_SEC
+        inserted, skipped, fetched, partial = await loop.run_in_executor(
+            None, _run_vtb_blocking, project_id, config, date_from, date_to, deadline
         )
         sync_log.status = "OK"
         sync_log.rows_fetched = fetched
         sync_log.rows_inserted = inserted
+        if partial:
+            sync_log.error_msg = "deadline: partial statement (narrow window or raise budget)"
         sync_log.finished_at = utcnow()
         key.last_sync_at = utcnow()
         await db.commit()

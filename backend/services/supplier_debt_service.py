@@ -45,6 +45,8 @@ _LOADED_STATUSES = (
 )
 
 _ZERO = Decimal("0")
+# Cap the payment list returned in the supplier card payload (KPIs stay exact — see below).
+_PAYMENTS_DISPLAY_LIMIT = 500
 # Допуск на «близкую сумму» при авто-распределении: банк/курс/округление дают
 # отклонение платежа от себестоимости машины в доли процента (583 853 vs 583 358).
 _AMOUNT_TOLERANCE = Decimal("0.01")  # ±1%
@@ -387,13 +389,17 @@ class SupplierDebtService:
                 )
                 .order_by(Transaction.date.desc())
             )
+            # KPIs (paid/commission_total) sum over ALL payments; only the newest
+            # _PAYMENTS_DISPLAY_LIMIT rows go into the response list so the card payload
+            # stays bounded regardless of how many payments the supplier accumulated.
             for t in pay_res.scalars().all():
                 if t.id in commission_ids:
                     continue  # комиссия не отдельный платёж
                 comm = comm_by_amount.pop(_payment_key_amount(t), _ZERO)
-                payments.append(self._txn_item(t, comm))
-            paid = sum((p["expense"] for p in payments), _ZERO)
-            commission_total = sum((p["commission"] for p in payments), _ZERO)
+                paid += t.expense or _ZERO
+                commission_total += comm
+                if len(payments) < _PAYMENTS_DISPLAY_LIMIT:
+                    payments.append(self._txn_item(t, comm))
 
         # Идентификаторы этого поставщика (контракты/счета) — блок настроек.
         identifiers: list[dict] = []

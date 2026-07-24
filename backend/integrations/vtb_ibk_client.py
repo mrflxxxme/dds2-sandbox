@@ -250,6 +250,7 @@ def curl_post_argv(*, url: str, body_path: str, thumbprint: str) -> list[str]:
         "--cert", thumbprint,
         "-H", "Content-Type: text/xml",
         "-d", f"@{body_path}",
+        "-w", "\n%{http_code}",
         url,
     ]
 
@@ -306,7 +307,13 @@ def post(*, url: str, body: str, thumbprint: str, timeout: int = _HTTP_TIMEOUT) 
                 f"cprocsp-curl POST не удался (rc={proc.returncode}): "
                 f"{proc.stderr.decode('utf-8', 'replace')[:400]}"
             )
-    return _decode_response(proc.stdout)
+    # curl без --fail возвращает rc=0 и на HTTP 4xx/5xx: -w дописывает код в конец —
+    # отделяем и валидируем, иначе тело ошибки банка примется за валидный SOAP-ответ.
+    out = _decode_response(proc.stdout)
+    body_text, _, code = out.rpartition("\n")
+    if not code.strip().isdigit() or not (200 <= int(code.strip()) < 300):
+        raise RuntimeError(f"ИБК HTTP {code.strip() or '???'} от {url}: {body_text[:400]}")
+    return body_text
 
 
 def _decode_response(data: bytes) -> str:
