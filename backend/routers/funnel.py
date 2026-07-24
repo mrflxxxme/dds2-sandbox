@@ -859,6 +859,10 @@ class ProblemDigestSettingsRequest(BaseModel):
     no_ads_stock_days: int | None = Field(None, ge=1, le=3650)
     wb_low_days: int | None = Field(None, ge=1, le=365)
     top_n: int | None = Field(None, ge=5, le=200)
+    # Google-таблицы сводки (id расшаренных на сервисный аккаунт таблиц)
+    sheet_id: str | None = Field(None, max_length=200)
+    sheet_id_weekly: str | None = Field(None, max_length=200)
+    share_emails: list[str] | None = None
 
 
 @router.post("/problem-digest/settings", dependencies=[Depends(rate_limit_write)])
@@ -919,23 +923,32 @@ async def send_problem_digest_now(
     db: AsyncSession = Depends(get_db),
 ):
     """Прислать сводку в настроенные чаты прямо сейчас (тест, не дожидаясь 09:30)."""
-    from backend.integrations.telegram_bot import bot
+    from backend.integrations import telegram_bot
     from backend.scheduler.jobs.problem_digest import _send_to_chat
-    from backend.services.funnel.problem_digest import get_digest_settings
+    from backend.services.funnel.problem_digest import attach_sheet_link, get_digest_settings
 
+    # В API-контейнере глобальный бот не инициализирован (create_bot — только
+    # worker) — поднимаем разовый Bot на время запроса.
+    bot = telegram_bot.bot
+    ephemeral = None
     if not bot:
-        raise HTTPException(503, "Telegram-бот не инициализирован (нет токена)")
+        ephemeral = telegram_bot.make_bot()
+        bot = ephemeral
+    if not bot:
+        raise HTTPException(503, "Telegram-бот не настроен (нет TELEGRAM_BOT_TOKEN_ANALYTICS)")
     cfg = await get_digest_settings(db, project.id)
     if not cfg["chat_ids"]:
         raise HTTPException(400, "В настройке сводки нет chat_ids — добавьте чат")
-    payload = await _build_problem_digest(db, project, kind)
-    from backend.services.funnel.problem_digest import attach_sheet_link
-
-    await attach_sheet_link(db, project.id, cfg, payload)
-    sent = 0
-    for chat_id in cfg["chat_ids"]:
-        await _send_to_chat(bot, chat_id, payload)
-        sent += 1
+    try:
+        payload = await _build_problem_digest(db, project, kind)
+        await attach_sheet_link(db, project.id, cfg, payload)
+        sent = 0
+        for chat_id in cfg["chat_ids"]:
+            await _send_to_chat(bot, chat_id, payload)
+            sent += 1
+    finally:
+        if ephemeral:
+            await ephemeral.session.close()
     return {"ok": True, "sent": sent}
 
 

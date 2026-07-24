@@ -32,18 +32,30 @@ dp: Dispatcher | None = None
 router = Router()
 
 
-def create_bot() -> tuple[Bot, Dispatcher]:
-    """Create and configure bot + dispatcher. Called once at worker startup."""
-    global bot, dp
-
+def make_bot() -> Bot | None:
+    """Отдельный Bot-инстанс (без диспетчера/поллинга) — для разовой отправки
+    из API-процесса, где глобальный `bot` не инициализирован (create_bot
+    зовётся только в worker). None, если токен не настроен. Вызвавший обязан
+    закрыть сессию: `await b.session.close()`.
+    """
+    if not settings.TELEGRAM_BOT_TOKEN_ANALYTICS:
+        return None
     session = None
     if settings.TELEGRAM_PROXY:
         from aiogram.client.session.aiohttp import AiohttpSession
 
         session = AiohttpSession(proxy=settings.TELEGRAM_PROXY)
         logger.info("Telegram bot using proxy: %s", settings.TELEGRAM_PROXY.split("@")[-1])
+    return Bot(token=settings.TELEGRAM_BOT_TOKEN_ANALYTICS, session=session)
 
-    bot = Bot(token=settings.TELEGRAM_BOT_TOKEN_ANALYTICS, session=session)
+
+def create_bot() -> tuple[Bot, Dispatcher]:
+    """Create and configure bot + dispatcher. Called once at worker startup."""
+    global bot, dp
+
+    new_bot = make_bot()
+    assert new_bot is not None, "TELEGRAM_BOT_TOKEN_ANALYTICS is required for create_bot()"
+    bot = new_bot
     dp = Dispatcher()
     dp.include_router(router)
     return bot, dp
