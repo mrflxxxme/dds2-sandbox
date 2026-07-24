@@ -380,8 +380,9 @@ async def build_daily_digest(db: AsyncSession, project: Project, cfg: dict[str, 
     }
     revenue = digest["revenue_cmp"]  # выручка за вчера — свежий день
     revenue_label = f"за {yday.strftime('%d.%m')}"
+    sheet = _cfg_sheet_url(cfg, "sheet_id")
     return {
-        "text": build_tg_text(title, revenue=revenue, revenue_label=revenue_label),
+        "text": build_tg_text(title, sheet_url=sheet, revenue=revenue, revenue_label=revenue_label),
         "title": title,
         "kind": "daily",
         "revenue": revenue,
@@ -416,8 +417,9 @@ async def build_weekly_digest(db: AsyncSession, project: Project, cfg: dict[str,
     }
     revenue = digest["revenue_main"]  # выручка за отчётную неделю
     revenue_label = f"за неделю {_fmt_period(last_monday, last_sunday)}"
+    sheet = _cfg_sheet_url(cfg, "sheet_id_weekly")
     return {
-        "text": build_tg_text(title, revenue=revenue, revenue_label=revenue_label),
+        "text": build_tg_text(title, sheet_url=sheet, revenue=revenue, revenue_label=revenue_label),
         "title": title,
         "kind": "weekly",
         "revenue": revenue,
@@ -456,17 +458,23 @@ async def pop_asap_request(db: AsyncSession, project_id: int) -> str | None:
     return kind if kind in ("daily", "weekly") else None
 
 
-async def attach_sheet_link(db: AsyncSession, project_id: int, cfg: dict[str, Any], payload: dict[str, Any]) -> None:
-    """Обновить Google-таблицу сводки и вписать ссылку в текст сообщения.
+def _cfg_sheet_url(cfg: dict[str, Any], key: str) -> str | None:
+    """Постоянная ссылка на настроенную Google-таблицу (кладём в текст всегда,
+    даже если заливка недоступна — сама таблица живёт по стабильному URL)."""
+    from backend.services.funnel.problem_digest_gsheet import sheet_url
 
-    Без ключа сервисного аккаунта / при ошибке Google текст остаётся прежним.
+    sid = str(cfg.get(key) or "")
+    return sheet_url(sid) if sid else None
+
+
+async def attach_sheet_link(db: AsyncSession, project_id: int, cfg: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Залить свежий xlsx в Google-таблицу сводки (best-effort).
+
+    Ссылка на таблицу уже в тексте (build_*_digest); здесь только обновляем
+    содержимое — без ключа сервисного аккаунта / при ошибке Google тихо скипаем.
     """
     from backend.services.funnel.problem_digest_gsheet import update_digest_sheet
 
     url = await update_digest_sheet(db, project_id, cfg, payload["kind"], payload["xlsx"])
     if url:
         payload["sheet_url"] = url
-        payload["text"] = build_tg_text(
-            payload["title"], sheet_url=url,
-            revenue=payload.get("revenue"), revenue_label=payload.get("revenue_label"),
-        )
