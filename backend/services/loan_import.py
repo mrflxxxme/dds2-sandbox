@@ -237,8 +237,12 @@ async def import_loans_from_xlsx(
                 continue
             maturity = _to_date(col(row, "to"))
             rate = _to_decimal(col(row, "rate"))
-            status_raw = col(row, "status")
-            status = "ACTIVE" if (status_raw and "активен" == str(status_raw).strip().lower()) else "CLOSED"
+            # Колонка «Статус» в реестре — формула =IF(AND(TODAY()>=От; TODAY()<=До);
+            # «Активен»; «Не активен»), т.е. «срок идёт», а НЕ «вернули». Брать её за
+            # статус займа нельзя: просроченный невозвращённый займ приезжал CLOSED и
+            # выпадал из остатка долга. Источник истины по закрытию — строка «Возврат»:
+            # создаём живым, второй проход закроет те, по которым возврат есть.
+            status = "ACTIVE"
             ent, bank = entity_map.get(key_name, (None, None))
 
             existing = loans_by_key.get((cp.id, contract, start.isoformat()))

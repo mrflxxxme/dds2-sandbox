@@ -261,6 +261,36 @@ async def test_import_rollover_same_contract_closes_old_tranche(db_session, clie
     assert payment.loan_id == old.id, "возврат повешен на новый транш вместо погашаемого старого"
 
 
+def _build_overdue_xlsx() -> bytes:
+    """Срок вышел, строки «Возврат» нет. Колонка «Статус» — формула по датам, ей верить нельзя."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Расчет процентов"
+    ws.append(["Дата", "Тип", "Сумма", "Контрагент", "Номер договора", "Ставка", "От", "До", "Статус"])
+    # формула =IF(AND(TODAY()>=От; TODAY()<=До)…) на просроченном займе даёт «Не активен»
+    ws.append([date(2025, 1, 1), "Приход", 3000000, "Петров", "200", 0.28, date(2025, 1, 1), date(2025, 7, 1), "Не активен"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_import_overdue_without_return_stays_active(db_session, client, auth_headers):
+    """Просроченный займ без возврата остаётся ACTIVE — иначе долг исчезает из остатка."""
+    from sqlalchemy import select
+
+    from backend.models.loan import Loan
+
+    project_id = await _create_project(client, auth_headers)
+    res = await import_loans_from_xlsx(db_session, project_id=project_id, content=_build_overdue_xlsx())
+    assert res.created_loans == 1
+    assert res.created_payments == 0
+
+    loan = (await db_session.execute(select(Loan).where(Loan.project_id == project_id))).scalars().one()
+    assert loan.status == "ACTIVE", "займ без строки «Возврат» не должен закрываться по формуле «Статус»"
+    assert loan.maturity_date == date(2025, 7, 1)
+
+
 # ─── Lender portal scoping ────────────────────────────────────────────────────
 
 
