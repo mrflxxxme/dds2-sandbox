@@ -428,6 +428,34 @@ async def build_weekly_digest(db: AsyncSession, project: Project, cfg: dict[str,
     }
 
 
+# ─── «Прислать сейчас» через worker ─────────────────────────────────────────
+# Из API-контейнера прода api.telegram.org недоступен (РКН; прокси-путь живёт
+# в worker) — send-now ставит маркер, worker-тик подхватывает его в течение минуты.
+
+ASAP_KEY = "ads_problem_digest_asap"
+
+
+async def request_asap_send(db: AsyncSession, project_id: int, kind: str) -> None:
+    from backend.services.settings_service import set_setting
+
+    await set_setting(db, project_id, ASAP_KEY, json.dumps({"kind": kind}))
+
+
+async def pop_asap_request(db: AsyncSession, project_id: int) -> str | None:
+    """Прочитать и снять маркер «прислать сейчас». Возвращает kind или None."""
+    from backend.services.settings_service import get_setting, set_setting
+
+    raw = await get_setting(db, project_id, ASAP_KEY)
+    if not raw:
+        return None
+    try:
+        kind = json.loads(raw).get("kind")
+    except (TypeError, ValueError, AttributeError):
+        kind = None
+    await set_setting(db, project_id, ASAP_KEY, "")
+    return kind if kind in ("daily", "weekly") else None
+
+
 async def attach_sheet_link(db: AsyncSession, project_id: int, cfg: dict[str, Any], payload: dict[str, Any]) -> None:
     """Обновить Google-таблицу сводки и вписать ссылку в текст сообщения.
 

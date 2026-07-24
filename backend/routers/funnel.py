@@ -923,7 +923,7 @@ async def send_problem_digest_now(
     db: AsyncSession = Depends(get_db),
 ):
     """Прислать сводку в настроенные чаты прямо сейчас (тест, не дожидаясь 09:30)."""
-    from aiogram.exceptions import TelegramAPIError
+    from aiogram.exceptions import TelegramAPIError, TelegramNetworkError
 
     from backend.integrations import telegram_bot
     from backend.scheduler.jobs.problem_digest import _send_to_chat
@@ -949,9 +949,15 @@ async def send_problem_digest_now(
             for chat_id in cfg["chat_ids"]:
                 await _send_to_chat(bot, chat_id, payload)
                 sent += 1
+        except TelegramNetworkError:
+            # Из API-контейнера прода api.telegram.org недоступен (РКН; прокси-путь
+            # живёт в worker) — ставим маркер, worker-тик отправит в течение минуты.
+            from backend.services.funnel.problem_digest import request_asap_send
+
+            await request_asap_send(db, project.id, kind)
+            return {"ok": True, "queued": True, "note": "Telegram недоступен из API — отправит worker в течение 1-2 минут"}
         except TelegramAPIError as exc:
-            # Сеть/доступ к api.telegram.org из API-контейнера, невалидный chat_id и т.п. —
-            # отдаём причину, а не безликий 500 (штатная рассылка идёт из worker в 09:30).
+            # Невалидный chat_id, бот не в чате и т.п. — отдаём причину, а не безликий 500
             raise HTTPException(502, f"Telegram не принял сообщение: {type(exc).__name__}: {exc}") from exc
     finally:
         if ephemeral:

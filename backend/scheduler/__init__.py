@@ -65,7 +65,7 @@ from backend.scheduler.jobs.wb_reviews_sync import sync_all_projects_wb_feedback
 from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
 from backend.scheduler.jobs.wb_prices_sync import sync_all_projects_wb_prices
 from backend.scheduler.jobs.measurements_digest import send_measurement_digests
-from backend.scheduler.jobs.problem_digest import send_problem_digests
+from backend.scheduler.jobs.problem_digest import problem_digest_asap_tick, send_problem_digests
 from backend.scheduler.jobs.wb_measurements import sync_all_projects_wb_measurements
 from backend.scheduler.jobs.wb_stocks import sync_all_projects_wb_remains, sync_all_projects_wb_stocks
 from backend.scheduler.jobs.wb_supply_states import sync_all_projects_wb_supply_states
@@ -490,6 +490,18 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=3600,
+    )
+
+    # «Прислать сводку сейчас»: раз в минуту исполняем маркеры от send-now
+    # (API-контейнер не достаёт до Telegram — шлём отсюда). Почти всегда no-op.
+    _scheduler.add_job(
+        problem_digest_asap_tick,
+        trigger=IntervalTrigger(seconds=60),
+        id="problem_digest_asap",
+        name="Ads problem digest asap sender (every 1min)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=60,
     )
 
     # WB prices snapshot (цены витрины): 2×/день — 09:30 и 21:30 MSK.
