@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_project_reports
 from backend.config import settings
-from backend.models.counterparty import Counterparty, CounterpartyDocument
+from backend.models.counterparty import Counterparty, CounterpartyDocument, CounterpartyIdentifier
 from backend.models.loan import Loan
 from backend.models.refs import CounterpartyCategory
 from backend.models.transactions import CategoryChangeLog, Transaction
@@ -34,7 +34,7 @@ from backend.schemas.counterparty import (
     CounterpartyTransactionItem,
     CounterpartyUpdate,
 )
-from backend.storage import get_minio
+from backend.storage import download_file, get_minio
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -841,6 +841,102 @@ class CounterpartyService:
         await invalidate_project_reports(project_id)
         return True
 
+    # ─── identifiers (statement-matching keys) ──────────────────────────
+
+    async def _ensure_cp(self, counterparty_id: int, project_id: int) -> Counterparty:
+        res = await self.db.execute(
+            select(Counterparty).where(
+                Counterparty.id == counterparty_id,
+                Counterparty.project_id == project_id,
+                Counterparty.is_deleted == False,  # noqa: E712
+            )
+        )
+        cp = res.scalar_one_or_none()
+        if cp is None:
+            raise HTTPException(status_code=404, detail="Counterparty not found")
+        return cp
+
+    async def list_identifiers(
+        self, counterparty_id: int, *, project_id: int
+    ) -> builtins.list[CounterpartyIdentifier]:
+        await self._ensure_cp(counterparty_id, project_id)
+        res = await self.db.execute(
+            select(CounterpartyIdentifier)
+            .where(
+                CounterpartyIdentifier.counterparty_id == counterparty_id,
+                CounterpartyIdentifier.project_id == project_id,
+                CounterpartyIdentifier.is_deleted == False,  # noqa: E712
+            )
+            .order_by(CounterpartyIdentifier.kind, CounterpartyIdentifier.value)
+        )
+        return builtins.list(res.scalars().all())
+
+    async def add_identifier(
+        self,
+        counterparty_id: int,
+        *,
+        project_id: int,
+        kind: str,
+        value: str,
+        currency: str | None = None,
+        note: str | None = None,
+    ) -> CounterpartyIdentifier:
+        """Register a statement-matching identifier; restore a soft-deleted dup.
+
+        (project_id, kind, value) is partial-unique WHERE not deleted, so a
+        re-create of a previously removed identifier must RESTORE that row, not
+        INSERT — else IntegrityError on the unique index (SoftDelete+unique mine).
+        """
+        await self._ensure_cp(counterparty_id, project_id)
+        value = value.strip()
+
+        # Find ANY existing row (incl. soft-deleted) for this (project, kind, value).
+        res = await self.db.execute(
+            select(CounterpartyIdentifier).where(
+                CounterpartyIdentifier.project_id == project_id,
+                CounterpartyIdentifier.kind == kind,
+                CounterpartyIdentifier.value == value,
+            )
+        )
+        existing = res.scalar_one_or_none()
+        if existing is not None:
+            existing.restore()
+            existing.counterparty_id = counterparty_id
+            existing.currency = currency
+            existing.note = note
+            ident = existing
+        else:
+            ident = CounterpartyIdentifier(
+                project_id=project_id,
+                counterparty_id=counterparty_id,
+                kind=kind,
+                value=value,
+                currency=currency,
+                note=note,
+            )
+            self.db.add(ident)
+        await self.db.commit()
+        await self.db.refresh(ident)
+        await invalidate_project_reports(project_id)
+        return ident
+
+    async def delete_identifier(self, counterparty_id: int, identifier_id: int, *, project_id: int) -> bool:
+        res = await self.db.execute(
+            select(CounterpartyIdentifier).where(
+                CounterpartyIdentifier.id == identifier_id,
+                CounterpartyIdentifier.counterparty_id == counterparty_id,
+                CounterpartyIdentifier.project_id == project_id,
+                CounterpartyIdentifier.is_deleted == False,  # noqa: E712
+            )
+        )
+        ident = res.scalar_one_or_none()
+        if ident is None:
+            return False
+        ident.soft_delete()
+        await self.db.commit()
+        await invalidate_project_reports(project_id)
+        return True
+
     # ─── merge ──────────────────────────────────────────────────────────
 
     async def _load_cp(self, counterparty_id: int, project_id: int) -> Counterparty:
@@ -1106,6 +1202,35 @@ class CounterpartyService:
             .limit(500)
         )
         return list(res.scalars().all())
+
+    async def download_document(
+        self,
+        *,
+        doc_id: int,
+        counterparty_id: int,
+        project_id: int,
+    ) -> tuple[bytes, str, str]:
+        """Return (bytes, filename, content_type) for a document. Project-scoped.
+
+        Streams through the backend (no presigned URL) so access stays strictly
+        project-scoped. Raises 404 if missing, 503 if MinIO is down.
+        """
+        res = await self.db.execute(
+            select(CounterpartyDocument).where(
+                CounterpartyDocument.id == doc_id,
+                CounterpartyDocument.counterparty_id == counterparty_id,
+                CounterpartyDocument.project_id == project_id,
+                CounterpartyDocument.is_deleted == False,  # noqa: E712
+            )
+        )
+        doc = res.scalar_one_or_none()
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        data = await download_file(doc.minio_path)
+        if data is None:
+            raise HTTPException(status_code=503, detail="Файл недоступен (MinIO)")
+        return data, doc.original_filename or "document", doc.mime_type or "application/octet-stream"
 
     async def delete_document(
         self,

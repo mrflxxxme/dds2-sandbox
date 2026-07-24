@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 ALLOWED_DIRECTIONS = ["INCOMING", "OUTGOING", "AFFILIATED"]
 ALLOWED_STATUSES = ["ACTIVE", "CLOSED", "DEFAULTED"]
 ALLOWED_PAYMENT_TYPES = ["DISBURSEMENT", "PRINCIPAL_REPAY", "INTEREST_PAY", "PENALTY"]
+ALLOWED_ENTITY_TYPES = ["PHYSICAL", "IP"]
 
 # ─── Loan ─────────────────────────────────────────────────────────────────────
 
@@ -27,6 +28,9 @@ class LoanBase(BaseModel):
     start_date: date
     maturity_date: date | None = None
     status: str = Field(default="ACTIVE")
+    entity_type: str | None = Field(default=None)  # PHYSICAL / IP
+    lender_bank: str | None = Field(default=None, max_length=50)
+    parent_loan_id: int | None = None
     notes: str | None = None
 
     @field_validator("direction")
@@ -34,6 +38,13 @@ class LoanBase(BaseModel):
     def validate_direction(cls, v: str) -> str:
         if v not in ALLOWED_DIRECTIONS:
             raise ValueError(f"direction must be one of: {ALLOWED_DIRECTIONS}")
+        return v
+
+    @field_validator("entity_type")
+    @classmethod
+    def validate_entity_type(cls, v: str | None) -> str | None:
+        if v is not None and v not in ALLOWED_ENTITY_TYPES:
+            raise ValueError(f"entity_type must be one of: {ALLOWED_ENTITY_TYPES}")
         return v
 
     @field_validator("status")
@@ -65,6 +76,8 @@ class LoanUpdate(BaseModel):
     start_date: date | None = None
     maturity_date: date | None = None
     status: str | None = None
+    entity_type: str | None = None
+    lender_bank: str | None = Field(None, max_length=50)
     notes: str | None = None
 
     @field_validator("direction")
@@ -72,6 +85,13 @@ class LoanUpdate(BaseModel):
     def validate_direction(cls, v: str | None) -> str | None:
         if v is not None and v not in ALLOWED_DIRECTIONS:
             raise ValueError(f"direction must be one of: {ALLOWED_DIRECTIONS}")
+        return v
+
+    @field_validator("entity_type")
+    @classmethod
+    def validate_entity_type(cls, v: str | None) -> str | None:
+        if v is not None and v not in ALLOWED_ENTITY_TYPES:
+            raise ValueError(f"entity_type must be one of: {ALLOWED_ENTITY_TYPES}")
         return v
 
     @field_validator("status")
@@ -102,11 +122,21 @@ class LoanShort(BaseModel):
 
 
 class LoanResponse(LoanBase):
-    """Full loan response."""
+    """Full loan response (with optional computed/enrichment fields for the registry)."""
 
     id: int
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    # Enrichment (populated by the service for list/detail views; None elsewhere)
+    counterparty_name: str | None = None
+    counterparty_inn: str | None = None
+    remaining_principal: Decimal | None = None  # тело за вычетом возвратов
+    accrued_interest: Decimal | None = None  # начислено с последней выплаты %
+    monthly_interest: Decimal | None = None  # ставка/12 от остатка (run-rate)
+    days_to_maturity: int | None = None  # до возврата (может быть отрицательным = просрочка)
+    next_interest_date: date | None = None  # ближайшая дата выплаты %
+    has_extension: bool = False  # есть ли продление (этот займ — предшественник)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -215,6 +245,7 @@ class LoanFilter(BaseModel):
     direction: str | None = None
     status: str | None = None
     counterparty_id: int | None = None
+    entity_type: str | None = None
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
 
@@ -231,3 +262,170 @@ class LoanFilter(BaseModel):
         if v is not None and v not in ALLOWED_STATUSES:
             raise ValueError(f"status must be one of: {ALLOWED_STATUSES}")
         return v
+
+
+# ─── Extend (продление) ──────────────────────────────────────────────────────
+
+
+class LoanExtend(BaseModel):
+    """Продление займа: закрыть текущий и создать преемника с новой ставкой/сроком."""
+
+    new_rate: Decimal | None = Field(None, ge=0, le=1)  # None = та же ставка
+    new_start_date: date | None = None  # дата продления (по умолч. maturity старого / сегодня)
+    new_maturity_date: date | None = None  # новый срок возврата
+    new_contract_number: str | None = Field(None, max_length=100)  # None = авто-суффикс «-NN»
+    principal: Decimal | None = Field(None, gt=0)  # None = остаток тела старого
+    record_repayment: bool = True  # отметить возврат тела на старом (закрытие)
+    entity_type: str | None = None
+    lender_bank: str | None = Field(None, max_length=50)
+    notes: str | None = None
+
+    @field_validator("entity_type")
+    @classmethod
+    def validate_entity_type(cls, v: str | None) -> str | None:
+        if v is not None and v not in ALLOWED_ENTITY_TYPES:
+            raise ValueError(f"entity_type must be one of: {ALLOWED_ENTITY_TYPES}")
+        return v
+
+
+# ─── Dashboard ───────────────────────────────────────────────────────────────
+
+
+class LoanKpis(BaseModel):
+    active_count: int = 0
+    total_outstanding: Decimal = Decimal("0")  # активное тело (INCOMING)
+    weighted_avg_rate: Decimal | None = None
+    accrued_interest: Decimal = Decimal("0")  # начисленные неоплаченные %
+    monthly_interest: Decimal = Decimal("0")  # run-rate %/мес по активным
+    interest_paid_total: Decimal = Decimal("0")
+    lenders_count: int = 0
+    next_maturity_date: date | None = None
+    next_maturity_amount: Decimal = Decimal("0")
+
+
+class LoanEntitySplit(BaseModel):
+    entity_type: str | None = None  # PHYSICAL / IP / None
+    count: int = 0
+    outstanding: Decimal = Decimal("0")
+
+
+class LoanRateBucket(BaseModel):
+    rate: Decimal
+    count: int = 0
+    outstanding: Decimal = Decimal("0")
+
+
+class LoanMonthlyPoint(BaseModel):
+    month: str  # YYYY-MM
+    disbursed: Decimal = Decimal("0")  # выдано тело
+    repaid: Decimal = Decimal("0")  # возвращено тело
+    outstanding: Decimal = Decimal("0")  # остаток тела на конец месяца
+    interest: Decimal = Decimal("0")  # начислено % за месяц
+
+
+class LoanTopLender(BaseModel):
+    counterparty_id: int
+    name: str
+    outstanding: Decimal = Decimal("0")
+    accrued_interest: Decimal = Decimal("0")
+    weighted_avg_rate: Decimal | None = None
+
+
+class LoanDashboard(BaseModel):
+    kpis: LoanKpis = Field(default_factory=LoanKpis)
+    by_entity: list[LoanEntitySplit] = Field(default_factory=list)
+    by_rate: list[LoanRateBucket] = Field(default_factory=list)
+    monthly: list[LoanMonthlyPoint] = Field(default_factory=list)
+    top_lenders: list[LoanTopLender] = Field(default_factory=list)
+
+
+# ─── By-lender rollup (Заёмщики) ─────────────────────────────────────────────
+
+
+class LoanLenderRollup(BaseModel):
+    counterparty_id: int
+    name: str
+    inn: str | None = None
+    entity_type: str | None = None  # преобладающий по активным
+    lender_bank: str | None = None
+    active_count: int = 0
+    total_count: int = 0
+    outstanding: Decimal = Decimal("0")
+    weighted_avg_rate: Decimal | None = None
+    accrued_interest: Decimal = Decimal("0")
+    interest_paid: Decimal = Decimal("0")
+    monthly_interest: Decimal = Decimal("0")
+    next_interest_date: date | None = None
+    next_maturity_date: date | None = None
+    first_loan_date: date | None = None
+    last_loan_date: date | None = None
+    has_portal_access: bool = False
+
+
+class LoanByLenderResponse(BaseModel):
+    items: list[LoanLenderRollup] = Field(default_factory=list)
+    total_outstanding: Decimal = Decimal("0")
+    total_accrued: Decimal = Decimal("0")
+
+
+# ─── Forecast (Прогноз) ──────────────────────────────────────────────────────
+
+
+class LoanForecastEvent(BaseModel):
+    date: date
+    loan_id: int
+    counterparty_id: int
+    counterparty_name: str
+    contract_number: str
+    kind: str  # 'INTEREST' | 'MATURITY'
+    amount: Decimal = Decimal("0")
+
+
+class LoanForecastMonth(BaseModel):
+    month: str  # YYYY-MM
+    interest: Decimal = Decimal("0")  # начисляемые % за месяц
+    principal_due: Decimal = Decimal("0")  # тело к возврату по срокам
+
+
+class LoanForecastResponse(BaseModel):
+    months: list[LoanForecastMonth] = Field(default_factory=list)
+    upcoming: list[LoanForecastEvent] = Field(default_factory=list)
+
+
+# ─── Lender portal access (выдача доступа заёмщику) ───────────────────────────
+
+
+class LenderAccessCreate(BaseModel):
+    counterparty_id: int
+    username: str | None = Field(None, max_length=100)  # авто из имени если не задан
+    password: str | None = Field(None, min_length=6, max_length=100)  # авто-генерация если не задан
+
+
+class LenderAccessInfo(BaseModel):
+    counterparty_id: int
+    counterparty_name: str
+    user_id: int | None = None
+    username: str | None = None
+    is_active: bool = False
+    created_at: datetime | None = None
+
+
+class LenderAccessCreated(LenderAccessInfo):
+    password: str | None = None  # plaintext — показывается ОДИН раз при создании/сбросе
+
+
+class LenderAccessListResponse(BaseModel):
+    items: list[LenderAccessInfo] = Field(default_factory=list)
+
+
+# ─── Excel import ────────────────────────────────────────────────────────────
+
+
+class LoanImportResult(BaseModel):
+    created_loans: int = 0
+    updated_loans: int = 0
+    created_counterparties: int = 0
+    created_payments: int = 0
+    skipped_rows: int = 0
+    lenders: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)

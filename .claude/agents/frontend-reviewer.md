@@ -1,6 +1,6 @@
 ---
 name: frontend-reviewer
-description: "Ревью фронта DDS2 (Next.js 15 / React 19): типы, состояния страниц, форматирование, API-клиент. Используй при изменениях в frontend-react/**."
+description: "Ревью фронта DDS2 (Next.js 15 / React 19): типы, состояния страниц, форматирование, API-клиент. Используй ПРОАКТИВНО после любых изменений в frontend-react/**, до коммита."
 tools: ["Read", "Grep", "Glob", "Bash"]
 model: opus
 ---

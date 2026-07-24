@@ -3657,3 +3657,34 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
     margin-top: 24px;
     line-height: 1.6;
 }
+
+/* Supplier card → Finance (заказы/оплаты/долг) */
+.sc-fin-h3 { font-size: 15px; font-weight: 600; margin: 0 0 12px; color: var(--color-text); }
+.sc-fin-h-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.sc-fin-h-row .sc-fin-h3 { margin: 0; }
+.sc-fin-check { width: 32px; text-align: center; }
+.sc-fin-row-sel { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+.sc-fin-bulkbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 12px; margin-bottom: 12px; border-radius: 12px; background: color-mix(in srgb, var(--color-accent) 8%, transparent); border: 1px solid var(--color-border); }
+.sc-fin-bulk-count { font-weight: 600; font-size: 13px; color: var(--color-text); }
+.sc-fin-row-click { cursor: pointer; transition: background 0.15s; }
+.sc-fin-row-click:hover { background: color-mix(in srgb, var(--color-accent) 7%, transparent); }
+.sc-fin-open { color: var(--color-accent); font-weight: 700; }
+.sc-fin-due-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.sc-fin-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.sc-fin-table th { text-align: left; padding: 6px 10px; color: var(--color-muted); font-weight: 500; border-bottom: 1px solid var(--color-border); }
+.sc-fin-table td { padding: 6px 10px; border-bottom: 1px solid var(--color-border); color: var(--color-text); }
+.sc-fin-num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sc-fin-purpose { color: var(--color-muted); max-width: 480px; }
+.sc-debt-badge { margin-top: 12px; text-align: right; }
+.sc-fin-comm { color: var(--color-muted); }
+.sc-fin-total { font-weight: 600; }
+.sc-fin-comm-tag { color: var(--color-muted); font-weight: 400; font-size: 13px; }
+.sc-fin-action { text-align: right; white-space: nowrap; }
+.sc-fin-id-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
+.sc-fin-id-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: 24px; padding: 4px 12px; font-size: 13px; color: var(--color-text); }
+.sc-fin-id-del { background: none; border: none; color: var(--color-muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 0; }
+.sc-fin-id-del:hover { color: var(--color-danger); }
+.sc-fin-id-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sc-fin-id-select, .sc-fin-id-input { height: 34px; border: 1px solid var(--color-border); border-radius: 8px; padding: 0 10px; font-size: 13px; background: var(--color-bg-card); color: var(--color-text); }
+.sc-fin-id-input { min-width: 220px; }
+.sc-fin-contract { white-space: nowrap; }

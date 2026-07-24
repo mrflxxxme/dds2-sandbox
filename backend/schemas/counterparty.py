@@ -13,6 +13,7 @@ ALLOWED_CP_TYPES = [
     "SUPPLIER",
     "FULFILLMENT",
     "CARRIER",
+    "TRADING_HOUSE",
     "CUSTOMS_BROKER",
     "DESIGNER",
     "LEGAL",
@@ -26,6 +27,156 @@ ALLOWED_CP_TYPES = [
 ]
 
 ALLOWED_DOC_TYPES = ["CONTRACT", "CERTIFICATE", "INVOICE", "OTHER"]
+ALLOWED_IDENTIFIER_KINDS = ["CONTRACT", "ACCOUNT", "INN"]
+
+
+# ─── Counterparty identifiers (statement-matching keys) ──────────────────────
+
+
+class CounterpartyIdentifierCreate(BaseModel):
+    kind: str = Field(..., description="CONTRACT | ACCOUNT | INN")
+    value: str = Field(..., min_length=1, max_length=100)
+    currency: str | None = Field(None, max_length=3)
+    note: str | None = Field(None, max_length=500)
+
+    @field_validator("kind")
+    @classmethod
+    def _validate_kind(cls, v: str) -> str:
+        if v not in ALLOWED_IDENTIFIER_KINDS:
+            raise ValueError(f"kind must be one of {ALLOWED_IDENTIFIER_KINDS}")
+        return v
+
+    @field_validator("value")
+    @classmethod
+    def _strip_value(cls, v: str) -> str:
+        return v.strip()
+
+
+class CounterpartyIdentifierItem(BaseModel):
+    id: int
+    kind: str
+    value: str
+    currency: str | None = None
+    note: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CounterpartyIdentifiersResponse(BaseModel):
+    items: list[CounterpartyIdentifierItem]
+
+
+# ─── Supplier debt (ordered vs paid) ─────────────────────────────────────────
+
+
+class SupplierDebtItem(BaseModel):
+    counterparty_id: int
+    name: str
+    primary_type: str
+    currency: str
+    ordered: Decimal
+    paid: Decimal
+    debt: Decimal
+    paid_by_currency: dict[str, Decimal]
+
+
+class SupplierDebtOverviewResponse(BaseModel):
+    items: list[SupplierDebtItem]
+    unassigned_ordered: Decimal
+
+
+class SupplierPaymentTxn(BaseModel):
+    id: int
+    date: datetime
+    expense: Decimal
+    commission: Decimal = Decimal("0")
+    total: Decimal = Decimal("0")
+    currency: str
+    purpose: str | None = None
+    contract_number: str | None = None
+    counterparty_name: str | None = None
+    machine_order_no: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SupplierIdentifierItem(BaseModel):
+    id: int
+    kind: str
+    value: str
+    currency: str | None = None
+
+
+class SupplierMachineItem(BaseModel):
+    order_no: str
+    status: str | None = None
+    invoice_no: str | None = None
+    ship_date: date | None = None
+    amount: Decimal
+    items_count: int
+    paid: Decimal = Decimal("0")
+    remaining: Decimal = Decimal("0")
+    remaining_due_date: date | None = None  # план: когда оплатят остаток (per поставщик)
+
+
+class MachinePlanRequest(BaseModel):
+    order_no: str = Field(..., min_length=1, max_length=50)
+    remaining_due_date: date | None = None  # null = снять дату
+
+
+class SupplierFinanceResponse(BaseModel):
+    supplier_id: int
+    supplier_name: str
+    currency: str
+    linked: bool
+    counterparty_id: int | None
+    ordered: Decimal
+    paid: Decimal
+    commission_total: Decimal = Decimal("0")
+    debt: Decimal
+    identifiers: list[SupplierIdentifierItem] = []
+    machines: list[SupplierMachineItem] = []
+    payments: list[SupplierPaymentTxn]
+    unlinked_candidates: list[SupplierPaymentTxn]
+
+
+class AutoDistributeResponse(BaseModel):
+    """Результат авто-распределения оплат по машинам + обновлённые финансы."""
+
+    assigned: int
+    finance: SupplierFinanceResponse
+
+
+class LinkPaymentRequest(BaseModel):
+    transaction_id: int
+
+
+class SupplierIdentifierCreate(BaseModel):
+    kind: str = Field(..., description="CONTRACT | ACCOUNT | INN")
+    value: str = Field(..., min_length=1, max_length=100)
+    currency: str | None = Field(None, max_length=3)
+
+    @field_validator("kind")
+    @classmethod
+    def _validate_kind(cls, v: str) -> str:
+        if v not in ALLOWED_IDENTIFIER_KINDS:
+            raise ValueError(f"kind must be one of {ALLOWED_IDENTIFIER_KINDS}")
+        return v
+
+    @field_validator("value")
+    @classmethod
+    def _strip_value(cls, v: str) -> str:
+        return v.strip()
+
+
+class AssignMachineRequest(BaseModel):
+    transaction_id: int
+    order_no: str | None = None  # None = снять привязку к машине
+
+
+class BulkAssignMachineRequest(BaseModel):
+    transaction_ids: list[int] = Field(..., min_length=1, max_length=200)
+    order_no: str | None = None  # None = снять привязку у всех выбранных
 
 # ─── Counterparty ─────────────────────────────────────────────────────────────
 
@@ -294,7 +445,11 @@ class CounterpartyDocumentCreate(BaseModel):
 
 
 class CounterpartyDocumentResponse(BaseModel):
-    """Document list/upload response (signed_url for download)."""
+    """Document list/upload response.
+
+    Downloads are streamed via GET /{cp}/documents/{doc}/download (project-scoped),
+    not a presigned URL — so no link field is exposed here.
+    """
 
     id: int
     counterparty_id: int
@@ -303,6 +458,5 @@ class CounterpartyDocumentResponse(BaseModel):
     file_size: int | None = None
     mime_type: str | None = None
     uploaded_at: datetime
-    signed_url: str | None = None  # set by service (TTL=300s)
 
     model_config = ConfigDict(from_attributes=True)

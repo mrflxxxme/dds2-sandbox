@@ -4907,9 +4907,21 @@ export interface Loan extends LoanShort {
   rate: number | null;
   contract_number: string;
   contract_date: string;
+  entity_type?: LoanEntityType | null;
+  lender_bank?: string | null;
+  parent_loan_id?: number | null;
   notes: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+  // computed enrichment (strings over the wire)
+  counterparty_name?: string | null;
+  counterparty_inn?: string | null;
+  remaining_principal?: number | null;
+  accrued_interest?: number | null;
+  monthly_interest?: number | null;
+  days_to_maturity?: number | null;
+  next_interest_date?: string | null;
+  has_extension?: boolean;
 }
 
 export interface LoanPayment {
@@ -4964,6 +4976,9 @@ export interface LoanCreate {
   start_date: string;
   maturity_date?: string | null;
   status?: LoanStatus;
+  entity_type?: LoanEntityType | null;
+  lender_bank?: string | null;
+  parent_loan_id?: number | null;
   notes?: string | null;
 }
 
@@ -4977,6 +4992,8 @@ export interface LoanUpdate {
   start_date?: string;
   maturity_date?: string | null;
   status?: LoanStatus;
+  entity_type?: LoanEntityType | null;
+  lender_bank?: string | null;
   notes?: string | null;
 }
 
@@ -7316,4 +7333,294 @@ export interface FfInvoicePaymentUnlinkPayload {
 
 export interface FfInvoiceCreatePaymentRequestResponse {
   payment_request_id: number;
+}
+
+/** Операционный дашборд: счётчики «Требуют внимания» (cross-domain action-center). */
+export interface DashboardOperations {
+  payments_pending: number;
+  fbo_orphans: number;
+  fbo_partial: number;
+  fbo_excess: number;
+  returns_pending: number;
+  returns_soon_expire: number;
+  sync_errors_24h: number;
+  ff_unlinked: number;
+  vehicles_in_transit: number;
+  vehicles_forming: number;
+  supply_items_in_transit: number;
+  supply_amount_cny: number;
+}
+
+/* ─── Loans: дашборд/аналитика/лендер-портал + финансы поставщиков (порт f6fcfd35) ─── */
+export type LoanEntityType = 'PHYSICAL' | 'IP';
+export interface LoanExtend {
+  new_rate?: number | null;
+  new_start_date?: string | null;
+  new_maturity_date?: string | null;
+  new_contract_number?: string | null;
+  principal?: number | null;
+  record_repayment?: boolean;
+  entity_type?: LoanEntityType | null;
+  lender_bank?: string | null;
+  notes?: string | null;
+}
+
+export interface LoanKpis {
+  active_count: number;
+  total_outstanding: number;
+  weighted_avg_rate: number | null;
+  accrued_interest: number;
+  monthly_interest: number;
+  interest_paid_total: number;
+  lenders_count: number;
+  next_maturity_date: string | null;
+  next_maturity_amount: number;
+}
+
+export interface LoanEntitySplit {
+  entity_type: LoanEntityType | null;
+  count: number;
+  outstanding: number;
+}
+
+export interface LoanRateBucket {
+  rate: number;
+  count: number;
+  outstanding: number;
+}
+
+export interface LoanTopLender {
+  counterparty_id: number;
+  name: string;
+  outstanding: number;
+  accrued_interest: number;
+  weighted_avg_rate: number | null;
+}
+
+export interface LoanMonthlyPoint {
+  month: string;
+  disbursed: number;
+  repaid: number;
+  outstanding: number;
+  interest: number;
+}
+
+export interface LoanDashboard {
+  kpis: LoanKpis;
+  by_entity: LoanEntitySplit[];
+  by_rate: LoanRateBucket[];
+  monthly: LoanMonthlyPoint[];
+  top_lenders: LoanTopLender[];
+}
+
+export interface LoanLenderRollup {
+  counterparty_id: number;
+  name: string;
+  inn: string | null;
+  entity_type: LoanEntityType | null;
+  lender_bank: string | null;
+  active_count: number;
+  total_count: number;
+  outstanding: number;
+  weighted_avg_rate: number | null;
+  accrued_interest: number;
+  interest_paid: number;
+  monthly_interest: number;
+  next_interest_date: string | null;
+  next_maturity_date: string | null;
+  first_loan_date: string | null;
+  last_loan_date: string | null;
+  has_portal_access: boolean;
+}
+
+export interface LoanByLenderResponse {
+  items: LoanLenderRollup[];
+  total_outstanding: number;
+  total_accrued: number;
+}
+
+export interface LoanForecastEvent {
+  date: string;
+  loan_id: number;
+  counterparty_id: number;
+  counterparty_name: string;
+  contract_number: string;
+  kind: 'INTEREST' | 'MATURITY';
+  amount: number;
+}
+
+export interface LoanForecastMonth {
+  month: string;
+  interest: number;
+  principal_due: number;
+}
+
+export interface LoanForecastResponse {
+  months: LoanForecastMonth[];
+  upcoming: LoanForecastEvent[];
+}
+
+export interface LoanImportResult {
+  created_loans: number;
+  updated_loans: number;
+  created_counterparties: number;
+  created_payments: number;
+  skipped_rows: number;
+  lenders: string[];
+  warnings: string[];
+}
+
+export interface LenderProjectInfo {
+  slug: string;
+  name: string;
+}
+
+export interface LenderMeResponse {
+  username: string;
+  display_name: string;
+  projects: LenderProjectInfo[];
+  totals: LenderTotals;
+}
+
+export interface LenderLoanRow {
+  id: number;
+  contract_number: string;
+  principal: number;
+  currency: string;
+  rate: number | null;
+  status: LoanStatus;
+  entity_type: LoanEntityType | null;
+  start_date: string;
+  maturity_date: string | null;
+  remaining_principal: number;
+  accrued_interest: number;
+  monthly_interest: number;
+  next_interest_date: string | null;
+  days_to_maturity: number | null;
+  is_overdue: boolean;
+}
+
+export interface LenderTotals {
+  active_count: number;
+  outstanding: number;
+  accrued_interest: number;
+  monthly_interest: number;
+  interest_paid: number;
+  next_interest_date: string | null;
+  next_maturity_date: string | null;
+}
+
+export interface LenderLoanListResponse {
+  items: LenderLoanRow[];
+  totals: LenderTotals;
+}
+
+export interface LenderPaymentRow {
+  payment_type: LoanPaymentType;
+  amount: number;
+  currency: string;
+  paid_at: string;
+}
+
+export interface LenderLoanDetail extends LenderLoanRow {
+  contract_date: string;
+  lender_bank: string | null;
+  notes: string | null;
+  interest_paid: number;
+  principal_repaid: number;
+  total_interest_projected: number;
+  payments: LenderPaymentRow[];
+  created_at?: string | null;
+}
+
+export interface LenderAccessCreate {
+  counterparty_id: number;
+  username?: string | null;
+  password?: string | null;
+}
+
+export interface LenderAccessInfo {
+  counterparty_id: number;
+  counterparty_name: string;
+  user_id: number | null;
+  username: string | null;
+  is_active: boolean;
+  created_at?: string | null;
+}
+
+export interface LenderAccessCreated extends LenderAccessInfo {
+  password: string | null;
+}
+
+export interface LenderAccessListResponse {
+  items: LenderAccessInfo[];
+}
+
+export interface SupplierDebtItem {
+  counterparty_id: number;
+  name: string;
+  primary_type: string;
+  currency: string;
+  ordered: number;
+  paid: number;
+  debt: number;
+  paid_by_currency: Record<string, number>;
+}
+
+export interface SupplierMachineItem {
+  order_no: string;
+  status?: string | null;
+  invoice_no?: string | null;
+  ship_date?: string | null;
+  amount: number;
+  items_count: number;
+  paid: number;
+  remaining: number;
+  remaining_due_date?: string | null;
+}
+
+export interface SupplierPaymentTxn {
+  id: number;
+  date: string;
+  expense: number;
+  commission: number;
+  total: number;
+  currency: string;
+  purpose?: string | null;
+  contract_number?: string | null;
+  counterparty_name?: string | null;
+  machine_order_no?: string | null;
+}
+
+export interface SupplierIdentifierItem {
+  id: number;
+  kind: 'CONTRACT' | 'ACCOUNT' | 'INN';
+  value: string;
+  currency?: string | null;
+}
+
+export interface SupplierFinance {
+  supplier_id: number;
+  supplier_name: string;
+  currency: string;
+  linked: boolean;
+  counterparty_id: number | null;
+  ordered: number;
+  paid: number;
+  commission_total: number;
+  debt: number;
+  identifiers: SupplierIdentifierItem[];
+  machines: SupplierMachineItem[];
+  payments: SupplierPaymentTxn[];
+  unlinked_candidates: SupplierPaymentTxn[];
+}
+
+export interface SupplierDebtOverview {
+  items: SupplierDebtItem[];
+  unassigned_ordered: number;
+}
+
+export interface AutoDistributeResult {
+  assigned: number;
+  finance: SupplierFinance;
 }

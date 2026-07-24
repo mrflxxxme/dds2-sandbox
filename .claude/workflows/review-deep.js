@@ -1,6 +1,6 @@
 // DDS2 — сохранённый Workflow «review»: фан-аут профильных ревьюеров по diff.
 // Запуск: Workflow({name:'review-deep'})  — для тяжёлого/ultracode-прогона.
-// Повседневный лёгкий аналог без Workflow-tool: команда /review (.claude/commands/review.md).
+// Повседневный лёгкий аналог без Workflow-tool: скилл /review (.claude/skills/review/SKILL.md).
 //
 // SOTA-приёмы здесь:
 //  • cache-warmup (1→N): code-reviewer прогревает общий префикс (CLAUDE.md+rules+diff),

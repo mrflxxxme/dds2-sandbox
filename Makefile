@@ -1,7 +1,7 @@
 # DDS — Makefile
 # Быстрые команды для повседневной разработки
 
-.PHONY: dev stop logs test lint deploy seed migrate backup restore status ssl-init
+.PHONY: dev stop logs test lint deploy seed migrate backup restore status ssl-init wt-reload wt-gates
 
 # ─── Разработка ──────────────────────────────────────────────────────────────
 
@@ -151,6 +151,12 @@ wt-finish: ## Слить worktree'ы обратно в dev (usage: make wt-finis
 
 wt-list: ## Показать активные worktree'ы
 	@git worktree list
+
+wt-reload: ## Пересобрать фронт-контейнер текущего дерева (wipe .next + restart + curl)
+	bash scripts/wt-dev.sh reload
+
+wt-gates: ## Фронт-гейты в one-off контейнере (usage: make wt-gates F="src/.../page.tsx ...")
+	bash scripts/wt-dev.sh gates $(F)
 
 # ─── Type sync (FastAPI → TypeScript) ────────────────────────────────────────
 

@@ -665,6 +665,25 @@ async def upsert_subcategory(db: AsyncSession, project_id: int, payload: dict):
             await db.refresh(sub)
             return sub
 
+    # uq по (project_id, name) НЕ учитывает is_deleted → soft-deleted строка держит
+    # слот. Повторное создание того же имени = restore (см. learnings: SoftDelete+uq).
+    existing = (
+        await db.execute(
+            select(ProductSubcategory).where(
+                ProductSubcategory.project_id == project_id,
+                ProductSubcategory.name == payload["name"],
+            )
+        )
+    ).scalar_one_or_none()
+    if existing:
+        existing.is_deleted = False
+        existing.deleted_at = None
+        if payload.get("color"):
+            existing.color = payload["color"]
+        await db.commit()
+        await db.refresh(existing)
+        return existing
+
     sub = ProductSubcategory(
         project_id=project_id,
         name=payload["name"],
