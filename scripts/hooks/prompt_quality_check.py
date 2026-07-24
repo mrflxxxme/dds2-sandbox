@@ -98,6 +98,10 @@ def main() -> int:
         )
 
     if hints:
+        hints.append(
+            "Подскажи юзеру (одной строкой в конце ответа) формулу промпта: "
+            "ЧТО · ГДЕ (URL/файл/ID) · КАК ПОЙМЁМ, ЧТО ГОТОВО — подробнее docs/PROMPT_GUIDE.md."
+        )
         print("[ТЗ-ГЕЙТ] " + " ".join(hints))
     return 0
 
