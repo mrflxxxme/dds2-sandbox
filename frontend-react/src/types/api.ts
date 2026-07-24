@@ -7317,3 +7317,19 @@ export interface FfInvoicePaymentUnlinkPayload {
 export interface FfInvoiceCreatePaymentRequestResponse {
   payment_request_id: number;
 }
+
+/** Операционный дашборд: счётчики «Требуют внимания» (cross-domain action-center). */
+export interface DashboardOperations {
+  payments_pending: number;
+  fbo_orphans: number;
+  fbo_partial: number;
+  fbo_excess: number;
+  returns_pending: number;
+  returns_soon_expire: number;
+  sync_errors_24h: number;
+  ff_unlinked: number;
+  vehicles_in_transit: number;
+  vehicles_forming: number;
+  supply_items_in_transit: number;
+  supply_amount_cny: number;
+}

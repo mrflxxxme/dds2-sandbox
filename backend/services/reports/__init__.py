@@ -17,6 +17,9 @@ from backend.services.reports.dds import (
 from backend.services.reports.dashboard import (
     get_dashboard_summary,
 )
+from backend.services.reports.dashboard_ops import (
+    get_dashboard_operations,
+)
 from backend.services.reports.queries import (
     get_fx_control,
     get_customs_control,
@@ -33,6 +36,7 @@ __all__ = [
     "get_dds_month",
     "get_dds_pnl",
     "get_dashboard_summary",
+    "get_dashboard_operations",
     "get_fx_control",
     "get_customs_control",
     "get_income_daily",

@@ -7,7 +7,7 @@ import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import type {
     DashboardSummary, BalanceAccount, DashboardFunnelSummary,
     DailyCashflowRow, ExpenseCategoryPie, ExpenseTypeGroup, IncomeCounterparty, IncomeTypeSlice,
-    DashboardTransaction, CategoryCounterparty,
+    DashboardTransaction, CategoryCounterparty, DashboardOperations,
     ChartTooltipProps, ChartTooltipPayloadItem, PieLabelProps,
 } from '@/types/api';
 import {
@@ -131,6 +131,8 @@ function DashboardInner() {
     const [data,setData]=useState<DashboardSummary|null>(null);
     const [balance,setBalance]=useState<BalanceAccount[]>([]);
     const [funnel,setFunnel]=useState<DashboardFunnelSummary|null>(null);
+    const [ops,setOps]=useState<DashboardOperations|null>(null);
+    const [openTables,setOpenTables]=useState<Set<string>>(new Set());
     const [loading,setLoading]=useState(true);
     const [error,setError]=useState('');
     const [period,setPeriod]=useState<PeriodKey>('month');
@@ -164,10 +166,11 @@ function DashboardInner() {
     const loadData=useCallback(async()=>{
         try { setLoading(true);setError('');
             const {from,to}=getPeriodDates(period,customFrom,customTo);
-            const [summary,bal,fun]=await Promise.all([
+            const [summary,bal,fun,operations]=await Promise.all([
                 api.getDashboardSummary(from,to),api.getBalance(),api.getFunnelSummary(from,to).catch(()=>null),
+                api.getDashboardOperations().catch(()=>null),
             ]);
-            setData(summary);setBalance(bal);setFunnel(fun);resetFilters();
+            setData(summary);setBalance(bal);setFunnel(fun);setOps(operations);resetFilters();
         } catch(e:unknown){setError(e instanceof Error ? e.message : 'Ошибка загрузки');} finally{setLoading(false);}
     },[period,customFrom,customTo]);
     useEffect(()=>{loadData();},[loadData]);
@@ -177,6 +180,11 @@ function DashboardInner() {
         setSelectedCp(null);setSelectedExpCat(null);setFilteredDaily(null);
         setCpTxnList([]);setCpTxnTotal(0);setCpTxnFlow('all');
         setCatCps([]);setSelectedCatCp(null);setCatCpTxnList([]);setCatCpTxnTotal(0);setCatCpTxnFlow('all');
+    },[]);
+
+    /* ─── Collapsible heavy tables (default collapsed, keeps входной экран чистым) ── */
+    const toggleTable=useCallback((k:string)=>{
+        setOpenTables(prev=>{const n=new Set(prev);if(n.has(k))n.delete(k);else n.add(k);return n;});
     },[]);
 
     /* ─── Income CP click → chart + transactions ──────────────── */
@@ -276,6 +284,18 @@ function DashboardInner() {
     const netCashflow=data.month_income-data.month_expense;
     const funnelDRR=funnel&&(funnel.orders_sum_rub??0)>0?((funnel.adv_sum??0)/(funnel.orders_sum_rub??1)*100):0;
 
+    /* ─── Action-center: что требует действия прямо сейчас (только count>0) ── */
+    const actionItems=([
+        {n:data.inbox_count, icon:'📥', label:'Нераспределённые операции', href:`/p/${slug}/inbox`, tone:'warning'},
+        {n:ops?.payments_pending??0, icon:'💸', label:'Заявки на согласовании', href:`/p/${slug}/payments`, tone:'warning'},
+        {n:ops?.fbo_orphans??0, icon:'📦', label:'FBO принят без сборки', href:`/p/${slug}/warehouse/fbo-supplies`, tone:'danger'},
+        {n:ops?.fbo_partial??0, icon:'📦', label:'FBO частичная приёмка', href:`/p/${slug}/warehouse/fbo-supplies`, tone:'warning'},
+        {n:ops?.returns_soon_expire??0, icon:'⏰', label:'Возвраты скоро истекут', href:`/p/${slug}/warehouse/wb-returns`, tone:'danger'},
+        {n:ops?.returns_pending??0, icon:'↩️', label:'Возвраты ждут приёмки', href:`/p/${slug}/warehouse/wb-returns`, tone:'warning'},
+        {n:ops?.ff_unlinked??0, icon:'🏭', label:'ФФ-заявки без привязки', href:`/p/${slug}/warehouse`, tone:'warning'},
+        {n:ops?.sync_errors_24h??0, icon:'🔄', label:'Ошибки синков за 24ч', href:`/p/${slug}/monitoring`, tone:'danger'},
+    ] satisfies {n:number;icon:string;label:string;href:string;tone:'warning'|'danger'}[]).filter(a=>a.n>0);
+
     return (
         <div className="animate-in">
             {/* Header */}
@@ -290,8 +310,40 @@ function DashboardInner() {
                 </div>
             </div>
 
+            {/* ─── Action center: «Требуют внимания» ── */}
+            {actionItems.length>0?(
+                <div className="glass-card" style={{marginTop:16,padding:'14px 16px'}}>
+                    <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:12,flexWrap:'wrap'}}>
+                        <h3 style={{fontSize:15,fontWeight:600,color:'var(--color-text)'}}>⚠️ Требуют внимания</h3>
+                        <span style={{fontSize:12,color:C.muted}}>{actionItems.length} {actionItems.length===1?'задача':'задач'} · клик — перейти</span>
+                    </div>
+                    <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+                        {actionItems.map((a,i)=>(
+                            <Link key={i} href={a.href} style={{textDecoration:'none'}}>
+                                <div style={{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',borderRadius:12,
+                                    background:'rgba(255,255,255,0.03)',
+                                    border:`1px solid ${a.tone==='danger'?'rgba(239,68,68,0.35)':'rgba(245,158,11,0.3)'}`}}>
+                                    <span style={{fontSize:16}}>{a.icon}</span>
+                                    <span style={{fontSize:13,color:'var(--color-text)'}}>{a.label}</span>
+                                    <span style={{fontSize:13,fontWeight:700,
+                                        color:a.tone==='danger'?C.expense:C.warning,
+                                        background:a.tone==='danger'?'rgba(239,68,68,0.12)':'rgba(245,158,11,0.12)',
+                                        borderRadius:20,padding:'1px 8px',minWidth:22,textAlign:'center' as const}}>{formatNumber(a.n,0)}</span>
+                                </div>
+                            </Link>
+                        ))}
+                    </div>
+                </div>
+            ):(
+                <div className="glass-card" style={{marginTop:16,padding:'12px 16px',display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+                    <span style={{fontSize:16}}>✅</span>
+                    <span style={{fontSize:14,color:C.income,fontWeight:600}}>Всё под контролем</span>
+                    <span style={{fontSize:12,color:C.muted}}>— нет задач, требующих внимания</span>
+                </div>
+            )}
+
             {/* KPI Row 1 */}
-            <div className="stats-grid" style={{gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))'}}>
+            <div className="stats-grid" style={{gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',marginTop:16}}>
                 <KpiCard icon="💰" label="Баланс RUB" value={`${formatNumber(data.balance_rub)} ₽`} color={C.income}/>
                 <KpiCard icon="💴" label="Баланс CNY" value={`${formatNumber(data.balance_cny)} ¥`} color={C.warning}/>
                 <KpiCard icon={netCashflow>=0?'📈':'📉'} label="Cashflow" value={`${netCashflow>=0?'+':''}${formatNumber(netCashflow)} ₽`} sub={`Приход ${fmtK(data.month_income)} / Расход ${fmtK(data.month_expense)}`} color={netCashflow>=0?C.income:C.expense} sparkData={(data.daily_cashflow||[]).map((d:DailyCashflowRow)=>d.income-d.expense)}/>
@@ -303,8 +355,42 @@ function DashboardInner() {
                 <KpiCard icon="📦" label="Заказы" value={`${data.orders_count}`} sub={`¥ ${formatNumber(data.orders_total_cny,0)}`} color={C.info}/>
                 <KpiCard icon="💳" label="Долг" value={data.debt_cny>0?`${formatNumber(data.debt_cny,0)} ¥`:(data.debt_rub>0?`${formatNumber(data.debt_rub,0)} ₽`:'0')} sub={data.debt_cny>0&&data.debt_rub>0?`+ ${formatNumber(data.debt_rub,0)} ₽`:'неоплаченные'} color={data.debt_rub>0||data.debt_cny>0?C.expense:C.income}/>
                 <KpiCard icon="📥" label="INBOX" value={`${data.inbox_count}`} sub="нераспределённых" color={data.inbox_count>0?C.warning:C.income}/>
-                {funnel?(<KpiCard icon="🛒" label="Заказы WB" value={funnel.orders_count?.toLocaleString('ru-RU')||'—'} sub={`${formatNumber(funnel.orders_sum_rub,0)} ₽`} color={C.info}/>):(<KpiCard icon="📊" label="Счета" value={`${data.accounts_count}`} sub="активных" color={C.accent}/>)}
+                <KpiCard icon="📊" label="Счета" value={`${data.accounts_count}`} sub="активных" color={C.accent}/>
             </div>
+
+            {/* ─── KPI — Продажи WB (из воронки) ── */}
+            {funnel&&(
+                <div style={{marginTop:18}}>
+                    <h3 style={{fontSize:12,fontWeight:600,color:C.muted,marginBottom:8,textTransform:'uppercase' as const,letterSpacing:'0.06em'}}>🛒 Продажи WB · {periodLabel}</h3>
+                    <div className="stats-grid" style={{gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',marginTop:0}}>
+                        <KpiCard icon="🛒" label="Заказы WB" value={formatNumber(funnel.orders_count??funnel.orders??0,0)} sub={`${fmtK(funnel.orders_sum_rub??funnel.orders_sum??0)} ₽`} color={C.info}/>
+                        <KpiCard icon="💵" label="Выручка WB" value={`${fmtK(funnel.orders_sum_rub??funnel.orders_sum??0)} ₽`} color={C.income}/>
+                        <KpiCard icon="📢" label="Реклама" value={`${fmtK(funnel.adv_sum??funnel.ad_sum??0)} ₽`} sub={`ДРР ${funnelDRR.toFixed(1)}%`} color={C.warning}/>
+                        <KpiCard icon="📈" label="Прибыль" value={`${fmtK(funnel.profit??0)} ₽`} color={(funnel.profit??0)>=0?C.income:C.expense}/>
+                    </div>
+                </div>
+            )}
+
+            {/* ─── Логистика-снапшот (цепочка поставок) ── */}
+            {ops&&(ops.vehicles_in_transit>0||ops.vehicles_forming>0||ops.supply_items_in_transit>0)&&(
+                <Link href={`/p/${slug}/supply-chain`} style={{textDecoration:'none'}}>
+                    <div className="glass-card" style={{marginTop:16,padding:'14px 16px',display:'flex',alignItems:'center',gap:28,flexWrap:'wrap'}}>
+                        <h3 style={{fontSize:14,fontWeight:600,color:'var(--color-text)'}}>🚚 Логистика</h3>
+                        {[
+                            {label:'Машины в пути',value:formatNumber(ops.vehicles_in_transit,0),color:C.info},
+                            {label:'Формируются',value:formatNumber(ops.vehicles_forming,0),color:C.muted},
+                            {label:'Товара в пути, шт',value:formatNumber(ops.supply_items_in_transit,0),color:C.accent},
+                            {label:'Сумма закупа',value:`${fmtK(ops.supply_amount_cny)} ¥`,color:C.warning},
+                        ].map((m,i)=>(
+                            <div key={i} style={{display:'flex',flexDirection:'column' as const,gap:2}}>
+                                <span style={{fontSize:11,color:C.muted}}>{m.label}</span>
+                                <span style={{fontSize:18,fontWeight:700,color:m.color}}>{m.value}</span>
+                            </div>
+                        ))}
+                        <span style={{marginLeft:'auto',fontSize:12,color:C.accent}}>Подробнее →</span>
+                    </div>
+                </Link>
+            )}
 
             {/* ─── Поступления по дням (по типам) ── */}
             {incomeByTypeChart.length>0&&incomeTypeTotal>0&&(
@@ -391,11 +477,11 @@ function DashboardInner() {
             {/* ─── Расходы: тип контрагента → категория (2 уровня) ── */}
             {expenseByType.length>0&&(
                 <div className="glass-card" style={{marginTop:20}}>
-                    <div className="table-toolbar">
-                        <h3 style={{fontSize:16,fontWeight:600}}>🗂 Расходы по типам контрагентов</h3>
-                        <span style={{fontSize:12,color:C.muted}}>тип → категория · клик для раскрытия</span>
+                    <div className="table-toolbar" onClick={()=>toggleTable('exp_type')} style={{cursor:'pointer'}}>
+                        <h3 style={{fontSize:16,fontWeight:600}}>{openTables.has('exp_type')?'▼':'▶'} 🗂 Расходы по типам контрагентов</h3>
+                        <span style={{fontSize:12,color:C.muted}}>{formatNumber(data.month_expense,0)} ₽ · {openTables.has('exp_type')?'свернуть':'тип → категория'}</span>
                     </div>
-                    <table className="data-table"><thead><tr>
+                    {openTables.has('exp_type')&&(<table className="data-table"><thead><tr>
                         <th>Тип / Категория</th><th style={{textAlign:'right'}}>Сумма</th><th style={{textAlign:'right'}}>Операций</th><th style={{textAlign:'right'}}>% от расходов</th>
                     </tr></thead><tbody>
                         {expenseByType.map((g:ExpenseTypeGroup,i:number)=>{
@@ -424,7 +510,7 @@ function DashboardInner() {
                                 })}
                             </React.Fragment>);
                         })}
-                    </tbody></table>
+                    </tbody></table>)}
                 </div>
             )}
 
@@ -433,10 +519,10 @@ function DashboardInner() {
             {incomeCounterparties.length>0&&(
                 <div className="glass-card" style={{marginTop:20}}>
                     <div className="table-toolbar">
-                        <h3 style={{fontSize:16,fontWeight:600}}>Приходы по контрагентам</h3>
+                        <h3 style={{fontSize:16,fontWeight:600,cursor:'pointer'}} onClick={()=>toggleTable('inc_cp')}>{openTables.has('inc_cp')?'▼':'▶'} Приходы по контрагентам</h3>
                         {selectedCp&&<button className="btn btn-sm btn-secondary" onClick={resetFilters}>Все</button>}
                     </div>
-                    <table className="data-table"><thead><tr>
+                    {openTables.has('inc_cp')&&(<table className="data-table"><thead><tr>
                         <th>Контрагент</th><th style={{textAlign:'right'}}>Сумма</th><th style={{textAlign:'right'}}>Операций</th><th style={{textAlign:'right'}}>% от общего</th>
                     </tr></thead><tbody>
                         {incomeCounterparties.map((c:IncomeCounterparty,i:number)=>{
@@ -454,7 +540,7 @@ function DashboardInner() {
                                 {isSelected&&<InlineTxnRows txnList={cpTxnList} txnTotal={cpTxnTotal} txnFlow={cpTxnFlow} onFlowChange={handleCpFlowChange} filterLoading={filterLoading} colSpan={4}/>}
                             </React.Fragment>);
                         })}
-                    </tbody></table>
+                    </tbody></table>)}
                 </div>
             )}
 
@@ -463,7 +549,7 @@ function DashboardInner() {
             {expensePie.length>0&&(
                 <div className="glass-card" style={{marginTop:20}}>
                     <div className="table-toolbar">
-                        <h3 style={{fontSize:16,fontWeight:600}}>Расходы по категориям</h3>
+                        <h3 style={{fontSize:16,fontWeight:600,cursor:'pointer'}} onClick={()=>toggleTable('exp_cat')}>{openTables.has('exp_cat')?'▼':'▶'} Расходы по категориям</h3>
                         <div style={{display:'flex',alignItems:'center',gap:12,marginLeft:'auto'}}>
                             {uncatExpPct>=20&&slug&&(
                                 <Link href={`/p/${slug}/refs`} style={{fontSize:12,color:C.warning,textDecoration:'none'}}>
@@ -473,7 +559,7 @@ function DashboardInner() {
                             {selectedExpCat&&<button className="btn btn-sm btn-secondary" onClick={resetFilters}>Все</button>}
                         </div>
                     </div>
-                    <table className="data-table"><thead><tr>
+                    {openTables.has('exp_cat')&&(<table className="data-table"><thead><tr>
                         <th>Категория</th><th style={{textAlign:'right'}}>Сумма</th><th style={{textAlign:'right'}}>Операций</th><th style={{textAlign:'right'}}>% от расходов</th>
                     </tr></thead><tbody>
                         {expensePie.map((c:ExpenseCategoryPie,i:number)=>{
@@ -531,7 +617,7 @@ function DashboardInner() {
                                 )}
                             </React.Fragment>);
                         })}
-                    </tbody></table>
+                    </tbody></table>)}
                 </div>
             )}
 

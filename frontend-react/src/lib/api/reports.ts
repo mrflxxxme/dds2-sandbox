@@ -5,7 +5,7 @@ import type {
     WbStocksResponse, WbStocksArticlesResponse, WbStockHistoryResponse,
     CostDnaResponse, StockAnalyticsResponse,
     CounterpartyTurnoversResponse, CounterpartyType,
-    ColdStartTableResponse,
+    ColdStartTableResponse, DashboardOperations,
 } from '@/types/api';
 
 export function addReportMethods(api: ApiClient) {
@@ -34,6 +34,9 @@ export function addReportMethods(api: ApiClient) {
                 income_counterparties: Array<{ name: string; key: string; total: number; count: number }>;
                 date_from: string; date_to: string;
             }>('GET', `/api/v1/reports/dashboard_summary?${q.toString()}`);
+        },
+        getDashboardOperations() {
+            return api.request<DashboardOperations>('GET', '/api/v1/reports/dashboard_operations');
         },
         getDailyFiltered(dateFrom: string, dateTo: string, cpKey?: string, category?: string) {
             const q = new URLSearchParams();
