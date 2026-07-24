@@ -279,14 +279,17 @@ async def import_loans_from_xlsx(
             if ret_date and contract:
                 returns.append((key_name, contract, ret_date, amount))
 
-    # Second pass: returns → PRINCIPAL_REPAY (idempotent) + close loan
-    for key_name, contract, ret_date, amount in returns:
+    # Second pass: returns → PRINCIPAL_REPAY (idempotent) + close loan.
+    # Chronological order so an earlier return claims the earlier tranche when a
+    # contract number is reused; repaid_ids keeps two returns off the same loan.
+    repaid_ids: set[int] = set()
+    for key_name, contract, ret_date, amount in sorted(returns, key=lambda r: r[2]):
         cp = cp_by_name.get(key_name)
         if cp is None:
             res.skipped_rows += 1
             continue
         candidates = by_cp_contract.get((cp.id, contract), [])
-        target = _pick_repay_target(candidates, ret_date)
+        target = _pick_repay_target(candidates, ret_date, repaid_ids)
         if target is None:
             res.warnings.append(f"{key_name} {contract}: возврат без займа — пропущен")
             res.skipped_rows += 1
@@ -312,6 +315,7 @@ async def import_loans_from_xlsx(
             )
             res.created_payments += 1
         target.status = "CLOSED"
+        repaid_ids.add(target.id)
 
     # Third pass: best-effort extension chain linking (06 → 06-01 → 06-02)
     await db.flush()
@@ -323,15 +327,27 @@ async def import_loans_from_xlsx(
     return res
 
 
-def _pick_repay_target(candidates: list[Loan], ret_date: date) -> Loan | None:
+def _pick_repay_target(
+    candidates: list[Loan], ret_date: date, repaid_ids: set[int] | None = None
+) -> Loan | None:
     """Among loans sharing (cp, contract), choose which one a return closes."""
     if not candidates:
         return None
-    active = [loan for loan in candidates if loan.status == "ACTIVE"]
-    pool = active or candidates
+    done = repaid_ids or set()
+    free = [loan for loan in candidates if loan.id not in done]
+    pool = free or candidates
+    # Продление без смены номера договора: старый транш погашается ровно в день
+    # старта преемника, и возврат датирован этим днём. Сначала матчим по дате
+    # погашения — иначе «последний старт ≤ возврата» закрывает ПРЕЕМНИКА,
+    # а погашенный транш остаётся висеть активным (11 таких пар в реестре).
+    exact = [loan for loan in pool if loan.maturity_date == ret_date]
+    if exact:
+        return min(exact, key=lambda loan: loan.start_date)
+    active = [loan for loan in pool if loan.status == "ACTIVE"]
+    ranked = active or pool
     # prefer the one started on/before the return, latest such start
-    eligible = [loan for loan in pool if loan.start_date <= ret_date]
-    chosen = eligible or pool
+    eligible = [loan for loan in ranked if loan.start_date <= ret_date]
+    chosen = eligible or ranked
     return max(chosen, key=lambda loan: loan.start_date)
 
 

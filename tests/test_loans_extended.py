@@ -216,6 +216,51 @@ async def test_import_idempotent(db_session, client, auth_headers):
     assert r2.created_payments == 0  # repayment already present (idempotent)
 
 
+def _build_rollover_xlsx() -> bytes:
+    """Продление БЕЗ смены номера договора: старый транш гасится в день старта нового."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Расчет процентов"
+    ws.append(["Дата", "Тип", "Сумма", "Контрагент", "Номер договора", "Ставка", "От", "До", "Статус"])
+    # старый транш
+    ws.append([date(2025, 8, 18), "Приход", 5000000, "Еремин", "64", 0.315, date(2025, 8, 18), date(2026, 2, 16), "Не активен"])
+    # возврат датирован ровно днём погашения старого = днём старта нового
+    ws.append([date(2026, 2, 16), "Возврат", 5000000, "Еремин", "64", 0.315, date(2026, 2, 16), date(2026, 2, 16), "Не активен"])
+    # преемник под ТЕМ ЖЕ номером
+    ws.append([date(2026, 2, 16), "Приход", 5000000, "Еремин", "64", 0.265, date(2026, 2, 16), date(2026, 8, 17), "Активен"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_import_rollover_same_contract_closes_old_tranche(db_session, client, auth_headers):
+    """Возврат закрывает транш, который в этот день ПОГАШАЕТСЯ, а не тот, что стартует."""
+    from sqlalchemy import select
+
+    from backend.models.loan import Loan, LoanPayment
+
+    project_id = await _create_project(client, auth_headers)
+    res = await import_loans_from_xlsx(db_session, project_id=project_id, content=_build_rollover_xlsx())
+    assert res.created_loans == 2
+    assert res.created_payments == 1
+
+    loans = (
+        (await db_session.execute(select(Loan).where(Loan.project_id == project_id).order_by(Loan.start_date)))
+        .scalars()
+        .all()
+    )
+    old, new = loans
+    assert old.start_date == date(2025, 8, 18)
+    assert new.start_date == date(2026, 2, 16)
+    # старый — закрыт возвратом, новый — живой
+    assert old.status == "CLOSED"
+    assert new.status == "ACTIVE"
+
+    payment = (await db_session.execute(select(LoanPayment).where(LoanPayment.loan_id.in_([old.id, new.id])))).scalars().one()
+    assert payment.loan_id == old.id, "возврат повешен на новый транш вместо погашаемого старого"
+
+
 # ─── Lender portal scoping ────────────────────────────────────────────────────
 
 
