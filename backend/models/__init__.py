@@ -52,7 +52,9 @@ from backend.models.cost import (
 from backend.models.counterparty import (
     Counterparty,
     CounterpartyDocument,
+    CounterpartyIdentifier,
     CounterpartyType,
+    IdentifierKind,
     DocType,
 )
 
@@ -317,7 +319,9 @@ __all__ = [
     # Counterparties & Loans
     "Counterparty",
     "CounterpartyDocument",
+    "CounterpartyIdentifier",
     "CounterpartyType",
+    "IdentifierKind",
     "DocType",
     "Loan",
     "LoanPayment",
