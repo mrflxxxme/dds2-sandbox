@@ -47,16 +47,19 @@ function _fillSheet(worksheet: any, data: Record<string, any>[], columns?: Excel
  * If `columns` is provided, uses column labels as headers and respects
  * `exportValue`/`getValue` accessors so nested/computed cells export correctly.
  * `additionalSheets` — необязательные доп. листы (например, шаблон для вставки).
+ * `firstSheetName` — имя первого листа; по умолчанию «Data». Задавать стоит там,
+ * где листов несколько и безымянный первый выбивается из ряда осмысленных.
  */
 export function exportToExcel(
     data: Record<string, any>[],
     filename: string,
     columns?: ExcelExportColumn[],
     additionalSheets?: ExcelExtraSheet[],
+    firstSheetName = 'Data',
 ) {
     import('exceljs').then(ExcelJS => {
         const workbook = new ExcelJS.Workbook();
-        const worksheet = workbook.addWorksheet('Data');
+        const worksheet = workbook.addWorksheet(firstSheetName);
 
         if (data.length === 0 && (!additionalSheets || additionalSheets.length === 0)) return;
 

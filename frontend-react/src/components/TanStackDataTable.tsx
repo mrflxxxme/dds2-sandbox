@@ -88,7 +88,7 @@ function adaptColumns(cols: Column[]): ColumnDef<any, any>[] {
     return cols.map((col) => {
         const def: ColumnDef<any, any> = {
             id: col.key,
-            header: col.label,
+            header: col.renderHeader ? () => col.renderHeader!() : col.label,
             size: col.width ? parseInt(col.width) : undefined,
             enableSorting: col.sortable !== false,
             ...(col.sortingFn ? { sortingFn: col.sortingFn } : {}),
