@@ -77,6 +77,66 @@ async def test_sync_persists_wb_id_beyond_int32(db_session, project):
     assert row.article_wb == BIG_NM_ID
 
 
+async def _run_sync(db_session, project, cards):
+    fake_client = AsyncMock()
+    fake_client.get_cards_list = AsyncMock(return_value=cards)
+    with (
+        patch.object(integrations_service, "_decrypt", return_value="api-key"),
+        patch("backend.integrations.wb_api.WBApiClient", return_value=fake_client),
+        patch(
+            "backend.services.cost.first_sale.backfill_first_sale_dates",
+            new=AsyncMock(return_value={}),
+        ),
+    ):
+        return await integrations_service.sync_wb_nomenclature(db_session, project.id)
+
+
+async def _nom_by_barcode(db_session, project, barcode: str) -> Nomenclature:
+    return (
+        await db_session.execute(
+            select(Nomenclature).where(
+                Nomenclature.project_id == project.id,
+                Nomenclature.barcode == barcode,
+            )
+        )
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_sync_fills_chrt_id(db_session, project):
+    """chrtID карточки обязан долетать до `Nomenclature.chrt_id`.
+
+    Ключ методов остатков Marketplace API — chrtId. Пока синк карточек его не
+    писал, трансляция FBS не отправляла в WB НИ ОДНОЙ позиции (все строки
+    блокировались как `no_chrt`), а прогон при этом рапортовал OK.
+    """
+    await _make_wb_key(db_session, project.id)
+    card = _card("2052654682644", 11, 21)
+    card["sizes"] = [{"chrtID": 987654, "skus": ["2052654682644"]}]
+
+    log = await _run_sync(db_session, project, [card])
+
+    assert log.status == "OK", log.error_msg
+    row = await _nom_by_barcode(db_session, project, "2052654682644")
+    assert row.chrt_id == 987654
+
+
+@pytest.mark.asyncio
+async def test_sync_does_not_wipe_known_chrt_id(db_session, project):
+    """Карточка без chrtID не должна обнулять уже известный ключ остатков."""
+    await _make_wb_key(db_session, project.id)
+    db_session.add(
+        Nomenclature(project_id=project.id, barcode="2052654682645", chrt_id=112233)
+    )
+    await db_session.commit()
+
+    log = await _run_sync(db_session, project, [_card("2052654682645", 12, 22)])
+
+    assert log.status == "OK", log.error_msg
+    row = await _nom_by_barcode(db_session, project, "2052654682645")
+    assert row.chrt_id == 112233
+
+
 @pytest.mark.asyncio
 async def test_sync_returns_error_log_not_500_on_bad_row(db_session, project):
     """If a row still fails to flush, the session is rolled back and an ERROR

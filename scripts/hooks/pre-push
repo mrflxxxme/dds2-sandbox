@@ -22,19 +22,37 @@ fi
 
 # ─── 1. Backend тесты (testmon + xdist -n 2, ~10-20 сек) ─────────────
 # Note: -n 2 (не auto) — auto спавнит по CPU count, на Docker с ограничением
-# RAM (обычно 2GB) приводит к OOM (exit 137). 2 worker'а = оптимум для 4-8 CPU
+# RAM приводит к OOM (exit 137). 2 worker'а = оптимум для 4-8 CPU.
+# Памяти backend нужно с запасом: сюита ~4700 тестов, один pytest-процесс рядом
+# с uvicorn ест ~1.9G. При лимите 2G второй воркер не влезал и гейт был красным
+# ВСЕГДА, независимо от кода (2026-07-26) → лимит поднят до 3584M в
+# docker-compose.override.yml. Растёт сюита — растить и лимит.
 echo ""
 echo "━━━ Backend tests (testmon + xdist -n 2) ━━━"
 if [ "$DOCKER_OK" -eq 1 ]; then
-    docker compose exec -T backend pytest --testmon -n 2 --tb=short -q 2>/dev/null
+    # stderr НЕ глушим: раньше стоял `2>/dev/null`, и при падении xdist-воркера
+    # причина исчезала — гейт печатал безликое «Backend tests FAILED», а автор
+    # часами искал несуществующий упавший тест (инцидент 2026-07-26).
+    PYTEST_OUT=$(docker compose exec -T backend pytest --testmon -n 2 --tb=short -q 2>&1)
     PYTEST_EXIT=$?
+    echo "$PYTEST_OUT" | tail -25
     # exit 5 = "no tests collected" (testmon: ничего не изменилось) — это OK, не fail
     if [ $PYTEST_EXIT -eq 0 ]; then
         echo -e "${GREEN}✓ Backend tests passed${NC}"
     elif [ $PYTEST_EXIT -eq 5 ]; then
         echo -e "${GREEN}✓ Backend tests skipped (testmon: no Python changes)${NC}"
+    elif [ $PYTEST_EXIT -eq 137 ] || echo "$PYTEST_OUT" | grep -qE 'node down|worker .* crashed|Replacing crashed worker|INTERNALERROR'; then
+        # OOM/крах воркера — это НЕ «код сломан». Отличать обязательно, иначе
+        # гейт врёт: сколько ни правь код, он остаётся красным.
+        echo -e "${RED}✗ Backend tests: УПАЛ САМ ПРОГОН (xdist-воркер умер, exit $PYTEST_EXIT)${NC}"
+        echo -e "${YELLOW}  Это не падение тестов, а нехватка памяти контейнера.${NC}"
+        echo -e "${YELLOW}  Проверить:  docker stats --no-stream dds2-backend-1${NC}"
+        echo -e "${YELLOW}  Лечится лимитом memory у backend в docker-compose.override.yml${NC}"
+        echo -e "${YELLOW}  Перепроверить без параллелизма: docker compose exec backend pytest --testmon -q${NC}"
+        FAILED=1
     else
         echo -e "${RED}✗ Backend tests FAILED (exit $PYTEST_EXIT)${NC}"
+        echo "$PYTEST_OUT" | grep -E '^(FAILED|ERROR)' | head -15
         FAILED=1
     fi
 else

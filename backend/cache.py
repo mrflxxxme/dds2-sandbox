@@ -176,6 +176,11 @@ async def invalidate_project_reports(project_id: int):
         "ff_billing:tariffs",
         "ff_billing:storage",
         "ff_billing:invoices",
+        # WB FBS (склад продавца: маппинг складов, превью остатка, заказы)
+        "fbs:warehouses",
+        "fbs:stock_preview",
+        "fbs:orders",
+        "fbs:supplies",
         "ad_clusters_alltime",  # кластеры кампании за всю жизнь (список + all-time показы для locked)
         # Counterparty & Loans (Phase 1 pre-registered; @cached in Phase 2 services)
         "counterparty_list",

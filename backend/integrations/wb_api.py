@@ -908,6 +908,7 @@ def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:
       - subjectName → subject
       - vendorCode → article_seller
       - sizes[].skus[] → barcode (one row per barcode)
+      - sizes[].chrtID → chrt_id (ключ методов остатков Marketplace API)
       - dimensions.length × width × height / 1000 → volume_l
     """
     nomenclature = []
@@ -931,6 +932,13 @@ def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:
         sizes = card.get("sizes", [])
         for size in sizes:
             skus = size.get("skus", [])
+            # chrtID лежит рядом со skus в том же элементе sizes[] и является
+            # ключом методов остатков Marketplace API (FBS): без него позиция
+            # физически не транслируется на склад продавца.
+            try:
+                chrt_id = int(size["chrtID"]) if size.get("chrtID") else None
+            except (TypeError, ValueError):
+                chrt_id = None
             for barcode in skus:
                 barcode = str(barcode).strip()
                 if not barcode or barcode in seen_barcodes:
@@ -940,6 +948,7 @@ def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:
                 nomenclature.append(
                     {
                         "barcode": barcode,
+                        "chrt_id": chrt_id,
                         "brand": brand,
                         "subject": subject,
                         "article_seller": vendor_code,

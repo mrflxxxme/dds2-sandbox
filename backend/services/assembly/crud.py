@@ -197,11 +197,19 @@ async def _validate_available_for_assembly(
     exclude_request_id: int | None = None,
 ) -> list[dict]:
     """
-    Check available stock = quantity - reserved by OTHER active assembly requests.
+    Check available stock = quantity - reserved by OTHER active assembly requests
+    - открытые FBS-задания на этом складе.
     Used at create / update / start_assembly to prevent over-commitment.
 
     exclude_request_id: исключить эту заявку из расчёта резерва (чтобы не вычитать саму себя
     при редактировании или старте).
+
+    Обратный гейт FBS: товар, проданный со склада продавца WB (`supplier_status`
+    new/confirm), физически ещё лежит на нашем складе и НЕ списан из ledger'а —
+    списание идёт только по `complete`. Без вычета его можно было бы второй раз
+    набрать в сборку и увезти на FBO, а потом не собрать FBS-задание.
+    Источник цифры — `wb_fbs.stock_service.get_open_fbs_qty` (та же функция кормит
+    прямой расчёт FBS-остатка). Без FBS-заказов вычет = 0 и поведение прежнее.
     """
     nom_ids = [item.nomenclature_id for item in items if item.nomenclature_id]
     if not nom_ids:
@@ -236,6 +244,11 @@ async def _validate_available_for_assembly(
     reserved_result = await db.execute(reserved_q)
     reserved_map = {r.nomenclature_id: r.reserved for r in reserved_result.all()}
 
+    # Второе слагаемое резерва — открытые FBS-задания на этом складе (см. докстринг).
+    from backend.services.warehouse_stock_engine import get_open_fbs_reserved
+
+    fbs_map = await get_open_fbs_reserved(db, project_id, [warehouse_id])
+
     needs: dict[int, int] = {}
     barcode_for_nom: dict[int, str] = {}
     for item in items:
@@ -248,7 +261,8 @@ async def _validate_available_for_assembly(
     for nom_id, need in needs.items():
         stock = stock_map.get(nom_id, 0)
         reserved = reserved_map.get(nom_id, 0)
-        available = max(0, stock - reserved)
+        fbs_open = fbs_map.get(nom_id, 0)
+        available = max(0, stock - reserved - fbs_open)
         if available < need:
             deficit_nom_ids.append(nom_id)
 
@@ -291,7 +305,8 @@ async def _validate_available_for_assembly(
         name = (nom.subject or nom.article_seller or bc) if nom else bc
         stock = stock_map.get(nom_id, 0)
         reserved = reserved_map.get(nom_id, 0)
-        available = max(0, stock - reserved)
+        fbs_open = fbs_map.get(nom_id, 0)
+        available = max(0, stock - reserved - fbs_open)
         deficits.append(
             {
                 "name": name,
@@ -300,6 +315,7 @@ async def _validate_available_for_assembly(
                 "have": available,
                 "stock": stock,
                 "reserved": reserved,
+                "fbs_open": fbs_open,
                 "holders": holders_map.get(nom_id, []),
             }
         )
@@ -314,6 +330,11 @@ def _format_deficit_error(deficits: list[dict]) -> str:
             f"  {d['name']} (ШК {d['barcode']}): нужно {d['need']}, доступно {d['have']} "
             f"(на складе {d['stock']}, в работе {d['reserved']}"
         )
+        # Продано по FBS — только когда реально есть открытые задания, иначе
+        # сообщение обязано остаться прежним (инвариант обратной совместимости).
+        fbs_open = d.get("fbs_open") or 0
+        if fbs_open:
+            line += f", продано по FBS {fbs_open}"
         holders = d.get("holders") or []
         if holders:
             shown = holders[:6]

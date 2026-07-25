@@ -27,6 +27,7 @@ const SECTION_PAGES: Record<string, { key: string; label: string }[]> = {
         { key: 'logistics', label: 'Лист логиста' },
         { key: 'fbo', label: 'Поставки FBO' },
         { key: 'stocks', label: 'Остатки WB' },
+        { key: 'fbs', label: 'FBS Wildberries' },
         { key: 'stock-analytics', label: 'Аналитика остатков' },
         { key: 'barcode-labels', label: 'Генератор ШК' },
     ],

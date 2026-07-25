@@ -406,6 +406,27 @@ class TestParseWBCards:
         result = parse_wb_cards_to_nomenclature(cards)
         assert len(result) == 1
 
+    def test_chrt_id_is_extracted_from_size(self):
+        """chrtID из sizes[] обязателен: без него FBS не транслирует остаток в WB."""
+        cards = [
+            {
+                "nmID": 1,
+                "imtID": 2,
+                "brand": "",
+                "subjectName": "",
+                "vendorCode": "",
+                "dimensions": {},
+                "sizes": [
+                    {"chrtID": 555, "skus": ["BC1"]},
+                    {"chrtID": "666", "skus": ["BC2"]},
+                    {"skus": ["BC3"]},  # карточка без chrtID — не падаем
+                    {"chrtID": "мусор", "skus": ["BC4"]},
+                ],
+            }
+        ]
+        result = {r["barcode"]: r["chrt_id"] for r in parse_wb_cards_to_nomenclature(cards)}
+        assert result == {"BC1": 555, "BC2": 666, "BC3": None, "BC4": None}
+
     def test_empty_cards(self):
         """Empty list returns empty."""
         assert parse_wb_cards_to_nomenclature([]) == []

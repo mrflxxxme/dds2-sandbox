@@ -256,6 +256,24 @@ from backend.models.wb_fbo import (
     WbSupplyStatus,
 )
 
+# WB FBS (продажи со склада продавца)
+from backend.models.wb_fbs import (
+    FBS_OPEN_STATUSES,
+    FBS_TERMINAL_STATUSES,
+    FbsPushStatus,
+    FbsPushTrigger,
+    FbsStockSource,
+    FbsSupplierStatus,
+    FbsWarehouseMode,
+    WbFbsOrder,
+    WbFbsStockOverride,
+    WbFbsStockPush,
+    WbFbsStockState,
+    WbFbsSupply,
+    WbFbsWarehouse,
+    WbFbsWarehouseLink,
+)
+
 # WB Finance (cached report)
 from backend.models.wb_finance import (
     WbFinanceRow,
@@ -488,6 +506,21 @@ __all__ = [
     "WbFboSupply",
     "WbFboSupplyItem",
     "WbSupplyStatus",
+    # WB FBS (склад продавца)
+    "FBS_OPEN_STATUSES",
+    "FBS_TERMINAL_STATUSES",
+    "FbsPushStatus",
+    "FbsPushTrigger",
+    "FbsStockSource",
+    "FbsWarehouseMode",
+    "FbsSupplierStatus",
+    "WbFbsOrder",
+    "WbFbsStockOverride",
+    "WbFbsStockPush",
+    "WbFbsStockState",
+    "WbFbsSupply",
+    "WbFbsWarehouse",
+    "WbFbsWarehouseLink",
     # Gazelka (gazelka.space)
     "GazelkaOrder",
     "GazelkaOrderStatus",

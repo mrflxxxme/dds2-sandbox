@@ -7624,3 +7624,523 @@ export interface AutoDistributeResult {
   assigned: number;
   finance: SupplierFinance;
 }
+
+// ─── WB FBS (продажа со своего склада) ───────────────────────────────────────
+// Зеркало backend/schemas/wb_fbs.py — контракт домена. Менять только вместе с ним.
+
+/** Источник остатка для трансляции в WB (WbFbsWarehouse.stock_source). */
+export type FbsStockSource = 'ledger' | 'ff_mirror' | 'min_of_both';
+
+/**
+ * Режим склада продавца (WbFbsWarehouse.mode).
+ * observe — только смотрим и сверяем, в WB ничего не пишем (штатное состояние);
+ * translate — остатки реально уезжают в кабинет.
+ */
+export type FbsWarehouseMode = 'observe' | 'translate';
+
+/**
+ * Режим контура FBS (backend/config.py: WB_FBS_MODE).
+ * safe — читаем боевой WB, но ничего в нём не меняем (кнопки записи выключены);
+ * sandbox — работа на тестовых данных песочницы (свой ключ scope Test);
+ * prod — боевой кабинет, запись разрешена.
+ */
+export type FbsMode = 'safe' | 'sandbox' | 'prod';
+
+/** GET /fbs/mode — что домену разрешено делать прямо сейчас. */
+export interface FbsModeInfo {
+  mode: FbsMode | string;
+  write_enabled: boolean;
+  api_base: string;
+  /** Есть ли активный боевой ключ «Маркетплейс» (wb_marketplace). */
+  has_key: boolean;
+  /** Есть ли активный ключ песочницы (wb_marketplace_sandbox). */
+  has_sandbox_key: boolean;
+}
+
+/** Статус сборочного задания у продавца (WB supplierStatus). */
+export type FbsSupplierStatus = 'new' | 'confirm' | 'complete' | 'cancel' | 'cancel_carrier';
+
+/** Формат стикера WB (POST /api/v3/orders/stickers). */
+export type FbsStickerType = 'svg' | 'zplv' | 'zplh' | 'png';
+
+/** Статус прогона трансляции остатков (WbFbsStockPush.status). */
+export type FbsPushStatus = 'RUNNING' | 'OK' | 'PARTIAL' | 'ERROR';
+
+/** Склад WB (пункт приёма) — не наша сущность, справочник из GET /api/v3/offices. */
+export interface FbsOffice {
+  id: number;
+  name?: string | null;
+  address?: string | null;
+  city?: string | null;
+  cargo_type?: number | null;
+  delivery_type?: number | null;
+  federal_district?: string | null;
+  selected: boolean;
+}
+
+/** Привязка нашего склада к складу продавца WB. */
+export interface FbsWarehouseLink {
+  id: number;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  is_active: boolean;
+  /**
+   * Источник остатка определяется автоматически по самому складу — отдельной
+   * настройки нет. Есть зеркало WMS → min(наш учёт, зеркало), нет → наш учёт.
+   */
+  has_mirror: boolean;
+  mirror_rows: number;
+  mirror_synced_at?: string | null;
+  mirror_provider?: string | null;
+  /** Ключ интеграции склада активен. false при живом зеркале = данные могут протухнуть. */
+  integration_active: boolean;
+}
+
+/** Склад продавца WB + наши настройки трансляции остатков. */
+export interface FbsWarehouse {
+  id: number;
+  wb_warehouse_id: number;
+  name?: string | null;
+  office_id?: number | null;
+  office_name?: string | null;
+  cargo_type?: number | null;
+  delivery_type?: number | null;
+  is_processing: boolean;
+  is_deleting: boolean;
+  // Наши настройки трансляции
+  is_active: boolean;
+  stock_source: FbsStockSource;
+  /** Numeric(5,2) — приходит СТРОКОЙ, перед показом оборачивать Number(). */
+  safety_stock_pct: number;
+  safety_stock_abs: number;
+  max_qty_per_sku: number;
+  /** observe — только показываем расхождения, translate — пишем остатки в WB. */
+  mode: FbsWarehouseMode | string;
+  /**
+   * Что отдаём в FBS: null — все остатки; 0 — только то, чего нет на FBO
+   * (позиция с живым остатком на складах WB не транслируется).
+   */
+  fbo_max_qty?: number | null;
+  synced_at?: string | null;
+  links: FbsWarehouseLink[];
+}
+
+/** Создать склад продавца НА СТОРОНЕ WB. */
+export interface FbsWarehouseCreatePayload {
+  name: string;
+  office_id: number;
+}
+
+/** Переименовать склад продавца WB (смена офиса — раз в сутки). */
+export interface FbsWarehouseRenamePayload {
+  name: string;
+  office_id?: number | null;
+}
+
+/** Наши настройки трансляции (WB не трогаем). Все поля опциональны. */
+export interface FbsWarehouseSettingsPayload {
+  is_active?: boolean | null;
+  stock_source?: FbsStockSource | null;
+  safety_stock_pct?: number | null;
+  safety_stock_abs?: number | null;
+  max_qty_per_sku?: number | null;
+  mode?: FbsWarehouseMode | null;
+  /**
+   * Что отдаём: 0 — только то, чего нет на FBO; -1 — снять гейт (все остатки).
+   * null в теле означал бы «не передано», поэтому «снять» кодируется -1.
+   */
+  fbo_max_qty?: number | null;
+}
+
+export interface FbsLinkCreatePayload {
+  wb_warehouse_id: number;
+  warehouse_id: number;
+}
+
+/** Одна позиция превью остатков — с полной расшифровкой вычетов. */
+export interface FbsStockRow {
+  barcode: string;
+  chrt_id?: number | null;
+  nomenclature_id?: number | null;
+  article_seller?: string | null;
+  nm_id?: number | null;
+  // Слагаемые формулы
+  qty_ledger: number;
+  qty_ff_mirror?: number | null;
+  qty_source: number;
+  /** Остаток на складах WB (FBO), сумма по всем складам. null — не считали. */
+  fbo_qty?: number | null;
+  reserved_assembly: number;
+  fbs_open: number;
+  defect: number;
+  buffer: number;
+  // Итог
+  /** Расчётный доступный ДО применения ручного количества. */
+  qty_computed: number;
+  qty_available: number;
+  qty_sent?: number | null;
+  qty_confirmed?: number | null;
+  /** Ручное количество по этому товару (null — не задано). 0 = не отдавать. */
+  override_qty?: number | null;
+  // Разрезы для группировки и массового выделения в таблице
+  brand?: string | null;
+  subject?: string | null;
+  subcategory_id?: number | null;
+  subcategory_name?: string | null;
+  /** Причина, по которой позиция не транслируется (no_chrt / warehouse_processing / …). */
+  blocked_reason?: string | null;
+}
+
+/**
+ * POST /fbs/stock/override — потоварная замена количества на складе продавца.
+ *
+ * qty = 0 — не отдавать позицию вовсе; qty > 0 — потолок, итог всегда
+ * min(qty, рассчитанный доступный) — поднять выше физического остатка нельзя;
+ * qty = null — снять ручное количество и вернуться к расчёту.
+ */
+export interface FbsOverrideSetPayload {
+  wb_warehouse_id: number;
+  /** Форма «одно число на список». Взаимоисключима с items. */
+  nomenclature_ids?: number[];
+  qty?: number | null;
+  /**
+   * Форма «каждому своё число» — для проставления из данных (зеркало ФФ),
+   * где у каждой позиции свой остаток.
+   */
+  items?: { nomenclature_id: number; qty: number }[];
+}
+
+/** Строка разреза статистики заказов: ярлык → штуки и рубли. */
+export interface FbsOrderStatRow {
+  label: string;
+  orders_count: number;
+  /** Numeric — приезжает СТРОКОЙ, перед показом оборачивать num(). */
+  orders_sum: number;
+}
+
+/** Точка дневного графика. День — МСК-сутки, как в воронке продаж. */
+export interface FbsOrderStatDay {
+  day: string;
+  orders_count: number;
+  orders_sum: number;
+}
+
+/**
+ * Весь объём заказов проекта по воронке WB — знаменатель доли FBS.
+ *
+ * Доля считается за ОДИНАКОВЫЕ дни с обеих сторон: воронка отстаёт от заданий,
+ * и полный период FBS, делённый на неполный период воронки, дал бы кратно
+ * завышенную долю. `fbs_*` — цифры FBS ровно за покрытый воронкой отрезок.
+ */
+export interface FbsOrderStatsFunnel {
+  orders_count: number;
+  orders_sum: number;
+  /** false — воронка за период пуста (синк не проходил); долю показывать нельзя. */
+  has_data: boolean;
+  covered_from?: string | null;
+  covered_to?: string | null;
+  /** false — доля посчитана за подотрезок; подпись обязана назвать какой. */
+  full_period: boolean;
+  fbs_orders_count: number;
+  fbs_orders_sum: number;
+}
+
+/**
+ * GET /fbs/orders/stats — сводка заказов FBS за период.
+ *
+ * `orders_count` включает отменённые: воронка WB их тоже не вычитает, а весь
+ * смысл блока — сопоставимость с ней. Отменённые вынесены отдельной парой полей.
+ */
+export interface FbsOrderStats {
+  date_from: string;
+  date_to: string;
+  wb_warehouse_id?: number | null;
+  orders_count: number;
+  orders_sum: number;
+  cancelled_count: number;
+  cancelled_sum: number;
+  by_day: FbsOrderStatDay[];
+  by_status: FbsOrderStatRow[];
+  by_brand: FbsOrderStatRow[];
+  by_subject: FbsOrderStatRow[];
+  by_subcategory: FbsOrderStatRow[];
+  funnel: FbsOrderStatsFunnel;
+}
+
+export interface FbsStockPreview {
+  wb_warehouse_id: number;
+  wb_warehouse_name?: string | null;
+  warehouse_ids: number[];
+  rows: FbsStockRow[];
+  total_rows: number;
+  total_units: number;
+  rows_no_chrt: number;
+  is_processing: boolean;
+}
+
+/**
+ * Тип расхождения первичной сверки.
+ * unmanaged — позиция висит в кабинете, а мы её не отдаём (наш расчёт = 0):
+ * дельта-пуш её не тронет никогда, значит она продолжит продаваться сама по себе;
+ * mismatch — отдаём, но цифра в кабинете другая.
+ */
+export type FbsReconcileKind = 'unmanaged' | 'mismatch';
+
+/** Одна строка сверки: что стоит в кабинете WB против нашего расчёта. */
+export interface FbsReconcileRow {
+  chrt_id: number;
+  barcode?: string | null;
+  article_seller?: string | null;
+  nm_id?: number | null;
+  /** Что сейчас реально стоит в кабинете WB. */
+  wb_amount: number;
+  /** Что отдаст наш расчёт (0 = не отдаём вовсе). */
+  our_amount: number;
+  kind: FbsReconcileKind | string;
+  /** Почему не отдаём: нет на привязанном складе, правило EXCLUDE, ноль остатка. */
+  reason?: string | null;
+}
+
+/**
+ * GET /fbs/stock/reconcile — первичная сверка склада продавца («захват»).
+ *
+ * Трансляция ДЕЛЬТОВАЯ: позиция, которую мы считаем в ноль и никогда не
+ * отправляли, в WB не уезжает вовсе. Остатки, проставленные в кабинете руками
+ * до подключения, так и останутся там и продолжат продаваться.
+ */
+export interface FbsReconcileOut {
+  wb_warehouse_id: number;
+  wb_warehouse_name?: string | null;
+  /** Сколько chrtId проверили (наша номенклатура с заполненным chrtId). */
+  checked: number;
+  unmanaged_positions: number;
+  unmanaged_units: number;
+  mismatch_positions: number;
+  rows: FbsReconcileRow[];
+  /** Позиции без chrtId — их состояние в кабинете проверить нечем. */
+  rows_no_chrt: number;
+}
+
+/** POST /fbs/stock/reconcile — обнулить в WB то, чем мы не управляем (ЗАПИСЬ). */
+export interface FbsReconcileApplyPayload {
+  wb_warehouse_id: number;
+  /** Пусто — все unmanaged-позиции сверки; иначе только эти chrtId. */
+  chrt_ids: number[];
+}
+
+export interface FbsStockPushPayload {
+  /** Пусто — все активные склады продавца. */
+  wb_warehouse_ids: number[];
+  /** true — слать все позиции, не только изменившиеся с прошлого пуша. */
+  force: boolean;
+}
+
+/** Строка лога трансляции остатков. */
+export interface FbsStockPush {
+  id: number;
+  wb_warehouse_id?: number | null;
+  trigger: string;
+  status: FbsPushStatus | string;
+  started_at: string;
+  finished_at?: string | null;
+  rows_total: number;
+  rows_changed: number;
+  rows_sent: number;
+  rows_no_chrt: number;
+  rows_mismatch: number;
+  error_msg?: string | null;
+}
+
+/** Сборочное задание FBS. */
+export interface FbsOrder {
+  id: number;
+  wb_order_id: number;
+  rid?: string | null;
+  created_at_wb?: string | null;
+  wb_warehouse_id?: number | null;
+  office_name?: string | null;
+  nm_id?: number | null;
+  chrt_id?: number | null;
+  barcode?: string | null;
+  article?: string | null;
+  subject?: string | null;
+  /** Numeric(18,2) — приходит СТРОКОЙ, перед показом оборачивать Number(). */
+  price?: number | null;
+  /** Numeric(18,2) — приходит СТРОКОЙ, перед показом оборачивать Number(). */
+  sale_price?: number | null;
+  currency_code?: string | null;
+  cargo_type?: number | null;
+  is_zero_order: boolean;
+  is_pickup_point_shipment_allowed: boolean;
+  supplier_status: FbsSupplierStatus | string;
+  wb_status?: string | null;
+  is_cancellable: boolean;
+  supply_id?: string | null;
+  sticker_barcode?: string | null;
+  sticker_part_a?: string | null;
+  sticker_part_b?: string | null;
+  ddate?: string | null;
+  comment?: string | null;
+  written_off_at?: string | null;
+  synced_at: string;
+}
+
+export interface FbsOrderListResponse {
+  items: FbsOrder[];
+  total: number;
+  /** Счётчики по статусам для вкладок (new / confirm / complete / cancel). */
+  status_counts: Record<string, number>;
+}
+
+/** WB: максимум 100 заданий за запрос, только статусы confirm/complete. */
+export interface FbsStickerRequestPayload {
+  order_ids: number[];
+  type: FbsStickerType;
+  width: number;
+  height: number;
+}
+
+export interface FbsSticker {
+  order_id: number;
+  part_a?: string | null;
+  part_b?: string | null;
+  barcode?: string | null;
+  /** base64-содержимое файла в запрошенном формате. */
+  file?: string | null;
+}
+
+/** Поставка FBS (WB-GI-…). */
+export interface FbsSupply {
+  id: number;
+  wb_supply_id: string;
+  name?: string | null;
+  done: boolean;
+  created_at_wb?: string | null;
+  closed_at?: string | null;
+  scan_dt?: string | null;
+  cargo_type?: number | null;
+  cross_border_type?: number | null;
+  is_b2b: boolean;
+  destination_office_id?: number | null;
+  wb_warehouse_id?: number | null;
+  orders_count: number;
+  qr_barcode?: string | null;
+}
+
+export interface FbsSupplyCreatePayload {
+  name: string;
+}
+
+/** WB bulk: до 100 заданий за запрос; задания переходят в confirm. */
+export interface FbsSupplyAddOrdersPayload {
+  order_ids: number[];
+}
+
+/**
+ * Одна будущая поставка в предпросмотре разбиения.
+ *
+ * WB запрещает смешивать в поставке склады и габариты: первое добавленное
+ * задание фиксирует cargoType и crossBorderType. Поэтому при нескольких
+ * складах выделенное физически обязано разъехаться по нескольким поставкам —
+ * группировка идёт по (склад, габарит, трансграничность).
+ */
+export interface FbsSupplyPlanGroup {
+  wb_warehouse_id?: number | null;
+  wb_warehouse_name?: string | null;
+  cargo_type?: number | null;
+  cross_border_type?: number | null;
+  order_ids: number[];
+  orders_count: number;
+  /** Активная поставка той же группы — в неё доложим вместо создания новой. */
+  existing_supply_id?: string | null;
+  /** Почему группу нельзя отправить (задание уже в поставке / терминальный статус). */
+  blocked_reason?: string | null;
+}
+
+/** POST /fbs/supplies/plan — предпросмотр: ничего не пишет, режимом контура не гейтится. */
+export interface FbsSupplyPlan {
+  groups: FbsSupplyPlanGroup[];
+  total_orders: number;
+  /** Сколько поставок получится (групп без blocked_reason). */
+  supplies_count: number;
+}
+
+/** Тело запроса плана — только выделенные задания. */
+export interface FbsSupplyPlanPayload {
+  order_ids: number[];
+}
+
+/** POST /fbs/supplies/bulk — создать поставки по плану: одна на каждую группу. */
+export interface FbsSupplyBulkCreatePayload {
+  order_ids: number[];
+  /** Префикс имени: к нему добавится склад, чтобы поставки различались. */
+  name_prefix?: string | null;
+  /** Докладывать в существующую активную поставку группы, если она есть. */
+  reuse_existing?: boolean;
+}
+
+export interface FbsSupplyBulkResult {
+  created: FbsSupply[];
+  /** Поставки, в которые доложили задания (новую не создавали). */
+  reused: FbsSupply[];
+  orders_attached: number;
+  errors: string[];
+}
+
+export interface FbsSupplyBarcode {
+  barcode?: string | null;
+  file?: string | null;
+}
+
+/**
+ * Строка листа подбора: агрегат ПО ТОВАРУ, а не по заданиям.
+ *
+ * Сборщику не нужен список заказов — ему нужно «снять со склада N штук вот
+ * этого баркода». Одна строка = одна номенклатура во всей поставке.
+ */
+export interface FbsPickListRow {
+  nomenclature_id?: number | null;
+  barcode?: string | null;
+  chrt_id?: number | null;
+  nm_id?: number | null;
+  article?: string | null;
+  subject?: string | null;
+  brand?: string | null;
+  /** Сколько единиц позиции в поставке (заданий на неё). */
+  qty: number;
+  /** Numeric(18,2) — приходит СТРОКОЙ, перед показом оборачивать Number(). */
+  amount?: number | null;
+  /** Остаток на привязанных наших складах — видно, хватает ли товара. */
+  stock_available?: number | null;
+}
+
+/** GET /fbs/supplies/{id}/pick-list — лист подбора поставки. */
+export interface FbsPickList {
+  wb_supply_id: string;
+  supply_name?: string | null;
+  wb_warehouse_id?: number | null;
+  wb_warehouse_name?: string | null;
+  cargo_type?: number | null;
+  done: boolean;
+  created_at_wb?: string | null;
+  orders_count: number;
+  /** Число уникальных позиций (строк листа). */
+  positions_count: number;
+  total_qty: number;
+  /** Numeric(18,2) — приходит СТРОКОЙ, перед показом оборачивать Number(). */
+  total_amount?: number | null;
+  rows: FbsPickListRow[];
+}
+
+/**
+ * Единый ответ write-действий: что реально произошло.
+ *
+ * У POST /fbs/stock/push ответ приходит ДО похода в WB (прогон уходит в фон):
+ * `affected` — сколько складов поставлено в очередь, прогресс — в /fbs/stock/pushes.
+ * У POST /fbs/supplies `message` несёт id созданной поставки (`WB-GI-…`).
+ */
+export interface FbsActionResult {
+  ok: boolean;
+  message?: string | null;
+  affected: number;
+}
