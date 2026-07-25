@@ -265,6 +265,15 @@ def test_gsheet_disabled_without_key(monkeypatch):
     assert g.load_credentials() is None
 
 
+def test_cfg_sheet_url_always_in_text():
+    """Ссылка на настроенную таблицу — в тексте даже без ключа/заливки."""
+    from backend.services.funnel.problem_digest import _cfg_sheet_url
+
+    cfg = dict(CFG, sheet_id="abc123", sheet_id_weekly="")
+    assert _cfg_sheet_url(cfg, "sheet_id") == "https://docs.google.com/spreadsheets/d/abc123"
+    assert _cfg_sheet_url(cfg, "sheet_id_weekly") is None
+
+
 # ─── xlsx ────────────────────────────────────────────────────────────────────
 
 

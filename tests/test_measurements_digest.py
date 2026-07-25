@@ -172,3 +172,31 @@ async def test_summary_subject_fallback(db_session, project):
     assert by_nm[502] == "Пледы"       # из карточки (замера нет)
     assert by_nm[503] == "Чехлы"       # собственный не тронут
     assert by_nm[504] == "Покрывала"   # пустая строка тоже добирается
+
+
+def test_day_bounds_are_msk():
+    """Границы периода — по МСК, не по UTC (иначе теряются ранне-утренние замеры)."""
+    df, dt = m._day_bounds(date(2026, 7, 23), date(2026, 7, 23))
+    # МСК-полночь 23.07 = 22.07 21:00 UTC; конец дня = 23.07 20:59:59 UTC
+    assert df.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M") == "2026-07-22T21:00"
+    assert dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M") == "2026-07-23T20:59"
+
+
+@pytest.mark.asyncio
+async def test_list_warehouse_early_msk_included(db_session, project):
+    """Замер в 01:00 МСК (= 22:00 UTC пред. суток) при фильтре на его МСК-дату — виден."""
+    early = datetime(2026, 7, 22, 22, 0, tzinfo=timezone.utc)  # 23.07 01:00 МСК
+    prev = datetime(2026, 7, 22, 20, 0, tzinfo=timezone.utc)   # 22.07 23:00 МСК
+    db_session.add_all([
+        _meas(project.id, 71, 701, "Ковры", 10.0, early),
+        _meas(project.id, 72, 702, "Пледы", 11.0, prev),
+    ])
+    await db_session.commit()
+
+    items, total = await m.list_warehouse_measurements(
+        db_session, project.id, date(2026, 7, 23), date(2026, 7, 23), None, None, None, None, 500, 0
+    )
+    nm_ids = {i.nm_id for i in items}
+    assert 701 in nm_ids       # ранне-утренний по МСК — включён
+    assert 702 not in nm_ids   # предыдущий день по МСК — исключён
+    assert total == 1

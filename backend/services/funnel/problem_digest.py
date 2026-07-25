@@ -327,17 +327,20 @@ def build_tg_text(
     Проблемные товары в тексте не перечисляем — они в приложенном xlsx
     и Google-таблице (решение юзера 23.07).
     """
+    from html import escape
+
     revenue = revenue or {}
     total = sum(d["total"] for d in revenue.values())
-    lines = [f"📊 <b>{title}</b>", ""]
-    lines.append(f"💰 <b>Выручка {revenue_label or ''} — {rub_short(total)}</b>")
+    lines = [f"📊 <b>{escape(title)}</b>", ""]
+    lines.append(f"💰 <b>Выручка {escape(revenue_label or '')} — {rub_short(total)}</b>")
     for brand, data in sorted(revenue.items(), key=lambda kv: -kv[1]["total"]):
         if data["total"] <= 0:
             continue
-        lines.append(f"<b>{brand}</b> — {rub_short(data['total'])}")
+        # Бренды/категории приходят из WB-карточек — сырые & и < ломают parse_mode=HTML
+        lines.append(f"<b>{escape(brand)}</b> — {rub_short(data['total'])}")
         subjects = sorted(((k, v) for k, v in data["subjects"].items() if v > 0), key=lambda kv: -kv[1])
         for subject, s in subjects[:5]:
-            lines.append(f"   • {subject} — {rub_short(s)}")
+            lines.append(f"   • {escape(subject)} — {rub_short(s)}")
         rest = subjects[5:]
         if rest:
             lines.append(f"   • прочие ({len(rest)}) — {rub_short(sum(v for _, v in rest))}")
@@ -377,8 +380,9 @@ async def build_daily_digest(db: AsyncSession, project: Project, cfg: dict[str, 
     }
     revenue = digest["revenue_cmp"]  # выручка за вчера — свежий день
     revenue_label = f"за {yday.strftime('%d.%m')}"
+    sheet = _cfg_sheet_url(cfg, "sheet_id")
     return {
-        "text": build_tg_text(title, revenue=revenue, revenue_label=revenue_label),
+        "text": build_tg_text(title, sheet_url=sheet, revenue=revenue, revenue_label=revenue_label),
         "title": title,
         "kind": "daily",
         "revenue": revenue,
@@ -413,8 +417,9 @@ async def build_weekly_digest(db: AsyncSession, project: Project, cfg: dict[str,
     }
     revenue = digest["revenue_main"]  # выручка за отчётную неделю
     revenue_label = f"за неделю {_fmt_period(last_monday, last_sunday)}"
+    sheet = _cfg_sheet_url(cfg, "sheet_id_weekly")
     return {
-        "text": build_tg_text(title, revenue=revenue, revenue_label=revenue_label),
+        "text": build_tg_text(title, sheet_url=sheet, revenue=revenue, revenue_label=revenue_label),
         "title": title,
         "kind": "weekly",
         "revenue": revenue,
@@ -425,17 +430,51 @@ async def build_weekly_digest(db: AsyncSession, project: Project, cfg: dict[str,
     }
 
 
-async def attach_sheet_link(db: AsyncSession, project_id: int, cfg: dict[str, Any], payload: dict[str, Any]) -> None:
-    """Обновить Google-таблицу сводки и вписать ссылку в текст сообщения.
+# ─── «Прислать сейчас» через worker ─────────────────────────────────────────
+# Из API-контейнера прода api.telegram.org недоступен (РКН; прокси-путь живёт
+# в worker) — send-now ставит маркер, worker-тик подхватывает его в течение минуты.
 
-    Без ключа сервисного аккаунта / при ошибке Google текст остаётся прежним.
+ASAP_KEY = "ads_problem_digest_asap"
+
+
+async def request_asap_send(db: AsyncSession, project_id: int, kind: str) -> None:
+    from backend.services.settings_service import set_setting
+
+    await set_setting(db, project_id, ASAP_KEY, json.dumps({"kind": kind}))
+
+
+async def pop_asap_request(db: AsyncSession, project_id: int) -> str | None:
+    """Прочитать и снять маркер «прислать сейчас». Возвращает kind или None."""
+    from backend.services.settings_service import get_setting, set_setting
+
+    raw = await get_setting(db, project_id, ASAP_KEY)
+    if not raw:
+        return None
+    try:
+        kind = json.loads(raw).get("kind")
+    except (TypeError, ValueError, AttributeError):
+        kind = None
+    await set_setting(db, project_id, ASAP_KEY, "")
+    return kind if kind in ("daily", "weekly") else None
+
+
+def _cfg_sheet_url(cfg: dict[str, Any], key: str) -> str | None:
+    """Постоянная ссылка на настроенную Google-таблицу (кладём в текст всегда,
+    даже если заливка недоступна — сама таблица живёт по стабильному URL)."""
+    from backend.services.funnel.problem_digest_gsheet import sheet_url
+
+    sid = str(cfg.get(key) or "")
+    return sheet_url(sid) if sid else None
+
+
+async def attach_sheet_link(db: AsyncSession, project_id: int, cfg: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Залить свежий xlsx в Google-таблицу сводки (best-effort).
+
+    Ссылка на таблицу уже в тексте (build_*_digest); здесь только обновляем
+    содержимое — без ключа сервисного аккаунта / при ошибке Google тихо скипаем.
     """
     from backend.services.funnel.problem_digest_gsheet import update_digest_sheet
 
     url = await update_digest_sheet(db, project_id, cfg, payload["kind"], payload["xlsx"])
     if url:
         payload["sheet_url"] = url
-        payload["text"] = build_tg_text(
-            payload["title"], sheet_url=url,
-            revenue=payload.get("revenue"), revenue_label=payload.get("revenue_label"),
-        )
