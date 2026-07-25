@@ -21,6 +21,59 @@ if TYPE_CHECKING:
 logger = logging.getLogger("dds.integrations")
 
 
+def _marketplace_base_url() -> str:
+    """База Marketplace API для пробника БОЕВОГО ключа — всегда боевой хост.
+
+    Хост пробника обязан зависеть от ТИПА ключа, а не от режима контура: при
+    `WB_FBS_MODE=sandbox` прежний `resolve_base_url()` уводил проверку боевого
+    токена на sandbox-хост, тот отвечал 401 → «Ключ без доступа Маркетплейс», и
+    валидный боевой ключ было не зарегистрировать. Зеркало
+    `_marketplace_sandbox_base_url` (там хост тоже прибит к типу ключа).
+    Override `settings.WB_FBS_API_BASE` при этом сохраняется.
+    """
+    from backend.config import WB_FBS_MODE_PROD
+    from backend.integrations.wb_fbs_api import resolve_base_url
+
+    return resolve_base_url(WB_FBS_MODE_PROD)
+
+
+def _marketplace_sandbox_base_url() -> str:
+    """База песочницы WB — пробник ключа scope Test бьётся именно туда."""
+    from backend.integrations.wb_fbs_api import WB_FBS_SANDBOX_BASE
+
+    return WB_FBS_SANDBOX_BASE
+
+
+async def check_marketplace_scope(api_key: str, base_url: str | None = None) -> str:
+    """Есть ли у токена категория «Маркетплейс». Возвращает "ok" | "no_scope" | "unknown".
+
+    Пробник — `GET /ping` marketplace-api (лимит ≤3 запроса/30 с). Marketplace API
+    принимает токен БЕЗ префикса `Bearer` (в отличие от Content API).
+    "unknown" (429/5xx/сеть) НЕ считать невалидным ключом — зеркало
+    check_content_scope: транзиент не должен блокировать живой ключ.
+
+    `base_url` задаётся явно для ключа песочницы: боевой хост ответил бы на
+    Test-токен 401 и «съел» бы валидный ключ.
+    """
+    import httpx
+
+    headers = {"Accept": "application/json", "Authorization": api_key}
+    host = (base_url or _marketplace_base_url()).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(f"{host}/ping", headers=headers)
+    except httpx.HTTPError as e:
+        logger.warning("Marketplace scope check: network error, cannot verify — %s", e)
+        return "unknown"
+    if resp.status_code == 200:
+        return "ok"
+    if resp.status_code in (401, 403):
+        logger.info("Marketplace scope check: token rejected (%s) — no Маркетплейс scope", resp.status_code)
+        return "no_scope"
+    logger.warning("Marketplace scope check: transient %s from WB marketplace API, cannot verify", resp.status_code)
+    return "unknown"
+
+
 # ─── Integration Keys ────────────────────────────────────────────────────────
 
 
@@ -67,9 +120,18 @@ async def add_key(
     Returns dict with key info.
     Raises ValueError on validation failure.
     """
-    if service not in ("wb", "wb_advert", "wb_content", "wb_feedbacks", "ozon"):
+    if service not in (
+        "wb",
+        "wb_advert",
+        "wb_content",
+        "wb_feedbacks",
+        "wb_marketplace",
+        "wb_marketplace_sandbox",
+        "ozon",
+    ):
         raise ValueError(
-            f"Unsupported service: {service}. Use 'wb', 'wb_advert', 'wb_content', 'wb_feedbacks' or 'ozon'."
+            f"Unsupported service: {service}. Use 'wb', 'wb_advert', 'wb_content', "
+            "'wb_feedbacks', 'wb_marketplace', 'wb_marketplace_sandbox' or 'ozon'."
         )
 
     # Test connection before saving — different scope, different endpoint.
@@ -102,6 +164,26 @@ async def add_key(
                 "Ключ без доступа «Контент». "
                 "Проверьте, что токен выпущен с категорией «Контент» и правом записи."
             )
+    elif service == "wb_marketplace":
+        # Ключ FBS: склады продавца, остатки (chrtId), сборочные задания, поставки.
+        # "unknown" (429/5xx/сеть) не блокирует сохранение — как и у прочих проверок.
+        # Хост — БОЕВОЙ явно, независимо от WB_FBS_MODE: в песочнице боевой токен
+        # получил бы 401 и валидный ключ отбился бы (зеркало ветки sandbox ниже).
+        scope = await check_marketplace_scope(api_key, base_url=_marketplace_base_url())
+        if scope == "no_scope":
+            raise ValueError(
+                "Ключ без доступа «Маркетплейс». "
+                "Проверьте, что токен выпущен с категорией «Маркетплейс» (FBS)."
+            )
+    elif service == "wb_marketplace_sandbox":
+        # Ключ песочницы WB: пробуем его ИМЕННО на sandbox-хосте — боевой ping
+        # отдал бы на Test-токен 401 и отбил бы валидный ключ.
+        scope = await check_marketplace_scope(api_key, base_url=_marketplace_sandbox_base_url())
+        if scope == "no_scope":
+            raise ValueError(
+                "Ключ не принят песочницей WB. Для песочницы нужен токен категории "
+                "«Маркетплейс» со scope Test — боевой ключ здесь не работает."
+            )
     elif service == "wb_feedbacks":
         from backend.integrations.wb_api import check_feedbacks_scope
 
@@ -129,6 +211,31 @@ async def add_key(
             )
         )
     ).scalar_one_or_none()
+
+    if service in ("wb_marketplace", "wb_marketplace_sandbox"):
+        # FBS-клиент выбирает ключ по (project_id, service) — второй активный
+        # ключ «Маркетплейса» с другим label сделал бы выбор недетерминированным
+        # (или уронил бы scalar_one). Гасим прежние активные строки этого сервиса.
+        # Боевой и песочный сервисы независимы: гасим только однотипные строки.
+        stale = (
+            (
+                await db.execute(
+                    select(IntegrationKey)
+                    .where(
+                        IntegrationKey.project_id == project_id,
+                        IntegrationKey.service == service,
+                        IntegrationKey.label != resolved_label,
+                        IntegrationKey.is_active.is_(True),
+                        IntegrationKey.is_deleted.is_(False),
+                    )
+                    .limit(20)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for old_key in stale:
+            old_key.is_active = False
 
     if existing is not None:
         existing.encrypted_key = encrypted
@@ -482,6 +589,9 @@ async def sync_wb_nomenclature(db: AsyncSession, project_id: int) -> SyncLog:
                 nom.article_seller = item.get("article_seller") or nom.article_seller
                 nom.article_wb = item.get("article_wb") or nom.article_wb
                 nom.imt_id = item.get("imt_id") or nom.imt_id
+                # chrtId — ключ методов остатков FBS. Пустым не затираем: карточка
+                # без chrtID не должна обнулять уже известный ключ.
+                nom.chrt_id = item.get("chrt_id") or nom.chrt_id
                 if item.get("volume_l"):
                     nom.volume_l = Decimal(str(item["volume_l"]))
                 nom.updated_at = utcnow()
@@ -495,6 +605,7 @@ async def sync_wb_nomenclature(db: AsyncSession, project_id: int) -> SyncLog:
                     article_seller=item.get("article_seller"),
                     article_wb=item.get("article_wb"),
                     imt_id=item.get("imt_id"),
+                    chrt_id=item.get("chrt_id"),
                     volume_l=Decimal(str(item.get("volume_l", 0))),
                 )
                 db.add(nom)

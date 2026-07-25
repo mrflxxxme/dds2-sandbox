@@ -28,7 +28,20 @@ router = APIRouter(prefix="/integrations")
 
 
 class AddKeyRequest(BaseModel):
-    service: Literal["wb", "wb_advert", "wb_content", "wb_feedbacks", "ozon"]
+    # wb_marketplace — категория «Маркетплейс» (FBS: склады продавца, остатки,
+    # сборочные задания, поставки). Отдельный токен от «Контента»/«Продвижения».
+    # wb_marketplace_sandbox — тот же «Маркетплейс», но токен scope Test для
+    # песочницы WB (WB_FBS_MODE=sandbox): отдельный контур со своими данными,
+    # боевой ключ там отвечает 401.
+    service: Literal[
+        "wb",
+        "wb_advert",
+        "wb_content",
+        "wb_feedbacks",
+        "wb_marketplace",
+        "wb_marketplace_sandbox",
+        "ozon",
+    ]
     api_key: str
     label: str | None = None
 

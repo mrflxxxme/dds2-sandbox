@@ -67,6 +67,13 @@ from backend.scheduler.jobs.wb_prices_sync import sync_all_projects_wb_prices
 from backend.scheduler.jobs.measurements_digest import send_measurement_digests
 from backend.scheduler.jobs.problem_digest import send_problem_digests
 from backend.scheduler.jobs.wb_measurements import sync_all_projects_wb_measurements
+from backend.scheduler.jobs.wb_fbs import (
+    push_all_projects_fbs_stocks,
+    sync_all_projects_fbs_new_orders,
+    sync_all_projects_fbs_order_statuses,
+    sync_all_projects_fbs_supplies,
+    sync_all_projects_fbs_warehouses,
+)
 from backend.scheduler.jobs.wb_stocks import sync_all_projects_wb_remains, sync_all_projects_wb_stocks
 from backend.scheduler.jobs.wb_supply_states import sync_all_projects_wb_supply_states
 
@@ -454,6 +461,71 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=600,
+    )
+
+    # ── WB FBS (продажи со склада продавца) ──
+    # Все пять джобов: max_instances=1 + coalesce=True — пропущенные тики
+    # схлопываются в ОДИН, а не выстраиваются в очередь (после паузы воркера
+    # иначе в WB улетела бы пачка одинаковых PUT и выжгла бакет лимитов).
+    # Проекты без ключа wb_marketplace / без активных складов FBS джобы
+    # отсеивают сами. Гонка с ручной кнопкой — Redis-лок внутри самой
+    # трансляции (services/wb_fbs/locks.py), а не здесь: кнопка живёт в
+    # api-контейнере и джоб её лок не увидел бы.
+    _scheduler.add_job(
+        push_all_projects_fbs_stocks,
+        trigger=IntervalTrigger(minutes=settings.WB_FBS_STOCK_PUSH_INTERVAL_MINUTES),
+        id="wb_fbs_stock_push",
+        name=f"WB FBS stock push (every {settings.WB_FBS_STOCK_PUSH_INTERVAL_MINUTES}min)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=120,
+    )
+
+    _scheduler.add_job(
+        sync_all_projects_fbs_new_orders,
+        trigger=IntervalTrigger(minutes=settings.WB_FBS_ORDERS_SYNC_INTERVAL_MINUTES),
+        id="wb_fbs_orders_sync",
+        name=f"WB FBS new orders sync (every {settings.WB_FBS_ORDERS_SYNC_INTERVAL_MINUTES}min)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=120,
+    )
+
+    _scheduler.add_job(
+        sync_all_projects_fbs_order_statuses,
+        trigger=IntervalTrigger(minutes=5),
+        id="wb_fbs_order_statuses",
+        name="WB FBS order statuses + writeoff (every 5min)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+
+    _scheduler.add_job(
+        sync_all_projects_fbs_supplies,
+        trigger=IntervalTrigger(minutes=15),
+        id="wb_fbs_supplies_sync",
+        name="WB FBS supplies sync (every 15min)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
+    )
+
+    # Справочник складов продавца: раз в сутки 04:50 MSK — свободный слот между
+    # рекламными дозагрузками (04:20–04:45) и утренними WB-джобами.
+    _scheduler.add_job(
+        sync_all_projects_fbs_warehouses,
+        trigger=CronTrigger(hour=4, minute=50, timezone=MSK),
+        id="wb_fbs_warehouses_sync",
+        name="WB FBS seller warehouses sync (daily 04:50 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
     )
 
     # WB замеры складов + удержания за габариты: раз в сутки в 01:00 MSK

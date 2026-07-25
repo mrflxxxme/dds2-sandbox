@@ -337,6 +337,30 @@ async def _get_reserved_detail_batch(
     return details
 
 
+async def get_open_fbs_reserved(db: AsyncSession, project_id: int, warehouse_ids: list[int]) -> dict[int, int]:
+    """Открытые FBS-задания как резерв нашего склада: {nomenclature_id: шт}.
+
+    Товар, проданный по FBS и ещё не отгруженный (`supplier_status` new/confirm),
+    физически лежит на нашем складе и НЕ списан из ledger'а (списание делает
+    `orders_service.writeoff_completed_orders` только по `complete`). Поэтому в
+    `WarehouseStock.quantity` он есть, а продать его второй раз — через сборку —
+    нельзя. Это второе слагаемое резерва рядом с резервом активных заявок.
+
+    Единственный источник цифры — `wb_fbs.stock_service.get_open_fbs_qty` (та же
+    функция кормит формулу FBS-остатка), чтобы прямой и обратный гейт не разъехались.
+
+    Домен FBS опционален: пока модуль не установлен, возвращаем пустой словарь —
+    вычет = 0, поведение вызывающего кода бит-в-бит прежнее.
+    """
+    if not warehouse_ids:
+        return {}
+    try:
+        from backend.services.wb_fbs.stock_service import get_open_fbs_qty
+    except ImportError:  # домен FBS не установлен — вычитать нечего
+        return {}
+    return await get_open_fbs_qty(db, project_id, list(warehouse_ids))
+
+
 async def get_warehouse_stock(
     db: AsyncSession, project_id: int, warehouse_id: int, exclude_assembly_id: int | None = None
 ) -> list[dict]:
@@ -344,6 +368,10 @@ async def get_warehouse_stock(
 
     exclude_assembly_id — резерв этой сборки не вычитается из available
     (для экрана редактирования сборки: «сколько могу заказать в ЭТОЙ сборке»).
+
+    Из available дополнительно вычитаются открытые FBS-задания (`fbs_open`):
+    этот товар уже продан со склада продавца и ждёт отгрузки. Без FBS-заказов
+    вычет = 0 и available считается ровно как раньше.
     """
     result = await db.execute(
         select(WarehouseStock)
@@ -357,11 +385,13 @@ async def get_warehouse_stock(
     rows = result.scalars().all()
 
     reserved_map = await _get_reserved_map(db, project_id, warehouse_id, exclude_assembly_id=exclude_assembly_id)
+    fbs_map = await get_open_fbs_reserved(db, project_id, [warehouse_id])
 
     enriched = []
     for row in rows:
         reserved = reserved_map.get(row.nomenclature_id, 0)
-        available = max(0, row.quantity - reserved)
+        fbs_open = fbs_map.get(row.nomenclature_id, 0)
+        available = max(0, row.quantity - reserved - fbs_open)
         enriched.append(
             {
                 "id": row.id,

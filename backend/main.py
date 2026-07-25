@@ -60,6 +60,7 @@ from backend.routers import (
     vibe,
     warehouse,
     warehouse_speed,
+    wb_fbs,
     wb_returns,
     ws,
 )
@@ -626,6 +627,13 @@ app.include_router(
     prefix="/api/v1",
     tags=["Warehouse Speed"],
     dependencies=[Depends(get_current_user)],
+)
+# WB FBS (склад продавца) — internal-only: внешние аккаунты (ФФ/лендер) сюда не ходят.
+app.include_router(
+    wb_fbs.router,
+    prefix="/api/v1",
+    tags=["WB FBS"],
+    dependencies=[Depends(require_internal)],
 )
 app.include_router(
     fulfillment.router,
