@@ -124,6 +124,42 @@ def pytest_sessionfinish(session, exitstatus):
             "DELETE FROM users WHERE id NOT IN (SELECT DISTINCT owner_id FROM projects WHERE owner_id IS NOT NULL) "
             "AND id NOT IN (SELECT DISTINCT user_id FROM project_members WHERE user_id IS NOT NULL)"
         )
+        # Таблицы с project_id, но БЕЗ FK на projects, не попадают в обход выше
+        # (он идёт по referential_constraints) → их строки переживают удаление
+        # проекта и остаются сиротами НАВСЕГДА. Инцидент 2026-07-26: гейт стал
+        # нечинибельно красным. counterparty_categories.cp_key уникален
+        # ГЛОБАЛЬНО (UNIQUE btree (cp_key), без project_id), а
+        # test_merge_collapses_to_single_category_row пишет фиксированный ключ
+        # 'главный ка' → одна осиротевшая строка от ПРОШЛОГО прогона роняет
+        # следующий с UniqueViolation. Каждый прогон гарантированно ломал
+        # следующий: агент не мог получить зелёное и не мог запушить.
+        # Накопилось 225 сирот от 194 мёртвых проектов (+10.8k в transactions,
+        # 10.3k в integration_keys, 8.8k в cost_orders).
+        #
+        # Предикат строго «сирота» (проекта уже нет), а НЕ `NOT IN
+        # _KEEP_PROJECT_IDS`: локальная БД — копия прода, и слепой фильтр по
+        # KEEP снёс бы живые данные (transactions/accounts/orders/wb_payouts).
+        # Сирота недостижима любым project-scoped запросом (Iron rule 1) → её
+        # удаление безопасно. Идёт ПОСЛЕ `DELETE FROM projects` — чтобы поймать
+        # и тех, кто осиротел прямо в этой сессии.
+        # Снапшот-таблицы (_remediation_*, *_backup_*) не трогаем — это архивы.
+        cur.execute(
+            "SELECT c.table_name FROM information_schema.columns c "
+            "JOIN information_schema.tables t ON t.table_name = c.table_name "
+            " AND t.table_schema = c.table_schema AND t.table_type = 'BASE TABLE' "
+            "WHERE c.column_name = 'project_id' AND c.table_schema = 'public' "
+            "AND c.table_name NOT LIKE '\\_remediation%' AND c.table_name NOT LIKE '%\\_backup\\_%' "
+            "AND c.table_name NOT IN ("
+            " SELECT tc.table_name FROM information_schema.referential_constraints rc "
+            " JOIN information_schema.table_constraints tc ON rc.constraint_name = tc.constraint_name "
+            " JOIN information_schema.constraint_column_usage ccu ON rc.unique_constraint_name = ccu.constraint_name "
+            " WHERE ccu.table_name = 'projects' AND ccu.column_name = 'id')"
+        )
+        for (table,) in cur.fetchall():
+            cur.execute(
+                f'DELETE FROM "{table}" x WHERE x.project_id IS NOT NULL '  # noqa: S608 — table from information_schema
+                "AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.id = x.project_id)"
+            )
         conn.commit()
         cur.close()
         conn.close()
