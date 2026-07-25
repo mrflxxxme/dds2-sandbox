@@ -1,8 +1,21 @@
 import secrets
 import warnings
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+# ─── Режимы контура WB FBS ───────────────────────────────────────────────────
+# Буквальное «чтение с прода / запись в песочницу» невозможно: песочница WB —
+# ОТДЕЛЬНЫЙ контур со своими данными и токеном scope Test, прод-идентификаторов
+# (складов продавца, chrtId, заданий) там не существует. Поэтому режим один на
+# весь контур, а различаются они правом записи и хостом:
+#   safe    — читаем боевой WB, любая ЗАПИСЬ блокируется до HTTP (дефолт);
+#   sandbox — весь трафик в песочницу, ключ берётся из `wb_marketplace_sandbox`;
+#   prod    — боевой контур, запись разрешена.
+WB_FBS_MODE_SAFE = "safe"
+WB_FBS_MODE_SANDBOX = "sandbox"
+WB_FBS_MODE_PROD = "prod"
+WB_FBS_MODES = (WB_FBS_MODE_SAFE, WB_FBS_MODE_SANDBOX, WB_FBS_MODE_PROD)
 
 
 class Settings(BaseSettings):
@@ -80,10 +93,30 @@ class Settings(BaseSettings):
     # На проде игнорируется (там основной scheduler уже крутит тот же тиринг).
     FULFILLMENT_SYNC_ENABLED: bool = False
 
+    # ── WB FBS (продажи со склада продавца) — фоновые джобы ──
+    # Мастер-тумблер домена: False = джобы FBS ничего не делают (registration
+    # остаётся, но каждый прогон выходит сразу). Локалка/стенд без ключа
+    # «Маркетплейс» гасится этим флагом без правки расписания.
+    WB_FBS_ENABLED: bool = True
+    # Каденс трансляции остатков на склады продавца WB (push_all_projects_fbs_stocks).
+    WB_FBS_STOCK_PUSH_INTERVAL_MINUTES: int = 3
+    # Каденс опроса новых сборочных заданий (sync_all_projects_fbs_new_orders).
+    WB_FBS_ORDERS_SYNC_INTERVAL_MINUTES: int = 2
+
     # Автоподача жалоб на отзывы через WB API (POST /api/v1/feedbacks/actions).
     # WB ВРЕМЕННО отключил этот метод — жалобы подаются только через ЛК продавца.
     # Клиент готов; включать, когда WB объявит возврат метода. Учти лимит 1 rps.
     WB_FEEDBACK_COMPLAINTS_API: bool = False
+
+    # WB FBS (Marketplace API) — склады продавца, остатки, задания, поставки.
+    WB_FBS_API_BASE: str = "https://marketplace-api.wildberries.ru"
+    # Режим контура: safe (дефолт, запись в WB запрещена) | sandbox | prod.
+    # Дефолт безопасный НАМЕРЕННО: пока владелец не разрешил запись, домен
+    # читает боевой кабинет, но не меняет в нём ничего.
+    WB_FBS_MODE: str = WB_FBS_MODE_SAFE
+    # LEGACY-алиас: WB_FBS_SANDBOX=true = WB_FBS_MODE=sandbox. Работает, только
+    # пока WB_FBS_MODE не задан явно (см. `_resolve_wb_fbs_mode`).
+    WB_FBS_SANDBOX: bool = False
 
     # Admin panel IP whitelist (comma-separated, empty = no restriction)
     ADMIN_ALLOWED_IPS: str = ""  # e.g. "1.2.3.4,2a01:e5c0:6dac::2"
@@ -107,6 +140,32 @@ class Settings(BaseSettings):
     FEATURE_DEMO_MODE: bool = False  # Show demo banner, enable seed data
     FEATURE_WB_SYNC: bool = True  # WB API sync enabled
     FEATURE_EXPORT_PDF: bool = False  # PDF export (beta)
+
+    @model_validator(mode="after")
+    def _resolve_wb_fbs_mode(self) -> "Settings":
+        """Нормализовать режим контура FBS на старте приложения.
+
+        Порядок: явный `WB_FBS_MODE` → legacy `WB_FBS_SANDBOX=true` → `safe`.
+        Неизвестное значение НЕ роняет старт (иначе опечатка в .env кладёт весь
+        сервис), а откатывается в самый безопасный режим с WARNING — потерять
+        песочницу не страшно, случайно записать в боевой WB — страшно.
+        """
+        raw = (self.WB_FBS_MODE or "").strip().lower()
+        explicit = "WB_FBS_MODE" in self.model_fields_set and raw
+        if not explicit and self.WB_FBS_SANDBOX:
+            raw = WB_FBS_MODE_SANDBOX
+        if raw not in WB_FBS_MODES:
+            if raw:
+                warnings.warn(
+                    f"⚠️  WB_FBS_MODE='{self.WB_FBS_MODE}' не распознан "
+                    f"(допустимо: {', '.join(WB_FBS_MODES)}). Включён режим "
+                    f"'{WB_FBS_MODE_SAFE}': запись в WB отключена.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            raw = WB_FBS_MODE_SAFE
+        self.WB_FBS_MODE = raw
+        return self
 
     @field_validator("MINIO_ACCESS_KEY", "MINIO_SECRET_KEY")
     @classmethod

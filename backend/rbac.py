@@ -45,6 +45,7 @@ ALL_PAGES: list[str] = [
     "stocks",
     "stock-analytics",
     "barcode-labels",
+    "fbs",
     "planning",
     "container",
     "funnel",
@@ -64,7 +65,16 @@ ALL_PAGES: list[str] = [
 
 SECTION_PAGES: dict[str, list[str]] = {
     "finance": ["import", "txn", "inbox", "reports", "cost", "refs"],
-    "warehouse": ["assembly", "assembly-analytics", "logistics", "fbo", "stocks", "stock-analytics", "barcode-labels"],
+    "warehouse": [
+        "assembly",
+        "assembly-analytics",
+        "logistics",
+        "fbo",
+        "fbs",
+        "stocks",
+        "stock-analytics",
+        "barcode-labels",
+    ],
     "orders": ["planning", "container"],
     "supply": ["supply-chain"],
     "sales": ["funnel", "ads-manager", "ab-tests", "trends", "opiu", "plan-fact", "geography"],

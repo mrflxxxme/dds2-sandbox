@@ -41,6 +41,10 @@ class Nomenclature(Base):
     # WB nmID/imtID: int64 — WB-side IDs outgrew int32 (imtID seen at 2.72B).
     article_wb: Mapped[int | None] = mapped_column(BigInteger)
     imt_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # chrtID (ID размера товара в WB). Ключ методов остатков Marketplace API —
+    # с 09.02.2026 баркоды (sku) там не принимаются. Заполняется синком карточек
+    # (sync_wb_nomenclature): barcode → chrtId, many-to-one.
+    chrt_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     volume_l: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     area_m2: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     # Reference per-barcode weight (kg) — fallback for WEIGHT-basis duty when the
