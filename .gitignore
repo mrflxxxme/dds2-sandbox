@@ -61,3 +61,6 @@ docker/cryptopro/linux-amd64_deb/
 
 # Локальный пайплайн WB-отчётов (SQL/сборка HTML→PDF) — вне продукта
 /analytics-local/
+
+# Рабочий каталог сессий: черновики, дампы, куки — в репозиторий не идёт
+scratchpad/

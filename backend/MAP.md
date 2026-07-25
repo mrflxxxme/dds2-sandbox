@@ -34,6 +34,11 @@ from backend.models.mixins import SoftDeleteMixin
 | WB HTTP-клиент | `integrations/wb_api.py` (+ `resilience.py`) |
 | Фулфилмент (skladbot.ru, wmscelicom, migfull) | `integrations/skladbot_client.py`, `integrations/wmscelicom_client.py`, `integrations/migfull_client.py`, `services/fulfillment_service.py`, `routers/fulfillment.py`, job `scheduler/jobs/fulfillment_sync.py` |
 | FF billing (тарифы, хранение, счета) | `models/ff_billing.py`, `schemas/ff_billing.py`, `services/ff_billing/`, `routers/ff_billing.py`, `etl/sync_ff_invoices.py`, job `scheduler/jobs/ff_storage_snapshot.py` |
+| WB FBS (склад продавца: остатки по `chrtId`, задания, поставки) | `models/wb_fbs.py`, `schemas/wb_fbs.py`, `integrations/wb_fbs_api.py`, `services/wb_fbs/` (`client_factory`, `warehouse_service`, `stock_service`, `orders_service`, `supplies_service`), `routers/wb_fbs.py`, job `scheduler/jobs/wb_fbs.py` |
+| Ручное количество FBS по товару (0 = не отдавать, N = потолок) | `services/wb_fbs/stock_service.py:set_overrides` (хранение) + `_apply_override` / `_group_override_limit` (применение); ручка `POST /fbs/stock/override` |
+| FBO-гейт FBS («отдаём только то, чего нет на складах WB») | `services/wb_fbs/stock_service.py:_load_fbo` / `_fbo_allowed_names` / `_fbo_blocks`; порог — `WbFbsWarehouse.fbo_max_qty` |
+| Режим склада продавца (`observe` — не писать в WB / `translate`) | `models/wb_fbs.py:FbsWarehouseMode`, гейт — `services/wb_fbs/stock_service.py:_push_stocks_locked` |
+| Обратный гейт FBS → сборка | `services/warehouse_stock_engine.py:get_open_fbs_reserved` → `services/assembly/crud.py:_validate_available_for_assembly` |
 | Telegram-бот | `integrations/telegram_bot.py` |
 | Фоновые задачи | `scheduler/jobs/` |
 | Кэш | `cache.py` |
@@ -58,6 +63,7 @@ from backend.models.mixins import SoftDeleteMixin
 | `FulfillmentStock`, `FulfillmentRequest` | `models/fulfillment.py` | зеркало остатков/заявок внешнего ФФ (skladbot, wmscelicom, migfull) |
 | `Account`, `CategoryRef` | `models/refs.py` | справочники |
 | `WarehouseTariff`, `FfStorageDaily`, `FfInvoice`, `FfInvoiceLine` | `models/ff_billing.py` | тарифы услуг ФФ, хранение, счета |
+| `WbFbsWarehouse`, `WbFbsWarehouseLink`, `WbFbsStockOverride`, `WbFbsOrder`, `WbFbsSupply` | `models/wb_fbs.py` | склады продавца WB, привязка к нашим, ручное количество по товару, сборочные задания и поставки FBS |
 
 ## Тесты
 `make test` · `test-fast` · `test-changed` · `test-unit` · `lint`. Прямо: `docker compose exec backend pytest tests/ -x --tb=short`.
