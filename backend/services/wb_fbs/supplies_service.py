@@ -34,7 +34,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, NamedTuple
 
-from sqlalchemy import cast, delete, func, literal, select, update
+from sqlalchemy import and_, cast, delete, func, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,6 +49,10 @@ from backend.models import (
     WbFbsSupply,
     WbFbsWarehouse,
 )
+
+# Прямо из подмодуля — как в `stock_service` / `orders_stats`: производный
+# статус поставки в реэкспорт `backend.models` не вынесен.
+from backend.models.wb_fbs import FbsSupplyStatus, supply_status
 from backend.services.wb_fbs import orders_service
 from backend.services.wb_fbs.client_factory import get_fbs_client
 from backend.services.wb_fbs.contour import contour_condition, stamp_contour
@@ -74,7 +78,13 @@ CACHE_SUPPLIES = "fbs:supplies"
 
 #: Сколько «чужих» поставок за прогон досинкиваем составом через
 #: `/order-ids` (по одному HTTP на поставку — держим в узде).
-_ORDER_IDS_FETCH_CAP = 10
+#:
+#: 25, а не 10: закрытая поставка спрашивается ОДИН раз за всю жизнь, и на
+#: десятке исторический хвост (52 поставки на проде) разбирался бы больше часа,
+#: всё это время показывая «заданий 0». Джоб ходит раз в 15 минут — верхняя
+#: нагрузка выходит 25 запросов на четверть часа, а недобранный остаток
+#: пишется в лог (`_pull_missing_order_ids`): молча потолок не срезает.
+_ORDER_IDS_FETCH_CAP = 25
 
 #: Нейтральный элемент для мержа JSONB (`raw || excluded.raw`): NULL с одной
 #: стороны обнулил бы весь результат, поэтому обе стороны страхуются coalesce'ом.
@@ -154,6 +164,9 @@ def _supply_row(raw: dict, project_id: int, sync_ts: datetime) -> dict[str, Any]
         "created_at_wb": _parse_wb_datetime(raw.get("createdAt")),
         "closed_at": _parse_wb_datetime(raw.get("closedAt")),
         "scan_dt": _parse_wb_datetime(raw.get("scanDt")),
+        # Единственный признак отклонённой приёмки: своего поля статуса у
+        # поставки нет, и без `rejectDt` отказ выглядел бы как «Передана».
+        "reject_dt": _parse_wb_datetime(raw.get("rejectDt")),
         "cargo_type": _int_or_none(raw.get("cargoType")),
         "cross_border_type": _int_or_none(raw.get("crossBorderType")),
         "is_b2b": bool(raw.get("isB2b", False)),
@@ -184,6 +197,10 @@ async def _upsert_supplies(db: AsyncSession, project_id: int, rows: list[dict]) 
                 "created_at_wb": func.coalesce(stmt.excluded.created_at_wb, WbFbsSupply.created_at_wb),
                 "closed_at": func.coalesce(stmt.excluded.closed_at, WbFbsSupply.closed_at),
                 "scan_dt": func.coalesce(stmt.excluded.scan_dt, WbFbsSupply.scan_dt),
+                # Отказ — необратимый факт: раз доехав, он не должен исчезать
+                # от прогона, где WB отдал `rejectDt: null` (поля списочного
+                # метода приходят непостоянно — та же страховка, что у closed_at).
+                "reject_dt": func.coalesce(stmt.excluded.reject_dt, WbFbsSupply.reject_dt),
                 # Списочный метод WB не отдаёт габариты — не затираем то,
                 # что зафиксировал первый добавленный заказ.
                 "cargo_type": func.coalesce(stmt.excluded.cargo_type, WbFbsSupply.cargo_type),
@@ -255,28 +272,64 @@ async def _recount_orders(db: AsyncSession, project_id: int, wb_supply_id: str |
     )
 
 
-async def _pull_missing_order_ids(db: AsyncSession, project_id: int, client: Any) -> int:
-    """Досинк состава активных поставок, созданных вне нашей системы.
+def _order_ids_candidates() -> Any:
+    """Кого досинкиваем составом через `/order-ids`.
 
-    Наши поставки помечают задания сами (`add_orders`), поэтому тянем состав
-    только для активных поставок с нулём заданий и не больше
-    `_ORDER_IDS_FETCH_CAP` штук за прогон — по одному HTTP на поставку.
+    Две РАЗНЫЕ ветки, потому что разная природа данных:
+
+    • **активные** (`done = false`) с нулём заданий в зеркале — каждый прогон:
+      в такую поставку докладывают прямо в кабинете, состав живой, и только
+      свежая метка даёт право предложить её к доклажу (`_load_active_supply_fits`);
+    • **закрытые** — РОВНО ОДИН раз, пока метки `raw[WB_ORDERS_KEY]` нет:
+      закрытая поставка неизменна, повторный запрос — сожжённый запрос бакета.
+
+    Раньше здесь стоял голый гейт `done == False`, и закрытые не спрашивались
+    НИКОГДА: 52 поставки с прода вечно показывали «заданий 0», хотя в кабинете
+    у них 22 / 11 / 8 / 7 / 9.
+    """
+    return and_(
+        contour_condition(WbFbsSupply.raw),
+        or_(
+            and_(
+                WbFbsSupply.done == False,  # noqa: E712
+                WbFbsSupply.orders_count == 0,
+            ),
+            and_(
+                WbFbsSupply.done == True,  # noqa: E712
+                # `->> ключ IS NULL` вместо оператора `?`: покрывает и NULL-raw,
+                # и отсутствие ключа, и не требует эскейпа плейсхолдера.
+                WbFbsSupply.raw[WB_ORDERS_KEY].astext.is_(None),
+            ),
+        ),
+    )
+
+
+async def _pull_missing_order_ids(db: AsyncSession, project_id: int, client: Any) -> int:
+    """Досинк состава поставок, набранных вне нашей системы.
+
+    Наши поставки помечают задания сами (`add_orders`), поэтому в WB ходим
+    только за теми, чей состав нам взяться неоткуда (`_order_ids_candidates`),
+    и не больше `_ORDER_IDS_FETCH_CAP` штук за прогон — по одному HTTP на
+    поставку. Недобранный хвост пишем в лог: молчащий потолок — это ровно то,
+    из-за чего «заданий 0» держалось незамеченным.
 
     Фактическое число заданий из ответа WB кладём в `raw[WB_ORDERS_KEY]`, даже
     когда ни один id не нашёлся в нашем зеркале: «в зеркале пусто» и «в WB
     пусто» — РАЗНЫЕ факты, и только второй разрешает доклад в эту поставку
-    (`_load_active_supply_fits`). Метку переписывает каждый синк — она всегда
-    свежая, а непроверенная поставка кандидатом не считается.
+    (`_load_active_supply_fits`). Активной метку переписывает каждый синк — она
+    всегда свежая, а непроверенная поставка кандидатом не считается.
     """
+    candidates = _order_ids_candidates()
     result = await db.execute(
         select(WbFbsSupply.wb_supply_id, WbFbsSupply.raw)
-        .where(
-            WbFbsSupply.project_id == project_id,
-            WbFbsSupply.done == False,  # noqa: E712
-            WbFbsSupply.orders_count == 0,
-            contour_condition(WbFbsSupply.raw),
+        .where(WbFbsSupply.project_id == project_id, candidates)
+        # Активные вперёд (false < true): их состав живой, а закрытые доберутся
+        # следующими прогонами — они всё равно уже не изменятся.
+        .order_by(
+            WbFbsSupply.done.asc(),
+            WbFbsSupply.created_at_wb.desc().nullslast(),
+            WbFbsSupply.id.desc(),
         )
-        .order_by(WbFbsSupply.created_at_wb.desc().nullslast(), WbFbsSupply.id.desc())
         .limit(_ORDER_IDS_FETCH_CAP)
     )
     targets: list[tuple[str, dict[str, Any]]] = [
@@ -284,6 +337,22 @@ async def _pull_missing_order_ids(db: AsyncSession, project_id: int, client: Any
     ]
     if not targets:
         return 0
+
+    if len(targets) == _ORDER_IDS_FETCH_CAP:
+        total = await db.scalar(
+            select(func.count())
+            .select_from(WbFbsSupply)
+            .where(WbFbsSupply.project_id == project_id, candidates)
+        )
+        leftover = max(0, int(total or 0) - len(targets))
+        if leftover:
+            logger.warning(
+                "wb_fbs.supplies.order_ids cap reached project=%s fetched=%s pending=%s "
+                "(доберём следующими прогонами)",
+                project_id,
+                len(targets),
+                leftover,
+            )
 
     await db.commit()  # не держим транзакцию через внешний HTTP
 
@@ -356,23 +425,103 @@ async def sync_supplies(db: AsyncSession, project_id: int) -> int:
 
 
 def _supply_to_dict(supply: WbFbsSupply) -> dict[str, Any]:
-    """Строка под `FbsSupplyOut` (контракт схем)."""
+    """Строка под `FbsSupplyOut` (контракт схем).
+
+    Два числа заданий рядом и намеренно: `orders_count` — НАШЕ зеркало (на нём
+    висят доклад и удаление), `wb_orders_count` — сколько их у WB. До бэкфилла
+    истории первое почти везде 0, и подменять им второе значило бы врать
+    ровно так же, как врал экран.
+
+    `destination_office_name` здесь всегда None: справочник офисов — поход в WB,
+    его резолвит `list_supplies` ОДНИМ запросом на страницу (см. `_office_names`).
+    """
     return {
         "id": supply.id,
         "wb_supply_id": supply.wb_supply_id,
         "name": supply.name,
         "done": supply.done,
+        "status": supply_status(supply.done, supply.scan_dt, supply.reject_dt),
         "created_at_wb": supply.created_at_wb,
         "closed_at": supply.closed_at,
         "scan_dt": supply.scan_dt,
+        "reject_dt": supply.reject_dt,
         "cargo_type": supply.cargo_type,
         "cross_border_type": supply.cross_border_type,
         "is_b2b": supply.is_b2b,
         "destination_office_id": supply.destination_office_id,
+        "destination_office_name": None,
         "wb_warehouse_id": supply.wb_warehouse_id,
         "orders_count": supply.orders_count,
+        "wb_orders_count": _wb_orders_count(supply.raw),
         "qr_barcode": supply.qr_barcode,
     }
+
+
+def _status_condition(status: str) -> Any:
+    """Ярлык кабинета → условие WHERE. Зеркало `models.wb_fbs.supply_status`.
+
+    Фильтруем в SQL, а не постфильтром по уже нарезанной странице: постфильтр
+    отбрасывал бы строки ПОСЛЕ `limit/offset`, и вкладка «Отгрузите поставку»
+    показывала бы то пусто, то половину при живых данных.
+    """
+    if status == FbsSupplyStatus.REJECTED.value:
+        return WbFbsSupply.reject_dt.isnot(None)
+    # Во всех остальных состояниях отказа нет — `rejectDt` перебивает всё.
+    not_rejected = WbFbsSupply.reject_dt.is_(None)
+    if status == FbsSupplyStatus.ACTIVE.value:
+        return and_(not_rejected, WbFbsSupply.done == False)  # noqa: E712
+    if status == FbsSupplyStatus.TO_SHIP.value:
+        return and_(
+            not_rejected,
+            WbFbsSupply.done == True,  # noqa: E712
+            WbFbsSupply.scan_dt.is_(None),
+        )
+    if status == FbsSupplyStatus.IN_DELIVERY.value:
+        return and_(
+            not_rejected,
+            WbFbsSupply.done == True,  # noqa: E712
+            WbFbsSupply.scan_dt.isnot(None),
+        )
+    # Молча снятый фильтр показал бы ВЕСЬ список под ярлыком вкладки — то же
+    # враньё, что чиним. Роутер отсекает раньше (422), это defense in depth.
+    raise FbsSupplyError(
+        f"Неизвестный статус поставки «{status}». Допустимы: "
+        + ", ".join(s.value for s in FbsSupplyStatus)
+    )
+
+
+async def _office_names(db: AsyncSession, project_id: int, office_ids: set[int]) -> dict[int, str]:
+    """id пункта приёма WB → имя. ОДИН поход в справочник на всю страницу.
+
+    Своей таблицы у офисов нет, источник — `GET /api/v3/offices` через
+    `warehouse_service.list_offices` (кэш 10 минут). Резолв на каждой строке
+    был бы N+1 по внешнему API с его лимитами.
+
+    Справочник — УКРАШЕНИЕ строки, а не её суть: нет ключа интеграции, 429 или
+    любой другой отказ WB не имеет права уронить список поставок, поэтому
+    падение гасится в None с предупреждением в лог.
+    """
+    if not office_ids:
+        return {}
+
+    # Локальный импорт — как в соседних модулях домена (защита от цикла).
+    from backend.services.wb_fbs import warehouse_service
+
+    try:
+        offices = await warehouse_service.list_offices(db, project_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("wb_fbs.supplies.offices lookup failed project=%s: %s", project_id, exc)
+        return {}
+
+    names: dict[int, str] = {}
+    for office in offices:
+        office_id = _int_or_none(office.get("id"))
+        name = _str_or_none(office.get("name"), 200)
+        if office_id and name:
+            names[office_id] = name
+    return names
 
 
 @cached(prefix="fbs:supplies", ttl=60)
@@ -381,10 +530,17 @@ async def list_supplies(
     project_id: int,
     *,
     done: bool | None = None,
+    status: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict]:
     """Список поставок из зеркала. `done=False` — активные (можно доложить).
+
+    `status` — точнее `done`: тот схлопывает в «закрыта» и «Отгрузите
+    поставку», и «Поставка в обработке», и отклонённую приёмку, из-за чего наш
+    экран расходился с кабинетом (52 «переданных» против «В доставке 44»).
+    Оба фильтра оставлены и складываются друг с другом: `done` — часть
+    прежнего контракта, на нём висят кнопки.
 
     Скоуп по контуру — как в списке заданий: боевой экран не должен показывать
     поставки песочницы (и наоборот).
@@ -398,12 +554,25 @@ async def list_supplies(
     )
     if done is not None:
         query = query.where(WbFbsSupply.done == done)
+    clean_status = (status or "").strip().lower()
+    if clean_status:
+        query = query.where(_status_condition(clean_status))
     result = await db.execute(
         query.order_by(WbFbsSupply.created_at_wb.desc().nullslast(), WbFbsSupply.id.desc())
         .limit(limit)
         .offset(offset)
     )
-    return [_supply_to_dict(supply) for supply in result.scalars().all()]
+    rows = [_supply_to_dict(supply) for supply in result.scalars().all()]
+
+    # Строки уже материализованы в dict'ы: справочник коммитит сессию перед
+    # HTTP (транзакцию через внешний вызов не держим), а после коммита
+    # ORM-объекты протухают.
+    office_ids = {r["destination_office_id"] for r in rows if r["destination_office_id"]}
+    names = await _office_names(db, project_id, office_ids)
+    if names:
+        for row in rows:
+            row["destination_office_name"] = names.get(row["destination_office_id"] or 0)
+    return rows
 
 
 async def _get_supply(db: AsyncSession, project_id: int, wb_supply_id: str) -> WbFbsSupply:
