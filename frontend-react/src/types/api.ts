@@ -8197,3 +8197,44 @@ export interface FbsActionResult {
   message?: string | null;
   affected: number;
 }
+
+
+/** Ячейка матрицы FBS: что стоит на складе WB и что можем туда поставить. */
+export interface FbsMatrixCell {
+  /** Живой остаток кабинета. null — не прочитан. */
+  wb: number | null;
+  /** Наш расчёт «сколько отдадим» по привязанным складам. */
+  can: number;
+}
+
+export interface FbsMatrixRow {
+  nomenclature_id: number;
+  barcode?: string | null;
+  article_seller?: string | null;
+  nm_id?: number | null;
+  brand?: string | null;
+  subject?: string | null;
+  /** Ключ — wb_warehouse_id строкой. */
+  cells: Record<string, FbsMatrixCell>;
+  total_wb: number;
+  total_can: number;
+  /** Деньги за окно тренда — по карточке, по складам не делятся. */
+  revenue: number | string;
+  profit: number | string;
+  /** null — выручки не было; ноль означал бы «продавали в ноль». */
+  margin_pct: number | null;
+  sale_qty: number;
+  avg_daily_qty: number;
+}
+
+export interface FbsMatrixWarehouse {
+  wb_warehouse_id: number;
+  name?: string | null;
+}
+
+export interface FbsMatrix {
+  warehouses: FbsMatrixWarehouse[];
+  rows: FbsMatrixRow[];
+  wb_stock_known: boolean;
+  trend_days: number;
+}

@@ -251,6 +251,48 @@ class FbsStockPreviewOut(BaseModel):
     is_processing: bool = False
 
 
+class FbsMatrixCell(BaseModel):
+    """Ячейка матрицы: что стоит на складе WB и что могли бы туда поставить."""
+
+    #: Живой остаток кабинета. None — не прочитали (нет ключа / WB не ответил).
+    wb: int | None = None
+    #: Наш расчёт «сколько отдадим» по привязанным складам.
+    can: int = 0
+
+
+class FbsMatrixRow(BaseModel):
+    nomenclature_id: int
+    barcode: str | None = None
+    article_seller: str | None = None
+    nm_id: int | None = None
+    brand: str | None = None
+    subject: str | None = None
+    #: Ключ — wb_warehouse_id строкой (JSON-объект не умеет int-ключи).
+    cells: dict[str, FbsMatrixCell] = Field(default_factory=dict)
+    total_wb: int = 0
+    total_can: int = 0
+    #: Деньги за окно тренда — по КАРТОЧКЕ, по складам не делятся.
+    revenue: Decimal = Decimal(0)
+    profit: Decimal = Decimal(0)
+    #: None — выручки не было; ноль означал бы «продавали в ноль».
+    margin_pct: float | None = None
+    sale_qty: int = 0
+    avg_daily_qty: float = 0
+
+
+class FbsMatrixWarehouse(BaseModel):
+    wb_warehouse_id: int
+    name: str | None = None
+
+
+class FbsMatrixOut(BaseModel):
+    warehouses: list[FbsMatrixWarehouse] = Field(default_factory=list)
+    rows: list[FbsMatrixRow] = Field(default_factory=list)
+    #: False → все `cells[*].wb` = None, рисуем прочерк, а не ноль.
+    wb_stock_known: bool = False
+    trend_days: int = 14
+
+
 # ─── Сверка с кабинетом ──────────────────────────────────────────────────────
 
 

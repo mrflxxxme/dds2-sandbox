@@ -1,6 +1,7 @@
 /** WB FBS API methods — склады продавца, трансляция остатков, задания, поставки. */
 import { ApiClient } from './client';
 import type {
+    FbsMatrix,
     FbsActionResult,
     FbsLinkCreatePayload,
     FbsModeInfo,
@@ -98,6 +99,11 @@ export function addFbsMethods(api: ApiClient) {
         /** Асинхронный триггер: ответ не ждёт похода в WB — прогресс смотрим в /fbs/stock/pushes. */
         pushFbsStocks(body: FbsStockPushPayload) {
             return api.request<FbsActionResult>('POST', '/api/v1/fbs/stock/push', body);
+        },
+        /** Матрица «товар × склад продавца WB»: стоит / можем + деньги. */
+        getFbsStockMatrix(trendDays = 14) {
+            const q = new URLSearchParams({ trend_days: String(trendDays) });
+            return api.request<FbsMatrix>('GET', `/api/v1/fbs/stock/matrix?${q.toString()}`);
         },
         getFbsStockPushes(limit = 50) {
             const q = new URLSearchParams({ limit: String(limit) });

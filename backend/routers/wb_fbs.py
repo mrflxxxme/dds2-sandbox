@@ -53,6 +53,7 @@ from backend.schemas.wb_fbs import (
     FbsOverrideSet,
     FbsPickListOut,
     FbsReconcileApply,
+    FbsMatrixOut,
     FbsReconcileOut,
     FbsStickerOut,
     FbsStickerRequest,
@@ -489,6 +490,22 @@ async def set_stock_override(
 # продаваться. GET спрашивает у WB фактические остатки по нашей номенклатуре
 # (ЧТЕНИЕ — работает и в режиме `safe`), POST обнуляет то, чем мы не управляем
 # (ЗАПИСЬ — гейтится режимом контура в клиенте).
+
+
+@router.get("/stock/matrix", response_model=FbsMatrixOut)
+async def get_stock_matrix(
+    trend_days: int = Query(14, description="Окно тренда для денег: 7 / 14 / 30"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Матрица «товар × склад продавца WB»: стоит / можем поставить + деньги.
+
+    Колонки — только склады со связкой на наши: без привязки поставить нечего.
+    Обе цифры ячейки берутся из общего превью остатков, поэтому матрица и
+    вкладка «Остатки» не могут разойтись в числах.
+    """
+    with _fbs_errors():
+        return await stock_service.stock_matrix(db, project.id, trend_days=trend_days)
 
 
 @router.get("/stock/reconcile", response_model=FbsReconcileOut)

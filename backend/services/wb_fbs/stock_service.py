@@ -1233,6 +1233,116 @@ def _count_no_chrt(rows: list[dict[str, Any]]) -> int:
     return sum(1 for r in rows if not r.get("chrt_id"))
 
 
+
+# ─── Матрица складов продавца WB ─────────────────────────────────────────────
+
+
+#: Окна тренда, которые умеет отдавать `get_unified_stock_summary`.
+_MATRIX_TREND_KEYS = {7: "trend_7", 14: "trend_14", 30: "trend_30"}
+
+
+async def stock_matrix(db: AsyncSession, project_id: int, trend_days: int = 14) -> dict[str, Any]:
+    """Матрица «товар × склад продавца WB»: что там стоит и что могли бы поставить.
+
+    Колонки — ТОЛЬКО склады со связкой на наши (`WbFbsWarehouseLink`): без
+    привязки поставить физически нечего, и пустой столбец лишь мешает.
+
+    Обе цифры ячейки берутся из ОБЩЕГО `preview_stock`, а не считаются заново:
+    вкладка «Остатки» и матрица обязаны показывать одно и то же число, иначе
+    расхождение читается как ошибка расчёта (та же причина, по которой выручка
+    FBS сведена в одну формулу). Побочная выгода — общий кэш превью, так что
+    матрица не добавляет походов в WB сверх одного на склад в минуту.
+
+    Деньги (реализация и маржа) — из `get_unified_stock_summary`: они считаются
+    по КАРТОЧКЕ и по складам не делятся, поэтому живут отдельными колонками
+    справа, а не в ячейках складов.
+    """
+    from backend.services.warehouse_stock_engine import get_unified_stock_summary
+
+    trend_key = _MATRIX_TREND_KEYS.get(int(trend_days), "trend_14")
+
+    linked = await db.execute(
+        select(WbFbsWarehouse)
+        .where(
+            WbFbsWarehouse.project_id == project_id,
+            WbFbsWarehouse.wb_warehouse_id.in_(
+                select(WbFbsWarehouseLink.wb_warehouse_id).where(
+                    WbFbsWarehouseLink.project_id == project_id,
+                    WbFbsWarehouseLink.is_active == True,  # noqa: E712
+                )
+            ),
+        )
+        .order_by(WbFbsWarehouse.name)
+        .limit(100)
+    )
+    warehouses = list(linked.scalars().all())
+    if not warehouses:
+        return {"warehouses": [], "rows": [], "wb_stock_known": False, "trend_days": int(trend_days)}
+
+    wb_known = False
+    # nomenclature_id → строка матрицы
+    by_nom: dict[int, dict[str, Any]] = {}
+    for wh in warehouses:
+        preview = await preview_stock(db, project_id, wh.wb_warehouse_id)
+        wb_known = wb_known or bool(preview.get("wb_stock_known"))
+        for r in preview.get("rows", []):
+            nom_id = r.get("nomenclature_id")
+            if not nom_id:
+                continue  # без номенклатуры строку не с чем сшить по деньгам
+            row = by_nom.setdefault(
+                int(nom_id),
+                {
+                    "nomenclature_id": int(nom_id),
+                    "barcode": r.get("barcode"),
+                    "article_seller": r.get("article_seller"),
+                    "nm_id": r.get("nm_id"),
+                    "brand": r.get("brand"),
+                    "subject": r.get("subject"),
+                    "cells": {},
+                    "total_wb": 0,
+                    "total_can": 0,
+                },
+            )
+            wb_qty = r.get("qty_wb")
+            can_qty = int(r.get("qty_available") or 0)
+            row["cells"][str(wh.wb_warehouse_id)] = {"wb": wb_qty, "can": can_qty}
+            row["total_wb"] += int(wb_qty or 0)
+            row["total_can"] += can_qty
+
+    # Деньги одним запросом на всю выдачу — не по складу и не по строке.
+    money: dict[int, dict[str, Any]] = {}
+    try:
+        for u in await get_unified_stock_summary(db, project_id):
+            nom_id = u.get("nomenclature_id")
+            if nom_id:
+                money[int(nom_id)] = u.get(trend_key) or {}
+    except Exception as exc:  # тренда нет — матрица обязана остаться рабочей
+        logger.warning("wb_fbs.matrix project=%s тренд недоступен: %s", project_id, exc)
+
+    rows = []
+    for row in by_nom.values():
+        t = money.get(row["nomenclature_id"], {})
+        revenue = Decimal(str(t.get("revenue") or 0))
+        profit = Decimal(str(t.get("profit") or 0))
+        row["revenue"] = revenue
+        row["profit"] = profit
+        # Маржинальность без выручки не определена — None, а не 0: ноль означал бы
+        # «продавали в ноль», а мы просто не продавали.
+        row["margin_pct"] = float(profit / revenue * 100) if revenue else None
+        row["sale_qty"] = int(t.get("sale_qty") or 0)
+        row["avg_daily_qty"] = float(t.get("avg_daily_qty") or 0)
+        rows.append(row)
+
+    rows.sort(key=lambda r: (-(r["revenue"] or 0), -(r["total_can"] or 0)))
+    return {
+        "warehouses": [
+            {"wb_warehouse_id": w.wb_warehouse_id, "name": w.name} for w in warehouses
+        ],
+        "rows": rows,
+        "wb_stock_known": wb_known,
+        "trend_days": int(trend_days),
+    }
+
 # ─── Потоварная замена количества ────────────────────────────────────────────
 
 

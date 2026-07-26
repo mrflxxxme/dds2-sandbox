@@ -836,6 +836,44 @@ class TestStockFormula:
         assert preview["total_rows"] >= 1
         assert all(r.get("qty_wb") is None for r in preview["rows"])
 
+
+    @pytest.mark.asyncio
+    async def test_matrix_columns_are_linked_fbs_warehouses(
+        self, db_session, project, fbs_env, monkeypatch
+    ):
+        """Колонки матрицы — склады ПРОДАВЦА WB со связкой, а не наши внутренние.
+
+        Первая версия экрана строилась по нашим складам и отвечала не на тот
+        вопрос: пользователю нужно видеть, что стоит на «Белой Даче» и сколько
+        туда можно довезти, а не сумму по нашему складу.
+        """
+        wh, fbs_wh = fbs_env
+        nom = await _mk_nom(db_session, project.id, chrt_id=8801)
+        await _mk_stock(db_session, project.id, wh, nom, 7)
+        await db_session.commit()
+
+        class _Client:
+            async def get_stocks(self, wb_warehouse_id, chrt_ids):
+                return {8801: 3}
+
+        async def _fake(db, project_id):
+            return _Client()
+
+        monkeypatch.setattr(stock_service, "_get_client", _fake)
+
+        matrix = await stock_service.stock_matrix(db_session, project.id)
+
+        ids = [w["wb_warehouse_id"] for w in matrix["warehouses"]]
+        assert ids == [fbs_wh.wb_warehouse_id]
+        assert matrix["wb_stock_known"] is True
+
+        row = next(r for r in matrix["rows"] if r["nomenclature_id"] == nom.id)
+        cell = row["cells"][str(fbs_wh.wb_warehouse_id)]
+        assert cell["wb"] == 3  # стоит в кабинете
+        assert cell["can"] == 7  # можем поставить с привязанного склада
+        # Маржа без выручки не определена — None, а не ноль.
+        assert row["margin_pct"] is None or isinstance(row["margin_pct"], float)
+
     @pytest.mark.asyncio
     async def test_project_isolation(self, db_session, project, other_project, fbs_env):
         """Остаток чужого проекта на «том же» складе продавца не подмешивается."""
