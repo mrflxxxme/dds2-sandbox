@@ -216,14 +216,27 @@ export default function StockTab({
         return () => controller.abort();
     }, [refreshTick]);
 
-    const handlePush = async () => {
+    /**
+     * Запуск трансляции. `chrtIds` — точечная отправка одной/нескольких позиций:
+     * правка одного товара не должна гонять весь склад и жечь лимит WB.
+     */
+    const handlePush = async (chrtIds?: number[]) => {
         if (wbWarehouseId === '') return;
         setPushing(true);
         setError('');
         setPolling(true); // лог начинает обновляться, пока запрос ещё в полёте
         try {
-            await api.pushFbsStocks({ wb_warehouse_ids: [wbWarehouseId], force });
-            onToast('Трансляция запущена — следите за логом ниже');
+            await api.pushFbsStocks({
+                wb_warehouse_ids: [wbWarehouseId],
+                // Точечная отправка всегда идёт force: смысл кнопки в строке —
+                // «продавить именно это число», а дельта-режим счёл бы позицию
+                // неизменившейся и молча ничего не отправил.
+                force: chrtIds?.length ? true : force,
+                ...(chrtIds?.length ? { chrt_ids: chrtIds } : {}),
+            });
+            onToast(chrtIds?.length
+                ? `Отправляем ${chrtIds.length === 1 ? 'позицию' : `${chrtIds.length} позиции`} в WB`
+                : 'Трансляция запущена — следите за логом ниже');
         } catch (e: unknown) {
             setPolling(false);
             setError(e instanceof Error ? e.message : 'Ошибка запуска трансляции');
@@ -743,7 +756,7 @@ export default function StockTab({
                 </button>
                 <button
                     className="btn btn-primary btn-sm"
-                    onClick={handlePush}
+                    onClick={() => handlePush()}
                     disabled={
                         !writeEnabled || !translating || pushing || polling
                         || wbWarehouseId === '' || !!selected?.is_processing

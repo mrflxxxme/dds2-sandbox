@@ -787,6 +787,56 @@ class TestStockFormula:
         assert preview["rows_no_chrt"] >= 1
 
     @pytest.mark.asyncio
+    async def test_preview_attaches_live_wb_stock(self, db_session, project, fbs_env, monkeypatch):
+        """Колонка «В WB» приезжает вместе с превью — автоматически, без кнопки."""
+        wh, fbs_wh = fbs_env
+        nom = await _mk_nom(db_session, project.id, chrt_id=7710)
+        await _mk_stock(db_session, project.id, wh, nom, 10)
+        await db_session.commit()
+
+        asked: list[tuple] = []
+
+        class _Client:
+            async def get_stocks(self, wb_warehouse_id, chrt_ids):
+                asked.append((wb_warehouse_id, sorted(chrt_ids)))
+                return {7710: 42}
+
+        async def _fake(db, project_id):
+            return _Client()
+
+        monkeypatch.setattr(stock_service, "_get_client", _fake)
+
+        preview = await stock_service.preview_stock(db_session, project.id, fbs_wh.wb_warehouse_id)
+
+        assert preview["wb_stock_known"] is True
+        assert asked == [(fbs_wh.wb_warehouse_id, [7710])]  # спрашиваем только позиции с chrt_id
+        row = next(r for r in preview["rows"] if r.get("chrt_id") == 7710)
+        assert row["qty_wb"] == 42
+
+    @pytest.mark.asyncio
+    async def test_preview_survives_wb_failure(self, db_session, project, fbs_env, monkeypatch):
+        """Падение WB не роняет экран: `qty_wb` = None, флаг снят — рисуем прочерк, не ноль."""
+        wh, fbs_wh = fbs_env
+        nom = await _mk_nom(db_session, project.id, chrt_id=7711)
+        await _mk_stock(db_session, project.id, wh, nom, 10)
+        await db_session.commit()
+
+        class _Client:
+            async def get_stocks(self, wb_warehouse_id, chrt_ids):
+                raise RuntimeError("429 too many requests")
+
+        async def _fake(db, project_id):
+            return _Client()
+
+        monkeypatch.setattr(stock_service, "_get_client", _fake)
+
+        preview = await stock_service.preview_stock(db_session, project.id, fbs_wh.wb_warehouse_id)
+
+        assert preview["wb_stock_known"] is False
+        assert preview["total_rows"] >= 1
+        assert all(r.get("qty_wb") is None for r in preview["rows"])
+
+    @pytest.mark.asyncio
     async def test_project_isolation(self, db_session, project, other_project, fbs_env):
         """Остаток чужого проекта на «том же» складе продавца не подмешивается."""
         wh, fbs_wh = fbs_env

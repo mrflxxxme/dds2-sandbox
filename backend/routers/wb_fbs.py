@@ -333,6 +333,7 @@ async def _push_stocks_bg(
     wb_warehouse_ids: list[int],
     force: bool,
     user_id: int | None,
+    chrt_ids: list[int] | None = None,
 ) -> None:
     """Прогон трансляции вне HTTP-запроса: своя сессия БД (сессия запроса уже закрыта).
 
@@ -353,6 +354,7 @@ async def _push_stocks_bg(
                     force=force,
                     trigger="manual",
                     user_id=user_id,
+                    chrt_ids=chrt_ids,
                 ),
                 timeout=PUSH_RUN_BUDGET_SEC,
             )
@@ -415,7 +417,11 @@ async def push_stock(
 
     # Дедуп с сохранением порядка: повторы в теле множили бы прогоны по складу.
     wb_ids = list(dict.fromkeys(payload.wb_warehouse_ids))
-    task = asyncio.create_task(_push_stocks_bg(project.id, wb_ids, payload.force, user.id))
+    # Точечная отправка: дедуп тем же порядком, пустой список = весь склад.
+    chrt_ids = list(dict.fromkeys(payload.chrt_ids)) or None
+    task = asyncio.create_task(
+        _push_stocks_bg(project.id, wb_ids, payload.force, user.id, chrt_ids)
+    )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 

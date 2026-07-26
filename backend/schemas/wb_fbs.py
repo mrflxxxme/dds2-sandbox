@@ -182,6 +182,9 @@ class FbsStockRow(BaseModel):
     qty_available: int = 0
     qty_sent: int | None = None
     qty_confirmed: int | None = None
+    #: ЖИВОЙ остаток в кабинете WB (нетто — WB сам вычел заказанное).
+    #: None = прочитать не удалось ИЛИ позиция без chrt_id; отличать от 0.
+    qty_wb: int | None = None
     #: Ручное количество по этому товару (None — не задано). 0 = не отдавать.
     override_qty: int | None = None
     #: Разрезы для группировки и массового выделения в таблице.
@@ -239,6 +242,9 @@ class FbsStockPreviewOut(BaseModel):
     wb_warehouse_name: str | None = None
     warehouse_ids: list[int] = Field(default_factory=list)
     rows: list[FbsStockRow] = Field(default_factory=list)
+    #: Удалось ли прочитать живой остаток кабинета. False → `qty_wb` у всех
+    #: строк None, и колонку «В WB» рисуем прочерками, а не нулями.
+    wb_stock_known: bool = False
     total_rows: int = 0
     total_units: int = 0
     rows_no_chrt: int = 0
@@ -298,6 +304,9 @@ class FbsStockPushRequest(BaseModel):
     wb_warehouse_ids: list[int] = Field(default_factory=list)
     #: True — слать все позиции, не только изменившиеся с прошлого пуша.
     force: bool = False
+    #: Точечная отправка: только эти chrtId. Пусто — весь склад.
+    #: Правка одной позиции не должна гонять 1200 строк и жечь лимит WB.
+    chrt_ids: list[int] = Field(default_factory=list)
 
 
 class FbsStockPushOut(BaseModel):

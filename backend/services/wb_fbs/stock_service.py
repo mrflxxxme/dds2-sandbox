@@ -1153,11 +1153,13 @@ async def preview_stock(db: AsyncSession, project_id: int, wb_warehouse_id: int)
     wh = await warehouse_service.get_warehouse(db, project_id, wb_warehouse_id)
     warehouse_ids = await warehouse_service.get_linked_warehouse_ids(db, project_id, wb_warehouse_id)
     rows = await _build_rows(db, project_id, wh, warehouse_ids)
+    wb_known = await _attach_wb_stock(db, project_id, wb_warehouse_id, rows)
     return {
         "wb_warehouse_id": wb_warehouse_id,
         "wb_warehouse_name": wh.name,
         "warehouse_ids": warehouse_ids,
         "rows": rows,
+        "wb_stock_known": wb_known,
         "total_rows": len(rows),
         # «Штук к передаче» — только то, что ФИЗИЧЕСКИ уедет. Позиция без chrt_id
         # не уйдёт никогда (ключ методов остатков WB), и считать её в этот итог
@@ -1167,6 +1169,57 @@ async def preview_stock(db: AsyncSession, project_id: int, wb_warehouse_id: int)
         "rows_no_chrt": _count_no_chrt(rows),
         "is_processing": wh.is_processing,
     }
+
+
+async def _attach_wb_stock(
+    db: AsyncSession, project_id: int, wb_warehouse_id: int, rows: list[dict[str, Any]]
+) -> bool:
+    """Дописать в строки `qty_wb` — ЖИВОЙ остаток из кабинета WB. True, если получилось.
+
+    Читается автоматически вместе с превью, а не по кнопке: пользователю нужно
+    видеть «сколько там сейчас» рядом с «сколько отдадим», иначе расхождение
+    ловится только отдельной сверкой и по факту не ловится никогда.
+
+    Цена вопроса — поход в WB на каждый расчёт превью, поэтому:
+      • запрос идёт ТОЛЬКО за позициями с `chrt_id` (ключ методов остатков WB);
+      • ответ кэшируется вместе со всем превью (`fbs:stock_preview`, TTL 60 c),
+        так что чаще раза в минуту на склад мы WB не трогаем;
+      • `POST /stocks` — ЧТЕНИЕ, гейт режима его не блокирует: колонка одинаково
+        работает и в «Наблюдении», и в боевом режиме.
+
+    Любая ошибка WB (401, 429, таймаут) НЕ роняет превью: `qty_wb` остаётся
+    `None`, а флаг `wb_stock_known=False` говорит фронту показать прочерк вместо
+    нуля. Ноль и «не знаем» — разные факты: ноль означает «в кабинете пусто».
+
+    Число WB уже НЕТТО: кабинет сам вычитает то, что заказали, поэтому сравнивать
+    его с нашим `qty_available` (тоже за вычетом открытых FBS-заказов) корректно.
+    """
+    chrt_ids = sorted({int(r["chrt_id"]) for r in rows if r.get("chrt_id")})
+    if not chrt_ids:
+        return False
+
+    try:
+        client = await _get_client(db, project_id)
+    except Exception as exc:  # ключа нет / не расшифровался — не повод ронять экран
+        logger.warning("wb_fbs.stock.wb_column project=%s клиент недоступен: %s", project_id, exc)
+        return False
+
+    await db.commit()  # не держим транзакцию через внешний HTTP
+    try:
+        remote = await client.get_stocks(wb_warehouse_id, chrt_ids)
+    except Exception as exc:
+        logger.warning(
+            "wb_fbs.stock.wb_column project=%s wh=%s не прочитали остаток WB: %s",
+            project_id,
+            wb_warehouse_id,
+            exc,
+        )
+        return False
+
+    for row in rows:
+        chrt = row.get("chrt_id")
+        row["qty_wb"] = int(remote.get(int(chrt), 0)) if chrt else None
+    return True
 
 
 def _count_no_chrt(rows: list[dict[str, Any]]) -> int:
@@ -1777,6 +1830,7 @@ async def push_stocks(
     force: bool = False,
     trigger: str = "auto",
     user_id: int | None = None,
+    chrt_ids: list[int] | None = None,
 ) -> list[int]:
     """Передать остатки в кабинет WB. Возвращает id созданных прогонов.
 
@@ -1804,6 +1858,7 @@ async def push_stocks(
             force=force,
             trigger=trigger,
             user_id=user_id,
+            chrt_ids=chrt_ids,
         )
     finally:
         await release_lock(PUSH_LOCK_NAME, project_id, token)
@@ -1817,8 +1872,13 @@ async def _push_stocks_locked(
     force: bool,
     trigger: str,
     user_id: int | None,
+    chrt_ids: list[int] | None = None,
 ) -> list[int]:
     """Тело трансляции — вызывается только из `push_stocks`, уже под локом."""
+    # Точечная отправка: правка одной позиции не должна гонять весь склад и жечь
+    # лимит WB. Фильтруем ПОСЛЕ `_build_rows` — формула остатка обязана остаться
+    # той же самой, меняется только состав отправляемого.
+    only_chrts = {int(c) for c in chrt_ids} if chrt_ids else None
     targets = await _select_push_targets(db, project_id, wb_warehouse_ids)
     if not targets:
         return []
@@ -1868,6 +1928,10 @@ async def _push_stocks_locked(
             blocked.append(_new_push(project_id, wh, trigger, user_id, error_msg=str(e)))
             logger.error("FBS push skipped: project=%s wb_wh=%s — %s", project_id, wh.wb_warehouse_id, e)
             continue
+        if only_chrts is not None:
+            rows = [r for r in rows if r.get("chrt_id") and int(r["chrt_id"]) in only_chrts]
+            if not rows:
+                continue
         plans.append((wh, rows, _new_push(project_id, wh, trigger, user_id, rows=rows)))
 
     for _, _, push in plans:

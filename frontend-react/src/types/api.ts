@@ -7780,6 +7780,8 @@ export interface FbsStockRow {
   qty_available: number;
   qty_sent?: number | null;
   qty_confirmed?: number | null;
+  /** Живой остаток в кабинете WB (нетто). null — не прочитан или нет chrtId. */
+  qty_wb?: number | null;
   /** Ручное количество по этому товару (null — не задано). 0 = не отдавать. */
   override_qty?: number | null;
   // Разрезы для группировки и массового выделения в таблице
@@ -7872,6 +7874,8 @@ export interface FbsStockPreview {
   wb_warehouse_name?: string | null;
   warehouse_ids: number[];
   rows: FbsStockRow[];
+  /** Удалось ли прочитать кабинет: false → все qty_wb = null. */
+  wb_stock_known?: boolean;
   total_rows: number;
   total_units: number;
   rows_no_chrt: number;
@@ -7933,6 +7937,8 @@ export interface FbsStockPushPayload {
   wb_warehouse_ids: number[];
   /** true — слать все позиции, не только изменившиеся с прошлого пуша. */
   force: boolean;
+  /** Точечная отправка: только эти chrtId. Пусто — весь склад. */
+  chrt_ids?: number[];
 }
 
 /** Строка лога трансляции остатков. */
