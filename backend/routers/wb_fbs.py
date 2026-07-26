@@ -40,10 +40,13 @@ from backend.project_context import get_current_project
 from backend.schemas.wb_fbs import (
     ALLOWED_STICKER_TYPES,
     ALLOWED_SUPPLIER_STATUSES,
+    ALLOWED_SUPPLY_STATUSES,
     FbsActionOut,
     FbsLinkCreate,
     FbsModeOut,
     FbsOfficeOut,
+    FbsOrderBackfillOut,
+    FbsOrderBackfillRequest,
     FbsOrderListOut,
     FbsOrderStatsOut,
     FbsOrderOut,
@@ -597,6 +600,22 @@ async def sync_orders(
     return FbsActionOut(ok=True, message="Сборочные задания обновлены", affected=int(count or 0))
 
 
+@router.post("/orders/backfill", response_model=FbsOrderBackfillOut, dependencies=[Depends(rate_limit_write)])
+async def backfill_orders(
+    payload: FbsOrderBackfillRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Обратная загрузка истории заданий (`GET /api/v3/orders`, окна ≤30 дней).
+
+    `POST`, а не `GET`: ходит в WB десятками запросов и пишет в зеркало.
+    Идемпотентна — тот же UPSERT по `(project_id, wb_order_id)`, что и синк.
+    """
+    with _fbs_errors():
+        result = await orders_service.backfill_orders_history(db, project.id, days=payload.days)
+    return FbsOrderBackfillOut(**result)
+
+
 @router.post("/orders/stickers", response_model=list[FbsStickerOut], dependencies=[Depends(rate_limit_write)])
 async def get_stickers(
     payload: FbsStickerRequest,
@@ -637,14 +656,25 @@ async def cancel_order(
 @router.get("/supplies", response_model=list[FbsSupplyOut])
 async def list_supplies(
     done: bool | None = Query(None, description="true — закрытые, false — активные"),
+    status: str | None = Query(
+        None, description="active | to_ship | in_delivery | rejected — точнее, чем `done`"
+    ),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Поставки FBS из нашего зеркала."""
+    """Поставки FBS из нашего зеркала.
+
+    `done` оставлен ради обратной совместимости; `status` — та же выборка, но
+    разложенная на четыре состояния кабинета (см. `supply_status`).
+    """
+    if status is not None and status not in ALLOWED_SUPPLY_STATUSES:
+        raise HTTPException(status_code=422, detail=f"Неизвестный статус поставки: {status}")
     with _fbs_errors():
-        return await supplies_service.list_supplies(db, project.id, done=done, limit=limit, offset=offset)
+        return await supplies_service.list_supplies(
+            db, project.id, done=done, status=status, limit=limit, offset=offset
+        )
 
 
 @router.post("/supplies/sync", response_model=FbsActionOut, dependencies=[Depends(rate_limit_write)])
