@@ -118,17 +118,6 @@ export function buildStockColumns(deps: StockColumnDeps): Column[] {
             render: (v: string | null) => v || <span style={{ color: 'var(--color-text-dim)' }}>—</span>,
         },
         {
-            key: 'subcategory_name', label: 'Под-категория', width: '140px',
-            render: (v: string | null) => v || <span style={{ color: 'var(--color-text-dim)' }}>—</span>,
-        },
-        {
-            key: 'chrt_id', label: 'chrtId', align: 'right',
-            headerTitle: 'Ключ трансляции остатков в WB. Без него позиция физически не уходит.',
-            render: (v: number | null) => v == null
-                ? <span className="badge badge-warning" style={{ fontSize: 11 }}>нет</span>
-                : <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</span>,
-        },
-        {
             key: 'qty_ledger', label: 'Наш учёт', align: 'right',
             headerTitle: 'WarehouseStock.quantity — годный остаток (брак не входит)',
             render: (v: number) => formatNumber(v, 0),
@@ -166,11 +155,6 @@ export function buildStockColumns(deps: StockColumnDeps): Column[] {
         {
             key: 'fbs_open', label: '− FBS-заказы', align: 'right', cellStyle: deductStyle,
             headerTitle: 'Открытые сборочные задания FBS по этому складу WB (new / confirm)',
-            render: (v: number) => v ? formatNumber(v, 0) : '—',
-        },
-        {
-            key: 'buffer', label: '− Буфер', align: 'right', cellStyle: deductStyle,
-            headerTitle: 'Страховой запас: % от источника + абсолютная добавка',
             render: (v: number) => v ? formatNumber(v, 0) : '—',
         },
         {
@@ -214,6 +198,36 @@ export function buildStockColumns(deps: StockColumnDeps): Column[] {
             },
         },
         {
+            key: 'qty_wb', label: 'В WB', align: 'right',
+            cellStyle: { background: 'rgba(99,102,241,0.06)' },
+            headerTitle: 'Живой остаток в кабинете WB на этом складе продавца. '
+                + 'Число уже нетто — WB сам вычитает заказанное. Читается автоматически '
+                + 'вместе с таблицей. Прочерк = позиция без chrtId либо кабинет не ответил.',
+            render: (v: number | null, row: FbsStockRow) => {
+                if (v == null) return <span style={{ color: 'var(--color-text-dim)' }}>—</span>;
+                // Расхождение с тем, что мы собираемся отдать, — главный сигнал
+                // экрана: именно из-за него раньше приходилось открывать сверку.
+                const diff = v - (row.qty_available ?? 0);
+                return (
+                    <span title={diff === 0
+                        ? 'Совпадает с тем, что отдаём'
+                        : `В кабинете на ${formatNumber(Math.abs(diff), 0)} шт `
+                          + `${diff > 0 ? 'больше' : 'меньше'}, чем отдаём`}>
+                        <strong>{formatNumber(v, 0)}</strong>
+                        {diff !== 0 && (
+                            <span style={{
+                                fontSize: 11,
+                                marginLeft: 4,
+                                color: diff > 0 ? 'var(--color-warning)' : 'var(--color-accent)',
+                            }}>
+                                {diff > 0 ? '+' : ''}{formatNumber(diff, 0)}
+                            </span>
+                        )}
+                    </span>
+                );
+            },
+        },
+        {
             key: '__qty', label: 'Кол-во', width: '120px', sortable: false, align: 'right',
             headerTitle: OVERRIDE_HINT,
             getValue: () => '',
@@ -225,32 +239,7 @@ export function buildStockColumns(deps: StockColumnDeps): Column[] {
                     onCommit={qty => onSetOverride(row, qty)}
                 />
             ),
-        },
-        {
-            key: 'qty_sent', label: 'Отправлено', align: 'right',
-            headerTitle: 'Что реально ушло в WB прошлым прогоном',
-            render: (v: number | null) => v == null ? '—' : formatNumber(v, 0),
-        },
-        {
-            key: 'qty_confirmed', label: 'Подтв. WB', align: 'right',
-            headerTitle: 'Проверка после PUT: WB отвечает 204 даже когда остаток не обновился',
-            render: (v: number | null, row: FbsStockRow) => {
-                if (v == null) return '—';
-                const mismatch = row.qty_sent != null && row.qty_sent !== v;
-                return (
-                    <span style={{ color: mismatch ? 'var(--color-danger)' : undefined, fontWeight: mismatch ? 600 : 400 }}>
-                        {formatNumber(v, 0)}
-                    </span>
-                );
-            },
-        },
-        {
-            key: 'blocked_reason', label: 'Причина', sortable: false,
-            render: (v: string | null) => v
-                ? <span className="badge badge-warning" style={{ fontSize: 11 }}>{blockedReasonLabel(v)}</span>
-                : <span style={{ color: 'var(--color-text-dim)' }}>—</span>,
-            exportValue: (row: FbsStockRow) => row.blocked_reason ? blockedReasonLabel(row.blocked_reason) : '',
-        },
+        }
     ];
 }
 

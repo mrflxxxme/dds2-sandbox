@@ -1935,6 +1935,234 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
 
 // ─── Main page ───────────────────────────────────────────────────────────
 
+// ─── Матрица складов: где лежит и когда кончится ─────────────────────────────
+
+/**
+ * Что показываем в ЯЧЕЙКЕ склада. Переключаются только те метрики, которые в
+ * разрезе склада вообще осмысленны.
+ *
+ * 🔴 Продажи сюда не попадают намеренно. Воронка WB отчитывается ПО КАРТОЧКЕ и
+ * не знает, с какого нашего склада уехала единица, поэтому «продажи склада» —
+ * величина, которой не существует. Разложить её пропорционально остатку
+ * технически можно, но тогда «дней до нуля» выходит одинаковым во всех складах
+ * и метрика вырождается. Продажи показываем отдельными колонками по товару.
+ */
+type MatrixMetric = 'stock' | 'days';
+
+const MATRIX_METRIC_LABEL: Record<MatrixMetric, string> = {
+    stock: 'Остаток, шт',
+    days: 'Дней до нуля',
+};
+
+/** ≥ этого порога считаем, что запас «бесконечный» — рисуем ∞, а не 999. */
+const DAYS_INFINITE = 999;
+
+function fmtDays(days: number): React.ReactNode {
+    if (!Number.isFinite(days) || days >= DAYS_INFINITE) {
+        return <span style={{ color: 'var(--color-text-dim)' }}>∞</span>;
+    }
+    const rounded = Math.floor(days);
+    const color = rounded <= 7 ? 'var(--color-danger)'
+        : rounded <= 21 ? 'var(--color-warning)'
+        : 'var(--color-text)';
+    return <span style={{ color, fontWeight: rounded <= 21 ? 600 : 400 }}>{formatNumber(rounded, 0)}</span>;
+}
+
+function MatrixTab({ data, warehouses, isLoading }: {
+    data: UnifiedStockRow[];
+    warehouses: Warehouse[];
+    isLoading: boolean;
+}) {
+    const [metric, setMetric] = useState<MatrixMetric>('stock');
+    const [period, setPeriod] = useState<7 | 14 | 30>(14);
+    const [search, setSearch] = useState('');
+    const [hideDead, setHideDead] = useState(false);
+
+    const trendOf = useCallback((row: UnifiedStockRow) => (
+        period === 7 ? row.trend_7 : period === 14 ? row.trend_14 : row.trend_30
+    ), [period]);
+
+    /** Остаток товара на КОНКРЕТНОМ складе. Ключ в `warehouses` — имя склада. */
+    const stockAt = useCallback((row: UnifiedStockRow, whName: string) => (
+        (row.warehouses || {})[whName] || 0
+    ), []);
+
+    const rows = useMemo(() => {
+        const q = search.trim().toLowerCase();
+        return data.filter(r => {
+            if (hideDead && (trendOf(r)?.avg_daily_qty || 0) <= 0) return false;
+            if (!q) return true;
+            return (
+                r.barcode.toLowerCase().includes(q)
+                || (r.article_seller ?? '').toLowerCase().includes(q)
+                || (r.brand ?? '').toLowerCase().includes(q)
+                || (r.subject ?? '').toLowerCase().includes(q)
+            );
+        });
+    }, [data, search, hideDead, trendOf]);
+
+    const cols: Column[] = useMemo(() => {
+        const out: Column[] = [
+            {
+                key: 'article_seller', label: 'Товар', width: '240px',
+                render: (v: string | null, row: UnifiedStockRow) => (
+                    <div>
+                        <div style={{ fontWeight: 500 }}>{v || row.barcode}</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                            {row.barcode}{row.brand ? ` · ${row.brand}` : ''}
+                        </div>
+                    </div>
+                ),
+                exportValue: (row: UnifiedStockRow) => row.article_seller || row.barcode,
+            },
+        ];
+
+        for (const wh of warehouses) {
+            out.push({
+                key: `wh_${wh.id}`,
+                label: wh.name,
+                align: 'right',
+                headerTitle: metric === 'stock'
+                    ? `Остаток товара на складе «${wh.name}»`
+                    : `Сколько дней продержится «${wh.name}», если ВЕСЬ спрос пойдёт отсюда. `
+                      + 'Оценка пессимистичная: воронка WB не делит продажи по нашим складам. '
+                      + 'Реальный срок по товару целиком — в колонке «Дней (итого)».',
+                getValue: (row: UnifiedStockRow) => {
+                    const qty = stockAt(row, wh.name);
+                    if (metric === 'stock') return qty;
+                    const daily = trendOf(row)?.avg_daily_qty || 0;
+                    return daily > 0 ? qty / daily : Number.MAX_SAFE_INTEGER;
+                },
+                exportValue: (row: UnifiedStockRow) => {
+                    const qty = stockAt(row, wh.name);
+                    if (metric === 'stock') return qty;
+                    const daily = trendOf(row)?.avg_daily_qty || 0;
+                    return daily > 0 ? Math.floor(qty / daily) : '';
+                },
+                render: (_: unknown, row: UnifiedStockRow) => {
+                    const qty = stockAt(row, wh.name);
+                    if (!qty) return <span style={{ color: 'var(--color-text-muted)' }}>—</span>;
+                    if (metric === 'stock') return formatNumber(qty, 0);
+                    const daily = trendOf(row)?.avg_daily_qty || 0;
+                    return fmtDays(daily > 0 ? qty / daily : Infinity);
+                },
+            });
+        }
+
+        out.push(
+            {
+                key: '__total', label: 'Итого, шт', align: 'right',
+                headerTitle: 'Сумма по нашим складам',
+                getValue: (row: UnifiedStockRow) => row.total_own || 0,
+                render: (_: unknown, row: UnifiedStockRow) => (
+                    <strong>{formatNumber(row.total_own || 0, 0)}</strong>
+                ),
+            },
+            {
+                key: '__sold', label: `Продано за ${period} дн`, align: 'right',
+                headerTitle: 'Штук продано за окно тренда — по воронке WB, по карточке целиком',
+                getValue: (row: UnifiedStockRow) => trendOf(row)?.sale_qty || 0,
+                render: (_: unknown, row: UnifiedStockRow) => {
+                    const sold = trendOf(row)?.sale_qty || 0;
+                    return sold ? formatNumber(sold, 0)
+                        : <span style={{ color: 'var(--color-text-muted)' }}>—</span>;
+                },
+            },
+            {
+                key: '__daily', label: 'Продаж/день', align: 'right',
+                headerTitle: 'Средние продажи в день за окно тренда',
+                getValue: (row: UnifiedStockRow) => trendOf(row)?.avg_daily_qty || 0,
+                render: (_: unknown, row: UnifiedStockRow) => {
+                    const daily = trendOf(row)?.avg_daily_qty || 0;
+                    return daily > 0 ? formatNumber(daily, 1)
+                        : <span style={{ color: 'var(--color-text-muted)' }}>—</span>;
+                },
+            },
+            {
+                key: '__days_total', label: 'Дней (итого)', align: 'right',
+                headerTitle: 'Честный срок по товару: весь наш остаток ÷ средние продажи в день',
+                getValue: (row: UnifiedStockRow) => {
+                    const daily = trendOf(row)?.avg_daily_qty || 0;
+                    return daily > 0 ? (row.total_own || 0) / daily : Number.MAX_SAFE_INTEGER;
+                },
+                render: (_: unknown, row: UnifiedStockRow) => {
+                    const daily = trendOf(row)?.avg_daily_qty || 0;
+                    return fmtDays(daily > 0 ? (row.total_own || 0) / daily : Infinity);
+                },
+            },
+        );
+        return out;
+    }, [warehouses, metric, period, trendOf, stockAt]);
+
+    return (
+        <div className="glass-card" style={{ marginTop: 16 }}>
+            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 16 }}>
+                <div>
+                    <label className="form-label" style={{ fontSize: 12 }}>В ячейках</label>
+                    <div style={{ display: 'flex', gap: 4 }}>
+                        {(Object.keys(MATRIX_METRIC_LABEL) as MatrixMetric[]).map(m => (
+                            <button
+                                key={m}
+                                className={`btn btn-sm ${metric === m ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setMetric(m)}
+                            >
+                                {MATRIX_METRIC_LABEL[m]}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+                <div>
+                    <label className="form-label" style={{ fontSize: 12 }}>Окно продаж</label>
+                    <div style={{ display: 'flex', gap: 4 }}>
+                        {([7, 14, 30] as const).map(p => (
+                            <button
+                                key={p}
+                                className={`btn btn-sm ${period === p ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setPeriod(p)}
+                            >
+                                {p} дн
+                            </button>
+                        ))}
+                    </div>
+                </div>
+                <div style={{ flex: 1, minWidth: 220 }}>
+                    <label className="form-label" style={{ fontSize: 12 }}>Поиск</label>
+                    <input
+                        className="form-input"
+                        placeholder="Артикул, баркод, бренд, предмет"
+                        value={search}
+                        onChange={e => setSearch(e.target.value)}
+                    />
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                    <input type="checkbox" checked={hideDead} onChange={e => setHideDead(e.target.checked)} />
+                    Скрыть без продаж
+                </label>
+            </div>
+
+            {isLoading ? (
+                <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                    Загрузка…
+                </div>
+            ) : rows.length === 0 ? (
+                <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                    {data.length === 0
+                        ? 'Остатков нет — проверьте склады и загрузку номенклатуры.'
+                        : 'Ничего не найдено под текущими фильтрами.'}
+                </div>
+            ) : (
+                <TanStackDataTable
+                    columns={cols}
+                    data={rows}
+                    exportName="Матрица складов"
+                    getRowId={(row: UnifiedStockRow) => String(row.nomenclature_id)}
+                />
+            )}
+        </div>
+    );
+}
+
+
 export default function StockSummaryPage() {
     const [tab, setTab] = useState('summary');
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
@@ -2010,6 +2238,7 @@ export default function StockSummaryPage() {
                 tabs={[
                     { key: 'summary', label: 'Сводные остатки' },
                     { key: 'unified', label: 'Единые остатки' },
+                    { key: 'matrix', label: 'Матрица складов' },
                 ]}
                 active={tab}
                 onChange={setTab}
@@ -2030,6 +2259,9 @@ export default function StockSummaryPage() {
                     includeForecast={includeForecast}
                     onForecastChange={handleForecastChange}
                 />
+            )}
+            {tab === 'matrix' && (
+                <MatrixTab data={unified} warehouses={warehouses} isLoading={unifiedLoading} />
             )}
         </div>
     );
