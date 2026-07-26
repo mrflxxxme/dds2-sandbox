@@ -49,12 +49,11 @@ jobs:
           host: ${{ secrets.DATA_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          timeout: 120s
-          script-stop: true
           # Дефолт 30s ронял выкатку трижды подряд (`dial tcp :22: i/o timeout`
           # ровно на 30-й секунде) при полностью живом сервере. Запас по коннекту
           # не лечит потери на пути, но снимает падения на медленном рукопожатии.
           timeout: 120s
+          script-stop: true
           script: |
             set -e
             cd /opt/dds_data
