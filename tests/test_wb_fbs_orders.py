@@ -574,6 +574,39 @@ async def test_sync_orders_recent_catches_up_window(db_session, env, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_wb_declined_order_is_not_counted_as_new(db_session, env, monkeypatch):
+    """Отказ покупателя ДО сборки: `supplier_status` навсегда `new`, но задание мёртвое.
+
+    Прод-кейс 26.07 (склад «Пушкино»): карточка показывала 5 «Новых», из них 3 —
+    отказы покупателя. Такое задание не должно ни числиться в очереди сборки, ни
+    держать остаток, ни опрашиваться синком статусов; во вкладке «Отменено» —
+    наоборот, обязано быть.
+    """
+    await _seed_order(db_session, env.project_id, 9500)  # живое, wb_status пуст
+    await _seed_order(
+        db_session, env.project_id, 9501, wb_status="declined_by_client"
+    )
+    await _seed_order(
+        db_session, env.project_id, 9502, wb_status="canceled_by_client"
+    )
+
+    listed = await orders_service.list_orders(db_session, env.project_id)
+
+    # Живое одно, два ушли в «Отменено» — при том что supplier_status у всех `new`.
+    assert listed["status_counts"].get(FbsSupplierStatus.NEW.value) == 1
+    assert listed["status_counts"].get(FbsSupplierStatus.CANCEL.value) == 2
+
+    cancelled = await orders_service.list_orders(
+        db_session, env.project_id, status=FbsSupplierStatus.CANCEL.value
+    )
+    assert {o["wb_order_id"] for o in cancelled["items"]} == {9501, 9502}
+
+    # Зеркало остаётся верным источнику: сырое поле WB мы не переписывали.
+    rows = {r.wb_order_id: r for r in await _orders(db_session, env.project_id)}
+    assert rows[9501].supplier_status == FbsSupplierStatus.NEW.value
+
+
+@pytest.mark.asyncio
 async def test_revenue_uses_converted_price_for_foreign_currency(db_session, env, monkeypatch):
     """Заказ в чужой валюте входит в выручку по `convertedPrice`, а не по `price`.
 
