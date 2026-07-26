@@ -49,13 +49,27 @@ jobs:
           host: ${{ secrets.DATA_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          timeout: 120s
           script-stop: true
+          # Дефолт 30s ронял выкатку трижды подряд (`dial tcp :22: i/o timeout`
+          # ровно на 30-й секунде) при полностью живом сервере. Запас по коннекту
+          # не лечит потери на пути, но снимает падения на медленном рукопожатии.
+          timeout: 120s
           script: |
             set -e
             cd /opt/dds_data
             echo "📦 Pre-deploy backup..."
             docker compose exec -T db pg_dump -U dds dds_db | gzip > backups/pre-deploy-$(date +%Y%m%d_%H%M%S).sql.gz
             echo "✅ Backup created on Data server"
+            # Ретеншен. Без него каталог рос неограниченно: на момент правки —
+            # 148 файлов и 40 ГБ при диске 79 ГБ, по ~312 МБ за деплой. Ровно так
+            # прод уже ложился: диск под ноль → Postgres в crash-loop → логин 500.
+            # Чистим ТОЛЬКО предделойные снимки: суточные `dds_db_*` — отдельная
+            # линия хранения, её трогать нельзя.
+            KEEP=20
+            ls -t backups/pre-deploy-*.sql.gz 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f
+            echo "🧹 Предделойных бэкапов оставлено: $(ls backups/pre-deploy-*.sql.gz 2>/dev/null | wc -l) (лимит $KEEP)"
+            df -h /opt/dds_data | tail -1
 
       # Step 2: Verify backup before deploying
       - name: Verify backup size
@@ -64,6 +78,7 @@ jobs:
           host: ${{ secrets.DATA_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          timeout: 120s
           script-stop: true
           script: |
             set -e
@@ -88,6 +103,7 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          timeout: 120s
           script-stop: true
           script: |
             set -e
@@ -169,6 +185,7 @@ jobs:
           host: ${{ secrets.DATA_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          timeout: 120s
           script-stop: true
           script: |
             set -e
