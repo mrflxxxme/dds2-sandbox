@@ -126,8 +126,15 @@ def _build_entity_map(wb: Any) -> dict[str, tuple[str | None, str | None]]:
         header = [str(c).strip().lower() if c is not None else "" for c in first]
         if "контрагент" not in header or "куда" not in header:
             continue
-        name_col = header.index("контрагент")
         kuda_cols = [i for i, h in enumerate(header) if h == "куда"]
+        # «Контрагент» на этом листе встречается ДВАЖДЫ: первое вхождение —
+        # служебный столбец графика выплат (там одно имя на весь лист), а физ/ИП
+        # и банк относятся к списку, что стоит вплотную слева от «куда». Брать
+        # header.index() = первое вхождение → сущность и банк не проставлялись
+        # ни у кого, кроме одного заёмщика (224 займа из 226 приезжали пустыми).
+        name_cols = [i for i, h in enumerate(header) if h == "контрагент"]
+        left_of_kuda = [i for i in name_cols if not kuda_cols or i < kuda_cols[0]]
+        name_col = max(left_of_kuda) if left_of_kuda else name_cols[0]
         entity_col = kuda_cols[0] if kuda_cols else None
         bank_col = kuda_cols[1] if len(kuda_cols) > 1 else None
         for row in ws.iter_rows(min_row=2, values_only=True):

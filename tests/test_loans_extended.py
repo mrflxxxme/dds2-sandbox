@@ -291,6 +291,51 @@ async def test_import_overdue_without_return_stays_active(db_session, client, au
     assert loan.maturity_date == date(2025, 7, 1)
 
 
+def _build_entity_sheet_xlsx() -> bytes:
+    """Второй лист боевого реестра: «Контрагент» встречается ДВАЖДЫ.
+
+    Первое вхождение — служебный столбец (один заёмщик), а физ/ИП и банк лежат
+    рядом со вторым, вплотную к колонкам «куда».
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "База"
+    ws.append(["Дата", "Тип", "Сумма", "Контрагент", "Номер договора", "Ставка", "От", "До", "Статус"])
+    ws.append([date(2025, 1, 1), "Приход", 500000, "Прохоров", "10", 0.28, date(2025, 1, 1), date(2025, 7, 1), "Активен"])
+    ws.append([date(2025, 1, 1), "Приход", 300000, "Карелин", "11", 0.28, date(2025, 1, 1), date(2025, 7, 1), "Активен"])
+
+    ws2 = wb.create_sheet("база 2")
+    # столбец A — «Контрагент»-обманка, реальные данные в C рядом с «куда»
+    ws2.append(["Контрагент", "Сумма процентов", "Контрагент", "куда", "куда"])
+    ws2.append(["Степан", 0, "Прохоров", "ип", None])
+    ws2.append(["Степан", 0, "Карелин", "физ", "альфа"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_import_entity_map_picks_column_next_to_kuda(db_session, client, auth_headers):
+    """Физ/ИП и банк берутся из «Контрагент», ближайшего к «куда», а не из первого."""
+    from sqlalchemy import select
+
+    from backend.models.loan import Loan
+
+    project_id = await _create_project(client, auth_headers)
+    res = await import_loans_from_xlsx(db_session, project_id=project_id, content=_build_entity_sheet_xlsx())
+    assert res.created_loans == 2
+
+    loans = (
+        (await db_session.execute(select(Loan).where(Loan.project_id == project_id)))
+        .scalars()
+        .all()
+    )
+    by_contract = {loan.contract_number: loan for loan in loans}
+    assert by_contract["10"].entity_type == "IP", "Прохоров должен приехать как ИП"
+    assert by_contract["11"].entity_type == "PHYSICAL", "Карелин должен приехать как физлицо"
+    assert by_contract["11"].lender_bank == "альфа"
+
+
 # ─── Lender portal scoping ────────────────────────────────────────────────────
 
 
