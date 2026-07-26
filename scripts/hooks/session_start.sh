@@ -61,7 +61,17 @@ fi
 
 # 5. Pre-push gate sanity — предупредить, если защита снята (была тихо-инертной до 2026-06-26)
 HOOKS_PATH=$(git config core.hooksPath 2>/dev/null || echo "")
-if [ "$HOOKS_PATH" != "scripts/hooks" ] && [ ! -x "$ROOT_DIR/.git/hooks/pre-push" ]; then
+# core.hooksPath бывает и относительным, и АБСОЛЮТНЫМ (git отдаёт ровно то, что
+# записали). Сравнение только с "scripts/hooks" врало: при абсолютном пути гейт
+# установлен и работает, а баннер пугал «НЕ установлен» каждую сессию
+# (2026-07-26). Проверяем по факту — резолвим путь и смотрим, там ли pre-push.
+HOOKS_ABS=""
+case "$HOOKS_PATH" in
+  "") ;;
+  /*) HOOKS_ABS="$HOOKS_PATH" ;;
+  *)  HOOKS_ABS="$ROOT_DIR/$HOOKS_PATH" ;;
+esac
+if [ ! -x "$HOOKS_ABS/pre-push" ] && [ ! -x "$ROOT_DIR/.git/hooks/pre-push" ]; then
   echo "## ⚠ Pre-push gate НЕ установлен (пуш не проверяется → mypy/audit ловятся только в CI ~9 мин)"
   echo "Активировать: git config core.hooksPath scripts/hooks"
   echo ""
