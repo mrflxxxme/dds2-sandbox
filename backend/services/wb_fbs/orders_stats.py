@@ -11,11 +11,13 @@
   • **Одно задание = одна единица товара** (инвариант домена, см. `WbFbsOrder`),
     поэтому «штук» — это `COUNT(*)`, отдельного поля количества нет.
 
-  • **Цена позиции — `sale_price` с фолбэком на `price`.** У WB `price` не
-    обязателен, а платит покупатель по `salePrice`; та же формула уже стоит в
-    листе подбора (`supplies_service._pick_list_groups`) — расхождение между
+  • **Цена позиции — общая формула `orders_service.revenue_rub_expr()`**, она же
+    в листе подбора (`supplies_service._pick_list_groups`): расхождение между
     двумя экранами по одной и той же сумме читалось бы как ошибка расчёта.
-    В базе обе колонки уже в РУБЛЯХ: копейки WB делит на 100 синк заданий.
+    🔴 Наивная сумма `salePrice`/`price` НЕВЕРНА — эти поля в валюте ПРОДАЖИ, а
+    WB торгует и в СНГ: узбекский заказ прибавлял к выручке 2.6 M «рублей».
+    Для не-рублёвых строк берётся `convertedPrice` (пересчёт самого WB).
+    Копейки WB делит на 100 синк заданий, так что в базе всё уже в единицах.
 
   • **Сутки считаются по МСК, а не по UTC.** `created_at_wb` хранится наивным
     UTC, воронка WB отчитывается московскими сутками. Без приведения заказ,
@@ -51,6 +53,7 @@ from backend.models.integrations import WbFunnelDaily
 from backend.models.refs import ProductSubcategory, ProductSubcategoryMap
 from backend.models.wb_fbs import FBS_TERMINAL_STATUSES, WbFbsOrder
 from backend.services.wb_fbs.contour import contour_condition
+from backend.services.wb_fbs.orders_service import revenue_rub_expr
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +75,12 @@ _NO_SUBCATEGORY = "Без под-категории"
 
 
 def _revenue_expr() -> Any:
-    """Выручка строки: `salePrice`, а при его отсутствии — `price` (оба в рублях)."""
-    return func.coalesce(WbFbsOrder.sale_price, WbFbsOrder.price, 0)
+    """Выручка строки в рублях — общая формула домена (см. `revenue_rub_expr`).
+
+    Своей копии тут быть не должно: `price`/`salePrice` лежат в валюте ПРОДАЖИ,
+    и наивная сумма подмешивала сумы и тенге к рублям.
+    """
+    return revenue_rub_expr()
 
 
 def _msk_day_expr() -> Any:

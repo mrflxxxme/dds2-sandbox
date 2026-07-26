@@ -20,7 +20,7 @@ from decimal import Decimal
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backend.models import (
     FbsSupplierStatus,
@@ -571,6 +571,47 @@ async def test_sync_orders_recent_catches_up_window(db_session, env, monkeypatch
     rows = {r.wb_order_id: r for r in await _orders(db_session, env.project_id)}
     assert rows[7240].nomenclature_id == env.nomenclature_id
     assert rows[7240].written_off_at is None
+
+
+@pytest.mark.asyncio
+async def test_revenue_uses_converted_price_for_foreign_currency(db_session, env, monkeypatch):
+    """Заказ в чужой валюте входит в выручку по `convertedPrice`, а не по `price`.
+
+    Прод-кейс 26.07: WB торгует в СНГ, и `price`/`salePrice` приходят в валюте
+    ПРОДАЖИ. Узбекский заказ на 2 595 300 сумов (≈16.8 k ₽) прибавлялся к рублёвой
+    выручке целиком — «Диваны бескаркасные» показали 5.5 M ₽ вместо ~0.55 M.
+    """
+    from backend.services.wb_fbs import orders_stats
+
+    _patch_client(
+        monkeypatch,
+        FakeFbsClient(
+            new_orders=[
+                # Рубль: платит покупатель по salePrice = 1 299 ₽.
+                _raw_order(8410),
+                # Узбекистан: 259 530 000 тийин = 2 595 300 сумов, пересчёт WB — 16 814.32 ₽.
+                _raw_order(
+                    8411,
+                    currencyCode=860,
+                    price=259_530_000,
+                    salePrice=259_530_000,
+                    convertedPrice=1_681_432,
+                ),
+            ]
+        ),
+    )
+    await orders_service.sync_new_orders(db_session, env.project_id)
+
+    total = (
+        await db_session.execute(
+            select(func.coalesce(func.sum(orders_stats._revenue_expr()), 0)).where(
+                WbFbsOrder.project_id == env.project_id
+            )
+        )
+    ).scalar_one()
+
+    # 1 299 ₽ (рубль, со скидкой) + 16 814.32 ₽ (пересчёт WB) — сумы не подмешались.
+    assert Decimal(str(total)) == Decimal("18113.32")
 
 
 @pytest.mark.asyncio

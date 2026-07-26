@@ -43,7 +43,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -97,6 +97,37 @@ _ORDERS_MAX_PAGES = 50
 
 #: `reference_type` движения склада для FBS-продажи (String(30)).
 _WRITEOFF_REF_TYPE = "FBS_ORDER"
+
+#: ISO-4217 рубля. WB отдаёт код числом, колонка — String(8).
+RUB_CURRENCY_CODE = "643"
+
+
+def revenue_rub_expr() -> Any:
+    """Выручка задания В РУБЛЯХ — единственная валютно-корректная формула домена.
+
+    🔴 `price` и `salePrice` приходят в валюте ПРОДАЖИ, а не продавца: WB торгует
+    и в СНГ, поэтому в зеркале лежат заказы в сумах (860), тенге (398), белорусских
+    рублях (933), драмах (51) и сомах (417). Складывать их с рублёвыми строками
+    нельзя — узбекский заказ на 2 595 300 сумов (≈16.8 k ₽) прибавлял к выручке
+    2 595 300 ₽ и один такой заказ перевешивал весь остальной период (прод 26.07:
+    диваны показали 5.5 M ₽ вместо ~0.55 M).
+
+    Пересчёт WB отдаёт сам — `convertedPrice` в `convertedCurrencyCode` (у нас
+    всегда 643). Поэтому:
+      • рубль (или пустой код у строк, записанных до появления валют) — прежняя
+        семантика `salePrice` → `price`: `salePrice` учитывает скидку покупателя,
+        а `convertedPrice` для рубля равен `price` бит-в-бит;
+      • иная валюта — ТОЛЬКО `convertedPrice`; если WB его не прислал, строка даёт
+        ноль. Занизить выручку лучше, чем сложить сумы с рублями.
+    """
+    is_rub = or_(
+        WbFbsOrder.currency_code.is_(None),
+        WbFbsOrder.currency_code == RUB_CURRENCY_CODE,
+    )
+    return case(
+        (is_rub, func.coalesce(WbFbsOrder.sale_price, WbFbsOrder.price, 0)),
+        else_=func.coalesce(WbFbsOrder.converted_price, 0),
+    )
 
 #: Префикс кэша чтения (зарегистрирован в `invalidate_project_reports`).
 #: В самом декораторе префикс обязан стоять СТРОКОВЫМ литералом — гейт
