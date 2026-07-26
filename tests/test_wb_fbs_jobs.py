@@ -231,6 +231,7 @@ class TestTimeBudgets:
         [
             (wb_fbs.STOCK_PUSH_TIMEOUT_SEC, wb_fbs.STOCK_PUSH_CYCLE_BUDGET_SEC),
             (wb_fbs.NEW_ORDERS_TIMEOUT_SEC, wb_fbs.NEW_ORDERS_CYCLE_BUDGET_SEC),
+            (wb_fbs.RECENT_ORDERS_TIMEOUT_SEC, wb_fbs.RECENT_ORDERS_CYCLE_BUDGET_SEC),
             (wb_fbs.ORDER_STATUSES_TIMEOUT_SEC, wb_fbs.ORDER_STATUSES_CYCLE_BUDGET_SEC),
             (wb_fbs.SUPPLIES_TIMEOUT_SEC, wb_fbs.SUPPLIES_CYCLE_BUDGET_SEC),
             (wb_fbs.WAREHOUSES_TIMEOUT_SEC, wb_fbs.WAREHOUSES_CYCLE_BUDGET_SEC),
@@ -251,6 +252,7 @@ class TestTimeBudgets:
         from backend.integrations import wb_fbs_api
 
         assert wb_fbs_api.REQUEST_TOTAL_BUDGET_SEC < wb_fbs.NEW_ORDERS_TIMEOUT_SEC
+        assert wb_fbs_api.REQUEST_TOTAL_BUDGET_SEC < wb_fbs.RECENT_ORDERS_TIMEOUT_SEC
         assert wb_fbs_api.REQUEST_TOTAL_BUDGET_SEC < wb_fbs.WAREHOUSES_TIMEOUT_SEC
         # Одна пауза по 429 не должна съедать бюджет целиком — иначе ретрая
         # не остаётся вовсе и смысл счётчика попыток теряется.
@@ -287,7 +289,7 @@ class TestTimeBudgets:
 
 
 async def test_jobs_registered_in_scheduler(monkeypatch):
-    """Все пять джобов зарегистрированы с max_instances=1 и coalesce=True."""
+    """Все шесть джобов зарегистрированы с max_instances=1 и coalesce=True."""
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
     from backend import scheduler as sched_mod
@@ -305,6 +307,7 @@ async def test_jobs_registered_in_scheduler(monkeypatch):
     expected = {
         "wb_fbs_stock_push",
         "wb_fbs_orders_sync",
+        "wb_fbs_recent_orders",
         "wb_fbs_order_statuses",
         "wb_fbs_supplies_sync",
         "wb_fbs_warehouses_sync",

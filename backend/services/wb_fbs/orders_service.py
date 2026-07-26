@@ -2,13 +2,24 @@
 """
 Service: WB FBS — сборочные задания (заказы со склада продавца).
 
-Зеркало Marketplace API v3: `GET /api/v3/orders/new` → upsert по
-`(project_id, wb_order_id)`, `POST /api/v3/orders/status` → досинк статусов,
-стикеры, отмена и списание проданного из нашего документного ledger'а.
+Зеркало Marketplace API v3: `GET /api/v3/orders/new` + `GET /api/v3/orders`
+(период) → upsert по `(project_id, wb_order_id)`, `POST /api/v3/orders/status`
+→ досинк статусов, стикеры, отмена и списание проданного из нашего
+документного ledger'а.
 
 Инварианты домена:
   • Одно задание WB = ОДНА единица товара (WB не агрегирует количество),
     поэтому списание всегда −1 на задание.
+  • `GET /orders/new` отдаёт ТОЛЬКО задания, ещё не положенные в поставку:
+    уехавшее в поставку исчезает оттуда навсегда. Одного этого метода мало —
+    зеркало не видит ни истории, ни заданий, собранных между двумя опросами.
+    Дыру закрывает периодный `GET /orders` (`backfill_orders_history` разово +
+    `sync_orders_recent` в фоне).
+  • 🔴 В payload'е периодного метода НЕТ `supplierStatus`, и всё, что он отдаёт,
+    легло бы как `new` → `complete` → списание со склада продаж прошлых
+    месяцев. Поэтому задания СТАРШЕ cutoff'а (момента, с которого домен вообще
+    начал видеть заказы) вставляются сразу с `written_off_at`: физически они
+    отгружены давно, и штатный `writeoff_completed_orders` их не тронет.
   • Цены приходят от WB В КОПЕЙКАХ (×100) — делим на 100 и кладём в Numeric(18,2).
   • `createdAt` — RFC3339 со смещением, а колонки БД naive → приводим к UTC
     и снимаем tzinfo (иначе asyncpg роняет TIMESTAMP WITHOUT TIME ZONE).
@@ -37,6 +48,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached, invalidate_cache
+from backend.integrations.wb_fbs_api import WbFbsApiError, WbFbsClient
 from backend.models import (
     FBS_TERMINAL_STATUSES,
     FbsSupplierStatus,
@@ -73,6 +85,15 @@ _LIST_MAX_LIMIT = 500
 #: Потолок заданий, списываемых за один прогон (хвост уедет следующим).
 _WRITEOFF_MAX_ORDERS = 2000
 _NOM_LOOKUP_LIMIT = 20_000
+
+#: `GET /api/v3/orders` принимает окно НЕ БОЛЬШЕ 30 дней за запрос.
+_ORDERS_WINDOW_DAYS = 30
+#: Глубина истории у WB — 3 месяца; просить больше нечего.
+_ORDERS_MAX_DEPTH_DAYS = 90
+#: Дефолт регулярного догона: перекрывает любой разумный простой воркера.
+_RECENT_DEFAULT_DAYS = 2
+#: Страховка от бесконечной пагинации одного окна (1000 заданий на страницу).
+_ORDERS_MAX_PAGES = 50
 
 #: `reference_type` движения склада для FBS-продажи (String(30)).
 _WRITEOFF_REF_TYPE = "FBS_ORDER"
@@ -232,11 +253,21 @@ def _order_row(
     sync_ts: datetime,
     by_chrt: dict[int, tuple[int, str | None]],
     by_barcode: dict[str, tuple[int, str | None]],
+    writeoff_before: datetime | None = None,
 ) -> dict[str, Any] | None:
-    """Payload WB → строка `wb_fbs_orders`. None, если нет `id` задания."""
+    """Payload WB → строка `wb_fbs_orders`. None, если нет `id` задания.
+
+    `writeoff_before` — граница «историческое / живое» для периодного метода
+    (см. модульный docstring): задание, созданное РАНЬШЕ неё, вставляется уже
+    списанным. Дата задания не распозналась — считаем историческим: не списать
+    единицу дважды дешевле, чем вычесть со склада давнюю продажу.
+    """
     wb_order_id = _int_or_none(raw.get("id"))
     if not wb_order_id:
         return None
+
+    created_at_wb = _parse_wb_datetime(raw.get("createdAt"))
+    is_history = writeoff_before is not None and (created_at_wb is None or created_at_wb < writeoff_before)
 
     chrt_id = _int_or_none(raw.get("chrtId"))
     barcode = _first_sku(raw)
@@ -249,7 +280,7 @@ def _order_row(
         "wb_order_id": wb_order_id,
         "rid": _str_or_none(raw.get("rid"), 120),
         "order_uid": _str_or_none(raw.get("orderUid"), 120),
-        "created_at_wb": _parse_wb_datetime(raw.get("createdAt")),
+        "created_at_wb": created_at_wb,
         "wb_warehouse_id": _int_or_none(raw.get("warehouseId")),
         "office_id": _int_or_none(raw.get("officeId")),
         "office_name": _office_name(raw),
@@ -278,6 +309,9 @@ def _order_row(
         "seller_date": _parse_wb_datetime(raw.get("sellerDate")),
         "comment": _str_or_none(raw.get("comment"), 300),
         "address": raw.get("address") if isinstance(raw.get("address"), dict) else None,
+        # Историческое задание вставляется УЖЕ списанным (в UPDATE поле не
+        # входит — повторный прогон метку не трогает, см. _upsert_orders).
+        "written_off_at": sync_ts if is_history else None,
         # Метка контура — единственный дискриминатор «песочница / боевой»
         # (колонки под него в модели нет, см. services/wb_fbs/contour.py).
         "raw": stamp_contour(raw),
@@ -297,11 +331,37 @@ def _supplier_status_or_new(raw: dict) -> str:
 # ─── Синк заданий ───────────────────────────────────────────────────────────
 
 
-async def _upsert_orders(db: AsyncSession, project_id: int, raw_orders: list[dict]) -> int:
-    """UPSERT заданий по natural key `(project_id, wb_order_id)`.
+async def _known_order_ids(db: AsyncSession, project_id: int, wb_order_ids: list[int]) -> set[int]:
+    """Какие из заданий уже есть в зеркале проекта (без учёта контура — ключ уникален)."""
+    if not wb_order_ids:
+        return set()
+    known: set[int] = set()
+    for chunk in _chunks(wb_order_ids, _STATUS_CHUNK):
+        result = await db.execute(
+            select(WbFbsOrder.wb_order_id).where(
+                WbFbsOrder.project_id == project_id,
+                WbFbsOrder.wb_order_id.in_(chunk),
+            )
+        )
+        known.update(int(row[0]) for row in result.all())
+    return known
+
+
+async def _upsert_orders(
+    db: AsyncSession,
+    project_id: int,
+    raw_orders: list[dict],
+    *,
+    writeoff_before: datetime | None = None,
+) -> tuple[int, int]:
+    """UPSERT заданий по natural key `(project_id, wb_order_id)` → (строк, помечено списанными).
 
     Дедуп ключей в Python ДО executemany — иначе PG роняет CardinalityViolation
     («ON CONFLICT не может обновить строку дважды»).
+
+    `writeoff_before` (только периодный метод): задания старше этой границы
+    вставляются с `written_off_at`. Во второй элемент кортежа попадают ТОЛЬКО
+    реально вставленные — у известного задания метку не меняет ничто.
     """
     deduped: dict[int, dict] = {}
     for raw in raw_orders:
@@ -311,7 +371,7 @@ async def _upsert_orders(db: AsyncSession, project_id: int, raw_orders: list[dic
         if wb_order_id:
             deduped[wb_order_id] = raw  # последнее вхождение выигрывает
     if not deduped:
-        return 0
+        return 0, 0
 
     payloads = list(deduped.values())
     by_chrt, by_barcode = await _resolve_nomenclature(
@@ -322,9 +382,19 @@ async def _upsert_orders(db: AsyncSession, project_id: int, raw_orders: list[dic
     )
 
     sync_ts = utcnow()
-    rows = [row for p in payloads if (row := _order_row(p, project_id, sync_ts, by_chrt, by_barcode))]
+    rows = [
+        row
+        for p in payloads
+        if (row := _order_row(p, project_id, sync_ts, by_chrt, by_barcode, writeoff_before))
+    ]
     if not rows:
-        return 0
+        return 0, 0
+
+    # Счётчик пометок обязан быть честным: на конфликте `written_off_at` не
+    # обновляется, поэтому «помечено» = только те, кого мы реально вставили.
+    marked_ids = [r["wb_order_id"] for r in rows if r["written_off_at"] is not None]
+    known = await _known_order_ids(db, project_id, marked_ids) if marked_ids else set()
+    marked = len([oid for oid in marked_ids if oid not in known])
 
     for chunk in _chunks(rows, _UPSERT_CHUNK):
         stmt = pg_insert(WbFbsOrder).values(chunk)
@@ -368,7 +438,7 @@ async def _upsert_orders(db: AsyncSession, project_id: int, raw_orders: list[dic
 
     await db.commit()
     await invalidate_cache(CACHE_ORDERS)
-    return len(rows)
+    return len(rows), marked
 
 
 async def sync_new_orders(db: AsyncSession, project_id: int) -> int:
@@ -380,8 +450,176 @@ async def sync_new_orders(db: AsyncSession, project_id: int) -> int:
     if not raw_orders:
         return 0
 
-    count = await _upsert_orders(db, project_id, raw_orders)
+    count, _marked = await _upsert_orders(db, project_id, raw_orders)
     logger.info("wb_fbs.orders.sync_new project=%s upserted=%s", project_id, count)
+    return count
+
+
+# ─── Периодный метод: бэкфилл истории и догон недавнего окна ────────────────
+
+
+async def _orders_cutoff(db: AsyncSession, project_id: int) -> datetime:
+    """Момент, с которого домен вообще начал видеть заказы этого проекта.
+
+    Это `MIN(created_at)` зеркала — время ПЕРВОЙ вставки, а не дата заказа.
+    Всё, что WB отдаёт за период раньше него и чего в зеркале нет, физически
+    отгружено до нашего первого опроса: в `GET /orders/new` такое задание
+    больше не приходило, иначе оно уже лежало бы у нас.
+
+    Зеркало пустое → «сейчас»: истории мы не знаем вовсе, и вычитать со склада
+    по ней нельзя ничего.
+    """
+    result = await db.execute(
+        select(func.min(WbFbsOrder.created_at)).where(
+            WbFbsOrder.project_id == project_id,
+            contour_condition(WbFbsOrder.raw),
+        )
+    )
+    return result.scalar() or utcnow()
+
+
+def _order_windows(date_from: datetime, date_to: datetime) -> list[tuple[datetime, datetime]]:
+    """Период → окна ≤30 дней встык (жёсткое ограничение `GET /api/v3/orders`)."""
+    windows: list[tuple[datetime, datetime]] = []
+    step = timedelta(days=_ORDERS_WINDOW_DAYS)
+    start = date_from
+    while start < date_to:
+        end = min(start + step, date_to)
+        windows.append((start, end))
+        start = end
+    return windows or [(date_from, date_to)]
+
+
+async def _fetch_orders_window(client: WbFbsClient, start: datetime, end: datetime) -> list[dict]:
+    """Одно окно периодного метода. Границы отдаём AWARE-UTC.
+
+    `_unix()` в клиенте зовёт `.timestamp()`, а он трактует naive-дату как
+    ЛОКАЛЬНОЕ время машины — на контейнере не с UTC окно уехало бы на часы.
+    """
+    return await client.get_orders(
+        date_from=start.replace(tzinfo=timezone.utc),
+        date_to=end.replace(tzinfo=timezone.utc),
+        max_pages=_ORDERS_MAX_PAGES,
+    )
+
+
+async def backfill_orders_history(db: AsyncSession, project_id: int, days: int = 90) -> dict:
+    """Разово подтянуть историю заданий за `days` дней (`GET /api/v3/orders`).
+
+    Зачем: зеркало наполняется из `GET /orders/new`, а он отдаёт только то, что
+    ещё не положено в поставку. Всё уехавшее в поставку исчезает оттуда
+    навсегда — истории у нас не было вовсе.
+
+    🔴 Историю вставляем СРАЗУ списанной (см. `_orders_cutoff`): в payload'е
+    периодного метода нет `supplierStatus`, поэтому без этой защиты три месяца
+    заданий легли бы как `new`, синк статусов перевёл бы их в `complete`, а
+    `writeoff_completed_orders` вычел бы со склада товар, проданный весной.
+
+    Отказ WB на очередном окне не откатывает уже записанное: прогон
+    останавливается, отдаёт `ok=False` с причиной и частичные счётчики —
+    следующий запуск доберёт остальное (UPSERT идемпотентен).
+    """
+    days = max(1, min(int(days or 0), _ORDERS_MAX_DEPTH_DAYS))
+    cutoff = await _orders_cutoff(db, project_id)
+
+    client = await get_fbs_client(db, project_id)
+    await db.commit()  # не держим транзакцию через внешний HTTP
+
+    now = utcnow()
+    windows = _order_windows(now - timedelta(days=days), now)
+
+    fetched = upserted = marked = done = 0
+    ok = True
+    message: str | None = None
+
+    for start, end in windows:
+        try:
+            raw_orders = await _fetch_orders_window(client, start, end)
+        except WbFbsApiError as err:
+            ok = False
+            message = f"Окно {start:%d.%m.%Y}–{end:%d.%m.%Y}: {err}"
+            logger.warning(
+                "wb_fbs.orders.backfill project=%s окно %s–%s оборвалось: %s",
+                project_id,
+                start,
+                end,
+                err,
+            )
+            break
+        done += 1
+        fetched += len(raw_orders)
+        rows, newly_marked = await _upsert_orders(db, project_id, raw_orders, writeoff_before=cutoff)
+        upserted += rows
+        marked += newly_marked
+        # Закрываем транзакцию ДО следующего похода в WB.
+        await db.commit()
+        logger.info(
+            "wb_fbs.orders.backfill project=%s окно %s–%s: fetched=%s upserted=%s written_off=%s",
+            project_id,
+            start.date(),
+            end.date(),
+            len(raw_orders),
+            rows,
+            newly_marked,
+        )
+
+    if ok:
+        message = (
+            f"История за {days} дн.: получено {fetched}, записано {upserted}, "
+            f"помечено списанными {marked}"
+        )
+    logger.info(
+        "wb_fbs.orders.backfill project=%s готово ok=%s windows=%s/%s fetched=%s upserted=%s marked=%s",
+        project_id,
+        ok,
+        done,
+        len(windows),
+        fetched,
+        upserted,
+        marked,
+    )
+    return {
+        "ok": ok,
+        "fetched": fetched,
+        "upserted": upserted,
+        "written_off_marked": marked,
+        "windows": done,
+        "message": message,
+    }
+
+
+async def sync_orders_recent(db: AsyncSession, project_id: int, days: int = _RECENT_DEFAULT_DAYS) -> int:
+    """Догон недавнего окна периодным методом. Возвращает число заапсерченных строк.
+
+    `GET /orders/new` теряет задание, собранное между двумя опросами: в поставку
+    оно уехало, «новым» больше не приходит и в зеркало не попадает никогда.
+    Окно в пару дней ловит такие задания и заодно чинит пропуски после простоя
+    воркера.
+
+    Граница исторического та же, что у бэкфилла: на ПЕРВОМ прогоне (зеркало
+    пусто → cutoff = «сейчас») окно принесёт уже отгруженные задания, и
+    списывать по ним реальный склад нельзя.
+    """
+    days = max(1, min(int(days or 0), _ORDERS_WINDOW_DAYS))
+    cutoff = await _orders_cutoff(db, project_id)
+
+    client = await get_fbs_client(db, project_id)
+    await db.commit()  # не держим транзакцию через внешний HTTP
+
+    now = utcnow()
+    raw_orders = await _fetch_orders_window(client, now - timedelta(days=days), now)
+    if not raw_orders:
+        return 0
+
+    count, marked = await _upsert_orders(db, project_id, raw_orders, writeoff_before=cutoff)
+    logger.info(
+        "wb_fbs.orders.sync_recent project=%s days=%s fetched=%s upserted=%s written_off=%s",
+        project_id,
+        days,
+        len(raw_orders),
+        count,
+        marked,
+    )
     return count
 
 
@@ -1046,10 +1284,12 @@ async def _writeoff_locked(db: AsyncSession, project_id: int) -> int:
 
 __all__ = [
     "FbsOrderError",
+    "backfill_orders_history",
     "cancel_order",
     "get_stickers",
     "list_orders",
     "sync_new_orders",
     "sync_order_statuses",
+    "sync_orders_recent",
     "writeoff_completed_orders",
 ]
