@@ -574,6 +574,33 @@ async def test_sync_orders_recent_catches_up_window(db_session, env, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_upsert_locks_rows_in_key_order(db_session, env, monkeypatch):
+    """Строки в UPSERT идут по возрастанию `wb_order_id`, каким бы ни был ответ WB.
+
+    Порядок строк = порядок захвата блокировок в PG. Писателей в таблицу два
+    (`sync_new_orders` и `sync_orders_recent`), их наборы заданий пересекаются,
+    а WB отдаёт задания в разном порядке — при несортированной вставке два
+    одновременных прогона брали одни строки встречно и ловили
+    `DeadlockDetectedError` (прод 26.07: периодный синк падал КАЖДЫЙ раз).
+    """
+    captured: list[list[int]] = []
+    original_chunks = orders_service._chunks
+
+    def spy(items, size):
+        captured.append([r["wb_order_id"] for r in items])
+        return original_chunks(items, size)
+
+    monkeypatch.setattr(orders_service, "_chunks", spy)
+    # WB отдаёт вперемешку — намеренно не по возрастанию.
+    shuffled = [_raw_order(oid) for oid in (9303, 9301, 9304, 9302)]
+
+    await orders_service._upsert_orders(db_session, env.project_id, shuffled)
+
+    assert captured, "не перехватили ни одной пачки значений UPSERT"
+    assert captured[0] == sorted(captured[0]) == [9301, 9302, 9303, 9304]
+
+
+@pytest.mark.asyncio
 async def test_sync_orders_recent_protects_stock_on_first_run(db_session, env, monkeypatch):
     """Первый прогон на пустом зеркале не списывает склад задним числом.
 
