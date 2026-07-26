@@ -1499,7 +1499,7 @@ async def _pick_list_groups(db: AsyncSession, project_id: int, wb_supply_id: str
             WbFbsOrder.subject,
             WbFbsOrder.supplier_status,
             func.count().label("qty"),
-            func.sum(func.coalesce(WbFbsOrder.sale_price, WbFbsOrder.price)).label("amount"),
+            func.sum(orders_service.revenue_rub_expr()).label("amount"),
         )
         .where(
             WbFbsOrder.project_id == project_id,
