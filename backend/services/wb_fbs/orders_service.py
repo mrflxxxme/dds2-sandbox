@@ -373,7 +373,16 @@ async def _upsert_orders(
     if not deduped:
         return 0, 0
 
-    payloads = list(deduped.values())
+    # Порядок строк в multi-row UPSERT задаёт порядок, в котором PG берёт
+    # блокировки. Писателей в эту таблицу ДВА и они пересекаются по заданиям:
+    # `sync_new_orders` (очередь `/orders/new`, раз в 2 мин) и
+    # `sync_orders_recent` (периодное окно, раз в 10 мин). WB отдаёт их ответы
+    # в РАЗНОМ порядке, поэтому два одновременных прогона брали одни и те же
+    # строки в противоположной последовательности → `DeadlockDetectedError`,
+    # и периодный синк падал на проде каждый раз (0 успешных прогонов).
+    # Сортировка по natural key даёт всем писателям один порядок захвата:
+    # цикла ожидания не возникает даже при разных границах чанков.
+    payloads = [deduped[key] for key in sorted(deduped)]
     by_chrt, by_barcode = await _resolve_nomenclature(
         db,
         project_id,
