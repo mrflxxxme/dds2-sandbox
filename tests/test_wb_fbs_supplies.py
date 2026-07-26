@@ -451,7 +451,15 @@ async def test_pull_missing_order_ids_is_project_scoped(db_session, env, other_p
     db_session.expire_all()
     alien = (
         await db_session.execute(
-            select(WbFbsSupply).where(WbFbsSupply.wb_supply_id == "WB-GI-ALIEN")
+            select(WbFbsSupply).where(
+                # Фильтр по проекту обязателен: тот же литерал сеет
+                # test_wb_fbs_supply_plan для СВОЕГО other_project, а уникальность
+                # у поставки — (project_id, wb_supply_id). Под `-n 2` (так гоняет
+                # pre-push гейт) оба теста делят одну живую БД, две строки живут
+                # одновременно и `scalar_one()` падает MultipleResultsFound.
+                WbFbsSupply.project_id == other_project.id,
+                WbFbsSupply.wb_supply_id == "WB-GI-ALIEN",
+            )
         )
     ).scalar_one()
     assert supplies_service._wb_orders_count(alien.raw) is None
