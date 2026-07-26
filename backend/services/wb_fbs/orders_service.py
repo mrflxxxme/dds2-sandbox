@@ -43,7 +43,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import case, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +51,7 @@ from backend.cache import cached, invalidate_cache
 from backend.integrations.wb_fbs_api import WbFbsApiError, WbFbsClient
 from backend.models import (
     FBS_TERMINAL_STATUSES,
+    FBS_WB_CANCELLED_STATUSES,
     FbsSupplierStatus,
     Nomenclature,
     WbFbsOrder,
@@ -100,6 +101,36 @@ _WRITEOFF_REF_TYPE = "FBS_ORDER"
 
 #: ISO-4217 рубля. WB отдаёт код числом, колонка — String(8).
 RUB_CURRENCY_CODE = "643"
+
+
+def effective_status_expr() -> Any:
+    """Статус задания с учётом ОБЕИХ осей WB — единственный источник для счётчиков.
+
+    `supplierStatus` описывает действия продавца, `wbStatus` — судьбу заказа у WB,
+    и они расходятся: покупатель отказался до сборки → `supplierStatus` навсегда
+    `new`, `wbStatus` = `declined_by_client`. Голый `supplier_status` в таком
+    случае врёт во все стороны сразу (см. `FBS_WB_CANCELLED_STATUSES`).
+
+    Схлопываем WB-отмену в `cancel`: задание разом уходит из «Новых», приходит во
+    вкладку «Отменено», перестаёт держать остаток и выпадает из опроса статусов.
+    Сам `supplier_status` НЕ переписываем — это поле WB, и зеркало обязано
+    оставаться верным источнику; расхождение видно в колонке «Статус WB».
+    """
+    return case(
+        (
+            and_(
+                WbFbsOrder.wb_status.in_(FBS_WB_CANCELLED_STATUSES),
+                WbFbsOrder.supplier_status.notin_(FBS_TERMINAL_STATUSES),
+            ),
+            FbsSupplierStatus.CANCEL.value,
+        ),
+        else_=WbFbsOrder.supplier_status,
+    )
+
+
+def alive_condition() -> Any:
+    """«Задание ещё живое»: не отменено ни продавцом, ни на стороне WB."""
+    return effective_status_expr().notin_(FBS_TERMINAL_STATUSES)
 
 
 def revenue_rub_expr() -> Any:
@@ -833,7 +864,7 @@ async def sync_order_statuses(db: AsyncSession, project_id: int) -> int:
         select(WbFbsOrder.wb_order_id)
         .where(
             WbFbsOrder.project_id == project_id,
-            WbFbsOrder.supplier_status.notin_(FBS_TERMINAL_STATUSES),
+            alive_condition(),
             contour_condition(WbFbsOrder.raw),
         )
         .order_by(WbFbsOrder.wb_order_id.desc())
@@ -974,16 +1005,18 @@ async def list_orders(
     if dt_to is not None:
         base.append(WbFbsOrder.created_at_wb < dt_to)
 
+    # Выражение строим ОДИН раз и группируем по метке: два отдельных вызова
+    # дают структурно равные, но разные объекты, и PG отказывается считать их
+    # одним и тем же — «wb_status must appear in the GROUP BY clause».
+    eff_status = effective_status_expr().label("eff")
     counts_result = await db.execute(
-        select(WbFbsOrder.supplier_status, func.count())
-        .where(*base)
-        .group_by(WbFbsOrder.supplier_status)
+        select(eff_status, func.count()).where(*base).group_by(eff_status)
     )
     status_counts = {row[0]: int(row[1]) for row in counts_result.all()}
 
     conditions = list(base)
     if status:
-        conditions.append(WbFbsOrder.supplier_status == status)
+        conditions.append(effective_status_expr() == status)
         total = status_counts.get(status, 0)
     else:
         total = sum(status_counts.values())

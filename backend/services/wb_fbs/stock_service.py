@@ -128,7 +128,7 @@ from backend.models.wb_fbs import (
     WbFbsWarehouseLink,
 )
 from backend.schemas.wb_fbs import FbsOverrideSet
-from backend.services.wb_fbs import warehouse_service
+from backend.services.wb_fbs import orders_service, warehouse_service
 from backend.services.wb_fbs.contour import contour_condition
 from backend.services.wb_fbs.locks import PUSH_LOCK_NAME, acquire_lock, release_lock
 from backend.utils.time import utcnow
@@ -376,6 +376,9 @@ async def _load_open_fbs_by_wh(
             WbFbsOrder.project_id == project_id,
             WbFbsOrder.wb_warehouse_id.in_(wb_warehouse_ids),
             WbFbsOrder.supplier_status.in_(FBS_OPEN_STATUSES),
+            # WB-отмена до сборки оставляет supplier_status='new' навсегда —
+            # без этого условия мёртвое задание вечно держит остаток.
+            orders_service.alive_condition(),
             WbFbsOrder.nomenclature_id.is_not(None),
             contour_condition(WbFbsOrder.raw),
         )

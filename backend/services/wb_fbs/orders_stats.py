@@ -53,7 +53,7 @@ from backend.models.integrations import WbFunnelDaily
 from backend.models.refs import ProductSubcategory, ProductSubcategoryMap
 from backend.models.wb_fbs import FBS_TERMINAL_STATUSES, WbFbsOrder
 from backend.services.wb_fbs.contour import contour_condition
-from backend.services.wb_fbs.orders_service import revenue_rub_expr
+from backend.services.wb_fbs.orders_service import effective_status_expr, revenue_rub_expr
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ def _rows(result: Any) -> list[dict[str, Any]]:
 
 async def _totals(db: AsyncSession, where: list[Any]) -> dict[str, Any]:
     """Итоги периода: всего, из них отменено (в штуках и рублях)."""
-    cancelled = WbFbsOrder.supplier_status.in_(FBS_TERMINAL_STATUSES)
+    cancelled = effective_status_expr().in_(FBS_TERMINAL_STATUSES)
     result = await db.execute(
         select(
             func.count(),
