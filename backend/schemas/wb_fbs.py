@@ -18,6 +18,9 @@ ALLOWED_WAREHOUSE_MODES = ["observe", "translate"]
 ALLOWED_FBS_MODES = ["safe", "sandbox", "prod"]
 ALLOWED_SUPPLIER_STATUSES = ["new", "confirm", "complete", "cancel", "cancel_carrier"]
 ALLOWED_STICKER_TYPES = ["svg", "zplv", "zplh", "png"]
+#: Производные состояния поставки (см. `models.wb_fbs.supply_status`) — своего
+#: поля статуса Marketplace API не отдаёт.
+ALLOWED_SUPPLY_STATUSES = ["active", "to_ship", "in_delivery", "rejected"]
 
 
 # ─── Режим контура ───────────────────────────────────────────────────────────
@@ -357,6 +360,28 @@ class FbsOrderListOut(BaseModel):
     status_counts: dict[str, int] = Field(default_factory=dict)
 
 
+class FbsOrderBackfillRequest(BaseModel):
+    """Обратная загрузка истории заданий из `GET /api/v3/orders`.
+
+    WB держит задания 3 месяца и отдаёт окном не больше 30 дней за запрос —
+    сервис сам режет период на окна, здесь только глубина.
+    """
+
+    days: int = Field(default=90, ge=1, le=90)
+
+
+class FbsOrderBackfillOut(BaseModel):
+    """Итог бэкфилла. `written_off_marked` — сколько исторических заданий
+    помечены уже списанными, чтобы не вычесть со склада продажи прошлых месяцев."""
+
+    ok: bool = True
+    fetched: int = 0
+    upserted: int = 0
+    written_off_marked: int = 0
+    windows: int = 0
+    message: str | None = None
+
+
 # ─── Статистика заказов за период ────────────────────────────────────────────
 
 
@@ -474,11 +499,21 @@ class FbsSupplyOut(BaseModel):
     created_at_wb: datetime | None = None
     closed_at: datetime | None = None
     scan_dt: datetime | None = None
+    reject_dt: datetime | None = None
+    #: Производное от `done`/`scan_dt`/`reject_dt` — см. `supply_status`.
+    #: `done` остаётся в контракте: на нём завязаны кнопки «Передать»/«Удалить».
+    status: str = "active"
     cargo_type: int | None = None
     cross_border_type: int | None = None
     is_b2b: bool = False
     destination_office_id: int | None = None
+    #: Имя пункта приёма WB из справочника `/api/v3/offices` (кэш 10 мин).
+    destination_office_name: str | None = None
     wb_warehouse_id: int | None = None
+    #: Заданий в поставке ПО ДАННЫМ WB (`GET /supplies/{id}/order-ids`).
+    #: None — состав ещё не спрашивали. Отличается от `orders_count`, который
+    #: считает наши зеркальные задания: до бэкфилла истории он почти везде 0.
+    wb_orders_count: int | None = None
     orders_count: int = 0
     qr_barcode: str | None = None
 
