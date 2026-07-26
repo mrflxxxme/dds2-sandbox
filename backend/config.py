@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     WB_FBS_STOCK_PUSH_INTERVAL_MINUTES: int = 3
     # Каденс опроса новых сборочных заданий (sync_all_projects_fbs_new_orders).
     WB_FBS_ORDERS_SYNC_INTERVAL_MINUTES: int = 2
+    # Каденс догона недавнего окна периодным методом GET /api/v3/orders
+    # (sync_all_projects_fbs_recent_orders): ловит задания, уехавшие в поставку
+    # между двумя опросами `/orders/new` — оттуда они исчезают навсегда.
+    WB_FBS_RECENT_ORDERS_INTERVAL_MINUTES: int = 10
 
     # Автоподача жалоб на отзывы через WB API (POST /api/v1/feedbacks/actions).
     # WB ВРЕМЕННО отключил этот метод — жалобы подаются только через ЛК продавца.

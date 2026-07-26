@@ -69,6 +69,39 @@ FBS_TERMINAL_STATUSES: tuple[str, ...] = (
 )
 
 
+class FbsSupplyStatus(str, enum.Enum):
+    """Состояние поставки в терминах кабинета WB.
+
+    Собственного поля статуса Marketplace API не отдаёт: в payload'е поставки
+    есть только `done`, `scanDt` и `rejectDt` — кабинет рисует свои ярлыки сам.
+    Раскладываем ту же тройку в те же четыре состояния, иначе весь `done=true`
+    схлопывается в одну строку и наш экран расходится с кабинетом (52
+    «переданных» против «В доставке 44»).
+    """
+
+    ACTIVE = "active"  # `done=false` — черновик, задания ещё докладываются
+    TO_SHIP = "to_ship"  # закрыта, QR не отсканирован — «Отгрузите поставку»
+    IN_DELIVERY = "in_delivery"  # закрыта, QR отсканирован — «Поставка в обработке»
+    REJECTED = "rejected"  # `rejectDt` — WB отклонил приёмку
+
+
+def supply_status(done: bool, scan_dt: datetime | None, reject_dt: datetime | None) -> str:
+    """`done`/`scanDt`/`rejectDt` → состояние поставки.
+
+    Порядок проверок значим: `rejectDt` перебивает всё (отклонённая поставка
+    остаётся `done=true` со сканом), а `scanDt` различает «лежит у нас, не
+    отгружена» и «уехала в WB» — это и есть граница вкладок кабинета.
+
+    Приёмка («Завершена») из этой тройки не выводится: факта приёмки в payload'е
+    поставки нет вообще. Он виден только по заданиям поставки — см. DOMAIN_WB_FBS.
+    """
+    if reject_dt is not None:
+        return FbsSupplyStatus.REJECTED.value
+    if not done:
+        return FbsSupplyStatus.ACTIVE.value
+    return FbsSupplyStatus.TO_SHIP.value if scan_dt is None else FbsSupplyStatus.IN_DELIVERY.value
+
+
 class FbsStockSource(str, enum.Enum):
     """Откуда берём физический остаток для трансляции на WB."""
 
@@ -389,6 +422,9 @@ class WbFbsSupply(Base, TimestampMixin):
     created_at_wb: Mapped[datetime | None] = mapped_column(DateTime)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime)
     scan_dt: Mapped[datetime | None] = mapped_column(DateTime)
+    #: `rejectDt` — WB отклонил приёмку поставки. Вместе с `done`/`scan_dt`
+    #: раскладывается в `FbsSupplyStatus` (см. `supply_status`).
+    reject_dt: Mapped[datetime | None] = mapped_column(DateTime)
 
     #: Габаритный «залипон»: тип фиксируется первым добавленным заданием.
     cargo_type: Mapped[int | None] = mapped_column(SmallInteger)

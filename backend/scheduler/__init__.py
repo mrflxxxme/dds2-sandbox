@@ -71,6 +71,7 @@ from backend.scheduler.jobs.wb_fbs import (
     push_all_projects_fbs_stocks,
     sync_all_projects_fbs_new_orders,
     sync_all_projects_fbs_order_statuses,
+    sync_all_projects_fbs_recent_orders,
     sync_all_projects_fbs_supplies,
     sync_all_projects_fbs_warehouses,
 )
@@ -464,7 +465,7 @@ def start_scheduler():
     )
 
     # ── WB FBS (продажи со склада продавца) ──
-    # Все пять джобов: max_instances=1 + coalesce=True — пропущенные тики
+    # Все шесть джобов: max_instances=1 + coalesce=True — пропущенные тики
     # схлопываются в ОДИН, а не выстраиваются в очередь (после паузы воркера
     # иначе в WB улетела бы пачка одинаковых PUT и выжгла бакет лимитов).
     # Проекты без ключа wb_marketplace / без активных складов FBS джобы
@@ -491,6 +492,21 @@ def start_scheduler():
         max_instances=1,
         coalesce=True,
         misfire_grace_time=120,
+    )
+
+    # Догон недавнего окна периодным методом: `/orders/new` отдаёт только то,
+    # что ещё не положено в поставку, и задание, собранное между двумя
+    # опросами, исчезает оттуда навсегда. Каденс реже «новых» — у `GET /orders`
+    # своя цена (окно + пагинация), а утечку закрывает и 10-минутный проход.
+    _scheduler.add_job(
+        sync_all_projects_fbs_recent_orders,
+        trigger=IntervalTrigger(minutes=settings.WB_FBS_RECENT_ORDERS_INTERVAL_MINUTES),
+        id="wb_fbs_recent_orders",
+        name=f"WB FBS recent orders catch-up (every {settings.WB_FBS_RECENT_ORDERS_INTERVAL_MINUTES}min)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
     )
 
     _scheduler.add_job(

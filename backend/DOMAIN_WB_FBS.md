@@ -55,7 +55,7 @@ FBS = Fulfillment by Seller: товар лежит на НАШЕМ складе,
 | `WbFbsStockState` | последнее переданное состояние остатка по `(склад WB, chrtId)`: `qty_sent` / `qty_confirmed` | `(project_id, wb_warehouse_id, chrt_id)` |
 | `WbFbsStockPush` | один прогон трансляции (лог для UI): счётчики `rows_*`, статус OK/PARTIAL/ERROR | index `(project_id, started_at)` |
 | `WbFbsOrder` | зеркало сборочного задания; **одно задание = одна единица товара** | `(project_id, wb_order_id)` + partial index `ix_wb_fbs_orders_open` по `supplier_status IN ('new','confirm')` |
-| `WbFbsSupply` | поставка FBS — контейнер заданий | `(project_id, wb_supply_id)` |
+| `WbFbsSupply` | поставка FBS — контейнер заданий; `done`/`scan_dt`/`reject_dt` раскладываются в `FbsSupplyStatus` (своего статуса WB не отдаёт) | `(project_id, wb_supply_id)` |
 
 Зеркала WB (`WbFbsOrder`, `WbFbsSupply`) — **без SoftDelete**: источник истины у WB, строки только
 upsert-ятся синком. `WbFbsStockOverride` тоже без SoftDelete намеренно: «снять ручное количество» —
@@ -313,6 +313,20 @@ available(наш склад, номенклатура) = max(0, quantity − res
 - `supplierStatus`: `new` → `confirm` (добавлено в поставку) → `complete` (поставка передана);
   плюс `cancel`, `cancel_carrier`. Отдельных PATCH confirm/deliver для FBS нет — статусы двигают
   методы поставок.
+- **Два источника заданий, и они не взаимозаменяемы.** `GET /orders/new` отдаёт ТОЛЬКО задания, ещё
+  не положенные в поставку: как только задание уходит в поставку, оно пропадает оттуда навсегда.
+  Один этот источник = зеркало-снимок текущей очереди сборки, а не история продаж. Историю даёт
+  периодный `GET /api/v3/orders` (`client.get_orders`, окно ≤30 дней, глубина 3 месяца, пагинация
+  `next`) — он и стоит под `backfill_orders_history` (разовая ручка) и `sync_orders_recent`
+  (регулярный догон недавнего окна). Без второго источника вкладки «В доставке» / «Отменённые» /
+  «Завершённые» пустые, а собранное между двумя опросами `/orders/new` теряется навсегда.
+- **🔴 Бэкфилл обязан помечать историю списанной.** `_supplier_status_or_new` при отсутствии
+  `supplierStatus` в payload'е ставит `new`; без защиты трёхмесячная история влетела бы как `new`,
+  `sync_order_statuses` перевёл бы её в `complete`, а `writeoff_completed_orders` вычел бы со склада
+  товар, проданный несколько месяцев назад. Граница «историческое / живое» — cutoff = момент, с
+  которого домен вообще начал видеть заказы (`min(created_at)` по строкам проекта, при пустой
+  таблице `utcnow()`): всё, что создано в WB раньше, вставляется сразу с `written_off_at`.
+  `on_conflict_do_update` НЕ трогает `written_off_at` — повторный бэкфилл ничего не «разсписывает».
 - Цены WB отдаёт в копейках (×100) — делить на 100 при укладке в `Numeric(18,2)`.
 - Списание в ledger идёт по `complete` через `StockMovement` типа OUTBOUND, идемпотентно по
   `WbFbsOrder.written_off_at`. Склад-источник — привязанный через `WbFbsWarehouseLink`; при
@@ -367,10 +381,11 @@ available(наш склад, номенклатура) = max(0, quantity − res
 | POST | `/stock/reconcile` | ✓ | применить сверку (обнулить чужое / выровнять базу дельты) |
 | GET | `/orders` | | `orders_service.list_orders` |
 | GET | `/orders/stats` | | `orders_stats.orders_stats` — выручка за период, разрезы (бренд/предмет/под-категория/статус/дни) и доля в объёме воронки |
-| POST | `/orders/sync` | ✓ | `orders_service.sync_new_orders` |
+| POST | `/orders/sync` | ✓ | `orders_service.sync_new_orders` — только очередь `/orders/new` |
+| **POST** | **`/orders/backfill`** | ✓ | **`orders_service.backfill_orders_history` — история заданий за `days` (≤90) окнами ≤30 дней; историю метит `written_off_at`, чтобы не вычесть со склада прошлые продажи** |
 | POST | `/orders/stickers` | ✓ | стикеры заданий (≤100 за раз) |
 | PATCH | `/orders/{wb_order_id}/cancel` | ✓ | отмена задания |
-| GET | `/supplies` | | список поставок |
+| GET | `/supplies` | | список поставок; `status=active\|to_ship\|in_delivery\|rejected` — точнее прежнего `done` |
 | POST | `/supplies` | ✓ | создать поставку |
 | POST | `/supplies/sync` | ✓ | синк поставок |
 | POST | `/supplies/plan` | | предпросмотр разбиения заданий на поставки (склад × габарит) |
@@ -462,14 +477,31 @@ available(наш склад, номенклатура) = max(0, quantity − res
   сырую 409 без объяснения.
 - **Поставка закрывается автоматически** при приёмке первого товара — доложить в неё после этого
   нельзя. QR поставки (`/barcode`) доступен только после `deliver`, иначе 409 `SupplyNotClosed`.
-- **«Пусто в зеркале» ≠ «пусто в WB».** Зеркало заданий наполняется только из `GET /orders/new`, а
-  задание, положенное в поставку прямо в кабинете WB, «новым» больше не приходит и в `wb_fbs_orders`
-  не попадает никогда; списочный метод поставок габаритов тоже не отдаёт. Поэтому кандидатом на
+- **«Пусто в зеркале» ≠ «пусто в WB».** Зеркало заданий исторически наполнялось только из
+  `GET /orders/new`, а задание, положенное в поставку прямо в кабинете WB, «новым» больше не
+  приходит; списочный метод поставок габаритов тоже не отдаёт. Поэтому кандидатом на
   доклад считается только ПОДТВЕРЖДЁННО пустая поставка: `_pull_missing_order_ids` пишет фактическое
   число заданий из `/order-ids` в `raw._dds_wb_orders`, и `_load_active_supply_fits` берёт лишь тех,
   у кого там ноль. Иначе кабинетная поставка вечно предлагалась к доклажу и вечно ловила 409, а цикл
   не разрывался ничем. Страховка сверху: провал доклада в чужую поставку ОДИН раз откатывается на
-  создание своей (`create_supplies_bulk`), группа не теряется.
+  создание своей (`create_supplies_bulk`), группа не теряется. Историю заданий закрывает бэкфилл
+  (см. «Заказы и поставки»), но метка `_dds_wb_orders` остаётся источником истины про состав:
+  закрытую поставку спрашиваем один раз (она неизменна), активную — каждый прогон.
+- **`GET /api/v3/supplies` не отдаёт ни состав, ни склад продавца, ни статус.** Весь payload —
+  `id, done, name, isB2b, scanDt, closedAt, rejectDt, cargoType, createdAt, crossBorderType,
+  recommendedWhId, destinationOfficeId, isPickupPointShipmentAllowed`. Отсюда три следствия:
+  «Заданий» и «Склад WB» выводятся из НАШИХ заданий (`_recount_orders`) и пусты, пока зеркало
+  заданий не наполнено; настоящее число заданий берётся отдельным `/order-ids` и живёт в
+  `raw._dds_wb_orders` — это ДВА разных числа (`orders_count` наше, `wb_orders_count` WB-шное), и
+  бизнес-логика доклада завязана именно на второе.
+- **Статус поставки — производный, своего поля у WB нет.** Ярлыки кабинета («Отгрузите поставку»,
+  «Поставка в обработке», «Завершена») WB рисует сам. Мы раскладываем ту же тройку
+  `done`/`scanDt`/`rejectDt` в `FbsSupplyStatus` (`supply_status()` в `models/wb_fbs.py`):
+  `rejectDt` перебивает всё → `rejected`; `done=false` → `active`; дальше `scanDt` различает
+  `to_ship` (лежит у нас, не отгружена) и `in_delivery` (уехала). Пока всё это схлопывалось в один
+  ярлык «Передана», экран показывал 52 «переданных» против «В доставке 44» в кабинете. Приёмку
+  («Завершена») из этой тройки вывести НЕЛЬЗЯ — факта приёмки в payload'е поставки нет вообще,
+  он виден только по статусам заданий поставки.
 - **Контур накрывает и поставки.** `wb_fbs_supplies.raw` несёт ту же метку `_dds_contour`, что и
   задания: без неё боевой план предлагал доклад в поставку песочницы и PATCH боевым токеном по
   чужому id уходил в 404/409. Фильтр — в `list_supplies`, `_get_supply`, `_load_active_supply_fits`
@@ -529,7 +561,8 @@ available(наш склад, номенклатура) = max(0, quantity − res
   воронки), `supplies_service`, `locks` (распределённые локи трансляции и списания),
   `contour` (метка песочницы в зеркале заданий). Отдельного `rules_service` больше нет.
 - `backend/routers/wb_fbs.py` — endpoints с префиксом `/fbs`; page-ключ RBAC — `fbs`.
-- `backend/scheduler/jobs/wb_fbs.py` — пуш остатков, синк заданий / статусов / поставок / складов.
+- `backend/scheduler/jobs/wb_fbs.py` — пуш остатков, синк заданий (очередь `/orders/new` + догон
+  периодного окна) / статусов / поставок / складов.
 - `backend/services/warehouse_stock_engine.py:get_open_fbs_reserved` +
   `backend/services/assembly/crud.py:_validate_available_for_assembly` — обратный гейт.
 - `tests/test_wb_fbs_assembly_gate.py` — тесты обратного гейта и инварианта совместимости.
