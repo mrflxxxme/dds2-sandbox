@@ -13,8 +13,19 @@ import { api } from '@/lib/api';
 import { formatDateTime, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { FbsSupply, FbsWarehouse } from '@/types/api';
-import { cargoLabel, crossBorderLabel, downloadBase64 } from './fbsShared';
+import type { FbsSupply, FbsSupplyStatus, FbsWarehouse } from '@/types/api';
+import {
+    SUPPLY_STATUS_LABEL,
+    SUPPLY_STATUSES,
+    SupplyStatusBadge,
+    cargoLabel,
+    crossBorderLabel,
+    downloadBase64,
+    supplyOrdersCount,
+    supplyOrdersMirrorHint,
+    supplyOrdersMirrorTitle,
+    supplyStatusOf,
+} from './fbsShared';
 import { MiniKpi } from './stockColumns';
 import SupplyDetailScreen from './SupplyDetailScreen';
 
@@ -33,7 +44,8 @@ interface Props {
     refreshTick: number;
 }
 
-type DoneFilter = '' | 'active' | 'done';
+/** Пусто — все состояния; иначе одно из четырёх (query-параметр `status`). */
+type StatusFilter = '' | FbsSupplyStatus;
 
 export default function SuppliesTab({
     warehouses, writeEnabled, writeHint, onShowOrders, onToast, refreshTick,
@@ -42,7 +54,7 @@ export default function SuppliesTab({
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [actionError, setActionError] = useState('');
-    const [doneFilter, setDoneFilter] = useState<DoneFilter>('');
+    const [statusFilter, setStatusFilter] = useState<StatusFilter>('');
     const [whFilter, setWhFilter] = useState<number | ''>('');
     const [syncing, setSyncing] = useState(false);
     const [busyId, setBusyId] = useState<string | null>(null);
@@ -55,7 +67,7 @@ export default function SuppliesTab({
         setError('');
         try {
             const res = await api.getFbsSupplies({
-                done: doneFilter === '' ? undefined : doneFilter === 'done',
+                status: statusFilter || undefined,
                 limit: 100,
             });
             if (signal?.aborted) return;
@@ -71,7 +83,7 @@ export default function SuppliesTab({
         } finally {
             if (!signal?.aborted) setLoading(false);
         }
-    }, [doneFilter]);
+    }, [statusFilter]);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -96,9 +108,24 @@ export default function SuppliesTab({
         [items, whFilter],
     );
 
-    const activeCount = rows.filter(s => !s.done).length;
-    const activeOrders = rows.filter(s => !s.done).reduce((a, s) => a + (s.orders_count || 0), 0);
-    const doneCount = rows.filter(s => s.done).length;
+    /**
+     * Счётчики по тем же четырём состояниям, что и фильтр: «Переданных» одной
+     * цифрой скрывало, что часть закрытых поставок физически ещё лежит у нас
+     * (QR не отсканирован). Задания считаем по данным WB — наше зеркало до
+     * бэкфилла истории почти везде пустое.
+     */
+    const stats = useMemo(() => {
+        const byStatus: Record<FbsSupplyStatus, number> = {
+            active: 0, to_ship: 0, in_delivery: 0, rejected: 0,
+        };
+        let activeOrders = 0;
+        for (const s of rows) {
+            const st = supplyStatusOf(s);
+            byStatus[st] += 1;
+            if (st === 'active') activeOrders += supplyOrdersCount(s);
+        }
+        return { byStatus, activeOrders };
+    }, [rows]);
 
     const handleSync = async () => {
         setSyncing(true);
@@ -134,9 +161,16 @@ export default function SuppliesTab({
             // перечитывался (его зависимость — `supply.done`), а кнопка
             // передачи предлагала повтор, на который WB отвечает ошибкой.
             // Свежий объект из `load()` перекроет этот, если поставка в выдаче.
+            // Состояние после передачи — «Отгрузите поставку»: закрыта, но QR
+            // на пункте приёма ещё никто не сканировал (`scan_dt` пуст).
             setOpenSupply(prev => (
                 prev?.wb_supply_id === s.wb_supply_id
-                    ? { ...prev, done: true, closed_at: prev.closed_at ?? new Date().toISOString() }
+                    ? {
+                        ...prev,
+                        done: true,
+                        status: 'to_ship',
+                        closed_at: prev.closed_at ?? new Date().toISOString(),
+                    }
                     : prev
             ));
             await load();
@@ -210,16 +244,36 @@ export default function SuppliesTab({
         },
         {
             key: 'orders_count', label: 'Заданий', align: 'right',
-            render: (v: number, row: FbsSupply) => (
-                <button
-                    className="btn btn-sm"
-                    title="Открыть задания этой поставки на вкладке «Заказы»"
-                    onClick={e => { e.stopPropagation(); onShowOrders(row.wb_supply_id); }}
-                >
-                    {formatNumber(v, 0)}
-                </button>
-            ),
-            exportValue: (row: FbsSupply) => row.orders_count,
+            headerTitle: 'Заданий по данным WB. Если наше зеркало отстаёт, рядом — сколько из них уже у нас',
+            render: (_v: number, row: FbsSupply) => {
+                // Расхождение с зеркалом — ненавязчиво: цифра остаётся WB-шной,
+                // рядом мелкая подпись «в зеркале 0 из 11» с полной подсказкой.
+                const mirrorHint = supplyOrdersMirrorHint(row);
+                return (
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                        <button
+                            className="btn btn-sm"
+                            title="Открыть задания этой поставки на вкладке «Заказы»"
+                            onClick={e => { e.stopPropagation(); onShowOrders(row.wb_supply_id); }}
+                        >
+                            {formatNumber(supplyOrdersCount(row), 0)}
+                        </button>
+                        {mirrorHint && (
+                            <span
+                                style={{ fontSize: 11, color: 'var(--color-text-dim)', whiteSpace: 'nowrap' }}
+                                title={supplyOrdersMirrorTitle(row)}
+                            >
+                                {mirrorHint}
+                            </span>
+                        )}
+                    </div>
+                );
+            },
+            // Сортировка — по ПОКАЗАННОЙ цифре (данные WB), а не по ключу
+            // `orders_count`: иначе колонка сортируется не тем, что видно.
+            getValue: (row: FbsSupply) => supplyOrdersCount(row),
+            sortingFn: 'basic',
+            exportValue: (row: FbsSupply) => supplyOrdersCount(row),
         },
         {
             key: 'wb_warehouse_id', label: 'Склад WB',
@@ -234,12 +288,26 @@ export default function SuppliesTab({
             },
         },
         {
-            key: 'done', label: 'Статус',
-            render: (v: boolean) => (
-                <span className={`badge ${v ? 'badge-success' : 'badge-info'}`}>
-                    {v ? 'Передана' : 'Активная'}
-                </span>
-            ),
+            key: 'destination_office_name', label: 'Склад поставки',
+            headerTitle: 'Пункт приёма WB, куда везём поставку (destinationOfficeId)',
+            render: (v: string | null, row: FbsSupply) => v
+                ? <span style={{ fontSize: 13 }}>{v}</span>
+                : (
+                    <span style={{ color: 'var(--color-text-dim)' }}>
+                        {row.destination_office_id != null ? `#${row.destination_office_id}` : '—'}
+                    </span>
+                ),
+            exportValue: (row: FbsSupply) => row.destination_office_name
+                || (row.destination_office_id != null ? `#${row.destination_office_id}` : ''),
+        },
+        {
+            key: 'status', label: 'Статус',
+            headerTitle: 'Состояние в терминах кабинета WB: закрытая поставка бывает и «Отгрузите поставку», '
+                + 'и «В доставке», и «Отклонена»',
+            render: (_v: string, row: FbsSupply) => <SupplyStatusBadge supply={row} />,
+            // Сортируем и выгружаем ярлыком, а не машинным кодом статуса.
+            getValue: (row: FbsSupply) => SUPPLY_STATUS_LABEL[supplyStatusOf(row)].label,
+            exportValue: (row: FbsSupply) => SUPPLY_STATUS_LABEL[supplyStatusOf(row)].label,
         },
         {
             key: 'cargo_type', label: 'Груз',
@@ -333,11 +401,12 @@ export default function SuppliesTab({
             }}>
                 <div>
                     <label className="form-label" style={{ fontSize: 12 }}>Статус</label>
-                    <select className="form-input" style={{ width: 180 }} value={doneFilter}
-                        onChange={e => setDoneFilter(e.target.value as DoneFilter)}>
+                    <select className="form-input" style={{ width: 200 }} value={statusFilter}
+                        onChange={e => setStatusFilter(e.target.value as StatusFilter)}>
                         <option value="">Все</option>
-                        <option value="active">Активные</option>
-                        <option value="done">Переданные</option>
+                        {SUPPLY_STATUSES.map(st => (
+                            <option key={st} value={st}>{SUPPLY_STATUS_LABEL[st].label}</option>
+                        ))}
                     </select>
                 </div>
                 <div>
@@ -376,8 +445,18 @@ export default function SuppliesTab({
                 <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div>
             ) : rows.length === 0 ? (
                 <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                    📦 Поставок нет — выделите задания на вкладке «Заказы» и нажмите «В поставку»:
-                    система сама разложит их по складам и габаритам.
+                    {statusFilter || whFilter !== '' ? (
+                        <>
+                            📦 Под выбранными фильтрами поставок нет
+                            {statusFilter && ` — состояние «${SUPPLY_STATUS_LABEL[statusFilter].label}»`}.
+                            {' '}Снимите фильтр или нажмите «Синхронизировать».
+                        </>
+                    ) : (
+                        <>
+                            📦 Поставок нет — выделите задания на вкладке «Заказы» и нажмите «В поставку»:
+                            система сама разложит их по складам и габаритам.
+                        </>
+                    )}
                 </div>
             ) : (
                 <>
@@ -385,9 +464,17 @@ export default function SuppliesTab({
                         display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
                         gap: 12, marginBottom: 12,
                     }}>
-                        <MiniKpi label="Активных поставок" value={activeCount} />
-                        <MiniKpi label="Заданий в активных" value={activeOrders} />
-                        <MiniKpi label="Переданных" value={doneCount} />
+                        <MiniKpi label="Активных поставок" value={stats.byStatus.active} />
+                        <MiniKpi label="Заданий в активных" value={stats.activeOrders} />
+                        <MiniKpi label={SUPPLY_STATUS_LABEL.to_ship.label} value={stats.byStatus.to_ship} />
+                        <MiniKpi label={SUPPLY_STATUS_LABEL.in_delivery.label} value={stats.byStatus.in_delivery} />
+                        {stats.byStatus.rejected > 0 && (
+                            <MiniKpi
+                                label={SUPPLY_STATUS_LABEL.rejected.label}
+                                value={stats.byStatus.rejected}
+                                danger
+                            />
+                        )}
                     </div>
 
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>

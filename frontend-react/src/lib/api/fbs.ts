@@ -5,6 +5,8 @@ import type {
     FbsLinkCreatePayload,
     FbsModeInfo,
     FbsOffice,
+    FbsOrderBackfillPayload,
+    FbsOrderBackfillResult,
     FbsOrderListResponse,
     FbsOrderStats,
     FbsOverrideSetPayload,
@@ -24,6 +26,7 @@ import type {
     FbsSupplyBulkResult,
     FbsSupplyCreatePayload,
     FbsSupplyPlan,
+    FbsSupplyStatus,
     FbsWarehouse,
     FbsWarehouseCreatePayload,
     FbsWarehouseRenamePayload,
@@ -142,6 +145,16 @@ export function addFbsMethods(api: ApiClient) {
         syncFbsOrders() {
             return api.request<FbsActionResult>('POST', '/api/v1/fbs/orders/sync');
         },
+        /**
+         * Обратная загрузка истории заданий (до 90 дней назад). Обычный синк
+         * тянет только новые задания, поэтому всё, что было до подключения
+         * раздела, приходит только отсюда. Запрос ДОЛГИЙ — WB отдаёт историю
+         * окнами, до минуты на 90 дней.
+         */
+        backfillFbsOrders(days: number) {
+            const body: FbsOrderBackfillPayload = { days };
+            return api.request<FbsOrderBackfillResult>('POST', '/api/v1/fbs/orders/backfill', body);
+        },
         /** Стикеры приходят base64 — файл собирается на клиенте. */
         getFbsStickers(body: FbsStickerRequestPayload) {
             return api.request<FbsSticker[]>('POST', '/api/v1/fbs/orders/stickers', body);
@@ -151,8 +164,17 @@ export function addFbsMethods(api: ApiClient) {
         },
 
         // ─── Поставки ────────────────────────────────────────────────────────
-        getFbsSupplies(opts: { done?: boolean; limit?: number; offset?: number } = {}) {
+        /**
+         * Список поставок. `status` точнее `done`: закрытая поставка бывает и
+         * «Отгрузите поставку», и «В доставке», и «Отклонена» — одним флагом
+         * это не выражается. `done` оставлен для вызовов, которым хватает
+         * деления «активная / закрытая».
+         */
+        getFbsSupplies(
+            opts: { status?: FbsSupplyStatus; done?: boolean; limit?: number; offset?: number } = {},
+        ) {
             const q = new URLSearchParams();
+            if (opts.status) q.set('status', opts.status);
             if (opts.done != null) q.set('done', String(opts.done));
             if (opts.limit != null) q.set('limit', String(opts.limit));
             if (opts.offset != null) q.set('offset', String(opts.offset));

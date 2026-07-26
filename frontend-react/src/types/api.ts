@@ -7992,6 +7992,31 @@ export interface FbsOrderListResponse {
   status_counts: Record<string, number>;
 }
 
+/**
+ * POST /fbs/orders/backfill — обратная загрузка истории заданий.
+ *
+ * Обычный синк («Забрать новые») тянет только новые задания, поэтому в зеркале
+ * нет ничего, что появилось до подключения раздела. Бэкфилл идёт окнами назад
+ * по датам — запрос долгий (десятки секунд).
+ */
+export interface FbsOrderBackfillPayload {
+  /** Глубина в днях: 1..90, дефолт 90. */
+  days: number;
+}
+
+export interface FbsOrderBackfillResult {
+  ok: boolean;
+  /** Сколько заданий отдал WB за все окна. */
+  fetched: number;
+  /** Сколько строк реально легло в зеркало (вставка + обновление). */
+  upserted: number;
+  /** Скольким заданиям проставлено списание со склада. */
+  written_off_marked: number;
+  /** На сколько окон разбился период (WB отдаёт историю кусками). */
+  windows: number;
+  message?: string | null;
+}
+
 /** WB: максимум 100 заданий за запрос, только статусы confirm/complete. */
 export interface FbsStickerRequestPayload {
   order_ids: number[];
@@ -8009,6 +8034,18 @@ export interface FbsSticker {
   file?: string | null;
 }
 
+/**
+ * Состояние поставки словами кабинета WB.
+ *
+ * Marketplace API своего статуса не отдаёт — это разложение `done` / `scan_dt` /
+ * `reject_dt` на бэке:
+ * active — черновик, задания докладываются;
+ * to_ship — закрыта, но QR ещё не отсканирован («Отгрузите поставку»);
+ * in_delivery — закрыта и отсканирована на пункте приёма;
+ * rejected — WB отклонил приёмку.
+ */
+export type FbsSupplyStatus = 'active' | 'to_ship' | 'in_delivery' | 'rejected';
+
 /** Поставка FBS (WB-GI-…). */
 export interface FbsSupply {
   id: number;
@@ -8017,13 +8054,23 @@ export interface FbsSupply {
   done: boolean;
   created_at_wb?: string | null;
   closed_at?: string | null;
+  /** Момент сканирования QR на пункте приёма WB. */
   scan_dt?: string | null;
+  /** Момент отклонения приёмки WB. */
+  reject_dt?: string | null;
+  /** Производное состояние для UI — см. FbsSupplyStatus. */
+  status: FbsSupplyStatus | string;
   cargo_type?: number | null;
   cross_border_type?: number | null;
   is_b2b: boolean;
   destination_office_id?: number | null;
+  /** Имя пункта приёма WB, куда везём поставку. */
+  destination_office_name?: string | null;
   wb_warehouse_id?: number | null;
+  /** Заданий в НАШЕМ зеркале (может отставать от WB, пока не прошёл синк). */
   orders_count: number;
+  /** Заданий ПО ДАННЫМ WB. null — состав поставки у WB не спрашивали. */
+  wb_orders_count?: number | null;
   qr_barcode?: string | null;
 }
 

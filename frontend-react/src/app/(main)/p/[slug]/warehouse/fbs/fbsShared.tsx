@@ -5,13 +5,16 @@
  */
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
-import { formatDateTime, formatNumber } from '@/lib/utils';
+import { formatDateTime, formatNumber, pluralRu } from '@/lib/utils';
 import type {
     FbsModeInfo,
+    FbsOrderBackfillResult,
     FbsPickList,
     FbsSticker,
     FbsStickerType,
     FbsSupplierStatus,
+    FbsSupply,
+    FbsSupplyStatus,
 } from '@/types/api';
 import { formatAge } from './useAutoRefresh';
 
@@ -231,6 +234,112 @@ export function cargoCabinetLabel(v: number | null | undefined): string {
 /** crossBorderType поставки: 0/пусто — обычная, иначе трансграничная. */
 export function crossBorderLabel(v: number | null | undefined): string {
     return v ? 'трансграничная' : 'обычная';
+}
+
+// ─── Состояние поставки ─────────────────────────────────────────────────────
+
+/**
+ * Ярлык, бейдж и подсказка на каждое состояние поставки — ЕДИНАЯ карта на
+ * список и экран поставки. Раньше состояний было два (`done ? 'Передана' :
+ * 'Активная'`), и все закрытые поставки выглядели одинаково, хотя в кабинете
+ * WB их три: «Отгрузите поставку» (QR не отсканирован), «Завершена»
+ * (отсканирована) и «Отклонена».
+ */
+export const SUPPLY_STATUS_LABEL: Record<FbsSupplyStatus, {
+    label: string;
+    badge: string;
+    hint: string;
+}> = {
+    active: {
+        label: 'Активная',
+        badge: 'badge-info',
+        hint: 'Черновик поставки: задания докладываются, передать её ещё не передали',
+    },
+    to_ship: {
+        label: 'Отгрузите поставку',
+        badge: 'badge-warning',
+        hint: 'Поставка закрыта, но QR на пункте приёма WB ещё не отсканирован — товар не сдан',
+    },
+    in_delivery: {
+        label: 'В доставке',
+        badge: 'badge-success',
+        hint: 'QR отсканирован на пункте приёма WB — в кабинете это «Поставка в обработке». '
+            + 'Факта приёмки поставка в API не несёт: он виден только по её заданиям',
+    },
+    rejected: {
+        label: 'Отклонена',
+        badge: 'badge-danger',
+        hint: 'WB отклонил приёмку поставки (rejectDt)',
+    },
+};
+
+/** Порядок состояний для фильтров и счётчиков — от черновика к финалу. */
+export const SUPPLY_STATUSES: readonly FbsSupplyStatus[] = [
+    'active', 'to_ship', 'in_delivery', 'rejected',
+];
+
+function isSupplyStatus(v: string | null | undefined): v is FbsSupplyStatus {
+    return !!v && v in SUPPLY_STATUS_LABEL;
+}
+
+/**
+ * Состояние поставки. Обычно приходит готовым полем `status`; фолбэк по
+ * `reject_dt` / `scan_dt` / `done` нужен для строк, приехавших до появления
+ * поля (кэш браузера, старый ответ) — без него бейдж молча стал бы пустым.
+ */
+export function supplyStatusOf(s: Pick<FbsSupply, 'status' | 'done' | 'scan_dt' | 'reject_dt'>): FbsSupplyStatus {
+    if (isSupplyStatus(s.status)) return s.status;
+    if (s.reject_dt) return 'rejected';
+    if (!s.done) return 'active';
+    return s.scan_dt ? 'in_delivery' : 'to_ship';
+}
+
+export function supplyStatusMeta(s: Pick<FbsSupply, 'status' | 'done' | 'scan_dt' | 'reject_dt'>) {
+    return SUPPLY_STATUS_LABEL[supplyStatusOf(s)];
+}
+
+/** Бейдж состояния поставки — один и тот же в списке и в шапке экрана. */
+export function SupplyStatusBadge(
+    { supply }: { supply: Pick<FbsSupply, 'status' | 'done' | 'scan_dt' | 'reject_dt'> },
+) {
+    const meta = supplyStatusMeta(supply);
+    return <span className={`badge ${meta.badge}`} title={meta.hint}>{meta.label}</span>;
+}
+
+// ─── Заданий в поставке ─────────────────────────────────────────────────────
+
+/**
+ * Сколько заданий в поставке. Приоритет у данных WB: наше зеркало наполняется
+ * синком и до него честно пусто, а показывать «0» там, где WB говорит «11», —
+ * прямая ложь (ровно этим колонка «Заданий» и врала).
+ */
+export function supplyOrdersCount(s: Pick<FbsSupply, 'orders_count' | 'wb_orders_count'>): number {
+    return num(s.wb_orders_count ?? s.orders_count);
+}
+
+/**
+ * Подсказка, когда WB знает о поставке больше, чем наше зеркало. null — цифры
+ * сходятся (или состав у WB не спрашивали) и подсвечивать нечего.
+ */
+export function supplyOrdersMirrorHint(
+    s: Pick<FbsSupply, 'orders_count' | 'wb_orders_count'>,
+): string | null {
+    if (s.wb_orders_count == null) return null;
+    const wb = num(s.wb_orders_count);
+    const mirror = num(s.orders_count);
+    if (wb === mirror) return null;
+    return `в зеркале ${formatNumber(mirror, 0)} из ${formatNumber(wb, 0)}`;
+}
+
+/** Та же мысль, но развёрнуто — для подсказки при наведении. */
+export function supplyOrdersMirrorTitle(
+    s: Pick<FbsSupply, 'orders_count' | 'wb_orders_count'>,
+): string | undefined {
+    const short = supplyOrdersMirrorHint(s);
+    return short
+        ? `${short} — состав поставки известен WB, а наше зеркало отстаёт: `
+          + 'догрузите задания («Забрать новые» / «Загрузить историю» на вкладке «Заказы»)'
+        : undefined;
 }
 
 /**
@@ -591,6 +700,43 @@ export async function collectAllOrderIds(
         offset += chunk.length;
     }
     return { ids, truncated: total > target };
+}
+
+// ─── Обратная загрузка истории заданий ──────────────────────────────────────
+
+/** Глубина бэкфилла по умолчанию — потолок ручки (WB дальше не отдаёт). */
+export const BACKFILL_DAYS_DEFAULT = 90;
+
+/** Варианты глубины в селекте «Загрузить историю». */
+export const BACKFILL_DAYS_OPTIONS: readonly number[] = [7, 30, 90];
+
+/**
+ * Период словами: «за 3 месяца» читается человеком, «за 90 дней» — счётчиком.
+ * Кратные 30 дни показываем месяцами, 7 — неделей, остальное — днями.
+ */
+export function backfillPeriodLabel(days: number): string {
+    const d = Math.max(1, Math.round(num(days)));
+    if (d === 7) return 'за неделю';
+    if (d % 30 === 0) {
+        const months = d / 30;
+        return `за ${formatNumber(months, 0)} ${pluralRu(months, ['месяц', 'месяца', 'месяцев'])}`;
+    }
+    return `за ${formatNumber(d, 0)} ${pluralRu(d, ['день', 'дня', 'дней'])}`;
+}
+
+/**
+ * Итог бэкфилла человеческим текстом: «Загружено 1240 заданий за 3 месяца».
+ * Текст бэкенда, если он есть, приоритетнее — он знает про усечения окон.
+ */
+export function backfillResultMessage(res: FbsOrderBackfillResult, days: number): string {
+    if (res?.message) return res.message;
+    const fetched = num(res?.fetched);
+    const base = `Загружено ${formatNumber(fetched, 0)} `
+        + `${pluralRu(fetched, ['задание', 'задания', 'заданий'])} ${backfillPeriodLabel(days)}`;
+    const written = num(res?.written_off_marked);
+    return written > 0
+        ? `${base} · списание отмечено у ${formatNumber(written, 0)}`
+        : base;
 }
 
 // ─── Лист подбора: печать ───────────────────────────────────────────────────

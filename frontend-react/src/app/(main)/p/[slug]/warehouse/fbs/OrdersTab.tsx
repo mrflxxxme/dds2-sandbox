@@ -21,11 +21,15 @@ import type {
     FbsWarehouse,
 } from '@/types/api';
 import {
+    BACKFILL_DAYS_DEFAULT,
+    BACKFILL_DAYS_OPTIONS,
     SUPPLIER_STATUS_LABEL,
     SupplierStatusBadge,
     WB_STATUS_LABEL,
     SELECT_ALL_MAX,
     WB_STICKER_CHUNK,
+    backfillPeriodLabel,
+    backfillResultMessage,
     cargoLabel,
     collectAllOrderIds,
     deliverStickers,
@@ -95,11 +99,20 @@ export default function OrdersTab({
     /** Идёт сбор id всех отфильтрованных заданий (страницами по 500). */
     const [selectingAll, setSelectingAll] = useState(false);
     const [syncing, setSyncing] = useState(false);
+    /** Идёт обратная загрузка истории (долгий запрос — до минуты). */
+    const [backfilling, setBackfilling] = useState(false);
+    const [backfillDays, setBackfillDays] = useState(BACKFILL_DAYS_DEFAULT);
     const [busy, setBusy] = useState(false);
     const [stickerModal, setStickerModal] = useState(false);
     const [supplyModal, setSupplyModal] = useState(false);
     /** Пересчитать сводку по складам после синка / раскладки по поставкам. */
     const [summaryKey, setSummaryKey] = useState(0);
+    /**
+     * Локальный тик для блока статистики: он перечитывается по ЛЮБОЙ смене
+     * `refreshTick`, поэтому свои поводы (бэкфилл истории) прибавляем к тику
+     * автообновления — сумма монотонна, лишней загрузки не будет.
+     */
+    const [statsTick, setStatsTick] = useState(0);
 
     /**
      * Единый набор фильтров для списка и для «выбрать все»: если собирать их
@@ -319,6 +332,35 @@ export default function OrdersTab({
         }
     };
 
+    /**
+     * Обратная загрузка истории заданий. «Забрать новые» тянет только то, что
+     * WB отдаёт как новое, поэтому всё, что было до подключения раздела, в
+     * зеркале отсутствует — и вкладки, кроме «Новых», выглядят пустыми.
+     *
+     * Запрос долгий (WB отдаёт историю окнами) — двойной клик защищён и
+     * состоянием, и ref'ом: `disabled` ставится следующим рендером, а второй
+     * клик по той же кнопке успевает пройти раньше него.
+     */
+    const backfillRef = useRef(false);
+    const handleBackfill = async () => {
+        if (backfillRef.current) return;
+        backfillRef.current = true;
+        setBackfilling(true);
+        setActionError('');
+        try {
+            const res = await api.backfillFbsOrders(backfillDays);
+            onToast(backfillResultMessage(res, backfillDays));
+            setSummaryKey(k => k + 1);
+            setStatsTick(t => t + 1);
+            await load();
+        } catch (e: unknown) {
+            setActionError(e instanceof Error ? e.message : 'Ошибка загрузки истории заданий');
+        } finally {
+            backfillRef.current = false;
+            setBackfilling(false);
+        }
+    };
+
     const handleCancel = async (order: FbsOrder) => {
         if (!confirm(`Отменить сборочное задание ${order.wb_order_id}? Действие необратимо.`)) return;
         setBusy(true);
@@ -467,7 +509,7 @@ export default function OrdersTab({
             />
 
             {/* Аналитика периода: выручка, разрезы, доля FBS в объёме воронки */}
-            <OrdersStats wbWarehouseId={whFilter} refreshTick={refreshTick} />
+            <OrdersStats wbWarehouseId={whFilter} refreshTick={refreshTick + statsTick} />
 
             {/* Статусные вкладки */}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
@@ -513,10 +555,47 @@ export default function OrdersTab({
                     </button>
                 )}
                 <div style={{ flex: 1 }} />
-                <button className="btn btn-secondary btn-sm" onClick={handleSync} disabled={syncing}>
+                <button className="btn btn-secondary btn-sm" onClick={handleSync} disabled={syncing || backfilling}>
                     {syncing ? 'Синхронизация...' : '🔄 Забрать новые'}
                 </button>
+                {/* Глубина истории: WB хранит задания 3 месяца, дальше не отдаёт */}
+                <select
+                    className="form-input"
+                    style={{ width: 110 }}
+                    value={backfillDays}
+                    disabled={backfilling}
+                    title="Насколько глубоко тянуть историю заданий. WB хранит их 3 месяца"
+                    onChange={e => setBackfillDays(Number(e.target.value))}
+                >
+                    {BACKFILL_DAYS_OPTIONS.map(d => (
+                        <option key={d} value={d}>{formatNumber(d, 0)} дн.</option>
+                    ))}
+                </select>
+                <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={handleBackfill}
+                    disabled={backfilling || syncing}
+                    title={'Догрузить задания за прошлые дни: «Забрать новые» приносит только свежие, '
+                        + 'а история до подключения раздела в зеркале не появляется сама'}
+                >
+                    {backfilling ? 'Загрузка истории…' : '⏬ Загрузить историю'}
+                </button>
             </div>
+
+            {/* Прогресс долгого запроса: без подписи бэкфилл выглядит зависанием */}
+            {backfilling && (
+                <div className="glass-card" style={{
+                    padding: 12, marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center',
+                    borderLeft: '4px solid var(--color-accent)', fontSize: 13,
+                }}>
+                    <span>⏳</span>
+                    <span>
+                        Идёт обратная загрузка заданий {backfillPeriodLabel(backfillDays)} — WB отдаёт
+                        историю окнами, это может занять до минуты. Страницу можно не трогать: по
+                        завершении список и статистика обновятся сами.
+                    </span>
+                </div>
+            )}
 
             {/* Массовые действия */}
             {selectedIds.length > 0 && (
@@ -562,7 +641,31 @@ export default function OrdersTab({
                 <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div>
             ) : items.length === 0 ? (
                 <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                    📭 Сборочных заданий нет — нажмите «Забрать новые», если ждёте заказы из WB.
+                    {status === 'new' ? (
+                        <>📭 Новых сборочных заданий нет — нажмите «Забрать новые», если ждёте заказы из WB.</>
+                    ) : (
+                        <>
+                            <div>
+                                📭 {status
+                                    ? `Заданий в статусе «${SUPPLIER_STATUS_LABEL[status] ?? status}» нет.`
+                                    : 'Сборочных заданий нет.'}
+                            </div>
+                            <div style={{ marginTop: 8, fontSize: 13 }}>
+                                «Забрать новые» приносит только свежие задания — прошлые в зеркало
+                                попадают лишь обратной загрузкой истории.
+                            </div>
+                            <button
+                                className="btn btn-primary btn-sm"
+                                style={{ marginTop: 12 }}
+                                onClick={handleBackfill}
+                                disabled={backfilling || syncing}
+                            >
+                                {backfilling
+                                    ? 'Загрузка истории…'
+                                    : `⏬ Загрузить историю ${backfillPeriodLabel(backfillDays)}`}
+                            </button>
+                        </>
+                    )}
                 </div>
             ) : (
                 <>
