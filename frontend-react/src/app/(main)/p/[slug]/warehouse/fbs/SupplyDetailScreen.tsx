@@ -10,7 +10,15 @@
 import { useState } from 'react';
 import { formatDateTime, formatNumber } from '@/lib/utils';
 import type { FbsSupply, FbsWarehouse } from '@/types/api';
-import { cargoCabinetLabel, copyText, crossBorderLabel } from './fbsShared';
+import {
+    SupplyStatusBadge,
+    cargoCabinetLabel,
+    copyText,
+    crossBorderLabel,
+    supplyOrdersCount,
+    supplyOrdersMirrorHint,
+    supplyOrdersMirrorTitle,
+} from './fbsShared';
 import PickListModal from './PickListModal';
 import SupplyOrdersPanel from './SupplyOrdersPanel';
 
@@ -38,6 +46,8 @@ export default function SupplyDetailScreen({
     const wh = warehouses.find(w => w.wb_warehouse_id === supply.wb_warehouse_id);
     const warehouseName = wh?.name
         || (supply.wb_warehouse_id != null ? `#${supply.wb_warehouse_id}` : '');
+    /** WB знает о поставке больше, чем наше зеркало — честно подписываем разрыв. */
+    const mirrorHint = supplyOrdersMirrorHint(supply);
 
     const handleCopyQr = async () => {
         const ok = await copyText(supply.qr_barcode || supply.wb_supply_id);
@@ -58,9 +68,7 @@ export default function SupplyDetailScreen({
                             <h2 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>
                                 {supply.name || supply.wb_supply_id}
                             </h2>
-                            <span className={`badge ${supply.done ? 'badge-success' : 'badge-info'}`}>
-                                {supply.done ? 'Передана' : 'Активная'}
-                            </span>
+                            <SupplyStatusBadge supply={supply} />
                             {supply.is_b2b && <span className="badge badge-secondary">B2B</span>}
                         </div>
                         <div style={{ fontFamily: 'monospace', fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4 }}>
@@ -75,12 +83,24 @@ export default function SupplyDetailScreen({
                 }}>
                     <HeaderField label="Склад продавца" value={warehouseName || '—'} />
                     <HeaderField
+                        label="Склад поставки"
+                        value={supply.destination_office_name
+                            || (supply.destination_office_id != null ? `#${supply.destination_office_id}` : '—')}
+                        hint="Пункт приёма WB, куда везём поставку (destinationOfficeId)"
+                    />
+                    <HeaderField
                         label="Габарит"
                         value={cargoCabinetLabel(supply.cargo_type)}
                         hint="Габарит фиксирует первое добавленное задание — смешивать WB не разрешает"
                         sub={crossBorderLabel(supply.cross_border_type)}
                     />
-                    <HeaderField label="Заказы" value={formatNumber(supply.orders_count, 0)} />
+                    <HeaderField
+                        label="Заказы"
+                        value={formatNumber(supplyOrdersCount(supply), 0)}
+                        hint={supplyOrdersMirrorTitle(supply)
+                            ?? 'Заданий в поставке по данным WB'}
+                        sub={mirrorHint ?? undefined}
+                    />
                     <HeaderField
                         label="Грузоместа"
                         value="—"
@@ -95,6 +115,20 @@ export default function SupplyDetailScreen({
                         value={supply.closed_at ? formatDateTime(supply.closed_at) : '—'}
                         hint="Поставка закрывается сама при приёмке первого товара"
                     />
+                    {supply.scan_dt && (
+                        <HeaderField
+                            label="QR отсканирован"
+                            value={formatDateTime(supply.scan_dt)}
+                            hint="Момент сканирования QR на пункте приёма WB — с него поставка «В доставке»"
+                        />
+                    )}
+                    {supply.reject_dt && (
+                        <HeaderField
+                            label="Отклонена"
+                            value={formatDateTime(supply.reject_dt)}
+                            hint="WB отклонил приёмку поставки"
+                        />
+                    )}
                 </div>
 
                 {/* QR поставки: сам код с копированием + скачивание файла после передачи */}
