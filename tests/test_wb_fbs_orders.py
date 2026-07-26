@@ -15,7 +15,7 @@
   • изоляция по project_id.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -52,6 +52,7 @@ class FakeFbsClient:
         self,
         *,
         new_orders=None,
+        period_orders=None,
         statuses=None,
         stickers=None,
         supplies=None,
@@ -59,6 +60,9 @@ class FakeFbsClient:
         supply_barcode=None,
     ):
         self.new_orders = new_orders or []
+        #: Ответ `GET /api/v3/orders` — список либо callable(date_from, date_to).
+        self.period_orders = period_orders or []
+        self.order_calls: list[tuple] = []
         self.statuses = statuses or []
         self.stickers = stickers or []
         self.supplies = supplies or []
@@ -75,6 +79,12 @@ class FakeFbsClient:
 
     async def get_new_orders(self) -> list[dict]:
         return list(self.new_orders)
+
+    async def get_orders(self, date_from=None, date_to=None, max_pages=50) -> list[dict]:
+        self.order_calls.append((date_from, date_to, max_pages))
+        if callable(self.period_orders):
+            return list(self.period_orders(date_from, date_to))
+        return list(self.period_orders)
 
     async def get_orders_status(self, order_ids) -> list[dict]:
         self.status_calls.append(list(order_ids))
@@ -312,6 +322,280 @@ async def test_sync_new_orders_does_not_reset_status(db_session, env, monkeypatc
     assert rows[0].supply_id == SUPPLY_ID
     # Описательные поля при этом обновились.
     assert rows[0].price == Decimal("1379.00")
+
+
+# ─── Бэкфилл истории и догон недавнего окна (GET /api/v3/orders) ─────────────
+#
+# `GET /orders/new` отдаёт ТОЛЬКО задания, ещё не положенные в поставку: как
+# только задание уезжает в поставку, оно исчезает оттуда навсегда. Зеркало,
+# наполняемое одним этим методом, не видит ни истории, ни заданий, собранных
+# между двумя опросами. Периодный `GET /orders` закрывает обе дыры, но несёт
+# свой риск: в его payload'е НЕТ `supplierStatus`, и три месяца истории влетели
+# бы как `new` → `complete` → списание со склада товара, проданного весной.
+
+
+def _wb_ts(dt: datetime) -> str:
+    """naive UTC → RFC3339 в форме, в которой даты отдаёт WB."""
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def _backfill_env(db_session, project_id: int, *, cutoff_ago_days: int = 1) -> datetime:
+    """Зеркало с одним заданием — момент его вставки и есть cutoff проекта."""
+    from backend.utils.time import utcnow
+
+    cutoff = utcnow() - timedelta(days=cutoff_ago_days)
+    await _seed_order(db_session, project_id, 7199, created_at=cutoff)
+    return cutoff
+
+
+@pytest.mark.asyncio
+async def test_backfill_slices_period_into_windows(db_session, env, monkeypatch):
+    """Период режется на окна ≤30 дней (жёсткое ограничение WB), без дыр."""
+    client = _patch_client(monkeypatch, FakeFbsClient())
+
+    result = await orders_service.backfill_orders_history(db_session, env.project_id, days=90)
+
+    assert result["ok"] is True
+    assert result["windows"] == 3
+    assert len(client.order_calls) == 3
+    starts = [c[0] for c in client.order_calls]
+    ends = [c[1] for c in client.order_calls]
+    for start, end in zip(starts, ends, strict=True):
+        assert end - start <= timedelta(days=30)
+        # В WB уходит unix-timestamp: naive-дата тут трактовалась бы как
+        # локальное время машины, а не UTC.
+        assert start.tzinfo is not None and end.tzinfo is not None
+    assert ends[:-1] == starts[1:], "окна обязаны идти встык — иначе дыра в истории"
+    assert ends[-1] - starts[0] == timedelta(days=90)
+
+
+@pytest.mark.asyncio
+async def test_backfill_clamps_days_to_wb_depth(db_session, env, monkeypatch):
+    """Глубина истории у WB — 3 месяца; больше запрашивать бессмысленно."""
+    client = _patch_client(monkeypatch, FakeFbsClient())
+
+    result = await orders_service.backfill_orders_history(db_session, env.project_id, days=365)
+    assert result["windows"] == 3
+
+    client.order_calls.clear()
+    short = await orders_service.backfill_orders_history(db_session, env.project_id, days=1)
+    assert short["windows"] == 1
+    start, end, _pages = client.order_calls[0]
+    assert end - start == timedelta(days=1)
+
+
+@pytest.mark.asyncio
+async def test_backfill_marks_history_written_off_but_not_live(db_session, env, monkeypatch):
+    """🔴 Историю помечаем списанной СРАЗУ — иначе она спишет реальный склад.
+
+    Задание старше cutoff'а (момента, с которого домен вообще начал видеть
+    заказы) физически отгружено давно: его `written_off_at` проставляется при
+    вставке, и штатная связка `sync_order_statuses` → `writeoff_completed_orders`
+    его уже не тронет. Задание свежее cutoff'а идёт обычным путём.
+    """
+    from backend.utils.time import utcnow
+
+    cutoff = await _backfill_env(db_session, env.project_id)
+    now = utcnow()
+    _patch_client(
+        monkeypatch,
+        FakeFbsClient(
+            period_orders=[
+                _raw_order(7200, createdAt=_wb_ts(now - timedelta(days=45))),  # до cutoff
+                _raw_order(7201, createdAt=_wb_ts(now - timedelta(hours=2))),  # после cutoff
+            ]
+        ),
+    )
+
+    result = await orders_service.backfill_orders_history(db_session, env.project_id, days=90)
+
+    assert result["ok"] is True
+    # Фейк отдаёт один и тот же ответ на каждое окно: строки пишутся трижды,
+    # а пометка ставится РОВНО на вставке — повторы её не задваивают.
+    assert result["fetched"] == 6
+    assert result["written_off_marked"] == 1
+
+    rows = {r.wb_order_id: r for r in await _orders(db_session, env.project_id)}
+    assert rows[7200].written_off_at is not None, "историческое задание обязано быть помечено"
+    assert rows[7200].created_at_wb < cutoff
+    assert rows[7201].written_off_at is None, "живое задание списывает штатный механизм"
+
+
+@pytest.mark.asyncio
+async def test_backfill_is_idempotent_and_keeps_written_off(db_session, env, monkeypatch):
+    """Повторный прогон ничего не переписывает: `written_off_at` не в UPDATE.
+
+    Ни в одну сторону: уже списанное не «разсписывается», а известное живое
+    задание не получает пометку задним числом, даже если оно старше cutoff'а.
+    """
+    from backend.utils.time import utcnow
+
+    await _backfill_env(db_session, env.project_id)
+    now = utcnow()
+    # Живое задание, известное зеркалу и созданное ДО cutoff'а: пометка ему не
+    # положена — его уже ведёт штатный синк статусов.
+    await _seed_order(
+        db_session,
+        env.project_id,
+        7210,
+        created_at_wb=now - timedelta(days=40),
+        supplier_status=FbsSupplierStatus.CONFIRM.value,
+    )
+    _patch_client(
+        monkeypatch,
+        FakeFbsClient(
+            period_orders=[
+                _raw_order(7210, createdAt=_wb_ts(now - timedelta(days=40))),
+                _raw_order(7211, createdAt=_wb_ts(now - timedelta(days=40))),
+            ]
+        ),
+    )
+
+    first = await orders_service.backfill_orders_history(db_session, env.project_id, days=30)
+    assert first["written_off_marked"] == 1  # только НОВАЯ строка 7211
+
+    db_session.expire_all()
+    rows = {r.wb_order_id: r for r in await _orders(db_session, env.project_id)}
+    stamp = rows[7211].written_off_at
+    assert stamp is not None
+    assert rows[7210].written_off_at is None, "известное задание не помечаем задним числом"
+
+    second = await orders_service.backfill_orders_history(db_session, env.project_id, days=30)
+    assert second["written_off_marked"] == 0, "второй прогон ничего не помечает"
+
+    db_session.expire_all()
+    again = {r.wb_order_id: r for r in await _orders(db_session, env.project_id)}
+    assert again[7211].written_off_at == stamp, "повтор не перетирает метку списания"
+    assert again[7210].written_off_at is None
+    assert len(again) == 3  # 7199 (cutoff-якорь) + 7210 + 7211
+
+
+@pytest.mark.asyncio
+async def test_backfill_is_scoped_to_project(db_session, env, other_project, monkeypatch):
+    """Изоляция: чужие задания не трогаем и cutoff считаем по СВОЕМУ проекту."""
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    # У соседнего проекта зеркало древнее. Утечь оно не должно: иначе cutoff
+    # нашего (пустого) проекта уехал бы в прошлое и история не пометилась бы.
+    await _seed_order(db_session, other_project.id, 7220, created_at=now - timedelta(days=400))
+    _patch_client(
+        monkeypatch,
+        FakeFbsClient(period_orders=[_raw_order(7221, createdAt=_wb_ts(now - timedelta(days=10)))]),
+    )
+
+    result = await orders_service.backfill_orders_history(db_session, env.project_id, days=30)
+
+    assert result["written_off_marked"] == 1
+    ours = await _orders(db_session, env.project_id)
+    assert [r.wb_order_id for r in ours] == [7221]
+    theirs = await _orders(db_session, other_project.id)
+    assert [r.wb_order_id for r in theirs] == [7220]
+    assert theirs[0].written_off_at is None
+
+
+@pytest.mark.asyncio
+async def test_backfill_survives_empty_response(db_session, env, monkeypatch):
+    """Пустой ответ WB — это ноль строк, а не падение прогона."""
+    await _backfill_env(db_session, env.project_id)
+    _patch_client(monkeypatch, FakeFbsClient(period_orders=[]))
+
+    result = await orders_service.backfill_orders_history(db_session, env.project_id, days=60)
+
+    assert result == {
+        "ok": True,
+        "fetched": 0,
+        "upserted": 0,
+        "written_off_marked": 0,
+        "windows": 2,
+        "message": result["message"],
+    }
+    assert [r.wb_order_id for r in await _orders(db_session, env.project_id)] == [7199]
+
+
+@pytest.mark.asyncio
+async def test_backfill_reports_partial_failure(db_session, env, monkeypatch):
+    """Отказ WB на втором окне не теряет первое: ok=False + частичный результат."""
+    from backend.integrations.wb_fbs_api import WbFbsRateLimited
+    from backend.utils.time import utcnow
+
+    await _backfill_env(db_session, env.project_id)
+    now = utcnow()
+    client = FakeFbsClient()
+    calls: list[int] = []
+
+    def answer(date_from, date_to):
+        calls.append(len(calls))
+        if len(calls) > 1:
+            raise WbFbsRateLimited(429, "TooManyRequests", "лимит WB исчерпан")
+        return [_raw_order(7230, createdAt=_wb_ts(now - timedelta(days=80)))]
+
+    client.period_orders = answer
+    _patch_client(monkeypatch, client)
+
+    result = await orders_service.backfill_orders_history(db_session, env.project_id, days=90)
+
+    assert result["ok"] is False
+    assert result["windows"] == 1
+    assert result["upserted"] == 1
+    assert result["written_off_marked"] == 1
+    assert "лимит WB" in (result["message"] or "")
+    # Данные первого окна доехали до БД — прогон деградировал, а не откатился.
+    rows = {r.wb_order_id: r for r in await _orders(db_session, env.project_id)}
+    assert rows[7230].written_off_at is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_orders_recent_catches_up_window(db_session, env, monkeypatch):
+    """Догон недавнего окна ловит задание, уехавшее в поставку между опросами.
+
+    `GET /orders/new` его уже не отдаст, а `GET /orders` за 2 дня — отдаст.
+    Свежее задание живое (создано ПОСЛЕ cutoff'а) → списывает его штатный
+    механизм, пометка тут не ставится.
+    """
+    from backend.utils.time import utcnow
+
+    await _backfill_env(db_session, env.project_id, cutoff_ago_days=3)
+    now = utcnow()
+    client = _patch_client(
+        monkeypatch,
+        FakeFbsClient(period_orders=[_raw_order(7240, createdAt=_wb_ts(now - timedelta(hours=5)))]),
+    )
+
+    count = await orders_service.sync_orders_recent(db_session, env.project_id)
+
+    assert count == 1
+    assert len(client.order_calls) == 1
+    start, end, _pages = client.order_calls[0]
+    assert end - start == timedelta(days=2)
+    rows = {r.wb_order_id: r for r in await _orders(db_session, env.project_id)}
+    assert rows[7240].nomenclature_id == env.nomenclature_id
+    assert rows[7240].written_off_at is None
+
+
+@pytest.mark.asyncio
+async def test_sync_orders_recent_protects_stock_on_first_run(db_session, env, monkeypatch):
+    """Первый прогон на пустом зеркале не списывает склад задним числом.
+
+    Зеркала нет → cutoff = «сейчас», и всё, что периодный метод отдаёт из
+    прошлого, физически отгружено до того, как домен вообще начал смотреть.
+    """
+    from backend.utils.time import utcnow
+
+    _patch_client(
+        monkeypatch,
+        FakeFbsClient(period_orders=[_raw_order(7250, createdAt=_wb_ts(utcnow() - timedelta(days=1)))]),
+    )
+
+    assert await orders_service.sync_orders_recent(db_session, env.project_id) == 1
+
+    rows = await _orders(db_session, env.project_id)
+    assert rows[0].written_off_at is not None
+    # И проверка сквозная: задание в `complete` НЕ трогает реальный остаток.
+    rows[0].supplier_status = FbsSupplierStatus.COMPLETE.value
+    await db_session.commit()
+    assert await orders_service.writeoff_completed_orders(db_session, env.project_id) == 0
+    assert await _stock_qty(db_session, env.project_id, env.warehouse_id, env.nomenclature_id) == 5
 
 
 # ─── Синк статусов ───────────────────────────────────────────────────────────

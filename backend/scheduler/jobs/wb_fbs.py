@@ -2,9 +2,10 @@
 """
 Фоновые джобы домена WB FBS (продажи со склада продавца).
 
-Пять джобов, все регистрируются с `max_instances=1, coalesce=True`:
+Шесть джобов, все регистрируются с `max_instances=1, coalesce=True`:
   • push_all_projects_fbs_stocks          — трансляция остатков на склады продавца WB;
   • sync_all_projects_fbs_new_orders      — новые сборочные задания;
+  • sync_all_projects_fbs_recent_orders   — догон недавнего окна (`GET /orders`);
   • sync_all_projects_fbs_order_statuses  — статусы не-терминальных заданий + списание;
   • sync_all_projects_fbs_supplies        — зеркало поставок FBS;
   • sync_all_projects_fbs_warehouses      — справочник складов продавца (раз в сутки).
@@ -71,6 +72,13 @@ STOCK_PUSH_CYCLE_BUDGET_SEC = 240
 
 NEW_ORDERS_TIMEOUT_SEC = 120
 NEW_ORDERS_CYCLE_BUDGET_SEC = 90
+
+# Догон недавнего окна дороже «новых»: у периодного метода пагинация (до 1000
+# заданий на страницу), а окно после простоя воркера бывает и в пару суток —
+# потому потолок выше. Оба бюджета строго больше `REQUEST_TOTAL_BUDGET_SEC`
+# одного запроса к WB и связаны тестом TestTimeBudgets.
+RECENT_ORDERS_TIMEOUT_SEC = 180
+RECENT_ORDERS_CYCLE_BUDGET_SEC = 150
 
 ORDER_STATUSES_TIMEOUT_SEC = 300
 ORDER_STATUSES_CYCLE_BUDGET_SEC = 240
@@ -371,6 +379,19 @@ async def _handle_new_orders(db: AsyncSession, project_id: int) -> tuple[int, in
     return count, count
 
 
+async def _handle_recent_orders(db: AsyncSession, project_id: int) -> tuple[int, int]:
+    """Догон недавнего окна (`GET /api/v3/orders` за последние сутки-двое).
+
+    `GET /orders/new` отдаёт только задания, ещё не положенные в поставку:
+    собранное между двумя опросами исчезает оттуда навсегда и в зеркало не
+    попадает никогда. Периодный метод закрывает эту утечку.
+    """
+    from backend.services.wb_fbs.orders_service import sync_orders_recent
+
+    count = await sync_orders_recent(db, project_id)
+    return count, count
+
+
 async def _handle_order_statuses(db: AsyncSession, project_id: int) -> tuple[int, int]:
     """Статусы не-терминальных заданий + списание ушедших в `complete`.
 
@@ -437,6 +458,25 @@ async def sync_all_projects_fbs_new_orders() -> None:
         # складу оставлен ТОЛЬКО у пуша остатков — иначе до включения тумблера
         # зеркало заданий стоит мёртвым и статусы протухают (поймано вживую:
         # 22 задания уехали в поставку, а у нас все висели «Новое»).
+        require_active_warehouse=False,
+    )
+
+
+async def sync_all_projects_fbs_recent_orders() -> None:
+    """Догнать задания за недавнее окно периодным методом (каденс — 10 мин).
+
+    Отдельный джоб, а не расширение синка новых: у периодного метода свой
+    лимит запросов и своя цена (окно + пагинация), гонять его каждые 2 минуты
+    незачем — утечку закрывает и десятиминутный проход.
+    """
+    await _run_fbs_job(
+        sync_type="orders_recent",
+        title="WB FBS recent orders",
+        handler=_handle_recent_orders,
+        timeout=RECENT_ORDERS_TIMEOUT_SEC,
+        cycle_budget=RECENT_ORDERS_CYCLE_BUDGET_SEC,
+        # Ровно та же причина, что у синка новых заданий: заказы приходят
+        # независимо от того, включили мы трансляцию остатков или нет.
         require_active_warehouse=False,
     )
 
