@@ -14,10 +14,11 @@ import { AutoRefreshBadge, FbsModeBanner, FbsModeErrorBanner, writeDisabledHint 
 import { useAutoRefresh } from './useAutoRefresh';
 import WarehousesTab from './WarehousesTab';
 import StockTab from './StockTab';
+import FbsMatrixTab from './FbsMatrixTab';
 import OrdersTab from './OrdersTab';
 import SuppliesTab from './SuppliesTab';
 
-type Tab = 'supplies' | 'orders' | 'stock' | 'warehouses';
+type Tab = 'supplies' | 'orders' | 'stock' | 'matrix' | 'warehouses';
 
 /**
  * Порядок вкладок повторяет кабинет WB: единица работы — ПОСТАВКА, поэтому
@@ -28,6 +29,7 @@ const TABS: { key: Tab; label: string }[] = [
     { key: 'supplies', label: 'Поставки' },
     { key: 'orders', label: 'Заказы' },
     { key: 'stock', label: 'Остатки' },
+    { key: 'matrix', label: 'Матрица складов' },
     { key: 'warehouses', label: 'Склады' },
 ];
 
@@ -195,6 +197,8 @@ function FbsContent() {
                     refreshTick={auto.tick}
                 />
             )}
+
+            {tab === 'matrix' && <FbsMatrixTab refreshTick={auto.tick} />}
 
             {tab === 'orders' && (
                 <OrdersTab
