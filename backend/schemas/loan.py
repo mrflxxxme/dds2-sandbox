@@ -21,7 +21,10 @@ ALLOWED_FEE_KINDS = ["ORIGINATION", "LIMIT_SETUP", "OTHER"]
 class LoanBase(BaseModel):
     counterparty_id: int
     direction: str = Field(default="INCOMING")
-    principal: Decimal = Field(..., gt=0)
+    # Ноль допустим: у револьверных займов (кредитная линия, займ учредителя)
+    # тело задают движения — выборки и возвраты, — а `principal` символический.
+    # Запрет на ноль заставлял заводить фиктивный рубль, чтобы пройти валидацию.
+    principal: Decimal = Field(..., ge=0)
     currency: str = Field(default="RUB", max_length=3)
     rate: Decimal | None = Field(None, ge=0, le=1)
     contract_number: str = Field(..., min_length=1, max_length=100)
@@ -69,7 +72,8 @@ class LoanUpdate(BaseModel):
     """All fields optional for PATCH."""
 
     direction: str | None = None
-    principal: Decimal | None = Field(None, gt=0)
+    # Симметрично LoanBase: у револьверных займов тело задают движения.
+    principal: Decimal | None = Field(None, ge=0)
     currency: str | None = Field(None, max_length=3)
     rate: Decimal | None = Field(None, ge=0, le=1)
     contract_number: str | None = Field(None, min_length=1, max_length=100)
@@ -141,6 +145,10 @@ class LoanResponse(LoanBase):
     days_to_maturity: int | None = None  # до возврата (может быть отрицательным = просрочка)
     next_interest_date: date | None = None  # ближайшая дата выплаты %
     has_extension: bool = False  # есть ли продление (этот займ — предшественник)
+    # Вторая сторона того же договора в другом проекте (займ между своими юрлицами)
+    mirror_loan_id: int | None = None
+    mirror_project_id: int | None = None
+    mirror_project_name: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -680,6 +688,79 @@ class LoanScheduleResponse(BaseModel):
     # Полная стоимость: план процентов + разовые комиссии
     total_fees: Decimal = Decimal("0")
     total_cost: Decimal = Decimal("0")
+
+
+# ─── Займ между своими проектами (зеркало) ───────────────────────────────────
+
+
+class LoanMirrorCreate(BaseModel):
+    """
+    Завести вторую сторону договора в другом проекте.
+
+    Направление переворачивается само: полученный займ у одного — выданный у
+    другого. Контрагент второй стороны — это мы сами в её книге.
+    """
+
+    target_project_id: int
+    counterparty_id: int | None = None  # кем мы числимся в чужой книге
+    counterparty_name: str | None = Field(None, max_length=500)  # если создавать
+    counterparty_inn: str | None = Field(None, max_length=12)
+
+
+class LoanMirrorSide(BaseModel):
+    """Одна сторона договора: чья книга, что в ней числится."""
+
+    loan_id: int
+    project_id: int
+    project_name: str | None = None
+    project_slug: str | None = None
+    counterparty_name: str | None = None
+    direction: str  # INCOMING (долг) / OUTGOING (актив)
+    status: str = "ACTIVE"
+    outstanding: Decimal = Decimal("0")
+    accrued_interest: Decimal = Decimal("0")  # начислено за календарный месяц
+    accrued_total: Decimal = Decimal("0")  # начислено за всё время
+    interest_paid: Decimal = Decimal("0")
+    interest_debt: Decimal = Decimal("0")  # начислено всего − уплачено
+    current_rate: Decimal | None = None
+
+
+class LoanChainMovement(BaseModel):
+    """Движение по договору: выдача тела, возврат, выплата процентов."""
+
+    happened_at: date
+    kind: str  # DISBURSEMENT / PRINCIPAL_REPAY / INTEREST_PAY / PENALTY / COMMISSION
+    amount: Decimal
+    balance_after: Decimal | None = None  # тело после движения (для тела)
+
+
+class LoanChain(BaseModel):
+    """Договор целиком: обе книги, движения и итог."""
+
+    contract_number: str
+    contract_date: date | None = None
+    start_date: date | None = None
+    maturity_date: date | None = None  # пусто = до востребования
+    sides: list[LoanMirrorSide] = Field(default_factory=list)
+    total_disbursed: Decimal = Decimal("0")
+    total_repaid: Decimal = Decimal("0")
+    outstanding: Decimal = Decimal("0")
+    accrued_total: Decimal = Decimal("0")
+    interest_paid: Decimal = Decimal("0")
+    interest_debt: Decimal = Decimal("0")
+    total_debt: Decimal = Decimal("0")  # тело + долг по процентам
+    rate_periods: list[LoanRatePeriodResponse] = Field(default_factory=list)
+    movements: list[LoanChainMovement] = Field(default_factory=list)
+    # Начисление по календарным месяцам — та же база, что и в ОПиУ
+    monthly: list[LoanAccrualMonth] = Field(default_factory=list)
+    in_sync: bool = True  # движения обеих сторон совпадают
+    sync_note: str | None = None
+
+
+class LoanChainListResponse(BaseModel):
+    items: list[LoanChain] = Field(default_factory=list)
+    total_outstanding: Decimal = Decimal("0")
+    total_interest_debt: Decimal = Decimal("0")
 
 
 # ─── Зависшие займы (срок вышел, решения нет) ────────────────────────────────

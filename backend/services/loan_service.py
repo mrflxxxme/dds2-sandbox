@@ -145,6 +145,20 @@ async def _enrich_loans(db: AsyncSession, loans: list[Loan]) -> list[LoanRespons
     )
     extended_ids = {pid for (pid,) in ext_rows.all() if pid is not None}
 
+    # Вторая сторона договора в другом проекте — чей это проект. Читаем только по
+    # явной ссылке `mirror_loan_id`, то есть по договору, который завели сами.
+    mirror_ids = [loan.mirror_loan_id for loan in loans if loan.mirror_loan_id is not None]
+    mirror_map: dict[int, tuple[int, str | None]] = {}
+    if mirror_ids:
+        from backend.models.auth import Project
+
+        rows = await db.execute(
+            select(Loan.id, Loan.project_id, Project.name)
+            .join(Project, Project.id == Loan.project_id)
+            .where(Loan.id.in_(mirror_ids))
+        )
+        mirror_map = {r.id: (r.project_id, r.name) for r in rows.all()}
+
     out: list[LoanResponse] = []
     for loan in loans:
         calc = loan_interest.compute_loan(
@@ -171,6 +185,10 @@ async def _enrich_loans(db: AsyncSession, loans: list[Loan]) -> list[LoanRespons
         resp.days_to_maturity = calc.days_to_maturity
         resp.next_interest_date = calc.next_interest_date
         resp.has_extension = loan.id in extended_ids
+        if loan.mirror_loan_id is not None:
+            mp = mirror_map.get(loan.mirror_loan_id)
+            if mp is not None:
+                resp.mirror_project_id, resp.mirror_project_name = mp
         out.append(resp)
     return out
 

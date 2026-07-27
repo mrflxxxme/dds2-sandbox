@@ -195,6 +195,7 @@ async def invalidate_project_reports(project_id: int):
         "loan_by_lender",
         "loan_forecast",
         "loan_accrual_months",
+        "loan_cost_months",
     ):
         await invalidate_cache(f"{prefix}:project_id={project_id}")
 

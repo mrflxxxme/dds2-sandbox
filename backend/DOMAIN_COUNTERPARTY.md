@@ -16,6 +16,8 @@
 | `LoanScheduleEntry` | Строка планового графика платежей (аннуитет) | UNIQUE `(loan_id, seq)` |
 | `LoanFee` | Разовая комиссия (`fee_kind`: ORIGINATION/LIMIT_SETUP/OTHER) с флагом амортизации | INDEX `(loan_id, charged_at)` |
 
+`Loan.mirror_loan_id` — вторая сторона того же договора в другом проекте (займ между своими юрлицами); partial INDEX `WHERE mirror_loan_id IS NOT NULL`.
+
 `primary_type` — 13 значений: `SUPPLIER, FULFILLMENT, CARRIER, CUSTOMS_BROKER, DESIGNER, LEGAL, LANDLORD, IT_SERVICE, MARKETPLACE, BANK, GOVERNMENT, AFFILIATED, OTHER`. `secondary_types` — дополнительные роли (пример: ИП Кузнецов primary=FULFILLMENT, secondary=[CARRIER]).
 
 `transactions` несёт FK: `counterparty_id`, `loan_id`, `loan_payment_id`, `loan_payment_type`, плюс `contract_number`, `unk_number`.
@@ -54,6 +56,26 @@
   аннуитета одинаковые, а деньги ходят с РАЗНЫХ счетов одного холдинга.
 - `is_fee` на строке — «в колонке процентов напечатана комиссия». В `total_interest` она остаётся
   (так в договоре), а в стоимость денег заходит через `LoanFee`, иначе расход задвоится.
+
+### Займ между своими проектами (`Loan.mirror_loan_id`, `services/loan_mirror.py`)
+Займ учредителя (ИП → своё ООО) — одна сделка и ДВЕ книги: у ООО долг (`INCOMING`),
+у ИП актив (`OUTGOING`). Одной строкой это не описать — правило «каждый запрос фильтрует
+`project_id`» иначе ломается. Поэтому записи две, а `mirror_loan_id` держит их вместе.
+- `POST /loans/{id}/mirror` — завести вторую сторону в другом проекте: направление
+  переворачивается, реквизиты и ставки копируются, контрагент ищется по ИНН или создаётся
+  (`primary_type=AFFILIATED`).
+- `POST /loans/{id}/mirror/sync` — свести движения и ставки к ОБЪЕДИНЕНИЮ. Копируем в обе
+  стороны: платёж могли завести с любой книги, «источника истины» тут нет. Идемпотентно по
+  ключу `(payment_type, amount, paid_at)`. **`transaction_id` НЕ копируется** — банковская
+  проводка принадлежит книге своего проекта и уникальна на неё.
+- `GET /loans/chains` и `GET /loans/{id}/chain` — договор целиком: обе стороны, движения,
+  начисление по календарным месяцам. `in_sync=false` + `sync_note` подсвечивают расхождение.
+- `principal` у таких займов = 0: тело задают движения (см. `LoanBase.principal` — `ge=0`).
+
+Боевой случай — займ ИП Вяткина в ООО «Плюс Вайб» (`scripts/seed_vyatkin_pv_loan.py`):
+револьверный, до востребования, 2 % годовых до 31.10.2025 и 27 % с 01.11.2025, 118 движений
+из карточки 67.03. Движок сходится с бухгалтерией: за период 04.03–30.09.2025 начисление
+даёт ровно уплаченные 210 682,08 ₽, а на 30.06.2026 расхождение с 1С — 2 копейки.
 
 ### Разовые комиссии (`LoanFee`)
 `GET/POST/DELETE /loans/{id}/fees`. Комиссия за выдачу (4,25 % = 1 275 000 ₽) и за установление

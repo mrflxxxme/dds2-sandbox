@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
 from backend.database import get_db
-from backend.models import Project
+from backend.auth import get_current_user
+from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.loan import (
     CreditLineDetail,
@@ -24,6 +25,8 @@ from backend.schemas.loan import (
     LenderAccessInfo,
     LenderAccessListResponse,
     LoanByLenderResponse,
+    LoanChain,
+    LoanChainListResponse,
     LoanCreate,
     LoanDashboard,
     LoanDetail,
@@ -34,6 +37,7 @@ from backend.schemas.loan import (
     LoanForecastResponse,
     LoanImportResult,
     LoanListResponse,
+    LoanMirrorCreate,
     LoanPaymentMatch,
     LoanPaymentResponse,
     LoanRepay,
@@ -44,7 +48,13 @@ from backend.schemas.loan import (
     LoanStuckResponse,
     LoanUpdate,
 )
-from backend.services import lender_access_service, loan_analytics, loan_import, loan_schedule
+from backend.services import (
+    lender_access_service,
+    loan_analytics,
+    loan_import,
+    loan_mirror,
+    loan_schedule,
+)
 from backend.services.loan_service import (
     LoanPaymentAlreadyExistsError,
     LoanService,
@@ -204,6 +214,15 @@ async def credit_lines(
 ):
     """Все кредитные линии проекта: лимиты, выборка, свободный остаток."""
     return await list_credit_lines(db, project_id=project.id)
+
+
+@router.get("/chains", response_model=LoanChainListResponse)
+async def loan_chains(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Займы, у которых есть вторая сторона в другом проекте: обе книги одного договора."""
+    return await loan_mirror.list_chains(db, project_id=project.id)
 
 
 @router.get("/stuck", response_model=LoanStuckResponse)
@@ -373,6 +392,57 @@ async def add_rate_period(
 ):
     """Ставка с даты (плавающая: ключевая ЦБ + надбавка). Повтор даты перезаписывает."""
     return await set_rate_period(db, loan_id=loan_id, project_id=project.id, data=body)
+
+
+# ─── Займ между своими проектами (зеркало) ───────────────────────────────────
+
+
+@router.get("/{loan_id}/chain", response_model=LoanChain)
+async def loan_chain(
+    loan_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Договор целиком: обе стороны, движения, начисление по календарным месяцам."""
+    return await loan_mirror.get_chain(db, loan_id=loan_id, project_id=project.id)
+
+
+@router.post(
+    "/{loan_id}/mirror",
+    response_model=LoanChain,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def loan_mirror_create(
+    loan_id: int,
+    body: LoanMirrorCreate,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Завести вторую сторону договора в другом проекте (направление переворачивается).
+
+    Целевой проект приходит телом запроса — доступ к нему сервис проверяет отдельно:
+    `get_current_project` ручается только за текущий.
+    """
+    return await loan_mirror.create_mirror(
+        db, loan_id=loan_id, project_id=project.id, user_id=user.id, data=body
+    )
+
+
+@router.post(
+    "/{loan_id}/mirror/sync",
+    response_model=LoanChain,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def loan_mirror_sync(
+    loan_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Досинхронизировать стороны: недостающие движения и ставки едут на обе."""
+    return await loan_mirror.sync_mirror(db, loan_id=loan_id, project_id=project.id)
 
 
 # ─── График платежей и разовые комиссии ──────────────────────────────────────

@@ -46,6 +46,19 @@ async def _create_cp(db_session, project_id: int, name: str = "Кредитор"
     return cp.id
 
 
+async def _member_user_id(db_session, project_id: int) -> int:
+    """id пользователя, от имени которого создан проект (для проверок доступа)."""
+    from sqlalchemy import select
+
+    from backend.models import ProjectMember
+
+    return (
+        await db_session.execute(
+            select(ProjectMember.user_id).where(ProjectMember.project_id == project_id).limit(1)
+        )
+    ).scalar_one()
+
+
 def _incoming(cp_id: int, contract: str, principal="1000000", rate="0.28") -> LoanCreate:
     return LoanCreate(
         counterparty_id=cp_id,
@@ -1111,3 +1124,250 @@ async def test_month_cost_uses_schedule_and_amortized_fee(db_session, client, au
     # Полная стоимость месяца = проценты + комиссия
     for m in months["items"]:
         assert Decimal(m["total"]) == Decimal(m["interest"]) + Decimal(m["fee"])
+
+
+# ─── Займ между своими проектами (зеркало) ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_mirror_creates_opposite_side_and_syncs(db_session, client, auth_headers):
+    """Займ учредителя: у ООО долг, у ИП актив; движения зеркалятся один раз."""
+    from backend.models.loan import LoanPayment
+    from backend.schemas.loan import LoanMirrorCreate
+    from backend.services import loan_mirror
+
+    pv_project = await _create_project(client, auth_headers)
+    ip_project = await _create_project(client, auth_headers)
+    uid = await _member_user_id(db_session, pv_project)
+    cp_id = await _create_cp(db_session, pv_project, "ИП Вяткин")
+    svc = LoanService(db_session)
+    loan = await svc.create(
+        data=LoanCreate(
+            counterparty_id=cp_id, direction="INCOMING", principal=Decimal("0"),
+            currency="RUB", rate=Decimal("0.27"), contract_number="б/н от 04.03.2025",
+            contract_date=date(2025, 3, 4), start_date=date(2025, 3, 4),
+            maturity_date=None, entity_type="IP",
+        ),
+        project_id=pv_project,
+    )
+    for kind, amount, when in (
+        ("DISBURSEMENT", "1000000", date(2025, 3, 5)),
+        ("DISBURSEMENT", "500000", date(2025, 4, 1)),
+        ("PRINCIPAL_REPAY", "300000", date(2025, 6, 1)),
+    ):
+        db_session.add(LoanPayment(
+            loan_id=loan.id, payment_type=kind, amount=Decimal(amount),
+            currency="RUB", paid_at=when,
+        ))
+    await db_session.commit()
+
+    chain = await loan_mirror.create_mirror(
+        db_session, loan_id=loan.id, project_id=pv_project, user_id=uid,
+        data=LoanMirrorCreate(
+            target_project_id=ip_project,
+            counterparty_name="ООО «Плюс Вайб»", counterparty_inn=_inn(),
+        ),
+    )
+    assert len(chain.sides) == 2
+    debt = next(s for s in chain.sides if s.project_id == pv_project)
+    asset = next(s for s in chain.sides if s.project_id == ip_project)
+    # Направление переворачивается: полученный займ у одного — выданный у другого
+    assert debt.direction == "INCOMING" and asset.direction == "OUTGOING"
+    # Тело и начисления совпадают: договор один
+    assert debt.outstanding == asset.outstanding == Decimal("1200000.00")
+    assert debt.accrued_total == asset.accrued_total
+    assert chain.in_sync is True
+    assert chain.maturity_date is None  # до востребования
+
+    # Повторная синхронизация ничего не дублирует
+    again = await loan_mirror.sync_mirror(db_session, loan_id=loan.id, project_id=pv_project)
+    assert again.outstanding == Decimal("1200000.00")
+    assert len(again.movements) == 3
+
+
+@pytest.mark.asyncio
+async def test_mirror_syncs_payment_added_on_either_side(db_session, client, auth_headers):
+    """Платёж, заведённый со стороны ИП, доезжает до книги ООО — и наоборот."""
+    from backend.models.loan import Loan, LoanPayment
+    from backend.schemas.loan import LoanMirrorCreate
+    from backend.services import loan_mirror
+    from sqlalchemy import select
+
+    pv_project = await _create_project(client, auth_headers)
+    ip_project = await _create_project(client, auth_headers)
+    uid = await _member_user_id(db_session, pv_project)
+    cp_id = await _create_cp(db_session, pv_project, "ИП Вяткин")
+    svc = LoanService(db_session)
+    loan = await svc.create(
+        data=LoanCreate(
+            counterparty_id=cp_id, direction="INCOMING", principal=Decimal("0"),
+            currency="RUB", rate=Decimal("0.2"), contract_number="MIR-2",
+            contract_date=date(2025, 3, 4), start_date=date(2025, 3, 4),
+        ),
+        project_id=pv_project,
+    )
+    db_session.add(LoanPayment(
+        loan_id=loan.id, payment_type="DISBURSEMENT", amount=Decimal("2000000"),
+        currency="RUB", paid_at=date(2025, 3, 5),
+    ))
+    await db_session.commit()
+    await loan_mirror.create_mirror(
+        db_session, loan_id=loan.id, project_id=pv_project, user_id=uid,
+        data=LoanMirrorCreate(target_project_id=ip_project, counterparty_name="ООО", counterparty_inn=_inn()),
+    )
+    mirror_id = (
+        await db_session.execute(select(Loan.mirror_loan_id).where(Loan.id == loan.id))
+    ).scalar_one()
+
+    # Возврат завели в книге ИП — он обязан появиться и у ООО
+    db_session.add(LoanPayment(
+        loan_id=mirror_id, payment_type="PRINCIPAL_REPAY", amount=Decimal("700000"),
+        currency="RUB", paid_at=date(2025, 5, 1),
+    ))
+    await db_session.commit()
+    chain = await loan_mirror.get_chain(db_session, loan_id=loan.id, project_id=pv_project)
+    assert chain.in_sync is False  # расхождение видно до синхронизации
+    chain = await loan_mirror.sync_mirror(db_session, loan_id=loan.id, project_id=pv_project)
+    assert chain.in_sync is True
+    assert chain.outstanding == Decimal("1300000.00")
+    assert all(s.outstanding == Decimal("1300000.00") for s in chain.sides)
+
+
+@pytest.mark.asyncio
+async def test_mirror_rejects_same_project_and_double_link(db_session, client, auth_headers):
+    """Вторая сторона — только в другом проекте и только одна."""
+    from backend.schemas.loan import LoanMirrorCreate
+    from backend.services import loan_mirror
+
+    project_id = await _create_project(client, auth_headers)
+    other = await _create_project(client, auth_headers)
+    uid = await _member_user_id(db_session, project_id)
+    cp_id = await _create_cp(db_session, project_id)
+    svc = LoanService(db_session)
+    loan = await svc.create(data=_incoming(cp_id, "MIR-3"), project_id=project_id)
+
+    with pytest.raises(HTTPException) as exc:
+        await loan_mirror.create_mirror(
+            db_session, loan_id=loan.id, project_id=project_id, user_id=uid,
+            data=LoanMirrorCreate(target_project_id=project_id, counterparty_name="X", counterparty_inn=_inn()),
+        )
+    assert exc.value.status_code == 400
+
+    await loan_mirror.create_mirror(
+        db_session, loan_id=loan.id, project_id=project_id, user_id=uid,
+        data=LoanMirrorCreate(target_project_id=other, counterparty_name="X", counterparty_inn=_inn()),
+    )
+    with pytest.raises(HTTPException) as exc:
+        await loan_mirror.create_mirror(
+            db_session, loan_id=loan.id, project_id=project_id, user_id=uid,
+            data=LoanMirrorCreate(target_project_id=other, counterparty_name="Y", counterparty_inn=_inn()),
+        )
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_mirror_isolated_from_foreign_project(db_session, client, auth_headers):
+    """Чужой проект не видит цепочку — 404, а не чужие деньги."""
+    from backend.services import loan_mirror
+
+    project_id = await _create_project(client, auth_headers)
+    stranger = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id)
+    svc = LoanService(db_session)
+    loan = await svc.create(data=_incoming(cp_id, "MIR-4"), project_id=project_id)
+
+    with pytest.raises(HTTPException) as exc:
+        await loan_mirror.get_chain(db_session, loan_id=loan.id, project_id=stranger)
+    assert exc.value.status_code == 404
+    empty = await loan_mirror.list_chains(db_session, project_id=stranger)
+    assert empty.items == []
+
+
+@pytest.mark.asyncio
+async def test_mirror_rejects_foreign_target_project(db_session, client, auth_headers):
+    """
+    Целевой проект приходит телом запроса — членство в нём проверяется отдельно.
+
+    `get_current_project` ручается только за ТЕКУЩИЙ проект. Без явной проверки
+    участник одного проекта мог бы создать займ и контрагента в любом чужом,
+    зная только его id.
+    """
+    from backend.schemas.loan import LoanMirrorCreate
+    from backend.services import loan_mirror
+
+    project_id = await _create_project(client, auth_headers)
+    other = await _create_project(client, auth_headers)
+    uid = await _member_user_id(db_session, project_id)
+    cp_id = await _create_cp(db_session, project_id)
+    svc = LoanService(db_session)
+    loan = await svc.create(data=_incoming(cp_id, "MIR-FOREIGN"), project_id=project_id)
+
+    # Чужой пользователь (не участник целевого проекта) — отказ
+    with pytest.raises(HTTPException) as exc:
+        await loan_mirror.create_mirror(
+            db_session, loan_id=loan.id, project_id=project_id, user_id=uid + 10_000_000,
+            data=LoanMirrorCreate(target_project_id=other, counterparty_name="X", counterparty_inn=_inn()),
+        )
+    assert exc.value.status_code == 403
+
+    # Несуществующий проект — тот же отказ, без утечки факта существования
+    with pytest.raises(HTTPException) as exc:
+        await loan_mirror.create_mirror(
+            db_session, loan_id=loan.id, project_id=project_id, user_id=uid,
+            data=LoanMirrorCreate(target_project_id=99_000_000, counterparty_name="X", counterparty_inn=_inn()),
+        )
+    assert exc.value.status_code == 403
+
+
+def test_vyatkin_loan_matches_accounting_card():
+    """
+    Займ учредителя: движок сходится с бухгалтерией «Плюс Вайб» до копеек.
+
+    Ставка 2 % до 31.10.2025 и 27 % с 01.11.2025. Контроль — фактические выплаты
+    процентов (210 682,08 за 04.03–30.09.2025) и сальдо карточки 67.03.
+    """
+    from backend.services.loan_interest import RatePeriod, accrued_in_window
+
+    moves = [
+        (date(2025, 3, 5), "830000"), (date(2025, 3, 18), "303000"),
+        (date(2025, 3, 25), "28000"), (date(2025, 3, 26), "40000"),
+        (date(2025, 4, 7), "35000"), (date(2025, 4, 7), "550000"),
+        (date(2025, 4, 8), "1100000"), (date(2025, 4, 8), "1900000"),
+        (date(2025, 4, 9), "935000"), (date(2025, 4, 9), "3205000"),
+        (date(2025, 4, 16), "13000"), (date(2025, 4, 28), "2527000"),
+        (date(2025, 5, 7), "22000"), (date(2025, 5, 16), "1100000"),
+        (date(2025, 5, 16), "2000000"), (date(2025, 5, 21), "2600000"),
+        (date(2025, 5, 30), "125000"), (date(2025, 6, 4), "600000"),
+        (date(2025, 6, 5), "2638000"), (date(2025, 6, 19), "600000"),
+        (date(2025, 6, 27), "2140000"), (date(2025, 6, 27), "1040000"),
+        (date(2025, 7, 17), "710000"), (date(2025, 8, 7), "100000"),
+        (date(2025, 8, 21), "4890000"), (date(2025, 8, 27), "500000"),
+        (date(2025, 8, 27), "643000"), (date(2025, 8, 29), "170000"),
+        (date(2025, 8, 29), "600000"), (date(2025, 9, 8), "70000"),
+        (date(2025, 9, 9), "2100000"), (date(2025, 9, 9), "280000"),
+        (date(2025, 9, 9), "140000"), (date(2025, 9, 10), "1200000"),
+        (date(2025, 9, 10), "700000"), (date(2025, 9, 11), "82000"),
+        (date(2025, 9, 11), "35000"), (date(2025, 9, 12), "85000"),
+        (date(2025, 9, 15), "3600000"), (date(2025, 9, 16), "200000"),
+        (date(2025, 9, 16), "930000"), (date(2025, 9, 19), "540000"),
+        (date(2025, 9, 19), "3000000"), (date(2025, 9, 19), "3000000"),
+        (date(2025, 9, 22), "28000"), (date(2025, 9, 23), "70000"),
+        (date(2025, 9, 25), "3150000"), (date(2025, 9, 29), "80000"),
+        (date(2025, 9, 30), "95000"),
+    ]
+    pays = [loan_interest.PaymentLite("DISBURSEMENT", Decimal(a), d) for d, a in moves]
+    pays += [
+        loan_interest.PaymentLite("PRINCIPAL_REPAY", Decimal("1000000"), date(2025, 7, 1)),
+        loan_interest.PaymentLite("PRINCIPAL_REPAY", Decimal("2750000"), date(2025, 8, 5)),
+    ]
+    rates = [
+        RatePeriod(date(2025, 3, 4), Decimal("0.02")),
+        RatePeriod(date(2025, 11, 1), Decimal("0.27")),
+    ]
+    accrued = accrued_in_window(
+        principal=Decimal("0"), rate=Decimal("0.27"), start_date=date(2025, 3, 4),
+        payments=pays, win_start=date(2025, 3, 3), win_end=date(2025, 9, 30),
+        rate_periods=rates,
+    )
+    # Ровно столько «Плюс Вайб» и заплатил 23.10.2025 за период 04.03 — 30.09.2025
+    assert accrued == Decimal("210682.08")

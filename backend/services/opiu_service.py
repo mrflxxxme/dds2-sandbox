@@ -244,6 +244,20 @@ async def get_opiu(
     # ── 8. Build P&L rows ──
     months_sorted = sorted(months_set, reverse=True)
 
+    # ── 7c. Проценты и комиссии по займам ──
+    # Стоимость денег — операционный расход, но к бренду/артикулу не относится,
+    # поэтому при фильтре её не показываем (как и прочий opex выше). Считается по
+    # КАЛЕНДАРНЫМ месяцам по дням — та же база, что на дашборде займов.
+    loan_cost: dict[str, dict[str, float]] = {}
+    if not brand and not article and months_sorted:
+        from backend.services.loan_analytics import cost_by_month_keys
+
+        raw = await cost_by_month_keys(db, project_id, months_sorted)
+        loan_cost = {
+            mk: {"interest": float(v.get("interest", 0)), "fee": float(v.get("fee", 0))}
+            for mk, v in raw.items()
+        }
+
     pnl_result: dict = _build_pnl_result(
         monthly_data,
         total_data,
@@ -257,6 +271,7 @@ async def get_opiu(
         date_to,
         tax_by_month=tax_by_month,
         opex_by_type=opex_by_type,
+        loan_cost=loan_cost,
     )
     return pnl_result
 
@@ -274,6 +289,7 @@ def _build_pnl_result(
     date_to,
     tax_by_month=None,
     opex_by_type=None,
+    loan_cost=None,
 ):
     """Build the final P&L rows and return the result dict.
 
@@ -360,8 +376,19 @@ def _build_pnl_result(
         opex_child_defs.append((child_t, f"opex_{ptype.lower()}", label, child_m))
     opex_child_defs.sort(key=lambda x: x[0], reverse=True)
 
-    ops_m = {mk: sum(c[3][mk] for c in opex_child_defs) for mk in months_sorted}
-    ops_t = sum(c[0] for c in opex_child_defs)
+    # Проценты по займам — такой же операционный расход, но источник другой:
+    # не банковские платежи, а НАЧИСЛЕНИЕ по дням (проценты платят рвано, а то и
+    # не платят вовсе — по кассе расход месяца был бы нулевым при живом долге).
+    loan_cost = loan_cost or {}
+    loan_int_m = {mk: float(loan_cost.get(mk, {}).get("interest", 0.0)) for mk in months_sorted}
+    loan_fee_m = {mk: float(loan_cost.get(mk, {}).get("fee", 0.0)) for mk in months_sorted}
+    loan_m = {mk: loan_int_m[mk] + loan_fee_m[mk] for mk in months_sorted}
+    loan_int_t = sum(loan_int_m.values())
+    loan_fee_t = sum(loan_fee_m.values())
+    loan_t = loan_int_t + loan_fee_t
+
+    ops_m = {mk: sum(c[3][mk] for c in opex_child_defs) + loan_m[mk] for mk in months_sorted}
+    ops_t = sum(c[0] for c in opex_child_defs) + loan_t
 
     ebitda_m = {mk: margin_m[mk] - ops_m[mk] for mk in months_sorted}
     ebitda_t = margin_t - ops_t
@@ -414,6 +441,31 @@ def _build_pnl_result(
         _r(child_key, label, 1, False, child_m, child_t, real_m, real_t, parent_key="operating_expenses")
         for child_t, child_key, label, child_m in opex_child_defs
     ]
+    if loan_t:
+        # Комиссии раскрываем отдельной строкой только когда они есть: у частных
+        # займов их нет вовсе, и пустая строка «Комиссии» лишь путала бы.
+        has_fee = bool(loan_fee_t)
+        opex_child_rows.append(
+            _r(
+                "opex_loan_interest",
+                "Проценты по займам",
+                1,
+                False,
+                loan_m,
+                loan_t,
+                real_m,
+                real_t,
+                expandable=has_fee,
+                parent_key="operating_expenses",
+            )
+        )
+        if has_fee:
+            opex_child_rows += [
+                _r("loan_interest", "Проценты", 2, False, loan_int_m, loan_int_t,
+                   real_m, real_t, parent_key="opex_loan_interest"),
+                _r("loan_fees", "Комиссии банков", 2, False, loan_fee_m, loan_fee_t,
+                   real_m, real_t, parent_key="opex_loan_interest"),
+            ]
 
     rows = [
         _r("realization", "Реализация", 0, True, real_m, real_t),

@@ -7810,6 +7810,80 @@ export interface LenderAccessListResponse {
   items: LenderAccessInfo[];
 }
 
+// ─── Займы между своими проектами (зеркало) ──────────────────────────────────
+
+/** Начислено за КАЛЕНДАРНЫЙ месяц — строка для ОПиУ. */
+export interface LoanAccrualMonth {
+  month: string;
+  interest: number;
+  fee: number;
+  total: number;
+  ip: number;
+  physical: number;
+  avg_body: number;
+  effective_rate: number | null;
+  days: number;
+}
+
+export interface LoanMirrorCreate {
+  target_project_id: number;
+  counterparty_id?: number | null;
+  counterparty_name?: string | null;
+  counterparty_inn?: string | null;
+}
+
+/** Одна сторона договора: чья книга, что в ней числится. */
+export interface LoanMirrorSide {
+  loan_id: number;
+  project_id: number;
+  project_name: string | null;
+  project_slug: string | null;
+  counterparty_name: string | null;
+  direction: LoanDirection;
+  status: LoanStatus;
+  outstanding: number;
+  accrued_interest: number;
+  accrued_total: number;
+  interest_paid: number;
+  interest_debt: number;
+  current_rate: number | null;
+}
+
+/** Движение по договору: выдача тела, возврат, выплата процентов. */
+export interface LoanChainMovement {
+  happened_at: string;
+  kind: LoanPaymentType;
+  amount: number;
+  balance_after: number | null;
+}
+
+/** Договор целиком: обе книги, движения и итог. */
+export interface LoanChain {
+  contract_number: string;
+  contract_date: string | null;
+  start_date: string | null;
+  maturity_date: string | null;
+  sides: LoanMirrorSide[];
+  total_disbursed: number;
+  total_repaid: number;
+  outstanding: number;
+  accrued_total: number;
+  interest_paid: number;
+  interest_debt: number;
+  total_debt: number;
+  rate_periods: LoanRatePeriod[];
+  movements: LoanChainMovement[];
+  monthly: LoanAccrualMonth[];
+  in_sync: boolean;
+  sync_note: string | null;
+}
+
+export interface LoanChainListResponse {
+  items: LoanChain[];
+  total_outstanding: number;
+  total_interest_debt: number;
+}
+
 export interface SupplierDebtItem {
   counterparty_id: number;
   name: string;

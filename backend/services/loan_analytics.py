@@ -770,6 +770,40 @@ def _body_days(
 # ─── Начисление по календарным месяцам (база для ОПиУ) ───────────────────────
 
 
+@cached(prefix="loan_cost_months", ttl=300)
+async def cost_by_month_keys(db: AsyncSession, project_id: int, month_keys: list[str]) -> dict:
+    """
+    Стоимость денег по ЗАДАННЫМ календарным месяцам: {'YYYY-MM': {interest, fee}}.
+
+    Нужна ОПиУ: тот берёт произвольный диапазон отчёта, а `accrual_by_month`
+    умеет только «последние N месяцев от даты». База одна и та же — начисление по
+    дням с бакетом в календарный месяц, поэтому цифры сходятся с дашбордом.
+
+    `as_of` намеренно не передаётся: текущий месяц режется сегодняшним днём — в
+    ОПиУ незакрытый месяц не должен показывать проценты за будущие дни.
+    """
+    bundle = await _load(db, project_id)
+    as_of = loan_service._today()
+    out: dict[str, dict[str, str]] = {}
+    for key in month_keys:
+        try:
+            year, month = int(key[:4]), int(key[5:7])
+        except (ValueError, IndexError):
+            continue
+        win_start, win_end = month_window(year, month, as_of)
+        interest = fee = ZERO
+        if win_end > win_start:
+            for loan in bundle.loans:
+                i, f = loan_cost_in_window(bundle, loan, win_start=win_start, win_end=win_end)
+                interest += i
+                fee += f
+        out[key] = {
+            "interest": str(interest.quantize(Decimal("0.01"))),
+            "fee": str(fee.quantize(Decimal("0.01"))),
+        }
+    return out
+
+
 @cached(prefix="loan_accrual_months", ttl=300)
 async def accrual_by_month(db: AsyncSession, project_id: int, as_of: date, months: int = 12) -> dict:
     """

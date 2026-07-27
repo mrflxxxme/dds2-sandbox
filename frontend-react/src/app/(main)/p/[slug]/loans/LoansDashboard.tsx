@@ -119,7 +119,7 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
                     value={fmtDate(k.next_maturity_date)}
                     icon="📅"
                     color="#34c759"
-                    sub={k.next_maturity_amount ? `${money(k.next_maturity_amount)} ₽` : '—'}
+                    sub={Number(k.next_maturity_amount) > 0 ? `${money(k.next_maturity_amount)} ₽` : '—'}
                 />
             </div>
 

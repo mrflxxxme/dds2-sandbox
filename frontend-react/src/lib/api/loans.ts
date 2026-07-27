@@ -31,6 +31,9 @@ import type {
     LenderAccessInfo,
     LenderAccessListResponse,
     LoanImportResult,
+    LoanChain,
+    LoanChainListResponse,
+    LoanMirrorCreate,
 } from '@/types/api';
 
 export function addLoanMethods(api: ApiClient) {
@@ -155,6 +158,20 @@ export function addLoanMethods(api: ApiClient) {
             return api.request<LenderAccessInfo>(
                 'POST', `/api/v1/loans/lenders/access/${counterpartyId}/revoke`
             );
+        },
+
+        // ─── Займы между своими проектами (зеркало) ────────────────────────────
+        loanChains() {
+            return api.request<LoanChainListResponse>('GET', '/api/v1/loans/chains');
+        },
+        loanChain(loanId: number) {
+            return api.request<LoanChain>('GET', `/api/v1/loans/${loanId}/chain`);
+        },
+        createLoanMirror(loanId: number, data: LoanMirrorCreate) {
+            return api.request<LoanChain>('POST', `/api/v1/loans/${loanId}/mirror`, data);
+        },
+        syncLoanMirror(loanId: number) {
+            return api.request<LoanChain>('POST', `/api/v1/loans/${loanId}/mirror/sync`);
         },
 
         // ─── Excel import ─────────────────────────────────────────────────────

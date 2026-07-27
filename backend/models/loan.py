@@ -136,6 +136,12 @@ class Loan(Base, TimestampMixin, SoftDeleteMixin):
     payment_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Цепочка продлений: при продлении старый займ закрывается, новый ссылается на него.
     parent_loan_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("loan.id"), nullable=True)
+    # Вторая сторона ТОГО ЖЕ договора в другом проекте. Займ между своими юрлицами
+    # (ИП учредителя → ООО) — это одна сделка и две книги: у одного долг, у другого
+    # актив. Одной строкой это не описать — правило «каждый запрос фильтрует
+    # project_id» требует, чтобы у каждого проекта была своя запись. Ссылка держит
+    # их вместе: движения вводятся один раз и зеркалятся на вторую сторону.
+    mirror_loan_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("loan.id"), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships
@@ -162,6 +168,10 @@ class Loan(Base, TimestampMixin, SoftDeleteMixin):
     parent_loan: Mapped["Loan | None"] = relationship(
         remote_side=[id],
         foreign_keys=[parent_loan_id],
+    )
+    mirror_loan: Mapped["Loan | None"] = relationship(
+        remote_side=[id],
+        foreign_keys=[mirror_loan_id],
     )
 
     __table_args__ = (
