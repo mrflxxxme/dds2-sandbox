@@ -10,6 +10,7 @@ import type {
     FbsOrderBackfillResult,
     FbsOrderListResponse,
     FbsOrderStats,
+    FbsWarehouseSummary,
     FbsOverrideSetPayload,
     FbsReconcileApplyPayload,
     FbsReconcileOut,
@@ -138,6 +139,19 @@ export function addFbsMethods(api: ApiClient) {
         getFbsOrders(f: FbsOrderFilters = {}) {
             const q = buildOrderQuery(f);
             return api.request<FbsOrderListResponse>('GET', `/api/v1/fbs/orders${q ? `?${q}` : ''}`);
+        },
+        /**
+         * Очередь по складам продавца ОДНИМ запросом. Период сужает только
+         * фазы доставки — очередь сборки бэкенд отдаёт целиком.
+         */
+        getFbsWarehouseSummary(f: { dateFrom?: string; dateTo?: string } = {}) {
+            const q = new URLSearchParams();
+            if (f.dateFrom) q.set('date_from', f.dateFrom);
+            if (f.dateTo) q.set('date_to', f.dateTo);
+            const qs = q.toString();
+            return api.request<FbsWarehouseSummary>(
+                'GET', `/api/v1/fbs/orders/warehouse-summary${qs ? `?${qs}` : ''}`,
+            );
         },
         /** Сводка заказов за период: выручка, разрезы, доля в объёме воронки. */
         getFbsOrderStats(f: { dateFrom?: string; dateTo?: string; wbWarehouseId?: number } = {}) {

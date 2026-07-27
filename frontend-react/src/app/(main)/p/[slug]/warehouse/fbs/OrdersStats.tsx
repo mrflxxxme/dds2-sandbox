@@ -93,13 +93,13 @@ function mskDate(d: Date): string {
     return mskDateFmt.format(d);
 }
 
-function isoDaysAgo(days: number): string {
+export function isoDaysAgo(days: number): string {
     const d = new Date();
     d.setDate(d.getDate() - (days - 1));
     return mskDate(d);
 }
 
-function todayIso(): string {
+export function todayIso(): string {
     return mskDate(new Date());
 }
 
@@ -108,24 +108,30 @@ interface Props {
     wbWarehouseId: number | '';
     /** Счётчик тиков автообновления страницы. */
     refreshTick: number;
+    /**
+     * Период поднят в родителя: тем же окном живёт сводка по складам, и два
+     * независимых периода на одном экране означали бы, что «В доставке» вверху
+     * и график внизу молча говорят про разные отрезки времени.
+     */
+    dateFrom: string;
+    dateTo: string;
+    preset: string;
+    onPeriodChange: (next: { dateFrom: string; dateTo: string; preset: string }) => void;
 }
 
-export default function OrdersStats({ wbWarehouseId, refreshTick }: Props) {
+export default function OrdersStats({
+    wbWarehouseId, refreshTick, dateFrom, dateTo, preset, onPeriodChange,
+}: Props) {
     const [open, setOpen] = useState(true);
-    const [preset, setPreset] = useState('30');
-    const [dateFrom, setDateFrom] = useState(() => isoDaysAgo(30));
-    const [dateTo, setDateTo] = useState(todayIso);
     const [data, setData] = useState<FbsOrderStats | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
 
     const applyPreset = useCallback((key: string) => {
-        setPreset(key);
         const found = PRESETS.find(p => p.key === key);
         if (!found) return;
-        setDateFrom(isoDaysAgo(found.days));
-        setDateTo(todayIso());
-    }, []);
+        onPeriodChange({ dateFrom: isoDaysAgo(found.days), dateTo: todayIso(), preset: key });
+    }, [onPeriodChange]);
 
     const load = useCallback(async (signal?: AbortSignal) => {
         setLoading(true);
@@ -257,7 +263,7 @@ export default function OrdersStats({ wbWarehouseId, refreshTick }: Props) {
                     <input
                         className="form-input" type="date" style={{ width: 150 }}
                         value={dateFrom}
-                        onChange={e => { setDateFrom(e.target.value); setPreset(''); }}
+                        onChange={e => onPeriodChange({ dateFrom: e.target.value, dateTo, preset: '' })}
                     />
                 </div>
                 <div>
@@ -265,7 +271,7 @@ export default function OrdersStats({ wbWarehouseId, refreshTick }: Props) {
                     <input
                         className="form-input" type="date" style={{ width: 150 }}
                         value={dateTo}
-                        onChange={e => { setDateTo(e.target.value); setPreset(''); }}
+                        onChange={e => onPeriodChange({ dateFrom, dateTo: e.target.value, preset: '' })}
                     />
                 </div>
                 <div style={{ flex: 1 }} />

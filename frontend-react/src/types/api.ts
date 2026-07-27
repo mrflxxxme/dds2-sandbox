@@ -8110,11 +8110,33 @@ export interface FbsOrderListResponse {
   /** Счётчики по статусам для вкладок (new / confirm / complete / cancel). */
   status_counts: Record<string, number>;
   /**
-   * Подмножество `complete`, которое ЕЩЁ едет к покупателю (wbStatus не
-   * `sold`/`defect`). Отдельным полем, а не ключом `status_counts`: сумма
-   * счётчиков — это вкладка «Все», синтетика внутри неё двоила бы задания.
+   * Две ФАЗЫ внутри `complete`: «ещё едет, не отсортировано» и «принято
+   * сортировочным центром». Отдельными полями, а не ключами `status_counts`:
+   * сумма счётчиков — это вкладка «Все», синтетика внутри неё двоила бы задания.
    */
   in_delivery_count: number;
+  sorted_count: number;
+}
+
+/** Очередь одного склада продавца по фазам жизни задания. */
+export interface FbsWarehouseQueueRow {
+  wb_warehouse_id: number;
+  /** Очередь сборки — БЕЗ периода: старое несобранное задание не должно пропасть. */
+  new: number;
+  confirm: number;
+  /** Фазы доставки — за выбранный период (`complete` копится вечно). */
+  in_delivery: number;
+  sorted: number;
+}
+
+/** GET /fbs/orders/warehouse-summary — очередь по складам одним запросом. */
+export interface FbsWarehouseSummary {
+  /** Границы окна для фаз доставки (включительно). */
+  date_from: string | null;
+  date_to: string | null;
+  warehouses: FbsWarehouseQueueRow[];
+  /** Итог по всем складам — считает бэкенд. */
+  totals: Record<string, number>;
 }
 
 /**
