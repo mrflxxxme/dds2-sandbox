@@ -23,6 +23,7 @@ async def get_wb_bdr(
     brand: str | None = Query(None),
     article: str | None = Query(None),
     group_by: str = Query("article"),
+    period_mode: str = Query("sale"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -33,6 +34,8 @@ async def get_wb_bdr(
 
     if group_by not in ("article", "brand", "subject", "abc", "tag", "imt"):
         group_by = "article"
+    if period_mode not in ("sale", "report"):
+        period_mode = "sale"
     try:
         return await asyncio.wait_for(
             wb_bdr_service.get_wb_bdr(
@@ -43,6 +46,7 @@ async def get_wb_bdr(
                 brand=brand,
                 article=article,
                 group_by=group_by,
+                period_mode=period_mode,
             ),
             timeout=60,
         )

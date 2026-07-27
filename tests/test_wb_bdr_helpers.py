@@ -133,6 +133,22 @@ class TestBuildBdrAggregateSql:
         sql = build_bdr_aggregate_sql(brand=None, article=None)
         assert "неопознанный товар" in sql.lower()
 
+    def test_period_mode_sale_default(self):
+        """Default period_mode filters by sale/accrual date."""
+        sql = build_bdr_aggregate_sql(brand=None, article=None)
+        assert "COALESCE(sale_dt, rr_dt) BETWEEN" in sql
+
+    def test_period_mode_report_uses_report_period(self):
+        """report mode filters by WB report period, not sale date."""
+        sql = build_bdr_aggregate_sql(brand=None, article=None, period_mode="report")
+        assert "date_from >= :date_from AND date_to <= :date_to" in sql
+        assert "COALESCE(sale_dt, rr_dt) BETWEEN" not in sql
+
+    def test_period_mode_unknown_falls_back_to_sale(self):
+        """Unknown period_mode falls back to the sale-date predicate."""
+        sql = build_bdr_aggregate_sql(brand=None, article=None, period_mode="garbage")
+        assert "COALESCE(sale_dt, rr_dt) BETWEEN" in sql
+
 
 class TestBuildGroupNmIdsSql:
     """Tests for build_group_nm_ids_sql."""
