@@ -118,6 +118,18 @@ export function WbBdr() {
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
     const [expandedAbc, setExpandedAbc] = useState<Record<string, boolean>>({});
 
+    // Персист режима свода и группировки: заходишь — раздел уже в твоём виде
+    // (напр. «По отчётам ВБ» + «По категориям»), лишних кликов нет.
+    React.useEffect(() => {
+        try {
+            const pm = localStorage.getItem('wbbdr_period_mode');
+            if (pm === 'sale' || pm === 'report') setPeriodMode(pm);
+            const gb = localStorage.getItem('wbbdr_group_by');
+            if (gb && ['article', 'brand', 'subject', 'tag', 'imt', 'abc'].includes(gb)) setGroupBy(gb as typeof groupBy);
+        } catch { /* localStorage недоступен — тихо игнорируем */ }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
     React.useEffect(() => {
         api.getWbBdrSyncStatus(dateFrom, dateTo).then(setSyncStatus).catch(() => {});
         api.getWbBdrAvailableWeeks().then(r => setAvailableDates(r.available_dates || [])).catch(() => {});
@@ -344,7 +356,7 @@ export function WbBdr() {
                         <label style={{ fontSize: 12, opacity: 0.7, display: 'block', marginBottom: 4 }}>Группировка</label>
                         <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid #e5e7eb', background: '#f3f4f6', height: 38 }}>
                             {([['article', 'По артикулам'], ['brand', 'По брендам'], ['subject', 'По категориям'], ['tag', 'По ярлыкам'], ['imt', 'По склейкам'], ['abc', 'ABC анализ']] as const).map(([val, lbl]) => (
-                                <button key={val} onClick={() => { setGroupBy(val); }}
+                                <button key={val} onClick={() => { setGroupBy(val); try { localStorage.setItem('wbbdr_group_by', val); } catch { /* noop */ } }}
                                     style={{ padding: '0 14px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer', background: groupBy === val ? '#6366f1' : 'transparent', color: groupBy === val ? '#fff' : '#6b7280', transition: 'all 0.2s ease', whiteSpace: 'nowrap' }}>
                                     {lbl}
                                 </button>
@@ -355,7 +367,7 @@ export function WbBdr() {
                         <label style={{ fontSize: 12, opacity: 0.7, display: 'block', marginBottom: 4 }} title="«По дате продажи» — учёт по дате реализации (БДР accrual). «По отчётам ВБ» — по отчётному периоду, сходится с «Итого к оплате» в кабинете ВБ.">Свод</label>
                         <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid #e5e7eb', background: '#f3f4f6', height: 38 }}>
                             {([['sale', 'По дате продажи'], ['report', 'По отчётам ВБ']] as const).map(([val, lbl]) => (
-                                <button key={val} onClick={() => { setPeriodMode(val); }}
+                                <button key={val} onClick={() => { setPeriodMode(val); try { localStorage.setItem('wbbdr_period_mode', val); } catch { /* noop */ } }}
                                     style={{ padding: '0 14px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer', background: periodMode === val ? '#6366f1' : 'transparent', color: periodMode === val ? '#fff' : '#6b7280', transition: 'all 0.2s ease', whiteSpace: 'nowrap' }}>
                                     {lbl}
                                 </button>
