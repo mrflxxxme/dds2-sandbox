@@ -337,6 +337,11 @@ async def import_kb_from_answered_questions(db: AsyncSession, project_id: int) -
         if not q_text or not a_text:
             skipped_empty += 1
             continue
+        # Мусорные ответы WB («Вопрос отклонён» и т.п.) в базу знаний не берём —
+        # это не факты о товаре, а служебные статусы модерации
+        if _is_junk_answer(a_text):
+            skipped_empty += 1
+            continue
         h = _question_hash(q_text)
         key = (int(q.nm_id), h)
         if key in existing:
@@ -374,6 +379,14 @@ async def import_kb_from_answered_questions(db: AsyncSession, project_id: int) -
 
 
 _WORD_RE = re.compile(r"[0-9a-zа-яё]+", re.IGNORECASE)
+
+# Служебные ответы WB, не несущие фактов о товаре (модерация вопроса и т.п.)
+_JUNK_ANSWER_RE = re.compile(r"^\s*вопрос\s+отклон[её]н", re.IGNORECASE)
+
+
+def _is_junk_answer(answer: str) -> bool:
+    """True, если ответ — служебный статус WB, а не факт для базы знаний."""
+    return bool(_JUNK_ANSWER_RE.search(answer or ""))
 
 
 def _tokens(text: str | None) -> set[str]:
