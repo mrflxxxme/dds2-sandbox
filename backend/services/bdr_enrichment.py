@@ -226,6 +226,13 @@ def enrich_article(art: dict, total_real: float, total_sales: float, period_days
     stocks_wb = art.get("stocks_wb", 0)
     orders_sum = float(art.get("orders_sum", 0))
 
+    # Чистая выплата = К оплате − реклама категории. Отзывы уже вычтены в to_pay
+    # (ВБ привязывает их к предмету), а реклама/кредиты в финотчёте идут котлом
+    # без категории — поэтому режем per-nm рекламу из нашего трекинга (adv_sum).
+    # NB: для сводки это значение переопределяется в сервисе (см. net_payout там),
+    # т.к. summary.to_pay уже содержит вычет рекламного котла — иначе двойной счёт.
+    art["net_payout"] = round(float(art.get("to_pay", 0)) - adv_sum, 2)
+
     # Avg profit per item
     art["avg_profit_per_item"] = round(profit / sale_qty, 2) if sale_qty > 0 else 0
 

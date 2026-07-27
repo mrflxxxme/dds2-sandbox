@@ -251,6 +251,7 @@ def empty_metrics() -> dict:
         "sales_amount": ZERO,
         "returns_amount": ZERO,
         "to_pay": ZERO,
+        "net_payout": ZERO,
         "ppvz_for_pay": ZERO,
         "compensation": ZERO,
         "sale_qty": 0,
