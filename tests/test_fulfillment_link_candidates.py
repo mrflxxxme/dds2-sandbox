@@ -26,6 +26,7 @@ from backend.models import (
     WarehouseStock,
 )
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus, AssemblyStatusHistory
+from backend.models.warehouse import StockTransfer, StockTransferItem, TransferStatus
 from backend.models.wb_fbo import WbFboSupply
 from backend.services import fulfillment_service
 
@@ -78,6 +79,7 @@ def _mirror(
     total_qty=None,
     assembly_request_id=None,
     inbound_receipt_id=None,
+    stock_transfer_id=None,
 ):
     """Зеркальная ФФ-заявка для прямой вставки в БД."""
     return FulfillmentRequest(
@@ -93,6 +95,7 @@ def _mirror(
         raw=raw,
         assembly_request_id=assembly_request_id,
         inbound_receipt_id=inbound_receipt_id,
+        stock_transfer_id=stock_transfer_id,
     )
 
 
@@ -347,6 +350,167 @@ async def test_candidates_inbound(db_session, project, warehouse):
     assert row["total_qty"] == 6
     assert row["fbo_supply_number"] is None
     assert row["dest_warehouse"] is None
+
+
+# ─── Приёмка внутреннего перемещения (TR-*) ──────────────────────────────────
+
+
+async def _make_transfer(
+    db_session,
+    project_id,
+    from_warehouse_id,
+    to_warehouse_id,
+    *,
+    status=TransferStatus.COMPLETED.value,
+    created_at=None,
+    items=(),
+):
+    """Перемещение-кандидат; items — [(barcode, nomenclature_id, qty)]."""
+    doc = StockTransfer(
+        project_id=project_id,
+        from_warehouse_id=from_warehouse_id,
+        to_warehouse_id=to_warehouse_id,
+        number=f"TR-{_uid()[:6]}",
+        status=status,
+    )
+    if created_at is not None:
+        doc.created_at = created_at
+    await _add(db_session, doc)
+    if items:
+        db_session.add_all(
+            [
+                StockTransferItem(
+                    project_id=project_id,
+                    transfer_id=doc.id,
+                    nomenclature_id=nom_id,
+                    barcode=barcode,
+                    quantity=qty,
+                )
+                for barcode, nom_id, qty in items
+            ]
+        )
+        await db_session.commit()
+    return doc
+
+
+@pytest_asyncio.fixture
+async def source_warehouse(db_session, project):
+    """Склад-источник перемещения («апл» — ФФ без интеграции)."""
+    wh = Warehouse(project_id=project.id, name=f"апл-{_uid()}", warehouse_type="FULFILLMENT")
+    return await _add(db_session, wh)
+
+
+@pytest.mark.asyncio
+async def test_candidates_inbound_include_incoming_transfers(
+    db_session, project, warehouse, source_warehouse
+):
+    """Приход с НАШЕГО склада: приёмки нет, связывать надо с перемещением.
+
+    Провайдер приходует такой переезд обычной заявкой-приёмкой, а у нас это
+    `stock_transfers`. Пока перемещения не попадали в кандидаты, заявка ФФ
+    навсегда оставалась «без нашего документа».
+    """
+    bc = f"25{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    ff = await _add(
+        db_session,
+        _mirror(
+            project.id,
+            warehouse.id,
+            kind="inbound",
+            created=date(2026, 6, 8),
+            raw={"unloading_order_id": 1, "items": [{"barcode": bc, "count": 6}]},
+        ),
+    )
+
+    incoming = await _make_transfer(
+        db_session,
+        project.id,
+        source_warehouse.id,
+        warehouse.id,
+        created_at=datetime(2026, 6, 8, 9, 0),
+        items=[(bc, nom.id, 6)],
+    )
+    # Исходящее с этого склада приёмкой у провайдера обернуться не может.
+    await _make_transfer(
+        db_session, project.id, warehouse.id, source_warehouse.id, items=[(bc, nom.id, 6)]
+    )
+    # Черновик ещё не выехал — приходовать нечего.
+    await _make_transfer(
+        db_session,
+        project.id,
+        source_warehouse.id,
+        warehouse.id,
+        status=TransferStatus.DRAFT.value,
+        items=[(bc, nom.id, 6)],
+    )
+    # Уже связанное с другой ФФ-заявкой — исключается.
+    taken = await _make_transfer(
+        db_session, project.id, source_warehouse.id, warehouse.id, items=[(bc, nom.id, 6)]
+    )
+    db_session.add(_mirror(project.id, warehouse.id, kind="inbound", stock_transfer_id=taken.id))
+    await db_session.commit()
+
+    data = await fulfillment_service.get_link_candidates(db_session, project.id, warehouse.id, ff.id)
+
+    rows = {(c["doc_kind"], c["doc_id"]): c for c in data["candidates"]}
+    assert set(rows) == {("transfer", incoming.id)}
+    row = rows[("transfer", incoming.id)]
+    assert row["score"] == 100  # состав и дата сошлись — как у приёмки
+    assert row["total_qty"] == 6
+    assert row["dest_warehouse"] == f"← {source_warehouse.name}"
+
+
+@pytest.mark.asyncio
+async def test_link_transfer_to_inbound_request(db_session, project, warehouse, source_warehouse):
+    """Связь ставится, снимается и не перетирает соседние слоты."""
+    ff = await _add(db_session, _mirror(project.id, warehouse.id, kind="inbound"))
+    transfer = await _make_transfer(db_session, project.id, source_warehouse.id, warehouse.id)
+
+    row = await fulfillment_service.link_request(
+        db_session, project.id, ff.id, stock_transfer_id=transfer.id, warehouse_id=warehouse.id
+    )
+
+    assert row["stock_transfer_id"] == transfer.id
+    assert row["linked_number"] == transfer.number
+    assert row["inbound_receipt_id"] is None
+
+    row = await fulfillment_service.unlink_request(
+        db_session, project.id, ff.id, warehouse_id=warehouse.id
+    )
+    assert row["stock_transfer_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_link_transfer_rejects_wrong_direction_and_double_link(
+    db_session, project, warehouse, source_warehouse
+):
+    """Склад-приёмник обязан совпасть с заявкой, а перемещение — быть свободным."""
+    ff = await _add(db_session, _mirror(project.id, warehouse.id, kind="inbound"))
+    outgoing = await _make_transfer(db_session, project.id, warehouse.id, source_warehouse.id)
+    with pytest.raises(ValueError, match="другой склад"):
+        await fulfillment_service.link_request(
+            db_session, project.id, ff.id, stock_transfer_id=outgoing.id, warehouse_id=warehouse.id
+        )
+
+    transfer = await _make_transfer(db_session, project.id, source_warehouse.id, warehouse.id)
+    other_ff = await _add(
+        db_session,
+        _mirror(project.id, warehouse.id, kind="inbound", stock_transfer_id=transfer.id),
+    )
+    assert other_ff.id
+    with pytest.raises(ValueError, match="уже связано"):
+        await fulfillment_service.link_request(
+            db_session, project.id, ff.id, stock_transfer_id=transfer.id, warehouse_id=warehouse.id
+        )
+
+    # Сборку перемещением не закрыть — слоты не взаимозаменяемы.
+    asm_ff = await _add(db_session, _mirror(project.id, warehouse.id, kind="assembly"))
+    free = await _make_transfer(db_session, project.id, source_warehouse.id, warehouse.id)
+    with pytest.raises(ValueError, match="только к ФФ-заявке типа inbound"):
+        await fulfillment_service.link_request(
+            db_session, project.id, asm_ff.id, stock_transfer_id=free.id, warehouse_id=warehouse.id
+        )
 
 
 # ─── get_link_candidates: фолбэк по датам (состав недоступен) ────────────────

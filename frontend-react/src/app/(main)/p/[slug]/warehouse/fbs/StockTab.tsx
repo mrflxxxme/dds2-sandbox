@@ -45,6 +45,7 @@ import {
     buildStockColumns,
     matchesBoxFilter,
     parseOverrideInput,
+    PushBreakdown,
     stockAlertOf,
     stockRowClassName,
     type BoxState,
@@ -1173,6 +1174,8 @@ export default function StockTab({
                                   + 'на складах WB блокируются.')
                             : '. Сейчас отдаём все остатки, наличие на FBO не смотрим.'}
                     </div>
+
+                    <PushBreakdown breakdown={preview.breakdown} totalUnits={preview.total_units} />
 
                     {groupBy && (
                         <div style={{ marginBottom: 16 }}>

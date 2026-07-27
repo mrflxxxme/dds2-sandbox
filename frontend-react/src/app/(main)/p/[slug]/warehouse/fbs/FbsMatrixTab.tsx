@@ -13,7 +13,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
-import { formatNumber } from '@/lib/utils';
+import { formatNumber, pluralRu } from '@/lib/utils';
 import { exportToExcel } from '@/lib/utils';
 import WbThumb from '@/components/WbThumb';
 import { wbProductUrl } from '@/lib/wbMedia';
@@ -330,6 +330,47 @@ export default function FbsMatrixTab({ refreshTick }: { refreshTick: number }) {
         return [...filtered].sort((a, b) => compareRows(a, b, sortKey, dir));
     }, [data, search, gapFilter, warehouses, brand, subject, sortKey, sortAsc]);
 
+    /**
+     * Итоги — по ВИДИМЫМ строкам (`rows`, уже после поиска, срезов и фильтров
+     * бренда/предмета), а не по всей матрице: подводить черту под выборкой,
+     * которой на экране нет, — прямой способ увести человека не туда.
+     *
+     * Маржа складывается ВЗВЕШЕННО (Σприбыль / Σреализация), а не средним по
+     * строкам: среднее уравняло бы товар с реализацией 200 ₽ и товар с 260 000 ₽.
+     */
+    const totals = useMemo(() => {
+        const byWarehouse: Record<string, { wb: number; can: number; boxed: number }> = {};
+        for (const w of warehouses) {
+            byWarehouse[String(w.wb_warehouse_id)] = { wb: 0, can: 0, boxed: 0 };
+        }
+        let totalWb = 0, totalCan = 0, totalBoxed = 0, fbo = 0, revenue = 0, profit = 0;
+        for (const r of rows) {
+            for (const w of warehouses) {
+                const key = String(w.wb_warehouse_id);
+                const c = r.cells?.[key];
+                if (!c) continue;
+                byWarehouse[key].wb += Number(c.wb ?? 0);
+                byWarehouse[key].can += Number(c.can ?? 0);
+                byWarehouse[key].boxed += Number(c.boxed ?? 0);
+            }
+            totalWb += Number(r.total_wb ?? 0);
+            totalCan += Number(r.total_can ?? 0);
+            totalBoxed += Number(r.total_boxed ?? 0);
+            fbo += Number(r.fbo ?? 0);
+            revenue += Number(r.revenue ?? 0);
+            profit += Number(r.profit ?? 0);
+        }
+        return {
+            byWarehouse,
+            totalWb,
+            totalCan,
+            totalBoxed,
+            fbo,
+            revenue,
+            marginPct: revenue > 0 ? (profit / revenue) * 100 : null,
+        };
+    }, [rows, warehouses]);
+
     /** Сколько строк под каждым срезом — цифра на чипе, чтобы не кликать вслепую. */
     const gapCounts = useMemo(() => {
         const acc: Record<GapFilter, number> = { gap: 0, nosale: 0, boxes: 0 };
@@ -520,6 +561,68 @@ export default function FbsMatrixTab({ refreshTick }: { refreshTick: number }) {
                                 Маржа{sortMark('margin')}
                             </th>
                         </tr>
+                        {/* Итоги под текущими фильтрами — второй строкой шапки:
+                            подводить черту имеет смысл там, где на неё смотрят,
+                            а не в конце полутора тысяч строк. Цифры обязаны
+                            меняться вместе с выдачей, иначе строка врёт про то,
+                            что видно на экране. */}
+                        {rows.length > 0 && (
+                            <tr className="sc-matrix-totals">
+                                <th className="sc-matrix-th-fixed">
+                                    Итого · {formatNumber(rows.length, 0)}{' '}
+                                    {pluralRu(rows.length, ['товар', 'товара', 'товаров'])}
+                                </th>
+                                {warehouses.map(w => {
+                                    const t = totals.byWarehouse[String(w.wb_warehouse_id)];
+                                    return (
+                                        <th key={w.wb_warehouse_id} className="sc-matrix-th-num">
+                                            <span title={`Стоит на FBS: ${formatNumber(t?.wb ?? 0, 0)}\n`
+                                                + `Можем сейчас (россыпь): ${formatNumber(t?.can ?? 0, 0)}`
+                                                + ((t?.boxed ?? 0) > 0
+                                                    ? `\nЕщё ${formatNumber(t.boxed, 0)} шт коробами`
+                                                    : '')}
+                                            >
+                                                <strong>{formatNumber(t?.wb ?? 0, 0)}</strong>
+                                                <span style={{ color: 'var(--color-text-dim)' }}> / </span>
+                                                <span style={{ color: 'var(--color-text-muted)' }}>
+                                                    {formatNumber(t?.can ?? 0, 0)}
+                                                </span>
+                                                {(t?.boxed ?? 0) > 0 && (
+                                                    <span className="sc-matrix-boxed">
+                                                        {' '}+{formatNumber(t.boxed, 0)} 📦
+                                                    </span>
+                                                )}
+                                            </span>
+                                        </th>
+                                    );
+                                })}
+                                <th className="sc-matrix-th-num">
+                                    <strong>{formatNumber(totals.totalWb, 0)}</strong>
+                                </th>
+                                <th className="sc-matrix-th-num">
+                                    <span style={{ color: 'var(--color-text-muted)' }}>
+                                        {formatNumber(totals.totalCan, 0)}
+                                    </span>
+                                    {totals.totalBoxed > 0 && (
+                                        <span
+                                            className="sc-matrix-boxed"
+                                            title={`+${formatNumber(totals.totalBoxed, 0)} шт лежит коробами — `
+                                                + 'станут доступны после поштучной приёмки у ФФ'}
+                                        >
+                                            {' '}+{formatNumber(totals.totalBoxed, 0)} 📦
+                                        </span>
+                                    )}
+                                </th>
+                                <th className="sc-matrix-th-num">{formatNumber(totals.fbo, 0)}</th>
+                                <th className="sc-matrix-th-num">{formatNumber(totals.revenue, 0)}</th>
+                                <th
+                                    className="sc-matrix-th-num"
+                                    title="Взвешенно: вся прибыль выборки делённая на всю её реализацию"
+                                >
+                                    <Margin pct={totals.marginPct} />
+                                </th>
+                            </tr>
+                        )}
                     </thead>
                     <tbody>
                         {rows.map((r: FbsMatrixRow) => (

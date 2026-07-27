@@ -83,6 +83,22 @@ FBS_WB_CANCELLED_STATUSES: tuple[str, ...] = (
     "declined_by_client",  # отказ покупателя до получения
 )
 
+#: `wbStatus`, на которых путь заказа ЗАКОНЧИЛСЯ доставкой: товар у покупателя
+#: (или списан в брак). Всё остальное у задания в статусе `complete` — «ещё
+#: едет»: поставка передана в WB, но заказ до покупателя не дошёл
+#: (`waiting`/`sorted`/`ready_for_pickup`/…). Отсюда счётчик «В доставке»:
+#: сам `supplierStatus` навсегда остаётся `complete` и на вопрос «что ещё в
+#: пути» не отвечает — эту ось знает только `wbStatus`.
+FBS_WB_DELIVERED_STATUSES: tuple[str, ...] = (
+    "sold",  # получено покупателем
+    "defect",  # брак — до покупателя не доедет, но и в пути больше не числится
+)
+
+#: Псевдо-статус фильтра выдачи: «ещё в доставке» = `complete` минус доставленное.
+#: Значением `supplierStatus` не является и в зеркале не хранится — только фильтр
+#: и счётчик (см. `orders_service.in_delivery_condition`).
+FBS_IN_DELIVERY_STATUS = "in_delivery"
+
 
 class FbsSupplyStatus(str, enum.Enum):
     """Состояние поставки в терминах кабинета WB.

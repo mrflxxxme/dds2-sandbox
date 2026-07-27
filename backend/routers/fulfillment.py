@@ -496,7 +496,7 @@ async def link_request(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Привязать ФФ-заявку к нашему документу (заявка на сборку / приёмка)."""
+    """Привязать ФФ-заявку к нашему документу (сборка / приёмка / перемещение)."""
     try:
         row = await fulfillment_service.link_request(
             db,
@@ -504,6 +504,7 @@ async def link_request(
             ff_request_id,
             assembly_request_id=payload.assembly_request_id,
             inbound_receipt_id=payload.inbound_receipt_id,
+            stock_transfer_id=payload.stock_transfer_id,
             warehouse_id=warehouse_id,
         )
     except ValueError as e:

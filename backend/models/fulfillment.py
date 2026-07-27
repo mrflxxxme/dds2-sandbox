@@ -161,15 +161,24 @@ class FulfillmentRequest(Base):
     raw: Mapped[dict | None] = mapped_column(JSONB)
     synced_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
-    # Связь с нашими документами (ручная в фазе 1, автоматическая при push в фазе 2)
+    # Связь с нашими документами (ручная в фазе 1, автоматическая при push в фазе 2).
+    # Заполнен максимум ОДИН из трёх — какой именно, определяет kind заявки.
     assembly_request_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("assembly_requests.id"))
     inbound_receipt_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("inbound_receipts.id"))
+    # Приёмка ВНУТРЕННЕГО ПЕРЕМЕЩЕНИЯ: товар пришёл не от поставщика, а с нашего
+    # же склада (`stock_transfers`, «Входящее ← апл»), и приходует его ФФ своей
+    # заявкой. Приёмки (`inbound_receipts`) для такого переезда нет — до этой
+    # колонки связать было нечем, и заявка ФФ навсегда оставалась «без нашего
+    # документа», а расхождение остатков на стыке TR ↔ приёмка провайдера
+    # приходилось разбирать руками (разбор wh2/TR-20 15.07, TR-29 24.07).
+    stock_transfer_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("stock_transfers.id"))
 
     __table_args__ = (
         UniqueConstraint("project_id", "provider", "external_id", name="uq_ff_request_external"),
         Index("ix_fulfillment_requests_project_wh", "project_id", "warehouse_id"),
         Index("ix_fulfillment_requests_assembly_request_id", "assembly_request_id"),
         Index("ix_fulfillment_requests_inbound_receipt_id", "inbound_receipt_id"),
+        Index("ix_fulfillment_requests_stock_transfer_id", "stock_transfer_id"),
     )
 
 

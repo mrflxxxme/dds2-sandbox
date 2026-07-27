@@ -50,8 +50,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.cache import cached, invalidate_cache
 from backend.integrations.wb_fbs_api import WbFbsApiError, WbFbsClient
 from backend.models import (
+    FBS_IN_DELIVERY_STATUS,
     FBS_TERMINAL_STATUSES,
     FBS_WB_CANCELLED_STATUSES,
+    FBS_WB_DELIVERED_STATUSES,
     FbsSupplierStatus,
     Nomenclature,
     WbFbsOrder,
@@ -131,6 +133,29 @@ def effective_status_expr() -> Any:
 def alive_condition() -> Any:
     """«Задание ещё живое»: не отменено ни продавцом, ни на стороне WB."""
     return effective_status_expr().notin_(FBS_TERMINAL_STATUSES)
+
+
+def in_delivery_condition() -> Any:
+    """«Задание ЕЩЁ едет»: поставка передана в WB, покупатель товар не получил.
+
+    Одного `supplierStatus` тут мало: он застывает на `complete` в момент
+    передачи поставки и остаётся таким навсегда — и через день, и через месяц
+    после вручения. Ответ «что сейчас в пути» знает только `wbStatus`, поэтому
+    из `complete` вычитаем доставленное (`FBS_WB_DELIVERED_STATUSES`).
+
+    Отменённые сюда не попадают по построению: `effective_status_expr()` уже
+    схлопнул WB-отмену в `cancel`, даже если продавец успел передать поставку.
+
+    Пустой `wb_status` считаем «в пути»: так выглядят задания, записанные до
+    появления колонки, и их честнее показать в очереди, чем молча потерять.
+    """
+    return and_(
+        effective_status_expr() == FbsSupplierStatus.COMPLETE.value,
+        or_(
+            WbFbsOrder.wb_status.is_(None),
+            WbFbsOrder.wb_status.notin_(FBS_WB_DELIVERED_STATUSES),
+        ),
+    )
 
 
 def revenue_rub_expr() -> Any:
@@ -986,6 +1011,14 @@ async def list_orders(
     `status_counts` считается по ТЕМ ЖЕ фильтрам, но без фильтра статуса —
     иначе вкладка показывала бы только собственный счётчик.
 
+    `in_delivery_count` — подмножество `complete`, которое ЕЩЁ едет
+    (см. `in_delivery_condition`). Отдельным полем, а НЕ шестым ключом
+    `status_counts`: сумма счётчиков — это `total` вкладки «Все», и синтетика
+    внутри неё удвоила бы каждое переданное задание.
+
+    `status=in_delivery` — тот же псевдо-статус в фильтре: цифра на карточке
+    склада и выдача по клику обязаны совпадать до штуки.
+
     Выдача скоуплена по контуру: боевой список не должен показывать задания
     песочницы (и наоборот) — цифры вкладок обязаны совпадать с тем, что
     участвует в остатке и списании.
@@ -1010,12 +1043,19 @@ async def list_orders(
     # одним и тем же — «wb_status must appear in the GROUP BY clause».
     eff_status = effective_status_expr().label("eff")
     counts_result = await db.execute(
-        select(eff_status, func.count()).where(*base).group_by(eff_status)
+        select(eff_status, func.count(), func.count().filter(in_delivery_condition()))
+        .where(*base)
+        .group_by(eff_status)
     )
-    status_counts = {row[0]: int(row[1]) for row in counts_result.all()}
+    counts_rows = counts_result.all()
+    status_counts = {row[0]: int(row[1]) for row in counts_rows}
+    in_delivery_count = sum(int(row[2] or 0) for row in counts_rows)
 
     conditions = list(base)
-    if status:
+    if status == FBS_IN_DELIVERY_STATUS:
+        conditions.append(in_delivery_condition())
+        total = in_delivery_count
+    elif status:
         conditions.append(effective_status_expr() == status)
         total = status_counts.get(status, 0)
     else:
@@ -1029,7 +1069,12 @@ async def list_orders(
         .offset(offset)
     )
     items = [_order_to_dict(order) for order in items_result.scalars().all()]
-    return {"items": items, "total": total, "status_counts": status_counts}
+    return {
+        "items": items,
+        "total": total,
+        "status_counts": status_counts,
+        "in_delivery_count": in_delivery_count,
+    }
 
 
 # ─── Стикеры ────────────────────────────────────────────────────────────────

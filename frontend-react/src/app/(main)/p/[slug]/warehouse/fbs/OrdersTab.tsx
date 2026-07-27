@@ -51,11 +51,18 @@ const PAGE_SIZE = 100;
  */
 const STICKER_WARN_LIMIT = 500;
 
-const STATUS_TABS: { key: string; label: string }[] = [
+/**
+ * Вкладки выдачи. `in_delivery` — не статус задания, а его подмножество:
+ * `complete` говорит лишь «поставку передали» и таким остаётся навсегда, а
+ * «едет ли ещё» знает `wbStatus`. Счётчик к этой вкладке приходит отдельным
+ * полем `in_delivery_count`, не ключом `status_counts`.
+ */
+const STATUS_TABS: { key: string; label: string; title?: string }[] = [
     { key: '', label: 'Все' },
     { key: 'new', label: SUPPLIER_STATUS_LABEL.new },
     { key: 'confirm', label: SUPPLIER_STATUS_LABEL.confirm },
-    { key: 'complete', label: SUPPLIER_STATUS_LABEL.complete },
+    { key: 'complete', label: 'Переданы в WB', title: 'Все задания переданных поставок — вместе с доставленными' },
+    { key: 'in_delivery', label: 'Ещё в доставке', title: 'Переданы в WB и ещё не получены покупателем' },
     { key: 'cancel', label: SUPPLIER_STATUS_LABEL.cancel },
 ];
 
@@ -540,16 +547,20 @@ export default function OrdersTab({
 
             {/* Статусные вкладки */}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-                {STATUS_TABS.map(t => (
-                    <button
-                        key={t.key || 'all'}
-                        className={`btn btn-sm ${status === t.key ? 'btn-primary' : 'btn-secondary'}`}
-                        onClick={() => setStatus(t.key)}
-                    >
-                        {t.label}
-                        {t.key && counts[t.key] != null && ` · ${formatNumber(counts[t.key], 0)}`}
-                    </button>
-                ))}
+                {STATUS_TABS.map(t => {
+                    const count = t.key === 'in_delivery' ? data?.in_delivery_count : counts[t.key];
+                    return (
+                        <button
+                            key={t.key || 'all'}
+                            className={`btn btn-sm ${status === t.key ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => setStatus(t.key)}
+                            title={t.title}
+                        >
+                            {t.label}
+                            {t.key && count != null && ` · ${formatNumber(count, 0)}`}
+                        </button>
+                    );
+                })}
             </div>
 
             {/* Фильтры */}
@@ -674,7 +685,10 @@ export default function OrdersTab({
                         <>
                             <div>
                                 📭 {status
-                                    ? `Заданий в статусе «${SUPPLIER_STATUS_LABEL[status] ?? status}» нет.`
+                                    // Ярлык берём из вкладок: `in_delivery` — псевдо-статус,
+                                    // в словаре статусов задания его нет.
+                                    ? `Заданий в статусе «${STATUS_TABS.find(t => t.key === status)?.label
+                                        ?? SUPPLIER_STATUS_LABEL[status] ?? status}» нет.`
                                     : 'Сборочных заданий нет.'}
                             </div>
                             <div style={{ marginTop: 8, fontSize: 13 }}>

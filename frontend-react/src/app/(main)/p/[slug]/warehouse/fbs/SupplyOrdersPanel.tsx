@@ -9,6 +9,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
+import WbThumb from '@/components/WbThumb';
+import { wbProductUrl } from '@/lib/wbMedia';
 import type { FbsOrder, FbsStickerType, FbsSupply } from '@/types/api';
 import {
     SupplierStatusBadge,
@@ -195,9 +197,28 @@ export default function SupplyOrdersPanel({
                                         </div>
                                     </td>
                                     <td>
-                                        <div style={{ fontWeight: 500 }}>{o.article || o.barcode || '—'}</div>
-                                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                                            {o.subject ? `${o.subject} · ` : ''}{o.nm_id ? `nm ${o.nm_id}` : ''}
+                                        {/* Фото — самый быстрый способ понять, ТО ЛИ собирают:
+                                            артикулы вида divan_lightbrown / divan_darkblue
+                                            различаются одним словом, а лежат в разных коробах. */}
+                                        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                                            {o.nm_id ? (
+                                                <a
+                                                    href={wbProductUrl(o.nm_id)}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    title="Открыть карточку товара на Wildberries"
+                                                >
+                                                    <WbThumb nmId={o.nm_id} size={36} />
+                                                </a>
+                                            ) : (
+                                                <WbThumb nmId={null} size={36} />
+                                            )}
+                                            <div style={{ minWidth: 0 }}>
+                                                <div style={{ fontWeight: 500 }}>{o.article || o.barcode || '—'}</div>
+                                                <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                                    {o.subject ? `${o.subject} · ` : ''}{o.nm_id ? `nm ${o.nm_id}` : ''}
+                                                </div>
+                                            </div>
                                         </div>
                                     </td>
                                     <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>

@@ -70,6 +70,7 @@ from backend.models.assembly import (
     AssemblyStatus,
     AssemblyStatusHistory,
 )
+from backend.models.warehouse import StockTransfer, StockTransferItem, TransferStatus
 from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.assembly import AssemblyItemCreate, AssemblyRequestCreate
 from backend.schemas.fulfillment import FfBulkCreateRequestPayload, FfCreateFormResponse, FfCreateRequestPayload
@@ -3193,13 +3194,16 @@ def _request_to_dict(
     inbound_map: dict | None = None,
     units_map: dict | None = None,
     mismatch_map: dict | None = None,
+    transfer_map: dict | None = None,
 ) -> dict:
     """FulfillmentRequest → FfRequestRow-shaped dict с обогащением связи.
 
     units_map[req.id] — кол-во в штуках россыпи (пересчёт коробов, migfull);
     None — провайдер без коробов / состав не разрезолвлен (колонка «Кол-во (шт)»).
     mismatch_map[("assembly"|"inbound", doc_id)] — расхождение наполнения связанного
-    документа с заявкой(ами) ФФ (см. compute_doc_ff_mismatch).
+    документа с заявкой(ами) ФФ (см. compute_doc_ff_mismatch). Для перемещений
+    расхождение не считается — `compute_doc_ff_mismatch` знает только два типа
+    документов, и `linked_mismatch` у такой связи остаётся `None` («не считали»).
     """
     linked_number = linked_status = None
     linked_mismatch: bool | None = None
@@ -3209,6 +3213,8 @@ def _request_to_dict(
     elif req.inbound_receipt_id and inbound_map and req.inbound_receipt_id in inbound_map:
         linked_number, linked_status = inbound_map[req.inbound_receipt_id]
         linked_mismatch = (mismatch_map or {}).get(("inbound", req.inbound_receipt_id))
+    elif req.stock_transfer_id and transfer_map and req.stock_transfer_id in transfer_map:
+        linked_number, linked_status = transfer_map[req.stock_transfer_id]
     return {
         "id": req.id,
         "external_id": req.external_id,
@@ -3239,10 +3245,25 @@ def _request_to_dict(
         "synced_at": req.synced_at,
         "assembly_request_id": req.assembly_request_id,
         "inbound_receipt_id": req.inbound_receipt_id,
+        "stock_transfer_id": req.stock_transfer_id,
         "linked_number": linked_number,
         "linked_status": linked_status,
         "linked_mismatch": linked_mismatch,
     }
+
+
+async def _transfer_map(db: AsyncSession, project_id: int, ids: set[int]) -> dict[int, tuple]:
+    """{transfer_id: (номер, статус)} для связанных перемещений — одним запросом."""
+    if not ids:
+        return {}
+    result = await db.execute(
+        select(StockTransfer.id, StockTransfer.number, StockTransfer.status).where(
+            StockTransfer.project_id == project_id,
+            StockTransfer.id.in_(ids),
+            StockTransfer.is_deleted == False,  # noqa: E712 — SQLAlchemy expression
+        )
+    )
+    return {row[0]: (row[1], row[2]) for row in result.all()}
 
 
 async def list_requests(
@@ -3296,10 +3317,17 @@ async def list_requests(
         )
         inbound_map = {row[0]: (row[1], row[2]) for row in result.all()}
 
+    transfer_map = await _transfer_map(
+        db, project_id, {r.stock_transfer_id for r in requests if r.stock_transfer_id}
+    )
+
     units_map = await _migfull_units_by_request(db, project_id, warehouse_id, requests)
     mismatch_map = await compute_doc_ff_mismatch(db, project_id, assembly_ids, inbound_ids)
 
-    return [_request_to_dict(r, assembly_map, inbound_map, units_map, mismatch_map) for r in requests]
+    return [
+        _request_to_dict(r, assembly_map, inbound_map, units_map, mismatch_map, transfer_map)
+        for r in requests
+    ]
 
 
 async def _migfull_units_by_request(
@@ -3428,6 +3456,7 @@ async def _events_request_info(db: AsyncSession, project_id: int, req_ids: set[i
                 FulfillmentRequest.total_qty,
                 FulfillmentRequest.assembly_request_id,
                 FulfillmentRequest.inbound_receipt_id,
+                FulfillmentRequest.stock_transfer_id,
             ).where(
                 FulfillmentRequest.project_id == project_id,
                 FulfillmentRequest.id.in_(req_ids),
@@ -3457,12 +3486,20 @@ async def _events_request_info(db: AsyncSession, project_id: int, req_ids: set[i
             )
         )
         inbound_map = {row[0]: row[1] for row in ires.all()}
+    transfer_numbers = {
+        tid: number
+        for tid, (number, _status) in (
+            await _transfer_map(db, project_id, {r.stock_transfer_id for r in rows if r.stock_transfer_id})
+        ).items()
+    }
 
     info: dict[int, dict] = {}
     for r in rows:
         linked = assembly_map.get(r.assembly_request_id) if r.assembly_request_id else None
         if linked is None and r.inbound_receipt_id:
             linked = inbound_map.get(r.inbound_receipt_id)
+        if linked is None and r.stock_transfer_id:
+            linked = transfer_numbers.get(r.stock_transfer_id)
         info[r.id] = {
             "dest_warehouse": r.dest_warehouse,
             "total_qty": r.total_qty,
@@ -3808,14 +3845,20 @@ async def get_overview(
             FulfillmentRequest.local_archived == False,
         )
         if only_unlinked:
+            # «Без нашего документа» — значит НИ ОДНОГО слота связи. Приёмка,
+            # привязанная к перемещению, документ имеет и в этом блоке не строка.
             if kind == FfRequestKind.INBOUND.value:
-                q = q.where(FulfillmentRequest.inbound_receipt_id.is_(None))
+                q = q.where(
+                    FulfillmentRequest.inbound_receipt_id.is_(None),
+                    FulfillmentRequest.stock_transfer_id.is_(None),
+                )
             elif kind == FfRequestKind.ASSEMBLY.value:
                 q = q.where(FulfillmentRequest.assembly_request_id.is_(None))
             else:
                 q = q.where(
                     FulfillmentRequest.assembly_request_id.is_(None),
                     FulfillmentRequest.inbound_receipt_id.is_(None),
+                    FulfillmentRequest.stock_transfer_id.is_(None),
                 )
         q = q.order_by(
             FulfillmentRequest.external_created_at.desc().nullslast(),
@@ -3849,13 +3892,19 @@ async def get_overview(
         )
         inbound_map = {row[0]: (row[1], row[2]) for row in result.all()}
 
+    transfer_map = await _transfer_map(
+        db, project_id, {r.stock_transfer_id for r in requests if r.stock_transfer_id}
+    )
+
     suggestions_by_request = await _load_match_suggestions(db, project_id, requests)
     mismatch_map = await compute_doc_ff_mismatch(db, project_id, assembly_ids, inbound_ids)
 
     wh_name_by_id = {row.warehouse_id: row.name for row in integrations}
     out_requests = []
     for r in requests:
-        row_dict = _request_to_dict(r, assembly_map, inbound_map, mismatch_map=mismatch_map)
+        row_dict = _request_to_dict(
+            r, assembly_map, inbound_map, mismatch_map=mismatch_map, transfer_map=transfer_map
+        )
         row_dict.update(
             {
                 "warehouse_id": r.warehouse_id,
@@ -4223,13 +4272,23 @@ async def _load_linked_doc_items(
     req: FulfillmentRequest,
     has_assembly: bool,
     has_inbound: bool,
+    has_transfer: bool = False,
 ) -> dict[str, int] | None:
     """Состав связанного нашего документа {barcode: qty}. None — связи нет.
 
-    has_assembly/has_inbound — связанный документ существует и не удалён
-    (проверено выборкой assembly_map/inbound_map); сами items без is_deleted.
+    has_assembly/has_inbound/has_transfer — связанный документ существует и не
+    удалён (проверено выборкой соответствующей карты); сами items без is_deleted.
     """
-    if req.assembly_request_id and has_assembly:
+    if req.stock_transfer_id and has_transfer:
+        result = await db.execute(
+            select(StockTransferItem.barcode, func.sum(StockTransferItem.quantity))
+            .where(
+                StockTransferItem.project_id == project_id,
+                StockTransferItem.transfer_id == req.stock_transfer_id,
+            )
+            .group_by(StockTransferItem.barcode)
+        )
+    elif req.assembly_request_id and has_assembly:
         result = await db.execute(
             select(AssemblyRequestItem.barcode, func.sum(AssemblyRequestItem.quantity))
             .where(
@@ -4824,9 +4883,14 @@ async def get_request_detail(
             )
         )
         inbound_map = {row[0]: (row[1], row[2]) for row in result.all()}
+    transfer_map = await _transfer_map(
+        db, project_id, {req.stock_transfer_id} if req.stock_transfer_id else set()
+    )
 
     # Состав связанного нашего документа — для сверки (None, если связи нет)
-    our_by_barcode = await _load_linked_doc_items(db, project_id, req, bool(assembly_map), bool(inbound_map))
+    our_by_barcode = await _load_linked_doc_items(
+        db, project_id, req, bool(assembly_map), bool(inbound_map), bool(transfer_map)
+    )
 
     if req.provider == "wmscelicom":
         wms_products, wms_fields, creator = _wms_detail_parts(req)
@@ -4854,7 +4918,7 @@ async def get_request_detail(
                     "our_qty": our_by_barcode.get(barcode or "", 0) if our_by_barcode is not None else None,
                 }
             )
-        row = _request_to_dict(req, assembly_map, inbound_map)
+        row = _request_to_dict(req, assembly_map, inbound_map, transfer_map=transfer_map)
         row.update(
             {
                 "comment": None,
@@ -4958,7 +5022,7 @@ async def get_request_detail(
                     "our_qty": our_by_barcode.get(barcode or "", 0) if our_by_barcode is not None else None,
                 }
             )
-        row = _request_to_dict(req, assembly_map, inbound_map)
+        row = _request_to_dict(req, assembly_map, inbound_map, transfer_map=transfer_map)
         row.update(
             {
                 "comment": raw.get("notes") or raw.get("client_comment") or None,
@@ -5045,7 +5109,7 @@ async def get_request_detail(
         for log in (detail.get("stageLogs") or [])
     ]
 
-    row = _request_to_dict(req, assembly_map, inbound_map)
+    row = _request_to_dict(req, assembly_map, inbound_map, transfer_map=transfer_map)
     row.update(
         {
             "comment": detail.get("comment"),
@@ -5071,15 +5135,24 @@ async def link_request(
     assembly_request_id: int | None = None,
     inbound_receipt_id: int | None = None,
     warehouse_id: int | None = None,
+    stock_transfer_id: int | None = None,
 ) -> dict | None:
-    """Привязать ФФ-заявку к нашему документу (ровно один из двух id).
+    """Привязать ФФ-заявку к нашему документу (ровно один из трёх id).
+
+    Приёмка ФФ (`kind=inbound`) бывает двух происхождений: товар пришёл от
+    поставщика — это наша `InboundReceipt`; товар переехал с нашего же склада —
+    это `StockTransfer` («Входящее ← апл»), и приёмки для него не существует.
+    Поэтому у inbound допустимы оба слота, но по-прежнему ровно один за раз.
 
     Returns None если ФФ-заявка не найдена; ValueError при нарушении правил
-    (оба/ни одного id, чужой kind, чужой склад, несуществующий документ,
+    (не ровно один id, чужой kind, чужой склад, несуществующий документ,
     двойная привязка). warehouse_id (из path) дополнительно скоупит ФФ-заявку.
     """
-    if (assembly_request_id is None) == (inbound_receipt_id is None):
-        raise ValueError("Укажите ровно один из assembly_request_id / inbound_receipt_id")
+    given = [assembly_request_id, inbound_receipt_id, stock_transfer_id]
+    if sum(x is not None for x in given) != 1:
+        raise ValueError(
+            "Укажите ровно один из assembly_request_id / inbound_receipt_id / stock_transfer_id"
+        )
 
     q = select(FulfillmentRequest).where(
         FulfillmentRequest.id == ff_request_id,
@@ -5094,11 +5167,45 @@ async def link_request(
 
     assembly_map: dict[int, tuple] = {}
     inbound_map: dict[int, tuple] = {}
+    transfer_map: dict[int, tuple] = {}
     marked_ready = False
     accept_inbound = False
     ready_notify: dict[str, object] | None = None
 
-    if assembly_request_id is not None:
+    if stock_transfer_id is not None:
+        if req.kind != FfRequestKind.INBOUND.value:
+            raise ValueError("stock_transfer_id можно привязать только к ФФ-заявке типа inbound")
+        tr_result = await db.execute(
+            select(StockTransfer).where(
+                StockTransfer.id == stock_transfer_id,
+                StockTransfer.project_id == project_id,
+                StockTransfer.is_deleted == False,  # noqa: E712 — SQLAlchemy expression
+            )
+        )
+        tr_doc = tr_result.scalar_one_or_none()
+        if not tr_doc:
+            raise ValueError("Перемещение не найдено в проекте")
+        # Склад заявки ФФ — тот, КУДА приехало. Исходящее перемещение с этого
+        # склада приёмкой у провайдера обернуться не может.
+        if tr_doc.to_warehouse_id != req.warehouse_id:
+            raise ValueError("Перемещение приходует другой склад")
+        conflict = await db.execute(
+            select(FulfillmentRequest.id)
+            .where(
+                FulfillmentRequest.project_id == project_id,
+                FulfillmentRequest.stock_transfer_id == stock_transfer_id,
+                FulfillmentRequest.id != ff_request_id,
+            )
+            .limit(1)
+        )
+        if conflict.scalar_one_or_none() is not None:
+            raise ValueError("Перемещение уже связано с другой ФФ-заявкой")
+        req.stock_transfer_id = stock_transfer_id
+        # Приёмку перемещения (`complete_transfer`) НЕ автоматизируем, в отличие
+        # от авто-ACCEPT приёмки ниже: перемещение постит сток на ОБА склада, и
+        # его проводит человек, сверив факт. Связь — только факт привязки.
+        transfer_map = {tr_doc.id: (tr_doc.number, tr_doc.status)}
+    elif assembly_request_id is not None:
         if req.kind != FfRequestKind.ASSEMBLY.value:
             raise ValueError("assembly_request_id можно привязать только к ФФ-заявке типа assembly")
         asm_result = await db.execute(
@@ -5223,7 +5330,7 @@ async def link_request(
             inbound_map[inbound_receipt_id] = (number, InboundStatus.ACCEPTED.value)
         except Exception as e:  # — best-effort, связь уже сохранена
             logger.warning("FF link auto-accept: приёмка %s пропущена (%s)", inbound_receipt_id, e)
-    return _request_to_dict(req, assembly_map, inbound_map)
+    return _request_to_dict(req, assembly_map, inbound_map, transfer_map=transfer_map)
 
 
 async def unlink_request(
@@ -5232,7 +5339,7 @@ async def unlink_request(
     ff_request_id: int,
     warehouse_id: int | None = None,
 ) -> dict | None:
-    """Снять обе связи с ФФ-заявки. None если не найдена."""
+    """Снять любую связь с ФФ-заявки (сборка / приёмка / перемещение). None если не найдена."""
     q = select(FulfillmentRequest).where(
         FulfillmentRequest.id == ff_request_id,
         FulfillmentRequest.project_id == project_id,
@@ -5245,6 +5352,7 @@ async def unlink_request(
         return None
     req.assembly_request_id = None
     req.inbound_receipt_id = None
+    req.stock_transfer_id = None
     await db.commit()
     await invalidate_cache("reports:assembly_link_anomalies")
     return _request_to_dict(req)
@@ -5579,6 +5687,70 @@ async def _inbound_candidates(
     return docs, items_by_doc
 
 
+async def _warehouse_names(db: AsyncSession, project_id: int, ids: set[int]) -> dict[int, str]:
+    """{warehouse_id: имя} — для подписей, где id сам по себе ничего не говорит."""
+    if not ids:
+        return {}
+    result = await db.execute(
+        select(Warehouse.id, Warehouse.name).where(
+            Warehouse.project_id == project_id,
+            Warehouse.id.in_(ids),
+        )
+    )
+    return {row[0]: row[1] for row in result.all()}
+
+
+async def _transfer_candidates(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    ff_request_id: int,
+) -> tuple[list[StockTransfer], dict[int, dict[str, int]]]:
+    """Входящие перемещения склада, не связанные с ДРУГИМИ ФФ-заявками, + позиции.
+
+    Только ВХОДЯЩИЕ (`to_warehouse_id`) и только отправленные: черновик ещё не
+    выехал, физически приходовать провайдеру нечего — предлагать его в
+    кандидаты значит звать связать заявку с несуществующим переездом.
+    """
+    linked_subq = select(FulfillmentRequest.stock_transfer_id).where(
+        FulfillmentRequest.project_id == project_id,
+        FulfillmentRequest.stock_transfer_id.is_not(None),
+        FulfillmentRequest.id != ff_request_id,
+    )
+    result = await db.execute(
+        select(StockTransfer)
+        .where(
+            StockTransfer.project_id == project_id,
+            StockTransfer.to_warehouse_id == warehouse_id,
+            StockTransfer.is_deleted == False,  # noqa: E712 — SQLAlchemy expression
+            StockTransfer.status.in_(
+                (TransferStatus.IN_TRANSIT.value, TransferStatus.COMPLETED.value)
+            ),
+            StockTransfer.id.not_in(linked_subq),
+        )
+        .order_by(StockTransfer.created_at.desc(), StockTransfer.id.desc())
+        .limit(_LINK_CANDIDATES_LIMIT)
+    )
+    docs = list(result.scalars().all())
+    items_by_doc: dict[int, dict[str, int]] = {}
+    if docs:
+        items_result = await db.execute(
+            select(
+                StockTransferItem.transfer_id,
+                StockTransferItem.barcode,
+                func.sum(StockTransferItem.quantity),
+            )
+            .where(
+                StockTransferItem.project_id == project_id,
+                StockTransferItem.transfer_id.in_([d.id for d in docs]),
+            )
+            .group_by(StockTransferItem.transfer_id, StockTransferItem.barcode)
+        )
+        for doc_id, barcode, qty in items_result.all():
+            items_by_doc.setdefault(doc_id, {})[barcode] = int(qty or 0)
+    return docs, items_by_doc
+
+
 async def get_link_candidates(
     db: AsyncSession,
     project_id: int,
@@ -5587,10 +5759,16 @@ async def get_link_candidates(
 ) -> dict | None:
     """Кандидаты для связывания ФФ-заявки (FfLinkCandidatesResponse shape).
 
-    kind=assembly → наши заявки на сборку склада, kind=inbound → приёмки;
-    уже связанные с другими ФФ-заявками — исключаются. Скоринг: при доступном
-    составе — пересечение ШК (см. _score_by_composition), иначе фолбэк по
-    датам. None — ФФ-заявка не найдена; ValueError — kind=other.
+    kind=assembly → наши заявки на сборку склада; kind=inbound → приёмки И
+    входящие перемещения (товар мог приехать не от поставщика, а с нашего же
+    склада — приёмки для такого переезда не существует). Уже связанные с
+    другими ФФ-заявками — исключаются. Скоринг: при доступном составе —
+    пересечение ШК (см. _score_by_composition), иначе фолбэк по датам.
+    None — ФФ-заявка не найдена; ValueError — kind=other.
+
+    🔴 `doc_id` УНИКАЛЕН ТОЛЬКО ВНУТРИ СВОЕГО ТИПА: приёмка №7 и перемещение №7
+    существуют одновременно. Тип документа несёт `doc_kind`, и связывать/
+    ключевать строки можно только парой (doc_kind, doc_id).
     """
     req = await _get_request(db, project_id, warehouse_id, ff_request_id)
     if not req:
@@ -5611,16 +5789,26 @@ async def get_link_candidates(
 
     docs: list[AssemblyRequest] | list[InboundReceipt]
     linked_by_doc: dict[int, int] = {}
+    transfers: list[StockTransfer] = []
+    transfer_items: dict[int, dict[str, int]] = {}
     if kind == FfRequestKind.ASSEMBLY.value:
         docs, items_by_doc, linked_by_doc = await _assembly_candidates(
             db, project_id, warehouse_id, ff_request_id, provider=req.provider
         )
     else:
         docs, items_by_doc = await _inbound_candidates(db, project_id, warehouse_id, ff_request_id)
+        transfers, transfer_items = await _transfer_candidates(
+            db, project_id, warehouse_id, ff_request_id
+        )
+
+    # Имена складов-источников перемещений — одним запросом (в строке кандидата
+    # «TR-21» без «откуда» неразличимы между собой).
+    source_names = await _warehouse_names(db, project_id, {t.from_warehouse_id for t in transfers})
 
     candidates = []
-    for doc in docs:
-        cand_items = items_by_doc.get(doc.id, {})
+    for doc in [*docs, *transfers]:
+        is_transfer = isinstance(doc, StockTransfer)
+        cand_items = (transfer_items if is_transfer else items_by_doc).get(doc.id, {})
         cand_total = sum(cand_items.values())
         diff_days = _candidate_date_diff(ff_created, doc.created_at)
         if comp:
@@ -5633,10 +5821,15 @@ async def get_link_candidates(
             supply = doc.wb_fbo_supply
             fbo_supply_number = supply.wb_supply_id if supply else None
             dest_warehouse = doc.wb_warehouse_name_manual or (supply.warehouse_name if supply else None)
+        elif is_transfer:
+            # Поле мета-строки кандидата: у перемещения вместо склада сдачи
+            # осмысленно показать, ОТКУДА оно приехало.
+            dest_warehouse = f"← {source_names.get(doc.from_warehouse_id, f'#{doc.from_warehouse_id}')}"
 
         candidates.append(
             {
                 "doc_id": doc.id,
+                "doc_kind": "transfer" if is_transfer else kind,
                 "number": doc.number,
                 "status": doc.status,
                 "created_at": doc.created_at,
@@ -5648,9 +5841,11 @@ async def get_link_candidates(
                 # Совпадение склада сдачи — только для сборок (у приёмок склада сдачи нет → не фильтруем)
                 "warehouse_match": _wh_names_match(ff_dest, dest_warehouse) if is_assembly else True,
                 # >0 только для migfull (сборка уже связана с N другими ФФ-заявками)
-                "linked_ff_count": linked_by_doc.get(doc.id, 0),
+                "linked_ff_count": linked_by_doc.get(doc.id, 0) if not is_transfer else 0,
             }
         )
+    # Порядок кандидатов задаёт фронт (`splitFfLinkCandidates`: сначала по score,
+    # затем безоценочные по дате) — второй сортировки здесь быть не должно.
 
     return {
         "kind": kind,

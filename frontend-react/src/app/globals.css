@@ -2805,6 +2805,37 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
     border-bottom: 1px solid var(--color-border);
 }
 
+/* Итоги матрицы — второй строкой шапки, сразу под названиями колонок: на
+   полутора тысячах строк черту снизу никто не долистывает.
+   `position: static` перебивает общее правило `.sc-matrix-table-sticky thead tr
+   th { top: 0 }`: иначе строка прилипла бы поверх самих заголовков. Липкость
+   по вертикали ей и не нужна — она и так первое, что видно. */
+.sc-matrix-totals th {
+    position: static;
+    background: rgba(248, 248, 248, 0.97);
+    border-bottom: 2px solid var(--color-border);
+    /* Цифры, а не заголовок: капс и разрядка шапки здесь мешают читать. */
+    text-transform: none;
+    letter-spacing: normal;
+    font-size: 13px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-text);
+    padding: 8px 12px;
+}
+
+/* А по горизонтали — липнет: при скролле вправо подпись «Итого · N товаров»
+   обязана оставаться на месте, как и первая колонка всех прочих строк. */
+.sc-matrix-totals .sc-matrix-th-fixed {
+    position: sticky;
+    left: 0;
+    z-index: 5;
+    color: var(--color-text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    text-align: left;
+}
+
 .sc-matrix-cell-empty {
     opacity: 0.3;
 }

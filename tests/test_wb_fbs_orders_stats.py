@@ -58,6 +58,7 @@ async def _mk_order(
     sale_price: Decimal | None = Decimal("100"),
     price: Decimal | None = None,
     supplier_status: str = "new",
+    wb_status: str | None = None,
     subject: str | None = None,
     contour: str | None = None,
 ) -> WbFbsOrder:
@@ -76,6 +77,7 @@ async def _mk_order(
         sale_price=sale_price,
         price=price,
         supplier_status=supplier_status,
+        wb_status=wb_status,
         raw=raw,
     )
     db.add(order)
@@ -184,6 +186,29 @@ class TestCuts:
         stats = await orders_stats(db_session, project.id)
 
         assert [r["label"] for r in stats["by_subcategory"]] == ["Без под-категории"]
+
+    @pytest.mark.asyncio
+    async def test_status_cut_matches_cancelled_kpi(self, db_session, project, noon_utc):
+        """Разрез «По статусам» считает ЭФФЕКТИВНЫЙ статус — как и шапка блока.
+
+        Отказ покупателя до сборки оставляет `supplierStatus = new` навсегда.
+        По сырому полю такое задание попадало в «Отменено, шт» вверху и
+        одновременно в строку «Новое» в разрезе — две цифры об одном и том же.
+        """
+        nom = await _mk_nom(db_session, project.id, brand="Уютопия", subject="Ковры")
+        await _mk_order(db_session, project.id, created_at=noon_utc, nom=nom, sale_price=Decimal("300"))
+        await _mk_order(
+            db_session, project.id, created_at=noon_utc, nom=nom,
+            sale_price=Decimal("100"), wb_status="declined_by_client",
+        )
+        await db_session.commit()
+
+        stats = await orders_stats(db_session, project.id)
+
+        by_status = {r["label"]: r for r in stats["by_status"]}
+        assert set(by_status) == {"new", "cancel"}
+        assert by_status["cancel"]["orders_count"] == stats["cancelled_count"] == 1
+        assert by_status["cancel"]["orders_sum"] == stats["cancelled_sum"] == Decimal("100")
 
 
 class TestMoscowDays:
