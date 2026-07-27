@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import PageHeader from '@/components/PageHeader';
 import PageGuard from '@/components/PageGuard';
+import WbThumb from '@/components/WbThumb';
 import type { AbTestListItem, AbTestStatus } from '@/types/api';
 
 const STATUS_LABEL: Record<AbTestStatus, string> = {
@@ -126,12 +127,8 @@ export default function AbTestsPage() {
                                 >
                                     <td style={{ padding: '12px 16px', whiteSpace: 'nowrap' }}>{formatDate(t.created_at)}</td>
                                     <td style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10 }}>
-                                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                                        <img
-                                            src={`${process.env.NEXT_PUBLIC_API_URL}/api/v1/media/product-image/${t.nm_id}`}
-                                            alt=""
-                                            style={{ width: 32, height: 42, objectFit: 'cover', borderRadius: 8 }}
-                                        />
+                                        <WbThumb nmId={t.nm_id} size={32} height={42} />
+
                                         <span>
                                             {t.title || t.name}
                                             <span style={{ display: 'block', fontSize: 12, color: 'var(--color-dim)' }}>{t.vendor_code}</span>
