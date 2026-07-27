@@ -83,11 +83,17 @@ async def get_wb_bdr(
     brand: str | None = None,
     article: str | None = None,
     group_by: str = "article",
+    period_mode: str = "sale",
 ) -> dict:
     """
     Build BDR from locally cached WB finance data.
     Enriches with ads, cost, tax.
     Returns { summary, articles, brands, period, total_rows, sync_status, tax_info }
+
+    period_mode: "sale" (default) attributes rows by sale/accrual date (accrual
+    view); "report" attributes by WB report period so "Итого к оплате" reconciles
+    with the WB cabinet. Only the wb_finance SQL date predicate changes — ads /
+    cost / cancel enrichment keep their own date windows.
 
     Uses SQL-level aggregation for performance (handles 1M+ rows).
     """
@@ -113,7 +119,9 @@ async def get_wb_bdr(
         safe_article = article.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         params["article_like"] = f"%{safe_article}%"
 
-    result = await db.execute(text(build_bdr_aggregate_sql(brand, article, group_by=group_by)), params)
+    result = await db.execute(
+        text(build_bdr_aggregate_sql(brand, article, group_by=group_by, period_mode=period_mode)), params
+    )
     agg_rows = result.mappings().all()
 
     if not agg_rows:
@@ -125,15 +133,16 @@ async def get_wb_bdr(
             "total_rows": 0,
             "sync_status": sync_status,
             "tax_info": {},
+            "period_mode": period_mode,
         }
 
     # ── 3. Total row count (for response metadata) ──
-    count_result = await db.execute(text(build_total_count_sql(brand, article)), params)
+    count_result = await db.execute(text(build_total_count_sql(brand, article, period_mode=period_mode)), params)
     total_rows = count_result.scalar() or 0
 
     # ── 4. Load brands for filter dropdown ──
     brands_result = await db.execute(
-        text(build_brands_sql_bdr()),
+        text(build_brands_sql_bdr(period_mode=period_mode)),
         {"project_id": project_id, "date_from": date_from, "date_to": date_to},
     )
     all_brands = sorted(r[0] for r in brands_result)
@@ -174,7 +183,7 @@ async def get_wb_bdr(
     nm_to_group: dict[int, str] = {}
     sa_to_group: dict[str, str] = {}
     if group_by in ("brand", "subject"):
-        nm_sql = build_group_nm_ids_sql(group_by, brand, article)
+        nm_sql = build_group_nm_ids_sql(group_by, brand, article, period_mode=period_mode)
         if nm_sql:
             nm_result = await db.execute(text(nm_sql), params)
             for r in nm_result.mappings():
@@ -182,7 +191,7 @@ async def get_wb_bdr(
                 if nm_id_val:
                     nm_to_group[int(nm_id_val)] = r["group_key"] or ""
 
-        sa_sql = build_group_sa_names_sql(group_by, brand, article)
+        sa_sql = build_group_sa_names_sql(group_by, brand, article, period_mode=period_mode)
         if sa_sql:
             sa_result = await db.execute(text(sa_sql), params)
             for r in sa_result.mappings():
@@ -406,7 +415,7 @@ async def get_wb_bdr(
         # (нужна только режиму Д−Р с cost_as_expense; помесячного среза COGS у
         # сводки нет — допущение задокументировано в blended_tax_info).
         monthly_rows = (
-            await db.execute(text(build_bdr_monthly_totals_sql(brand, article)), params)
+            await db.execute(text(build_bdr_monthly_totals_sql(brand, article, period_mode=period_mode)), params)
         ).mappings().all()
         if group_by in ("brand", "subject"):
             included_nms = {nm for nm in nm_to_group if nm}
@@ -473,6 +482,7 @@ async def get_wb_bdr(
         "sync_status": sync_status,
         "tax_info": tax_info,
         "group_by": original_group_by,
+        "period_mode": period_mode,
     }
 
 

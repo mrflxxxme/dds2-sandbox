@@ -98,11 +98,12 @@ export function addReportMethods(api: ApiClient) {
             if (article) q.set('article', article);
             return api.request<any>('GET', `/api/v1/reports/opiu?${q.toString()}`);
         },
-        getWbBdr(dateFrom: string, dateTo: string, brand?: string, article?: string, groupBy?: string) {
+        getWbBdr(dateFrom: string, dateTo: string, brand?: string, article?: string, groupBy?: string, periodMode?: string) {
             const q = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
             if (brand) q.set('brand', brand);
             if (article) q.set('article', article);
             if (groupBy) q.set('group_by', groupBy);
+            if (periodMode) q.set('period_mode', periodMode);
             return api.request<any>('GET', `/api/v1/reports/wb_bdr?${q.toString()}`);
         },
         getWbBdrSyncStatus(dateFrom?: string, dateTo?: string) {

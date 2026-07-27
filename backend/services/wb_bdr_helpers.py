@@ -22,6 +22,26 @@ _MONTH_KEY_EXPR = (
     "COALESCE(to_char(sale_dt, 'YYYY-MM'), to_char(rr_dt, 'YYYY-MM'), to_char(date_from, 'YYYY-MM'))"
 )
 
+# Attribute a row to its WB report period (date_from/date_to of the weekly
+# realizationreport) instead of the sale/accrual date. Sums every row of the
+# reports fully contained in the selected range → matches the "Итого к оплате"
+# shown in the WB cabinet 1:1.
+_REPORT_PERIOD_FILTER = "(date_from >= :date_from AND date_to <= :date_to)"
+
+
+def period_filter(period_mode: str) -> str:
+    """WHERE date predicate for the chosen aggregation mode.
+
+    - "sale" (default): row belongs to the period of its sale/accrual date
+      (COALESCE(sale_dt, rr_dt)) — accrual view, historic БДР behaviour.
+    - "report": row belongs to its WB report period — reconciles with the WB
+      cabinet, since WB computes "Итого к оплате" per weekly report, not per
+      sale date. Boundary rows (sale in one week, reported in another) are the
+      whole source of the mismatch between the two modes.
+    """
+    return _REPORT_PERIOD_FILTER if period_mode == "report" else _DATE_FILTER
+
+
 # Метрики без identity-блока — переиспользуются помесячным тоталом (налог при
 # смене ставок внутри диапазона): строки обоих SQL кормятся compute_metrics_from_sql.
 _METRIC_COLS_BDR = """
@@ -103,10 +123,12 @@ def build_bdr_aggregate_sql(
     brand: str | None,
     article: str | None,
     group_by: str = "article",
+    period_mode: str = "sale",
 ) -> str:
     """Build SQL aggregation query with optional filters.
 
     group_by: "article" (default) | "brand" | "subject"
+    period_mode: "sale" (default, by sale/accrual date) | "report" (by WB report period)
     """
     group_col = _resolve_group_col(group_by)
 
@@ -117,7 +139,7 @@ def build_bdr_aggregate_sql(
     else:
         select_cols = _SELECT_COLS_BDR
 
-    where = "project_id = :project_id AND " + _DATE_FILTER
+    where = "project_id = :project_id AND " + period_filter(period_mode)
     where += " AND LOWER(COALESCE(sa_name, '')) != 'неопознанный товар'"
     if brand:
         where += " AND brand_name = :brand"
@@ -135,13 +157,13 @@ def build_bdr_aggregate_sql(
     )
 
 
-def build_bdr_monthly_totals_sql(brand: str | None, article: str | None) -> str:
+def build_bdr_monthly_totals_sql(brand: str | None, article: str | None, period_mode: str = "sale") -> str:
     """Помесячные тоталы тех же метрик (identity-блок заменён на month_key).
 
     Нужны налогу при смене ставок внутри диапазона: каждая строка-месяц
     скармливается compute_metrics_from_sql (метрики идентичны основному SQL),
     итоговый налог = сумма помесячных. Фильтры — те же, что у основного SQL."""
-    where = "project_id = :project_id AND " + _DATE_FILTER
+    where = "project_id = :project_id AND " + period_filter(period_mode)
     where += " AND LOWER(COALESCE(sa_name, '')) != 'неопознанный товар'"
     if brand:
         where += " AND brand_name = :brand"
@@ -158,12 +180,14 @@ def build_bdr_monthly_totals_sql(brand: str | None, article: str | None) -> str:
     )
 
 
-def build_group_nm_ids_sql(group_by: str, brand: str | None, article: str | None) -> str:
+def build_group_nm_ids_sql(
+    group_by: str, brand: str | None, article: str | None, period_mode: str = "sale"
+) -> str:
     """Get nm_id → group_key mapping for aggregating enrichment data by brand/subject."""
     group_col = _resolve_group_col(group_by)
     if group_by == "article":
         return ""
-    where = "project_id = :project_id AND " + _DATE_FILTER
+    where = "project_id = :project_id AND " + period_filter(period_mode)
     where += " AND LOWER(COALESCE(sa_name, '')) != 'неопознанный товар'"
     where += " AND " + group_col + " IS NOT NULL AND " + group_col + " != ''"
     if brand:
@@ -176,12 +200,14 @@ def build_group_nm_ids_sql(group_by: str, brand: str | None, article: str | None
     )
 
 
-def build_group_sa_names_sql(group_by: str, brand: str | None, article: str | None) -> str:
+def build_group_sa_names_sql(
+    group_by: str, brand: str | None, article: str | None, period_mode: str = "sale"
+) -> str:
     """Get sa_name → group_key mapping for aggregating cost data by brand/subject."""
     group_col = _resolve_group_col(group_by)
     if group_by == "article":
         return ""
-    where = "project_id = :project_id AND " + _DATE_FILTER
+    where = "project_id = :project_id AND " + period_filter(period_mode)
     where += " AND LOWER(COALESCE(sa_name, '')) != 'неопознанный товар'"
     where += " AND " + group_col + " IS NOT NULL AND " + group_col + " != ''"
     if brand:
@@ -194,19 +220,19 @@ def build_group_sa_names_sql(group_by: str, brand: str | None, article: str | No
     )
 
 
-def build_brands_sql_bdr() -> str:
+def build_brands_sql_bdr(period_mode: str = "sale") -> str:
     """Get distinct brand names for filter dropdown."""
     return (
         "SELECT DISTINCT brand_name FROM wb_finance_rows"  # noqa: S608 — no user input
         " WHERE project_id = :project_id AND "
-        + _DATE_FILTER
+        + period_filter(period_mode)
         + " AND brand_name IS NOT NULL AND brand_name != '' ORDER BY brand_name"
     )
 
 
-def build_total_count_sql(brand: str | None, article: str | None) -> str:
+def build_total_count_sql(brand: str | None, article: str | None, period_mode: str = "sale") -> str:
     """Count total raw rows (for total_rows in response)."""
-    where = "project_id = :project_id AND " + _DATE_FILTER
+    where = "project_id = :project_id AND " + period_filter(period_mode)
     where += " AND LOWER(COALESCE(sa_name, '')) != 'неопознанный товар'"
     if brand:
         where += " AND brand_name = :brand"

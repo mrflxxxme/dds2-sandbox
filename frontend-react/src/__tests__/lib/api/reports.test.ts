@@ -164,6 +164,14 @@ describe('reports.getWbBdr', () => {
         const [url] = spy.mock.calls[0];
         expect(url).toContain('group_by=brand');
     });
+
+    it('includes period_mode when provided', async () => {
+        const spy = mockFetch({});
+        const api = makeApi();
+        await api.getWbBdr('2025-01-01', '2025-01-31', undefined, undefined, undefined, 'report');
+        const [url] = spy.mock.calls[0];
+        expect(url).toContain('period_mode=report');
+    });
 });
 
 describe('reports.getCostHistory', () => {

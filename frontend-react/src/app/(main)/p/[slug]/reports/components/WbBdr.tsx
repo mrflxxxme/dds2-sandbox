@@ -113,6 +113,7 @@ export function WbBdr() {
     const [syncing, setSyncing] = useState(false);
     const [availableDates, setAvailableDates] = useState<string[]>([]);
     const [groupBy, setGroupBy] = useState<'article' | 'brand' | 'subject' | 'tag' | 'imt' | 'abc'>('article');
+    const [periodMode, setPeriodMode] = useState<'sale' | 'report'>('sale');
     const [sortKey, setSortKey] = useState<string>('profit');
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
     const [expandedAbc, setExpandedAbc] = useState<Record<string, boolean>>({});
@@ -125,7 +126,7 @@ export function WbBdr() {
     const loadData = React.useCallback(async () => {
         setLoading(true); setError('');
         try {
-            const res = await api.getWbBdr(dateFrom, dateTo, brand || undefined, articleSearch || undefined, groupBy !== 'article' ? groupBy : undefined);
+            const res = await api.getWbBdr(dateFrom, dateTo, brand || undefined, articleSearch || undefined, groupBy !== 'article' ? groupBy : undefined, periodMode !== 'sale' ? periodMode : undefined);
             setData(res);
             if (res?.sync_status) setSyncStatus(res.sync_status);
             else {
@@ -133,9 +134,9 @@ export function WbBdr() {
             }
         } catch (e: any) { setError(e.message || 'Ошибка загрузки'); }
         finally { setLoading(false); }
-    }, [dateFrom, dateTo, brand, articleSearch, groupBy]);
+    }, [dateFrom, dateTo, brand, articleSearch, groupBy, periodMode]);
 
-    React.useEffect(() => { loadData(); }, [groupBy]);
+    React.useEffect(() => { loadData(); }, [groupBy, periodMode]);
 
     const handleSync = React.useCallback(async () => {
         setSyncing(true);
@@ -344,6 +345,17 @@ export function WbBdr() {
                             {([['article', 'По артикулам'], ['brand', 'По брендам'], ['subject', 'По категориям'], ['tag', 'По ярлыкам'], ['imt', 'По склейкам'], ['abc', 'ABC анализ']] as const).map(([val, lbl]) => (
                                 <button key={val} onClick={() => { setGroupBy(val); }}
                                     style={{ padding: '0 14px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer', background: groupBy === val ? '#6366f1' : 'transparent', color: groupBy === val ? '#fff' : '#6b7280', transition: 'all 0.2s ease', whiteSpace: 'nowrap' }}>
+                                    {lbl}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                    <div>
+                        <label style={{ fontSize: 12, opacity: 0.7, display: 'block', marginBottom: 4 }} title="«По дате продажи» — учёт по дате реализации (БДР accrual). «По отчётам ВБ» — по отчётному периоду, сходится с «Итого к оплате» в кабинете ВБ.">Свод</label>
+                        <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid #e5e7eb', background: '#f3f4f6', height: 38 }}>
+                            {([['sale', 'По дате продажи'], ['report', 'По отчётам ВБ']] as const).map(([val, lbl]) => (
+                                <button key={val} onClick={() => { setPeriodMode(val); }}
+                                    style={{ padding: '0 14px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer', background: periodMode === val ? '#6366f1' : 'transparent', color: periodMode === val ? '#fff' : '#6b7280', transition: 'all 0.2s ease', whiteSpace: 'nowrap' }}>
                                     {lbl}
                                 </button>
                             ))}
