@@ -15,7 +15,7 @@
   • изоляция по project_id.
 """
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -24,6 +24,7 @@ from sqlalchemy import func, select
 
 from backend.models import (
     FBS_IN_DELIVERY_STATUS,
+    FBS_SORTED_STATUS,
     FbsSupplierStatus,
     Nomenclature,
     WbFbsOrder,
@@ -1246,13 +1247,15 @@ async def test_list_orders_filters_and_money_precision(db_session, env, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_in_delivery_counts_only_what_is_still_on_the_way(db_session, env):
-    """«В доставке» = переданное МИНУС доставленное — по `wbStatus`, не по продавцу.
+async def test_delivery_phases_split_in_transit_from_sorted(db_session, env):
+    """Переданное делится на ДВЕ фазы по `wbStatus`, а не считается одной кучей.
 
     `supplierStatus` застывает на `complete` в момент передачи поставки и таким
     остаётся навсегда, поэтому на вопрос «что сейчас в пути» отвечает только
-    вторая ось. Отдельным полем, а не ключом `status_counts`: сумма счётчиков —
-    это вкладка «Все», и синтетика внутри неё удвоила бы каждое переданное.
+    вторая ось. Сортировочный центр — отдельный этап и отдельная зона
+    ответственности: пока задание не отсортировано, вопросы по нему ещё к нам.
+    Оба счётчика — отдельными полями, а не ключами `status_counts`: сумма
+    счётчиков — это вкладка «Все», и синтетика внутри неё удвоила бы задания.
     """
     done = FbsSupplierStatus.COMPLETE.value
     await _seed_order(db_session, env.project_id, 9600, supplier_status=done, wb_status="sorted")
@@ -1267,17 +1270,57 @@ async def test_in_delivery_counts_only_what_is_still_on_the_way(db_session, env)
 
     listed = await orders_service.list_orders(db_session, env.project_id)
 
-    assert listed["in_delivery_count"] == 2  # 9600 (sorted) и 9601 (пустой wbStatus)
+    assert listed["in_delivery_count"] == 1  # только 9601 (пустой wbStatus)
+    assert listed["sorted_count"] == 1  # 9600 ушло в свою фазу, а не в «в доставке»
     assert listed["status_counts"][FbsSupplierStatus.COMPLETE.value] == 4
     # Сумма счётчиков осталась равной вкладке «Все» — синтетика её не раздула.
     assert sum(listed["status_counts"].values()) == listed["total"] == 6
 
     # Цифра на карточке склада и выдача по клику обязаны совпадать до штуки.
-    filtered = await orders_service.list_orders(
-        db_session, env.project_id, status=FBS_IN_DELIVERY_STATUS
+    for status, expected in ((FBS_IN_DELIVERY_STATUS, {9601}), (FBS_SORTED_STATUS, {9600})):
+        filtered = await orders_service.list_orders(db_session, env.project_id, status=status)
+        assert filtered["total"] == len(expected)
+        assert {o["wb_order_id"] for o in filtered["items"]} == expected
+
+
+@pytest.mark.asyncio
+async def test_warehouse_summary_windows_delivery_but_not_the_queue(db_session, env):
+    """Период режет ТОЛЬКО фазы доставки; очередь сборки отдаётся целиком.
+
+    Задание, созданное два месяца назад и до сих пор не собранное, обязано быть
+    в цифре сборщика — иначе он его просто не увидит. А `complete` копится
+    вечно (WB его уже не двинет), и без окна «В доставке» показывает всё, что
+    когда-либо уезжало.
+    """
+    done = FbsSupplierStatus.COMPLETE.value
+    old = datetime.utcnow() - timedelta(days=120)
+    fresh = datetime.utcnow() - timedelta(days=1)
+    await _seed_order(db_session, env.project_id, 9700, created_at_wb=old)  # старое НОВОЕ
+    await _seed_order(
+        db_session, env.project_id, 9701, supplier_status=done, wb_status=None, created_at_wb=old
     )
-    assert filtered["total"] == 2
-    assert {o["wb_order_id"] for o in filtered["items"]} == {9600, 9601}
+    await _seed_order(
+        db_session, env.project_id, 9702, supplier_status=done, wb_status=None, created_at_wb=fresh
+    )
+    await _seed_order(
+        db_session, env.project_id, 9703, supplier_status=done, wb_status="sorted", created_at_wb=fresh
+    )
+
+    window = date.today() - timedelta(days=30)
+    summary = await orders_service.warehouse_summary(
+        db_session, env.project_id, date_from=window, date_to=date.today()
+    )
+
+    totals = summary["totals"]
+    assert totals["new"] == 1  # старое новое НЕ выпало из очереди
+    assert totals["in_delivery"] == 1  # 9701 старше окна → не считается
+    assert totals["sorted"] == 1
+    # Верхняя граница включительна: сегодняшний день не должен теряться.
+    assert summary["date_to"] == date.today()
+
+    # Без окна — вся история фаз доставки.
+    full = await orders_service.warehouse_summary(db_session, env.project_id)
+    assert full["totals"]["in_delivery"] == 2
 
 
 # ─── Контур: песочница не трогает боевые данные ──────────────────────────────

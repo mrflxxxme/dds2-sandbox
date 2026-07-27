@@ -1,25 +1,37 @@
 'use client';
 /**
- * Сводка «сколько заданий ждёт на каждом складе WB» — прямой ответ на вопрос
- * «а если у меня будет несколько складов»: работа с FBS всегда идёт по одному
- * складу за раз (в поставку нельзя смешивать склады), и сборщику надо видеть,
- * где очередь.
+ * Сводка «сколько заданий на каждом складе WB и на какой они фазе» — прямой
+ * ответ на вопрос «а если у меня несколько складов»: работа с FBS всегда идёт
+ * по одному складу за раз (в поставку нельзя смешивать склады), и сборщику
+ * надо видеть, где очередь.
  *
- * Данные берутся счётчиками status_counts: по запросу на склад с limit=1 —
- * это НЕ N+1 в смысле нагрузки (складов продавца единицы, тело ответа —
- * только цифры, на бэке список кэширован), зато цифра всегда честная и не
- * ограничена страницей выдачи.
+ * Четыре фазы жизни задания, и они делятся на две пары с РАЗНОЙ семантикой:
+ *
+ *   Новые · На сборке   — ОЧЕРЕДЬ, показывается целиком, без периода.
+ *                          Задание, созданное два месяца назад и до сих пор не
+ *                          собранное, обязано быть в цифре сборщика.
+ *   В доставке · Отсортировано — за выбранный ПЕРИОД. `supplierStatus`
+ *                          застывает на `complete` навсегда, поэтому без окна
+ *                          цифра копит всё, что когда-либо уезжало, и ничего
+ *                          не значит.
+ *
+ * Данные — одним запросом на весь экран (`GET /fbs/orders/warehouse-summary`);
+ * прежняя схема «limit=1 на каждый склад» упиралась в 9 параллельных походов
+ * ради девяти чисел.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
-import { formatNumber } from '@/lib/utils';
-import type { FbsWarehouse } from '@/types/api';
+import { formatDate, formatNumber } from '@/lib/utils';
+import type { FbsWarehouse, FbsWarehouseSummary } from '@/types/api';
 
 interface Props {
     warehouses: FbsWarehouse[];
     /** Меняется после синка/мутаций заданий — повод пересчитать сводку. */
     reloadKey: number;
-    /** Клик по цифре — фильтр «этот склад + этот статус». */
+    /** Окно для фаз доставки — общее с блоком статистики. */
+    dateFrom: string;
+    dateTo: string;
+    /** Клик по цифре — фильтр «этот склад + эта фаза». */
     onPick: (wbWarehouseId: number | '', status: string) => void;
 }
 
@@ -28,14 +40,14 @@ interface WhCounts {
     name: string;
     isNew: number;
     confirm: number;
-    /** Передано в WB и ещё не у покупателя — `in_delivery_count` бэкенда. */
     inDelivery: number;
+    sorted: number;
 }
 
-export default function OrdersWarehouseSummary({ warehouses, reloadKey, onPick }: Props) {
-    const [rows, setRows] = useState<WhCounts[] | null>(null);
-    const [total, setTotal] = useState<WhCounts | null>(null);
-    const [orphan, setOrphan] = useState<WhCounts | null>(null);
+export default function OrdersWarehouseSummary({
+    warehouses, reloadKey, dateFrom, dateTo, onPick,
+}: Props) {
+    const [data, setData] = useState<FbsWarehouseSummary | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
@@ -43,59 +55,16 @@ export default function OrdersWarehouseSummary({ warehouses, reloadKey, onPick }
         setLoading(true);
         setError('');
         try {
-            const [allRes, perWh] = await Promise.all([
-                api.getFbsOrders({ limit: 1 }),
-                Promise.all(
-                    warehouses.map(w =>
-                        api.getFbsOrders({ wbWarehouseId: w.wb_warehouse_id, limit: 1 })
-                            .then(r => ({ w, counts: r.status_counts ?? {}, inDelivery: r.in_delivery_count ?? 0 })),
-                    ),
-                ),
-            ]);
+            const res = await api.getFbsWarehouseSummary({ dateFrom, dateTo });
             if (signal?.aborted) return;
-
-            const list: WhCounts[] = perWh.map(({ w, counts, inDelivery }) => ({
-                wbWarehouseId: w.wb_warehouse_id,
-                name: w.name || `#${w.wb_warehouse_id}`,
-                isNew: counts.new ?? 0,
-                confirm: counts.confirm ?? 0,
-                inDelivery,
-            }));
-            const allCounts = allRes.status_counts ?? {};
-            const totals: WhCounts = {
-                wbWarehouseId: '',
-                name: 'Все склады',
-                isNew: allCounts.new ?? 0,
-                confirm: allCounts.confirm ?? 0,
-                inDelivery: allRes.in_delivery_count ?? 0,
-            };
-            // Задания склада, которого нет в нашем справочнике, иначе бы просто
-            // потерялись из сводки — показываем остаток честной строкой.
-            const sumNew = list.reduce((a, r) => a + r.isNew, 0);
-            const sumConfirm = list.reduce((a, r) => a + r.confirm, 0);
-            const sumDelivery = list.reduce((a, r) => a + r.inDelivery, 0);
-            const restNew = Math.max(0, totals.isNew - sumNew);
-            const restConfirm = Math.max(0, totals.confirm - sumConfirm);
-            const restDelivery = Math.max(0, totals.inDelivery - sumDelivery);
-
-            setRows(list);
-            setTotal(totals);
-            setOrphan(restNew + restConfirm + restDelivery > 0
-                ? {
-                    wbWarehouseId: '',
-                    name: 'Без склада в справочнике',
-                    isNew: restNew,
-                    confirm: restConfirm,
-                    inDelivery: restDelivery,
-                }
-                : null);
+            setData(res);
         } catch (e: unknown) {
             if (signal?.aborted) return;
             setError(e instanceof Error ? e.message : 'Ошибка загрузки сводки по складам');
         } finally {
             if (!signal?.aborted) setLoading(false);
         }
-    }, [warehouses]);
+    }, [dateFrom, dateTo]);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -104,7 +73,7 @@ export default function OrdersWarehouseSummary({ warehouses, reloadKey, onPick }
         // reloadKey — внешний триггер пересчёта после синка/раскладки заданий
     }, [load, reloadKey]);
 
-    if (loading && rows === null) {
+    if (loading && data === null) {
         return (
             <div className="glass-card" style={{ padding: 12, marginBottom: 12, fontSize: 13, color: 'var(--color-text-muted)' }}>
                 Сводка по складам: загрузка...
@@ -129,22 +98,57 @@ export default function OrdersWarehouseSummary({ warehouses, reloadKey, onPick }
         );
     }
 
-    const cards = [
-        ...(total ? [total] : []),
-        ...(rows ?? []),
-        ...(orphan ? [orphan] : []),
-    ];
+    const byId = new Map((data?.warehouses ?? []).map(w => [w.wb_warehouse_id, w]));
+    const rows: WhCounts[] = warehouses.map(w => {
+        const c = byId.get(w.wb_warehouse_id);
+        return {
+            wbWarehouseId: w.wb_warehouse_id,
+            name: w.name || `#${w.wb_warehouse_id}`,
+            isNew: c?.new ?? 0,
+            confirm: c?.confirm ?? 0,
+            inDelivery: c?.in_delivery ?? 0,
+            sorted: c?.sorted ?? 0,
+        };
+    });
+    const t = data?.totals ?? {};
+    const total: WhCounts = {
+        wbWarehouseId: '',
+        name: 'Все склады',
+        isNew: t.new ?? 0,
+        confirm: t.confirm ?? 0,
+        inDelivery: t.in_delivery ?? 0,
+        sorted: t.sorted ?? 0,
+    };
+    // Задания склада, которого нет в нашем справочнике, иначе бы просто
+    // потерялись из сводки — показываем остаток честной строкой.
+    const known = new Set(warehouses.map(w => w.wb_warehouse_id));
+    const rest = (data?.warehouses ?? []).filter(w => !known.has(w.wb_warehouse_id));
+    const orphan: WhCounts | null = rest.length > 0
+        ? {
+            wbWarehouseId: '',
+            name: 'Без склада в справочнике',
+            isNew: rest.reduce((a, r) => a + r.new, 0),
+            confirm: rest.reduce((a, r) => a + r.confirm, 0),
+            inDelivery: rest.reduce((a, r) => a + r.in_delivery, 0),
+            sorted: rest.reduce((a, r) => a + r.sorted, 0),
+        }
+        : null;
+
+    const cards = [total, ...rows, ...(orphan ? [orphan] : [])];
+    const periodLabel = data?.date_from && data?.date_to
+        ? `${formatDate(data.date_from)} — ${formatDate(data.date_to)}`
+        : 'за всё время';
 
     return (
         <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
-                Очередь по складам WB — в одну поставку задания разных складов не кладутся
+                Очередь по складам WB — в одну поставку задания разных складов не кладутся.{' '}
+                «Новые» и «На сборке» — вся очередь целиком; «В доставке» и «Отсортировано» —
+                за период <b style={{ color: 'var(--color-text)' }}>{periodLabel}</b>.
             </div>
-            {/* 240px — минимум под ТРИ ячейки: на прежних 190 подписи «На сборке»
-                и «В доставке» ломались на две строки, и карточка читалась как
-                каша из цифр. Ширину держит подпись, а не число. */}
+            {/* 300px — минимум под ЧЕТЫРЕ ячейки: ширину держит подпись, не число. */}
             <div style={{
-                display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12,
+                display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 12,
             }}>
                 {cards.map((c, i) => (
                     <div key={`${c.name}-${i}`} className="glass-card" style={{ padding: '12px 16px' }}>
@@ -159,14 +163,19 @@ export default function OrdersWarehouseSummary({ warehouses, reloadKey, onPick }
                                 onClick={() => onPick(c.wbWarehouseId, 'new')} />
                             <CountCell label="На сборке" value={c.confirm}
                                 onClick={() => onPick(c.wbWarehouseId, 'confirm')} />
-                            {/* Третья фаза жизни задания: уехало в WB, но у покупателя
-                                ещё не оказалось. Из `supplierStatus` её не видно — он
-                                застывает на `complete` навсегда. */}
+                            {/* Две фазы после передачи: пока задание не отсортировано,
+                                вопросы по нему ещё к нам; после — к логистике WB. */}
                             <CountCell
                                 label="В доставке"
                                 value={c.inDelivery}
-                                title="Передано в WB и ещё не получено покупателем"
+                                title="Передано в WB, сортировочный центр ещё не принял"
                                 onClick={() => onPick(c.wbWarehouseId, 'in_delivery')}
+                            />
+                            <CountCell
+                                label="Отсортировано"
+                                value={c.sorted}
+                                title="Принято сортировочным центром WB, покупатель ещё не получил"
+                                onClick={() => onPick(c.wbWarehouseId, 'sorted')}
                             />
                         </div>
                     </div>

@@ -40,7 +40,7 @@ import {
     selectStickerIds,
 } from './fbsShared';
 import OrdersWarehouseSummary from './OrdersWarehouseSummary';
-import OrdersStats from './OrdersStats';
+import OrdersStats, { isoDaysAgo as statsIsoDaysAgo, todayIso as statsTodayIso } from './OrdersStats';
 import SupplyPlanModal, { WB_PLAN_LIMIT } from './SupplyPlanModal';
 
 const PAGE_SIZE = 100;
@@ -62,7 +62,8 @@ const STATUS_TABS: { key: string; label: string; title?: string }[] = [
     { key: 'new', label: SUPPLIER_STATUS_LABEL.new },
     { key: 'confirm', label: SUPPLIER_STATUS_LABEL.confirm },
     { key: 'complete', label: 'Переданы в WB', title: 'Все задания переданных поставок — вместе с доставленными' },
-    { key: 'in_delivery', label: 'Ещё в доставке', title: 'Переданы в WB и ещё не получены покупателем' },
+    { key: 'in_delivery', label: 'Ещё в доставке', title: 'Переданы в WB, сортировочный центр ещё не принял' },
+    { key: 'sorted', label: 'Отсортировано', title: 'Принято сортировочным центром WB, покупатель ещё не получил' },
     { key: 'cancel', label: SUPPLIER_STATUS_LABEL.cancel },
 ];
 
@@ -122,6 +123,16 @@ export default function OrdersTab({
      * автообновления — сумма монотонна, лишней загрузки не будет.
      */
     const [statsTick, setStatsTick] = useState(0);
+    /**
+     * Период живёт ЗДЕСЬ, а не внутри блока статистики: тем же окном считаются
+     * фазы доставки в сводке по складам. Два независимых периода означали бы,
+     * что «В доставке» вверху и график внизу говорят про разные отрезки.
+     */
+    const [period, setPeriod] = useState(() => ({
+        dateFrom: statsIsoDaysAgo(30),
+        dateTo: statsTodayIso(),
+        preset: '30',
+    }));
 
     /**
      * Единый набор фильтров для списка и для «выбрать все»: если собирать их
@@ -535,6 +546,8 @@ export default function OrdersTab({
             <OrdersWarehouseSummary
                 warehouses={warehouses}
                 reloadKey={summaryKey}
+                dateFrom={period.dateFrom}
+                dateTo={period.dateTo}
                 onPick={(wh, st) => {
                     setWhFilter(wh);
                     setStatus(st);
@@ -543,12 +556,23 @@ export default function OrdersTab({
             />
 
             {/* Аналитика периода: выручка, разрезы, доля FBS в объёме воронки */}
-            <OrdersStats wbWarehouseId={whFilter} refreshTick={refreshTick + statsTick} />
+            <OrdersStats
+                wbWarehouseId={whFilter}
+                refreshTick={refreshTick + statsTick}
+                dateFrom={period.dateFrom}
+                dateTo={period.dateTo}
+                preset={period.preset}
+                onPeriodChange={setPeriod}
+            />
 
             {/* Статусные вкладки */}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
                 {STATUS_TABS.map(t => {
-                    const count = t.key === 'in_delivery' ? data?.in_delivery_count : counts[t.key];
+                    const count = t.key === 'in_delivery'
+                        ? data?.in_delivery_count
+                        : t.key === 'sorted'
+                            ? data?.sorted_count
+                            : counts[t.key];
                     return (
                         <button
                             key={t.key || 'all'}

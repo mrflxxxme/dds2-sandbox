@@ -122,10 +122,13 @@ from backend.models.loan import (
     Loan,
     LoanAccrualKind,
     LoanDirection,
+    LoanFee,
+    LoanFeeKind,
     LoanKind,
     LoanPayment,
     LoanPaymentType,
     LoanRatePeriod,
+    LoanScheduleEntry,
     LoanStatus,
 )
 
