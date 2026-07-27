@@ -36,6 +36,7 @@ from backend.models.wb_fbs import (
     FbsStockSource,
     FbsWarehouseMode,
     WbFbsOrder,
+    WbFbsStockOverride,
     WbFbsStockState,
     WbFbsWarehouse,
     WbFbsWarehouseLink,
@@ -1076,6 +1077,54 @@ class TestStockFormula:
 
         preview = await stock_service.preview_stock(db_session, project.id, fbs_wh.wb_warehouse_id)
         assert preview["rows_no_chrt"] >= 1
+        # Позиция физически не уедет — расшифровка обязана назвать её причиной,
+        # иначе 15 штук просто исчезают между «Доступно» склада и «к передаче».
+        assert preview["breakdown"]["cut_no_chrt"] >= 15
+
+    @pytest.mark.asyncio
+    async def test_breakdown_balances_and_names_the_cuts(self, db_session, project):
+        """Расшифровка дельты сходится до штуки и называет виновника поимённо.
+
+        Карточка склада показывает «Доступно» ТОЛЬКО по нашему учёту, а FBS
+        пропускает его ещё через зеркало ФФ, буфер и ручное количество. Две
+        цифры об одном товаре читаются как ошибка расчёта, пока разложения нет.
+        """
+        # Свой стенд: дефолт фикстуры — источник «наш учёт», а зеркало срезает
+        # остаток только при «Минимуме из двух».
+        wh = await _mk_warehouse(db_session, project.id)
+        fbs_wh = await _mk_fbs_warehouse(
+            db_session, project.id, stock_source=FbsStockSource.MIN_OF_BOTH.value
+        )
+        await _mk_link(db_session, project.id, fbs_wh, wh)
+        # Зеркало провайдера видит меньше нашего учёта → «Минимум из двух» срежет 40.
+        mirrored = await _mk_nom(db_session, project.id, chrt_id=7810)
+        await _mk_stock(db_session, project.id, wh, mirrored, 100)
+        await _mk_mirror(db_session, project.id, wh, mirrored, 60)
+        # Ручное «Кол-во» — потолок 30 при свободных 50.
+        capped = await _mk_nom(db_session, project.id, chrt_id=7811)
+        await _mk_stock(db_session, project.id, wh, capped, 50)
+        db_session.add(
+            WbFbsStockOverride(
+                project_id=project.id,
+                wb_warehouse_id=fbs_wh.wb_warehouse_id,
+                nomenclature_id=capped.id,
+                qty=30,
+            )
+        )
+        await db_session.commit()
+
+        preview = await stock_service.preview_stock(db_session, project.id, fbs_wh.wb_warehouse_id)
+        b = preview["breakdown"]
+
+        assert b["cut_by_mirror"] == 40
+        assert b["cut_by_override"] == 20
+        # Цепочка обязана сходиться: иначе расшифровка врёт заметнее цифры,
+        # которую объясняет.
+        cuts = sum(
+            b[k] for k in
+            ("cut_by_mirror", "cut_by_buffer", "cut_no_chrt", "cut_by_override", "cut_other")
+        )
+        assert b["ledger_free"] - cuts == preview["total_units"]
 
     @pytest.mark.asyncio
     async def test_preview_attaches_live_wb_stock(self, db_session, project, fbs_env, monkeypatch):

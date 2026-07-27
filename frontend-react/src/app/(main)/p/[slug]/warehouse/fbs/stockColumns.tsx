@@ -9,7 +9,7 @@ import { formatDateTime, formatNumber } from '@/lib/utils';
 import { wbProductUrl } from '@/lib/wbMedia';
 import type { Column } from '@/components/DataTable';
 import WbThumb from '@/components/WbThumb';
-import type { FbsStockRow, FbsWarehouse } from '@/types/api';
+import type { FbsPushBreakdown, FbsStockRow, FbsWarehouse } from '@/types/api';
 import {
     OVERRIDE_HINT,
     PUSH_STATUS_BADGE,
@@ -680,6 +680,79 @@ export function MiniKpi({ label, value, danger, warning, title, active, onClick 
                 {formatNumber(value, 0)}
             </div>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2 }}>{label}</div>
+        </div>
+    );
+}
+
+/**
+ * Почему «Штук к передаче» меньше «Доступно» на карточке склада — по слагаемым.
+ *
+ * Две цифры об одном товаре на двух экранах читаются как ошибка расчёта, хотя
+ * считают они разное: карточка склада знает только наш учёт, а FBS пропускает
+ * его ещё через зеркало ФФ, буфер, проданное по FBS, потолки и ручное «Кол-во».
+ * Пока цепочку не видно, единственный способ её узнать — читать код.
+ *
+ * Нулевые слагаемые не показываем: строка «буфер 0 · без chrtId 0» — это шум,
+ * который прячет то единственное, что реально срезало остаток.
+ */
+export function PushBreakdown({ breakdown, totalUnits }: {
+    breakdown: FbsPushBreakdown | undefined;
+    totalUnits: number;
+}) {
+    if (!breakdown) return null;
+    const cuts: { label: string; value: number; hint: string }[] = [
+        {
+            label: 'зеркало ФФ',
+            value: breakdown.cut_by_mirror,
+            hint: 'Провайдер видит у себя меньше, чем наш учёт, и при источнике '
+                + '«Минимум из двух» берётся его цифра — иначе WB продавал бы то, '
+                + 'чего на складе уже нет.',
+        },
+        {
+            label: 'буфер',
+            value: breakdown.cut_by_buffer,
+            hint: 'Страховой запас склада продавца — процент и абсолютный. Меняется на вкладке «Склады».',
+        },
+        {
+            label: 'без chrtId',
+            value: breakdown.cut_no_chrt,
+            hint: 'chrtId — ключ методов остатков WB. Без него позиция не уедет никогда.',
+        },
+        {
+            label: 'ручное кол-во',
+            value: breakdown.cut_by_override,
+            hint: 'Ручное «Кол-во» работает как ПОТОЛОК: 0 — не отдавать, N — не больше N. '
+                + 'Поднять выдачу выше свободного остатка оно не может.',
+        },
+        {
+            label: 'прочее',
+            value: breakdown.cut_other,
+            hint: 'Открытые задания FBS (проданное ещё не увезли), потолок на SKU, гейт по FBO.',
+        },
+    ].filter(c => c.value > 0);
+
+    if (!cuts.length) return null;
+
+    return (
+        <div
+            style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}
+            title="Цепочка сходится по построению: свободный остаток минус все вычеты = штук к передаче"
+        >
+            Почему меньше, чем «Доступно» на складе:{' '}
+            <strong style={{ color: 'var(--color-text)' }}>
+                {formatNumber(breakdown.ledger_free, 0)}
+            </strong>{' '}
+            свободно у нас
+            {cuts.map(c => (
+                <span key={c.label} title={c.hint}>
+                    {' − '}
+                    <strong style={{ color: 'var(--color-text)' }}>{formatNumber(c.value, 0)}</strong>
+                    {' '}{c.label}
+                </span>
+            ))}
+            {' = '}
+            <strong style={{ color: 'var(--color-accent)' }}>{formatNumber(totalUnits, 0)}</strong>
+            {' '}к передаче
         </div>
     );
 }

@@ -207,8 +207,16 @@ async def _by_day(db: AsyncSession, where: list[Any]) -> list[dict[str, Any]]:
 
 
 async def _by_status(db: AsyncSession, where: list[Any]) -> list[dict[str, Any]]:
-    """Разрез по статусу продавца. Ярлыки — на фронте (`SUPPLIER_STATUS_LABEL`)."""
-    result = await db.execute(_grouped(func.coalesce(WbFbsOrder.supplier_status, "—"), where))
+    """Разрез по статусу задания. Ярлыки — на фронте (`SUPPLIER_STATUS_LABEL`).
+
+    Статус — ЭФФЕКТИВНЫЙ (`effective_status_expr`), тот же, что в KPI и в
+    счётчиках вкладок. По сырому `supplier_status` разрез расходился с
+    собственной шапкой: покупатель, отказавшийся до сборки, оставляет
+    `supplierStatus = new` навсегда, поэтому такое задание попадало в
+    «Отменено, шт» вверху и одновременно в строку «Новое» здесь (прод 26.07 —
+    20 заданий). Две цифры об одном и том же читались как ошибка расчёта.
+    """
+    result = await db.execute(_grouped(func.coalesce(effective_status_expr(), "—"), where))
     return _rows(result)
 
 

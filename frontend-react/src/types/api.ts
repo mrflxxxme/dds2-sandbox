@@ -6231,6 +6231,8 @@ export interface FfRequestRow {
   synced_at: string;
   assembly_request_id: number | null;
   inbound_receipt_id: number | null;
+  /** приёмка внутреннего перемещения: товар приехал с нашего же склада */
+  stock_transfer_id: number | null;
   /** Обогащение по связанному документу (заполняет сервис) */
   linked_number: string | null;
   linked_status: string | null;
@@ -6427,14 +6429,19 @@ export interface FfOverviewResponse {
   requests: FfOverviewRequestRow[];
 }
 
+/** Ровно один id — какой именно, проверяет бэкенд. */
 export interface FfLinkPayload {
   assembly_request_id?: number | null;
   inbound_receipt_id?: number | null;
+  stock_transfer_id?: number | null;
 }
 
 /** Кандидат для связывания ФФ-заявки с нашим документом (модал «Связать») */
 export interface FfLinkCandidate {
+  /** 🔴 уникален только внутри своего doc_kind: приёмка №7 и перемещение №7 сосуществуют */
   doc_id: number;
+  /** в какой слот связи уедет кандидат */
+  doc_kind: 'assembly' | 'inbound' | 'transfer';
   number: string;
   status: string;
   created_at: string | null;
@@ -7954,6 +7961,25 @@ export interface FbsOrderStats {
   funnel: FbsOrderStatsFunnel;
 }
 
+/**
+ * Из чего сложилась разница «Доступно на складе» → «Штук к передаче».
+ * Цепочка сходится по построению: ledger_free − все cut_* = total_units.
+ */
+export interface FbsPushBreakdown {
+  /** Наш свободный остаток по привязанным складам — то же, что «Доступно» на карточке склада. */
+  ledger_free: number;
+  /** Срезало зеркало ФФ: провайдер видит меньше нашего учёта («Минимум из двух»). */
+  cut_by_mirror: number;
+  /** Страховой буфер склада продавца (процент + абсолютный). */
+  cut_by_buffer: number;
+  /** Позиции без chrtId — уехать в WB не могут. */
+  cut_no_chrt: number;
+  /** Ручное «Кол-во»: работает как потолок (0 — не отдавать), поднять не может. */
+  cut_by_override: number;
+  /** Открытые FBS-задания, потолок на SKU, FBO-гейт. */
+  cut_other: number;
+}
+
 export interface FbsStockPreview {
   wb_warehouse_id: number;
   wb_warehouse_name?: string | null;
@@ -7964,6 +7990,8 @@ export interface FbsStockPreview {
   total_rows: number;
   total_units: number;
   rows_no_chrt: number;
+  /** Почему total_units меньше «Доступно» на карточке склада. */
+  breakdown?: FbsPushBreakdown;
   is_processing: boolean;
 }
 
@@ -8081,6 +8109,12 @@ export interface FbsOrderListResponse {
   total: number;
   /** Счётчики по статусам для вкладок (new / confirm / complete / cancel). */
   status_counts: Record<string, number>;
+  /**
+   * Подмножество `complete`, которое ЕЩЁ едет к покупателю (wbStatus не
+   * `sold`/`defect`). Отдельным полем, а не ключом `status_counts`: сумма
+   * счётчиков — это вкладка «Все», синтетика внутри неё двоила бы задания.
+   */
+  in_delivery_count: number;
 }
 
 /**

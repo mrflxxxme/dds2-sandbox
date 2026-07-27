@@ -1411,6 +1411,7 @@ async def preview_stock(db: AsyncSession, project_id: int, wb_warehouse_id: int)
     warehouse_ids = await warehouse_service.get_linked_warehouse_ids(db, project_id, wb_warehouse_id)
     rows = await _build_rows(db, project_id, wh, warehouse_ids)
     wb_known = await _attach_wb_stock(db, project_id, wb_warehouse_id, rows)
+    total_units = sum(int(r["qty_available"]) for r in rows if r.get("chrt_id"))
     return {
         "wb_warehouse_id": wb_warehouse_id,
         "wb_warehouse_name": wh.name,
@@ -1422,8 +1423,10 @@ async def preview_stock(db: AsyncSession, project_id: int, wb_warehouse_id: int)
         # не уйдёт никогда (ключ методов остатков WB), и считать её в этот итог
         # значит обещать пользователю передачу, которой не будет: на живом складе
         # плашка показывала 573 штуки при нулевой фактической выдаче.
-        "total_units": sum(r["qty_available"] for r in rows if r.get("chrt_id")),
+        "total_units": total_units,
         "rows_no_chrt": _count_no_chrt(rows),
+        # Расшифровка дельты с «Доступно» карточки склада (см. _push_breakdown).
+        "breakdown": _push_breakdown(rows, total_units),
         "is_processing": wh.is_processing,
     }
 
@@ -1488,6 +1491,49 @@ def _count_no_chrt(rows: list[dict[str, Any]]) -> int:
     непередаваемых позициях — и пользователь не понимал, почему ничего не уходит.
     """
     return sum(1 for r in rows if not r.get("chrt_id"))
+
+
+def _push_breakdown(rows: list[dict[str, Any]], total_units: int) -> dict[str, int]:
+    """Почему «Штук к передаче» меньше «Доступно» на складе — по слагаемым.
+
+    Две цифры об одном товаре на двух экранах читаются как ошибка расчёта, хотя
+    считают они разное: карточка склада — ТОЛЬКО наш учёт за вычетом резервов,
+    а FBS — то же самое, но ещё через зеркало ФФ, буфер, проданное по FBS,
+    потолки и ручное количество. Вопрос «почему 29 612, а не 30 692» без этой
+    расшифровки не закрывается ничем, кроме чтения кода.
+
+    Цепочка сходится по ПОСТРОЕНИЮ: «прочее» — это остаток, а не отдельный
+    расчёт. Иначе первый же вычет, о котором здесь забыли (новый потолок,
+    FBO-гейт), тихо сломал бы баланс, и расшифровка стала бы врать заметнее,
+    чем цифра, которую она объясняет.
+    """
+    ledger_free = sum(int(r.get("qty_ledger_free") or 0) for r in rows)
+    # Зеркало срезает только там, где провайдер видит МЕНЬШЕ нашего учёта;
+    # обратный случай (источник ff_mirror выше ledger) — не вычет, а прибавка,
+    # и в расшифровку «почему меньше» ей заходить нечего.
+    by_mirror = sum(
+        max(0, int(r.get("qty_ledger_free") or 0) - int(r.get("qty_source") or 0)) for r in rows
+    )
+    by_buffer = sum(int(r.get("buffer") or 0) for r in rows)
+    no_chrt = sum(int(r.get("qty_ledger_free") or 0) for r in rows if not r.get("chrt_id"))
+    # `qty_computed` — потолок ДО вмешательства человека (см. _apply_chrt_limits),
+    # поэтому разница с `qty_available` и есть чистый эффект ручного количества.
+    by_override = sum(
+        max(0, int(r.get("qty_computed") or 0) - int(r.get("qty_available") or 0))
+        for r in rows
+        if r.get("chrt_id")
+    )
+    named = by_mirror + by_buffer + no_chrt + by_override
+    return {
+        "ledger_free": ledger_free,
+        "cut_by_mirror": by_mirror,
+        "cut_by_buffer": by_buffer,
+        "cut_no_chrt": no_chrt,
+        "cut_by_override": by_override,
+        # Открытые FBS-задания, потолок max_qty_per_sku, FBO-гейт — всё, что
+        # снимается на уровне позиции уже после схлопывания по chrtId.
+        "cut_other": max(0, ledger_free - named - total_units),
+    }
 
 
 

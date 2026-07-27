@@ -11,12 +11,17 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from backend.models.wb_fbs import FBS_IN_DELIVERY_STATUS
+
 # ─── Allowed enum values ─────────────────────────────────────────────────────
 
 ALLOWED_STOCK_SOURCES = ["ledger", "ff_mirror", "min_of_both"]
 ALLOWED_WAREHOUSE_MODES = ["observe", "translate"]
 ALLOWED_FBS_MODES = ["safe", "sandbox", "prod"]
 ALLOWED_SUPPLIER_STATUSES = ["new", "confirm", "complete", "cancel", "cancel_carrier"]
+#: То же + псевдо-статус «ещё в доставке» (`complete` минус доставленное) —
+#: он валиден в фильтре списка заданий, но значением `supplierStatus` не является.
+ALLOWED_ORDER_STATUS_FILTERS = [*ALLOWED_SUPPLIER_STATUSES, FBS_IN_DELIVERY_STATUS]
 ALLOWED_STICKER_TYPES = ["svg", "zplv", "zplh", "png"]
 #: Производные состояния поставки (см. `models.wb_fbs.supply_status`) — своего
 #: поля статуса Marketplace API не отдаёт.
@@ -247,6 +252,28 @@ class FbsOverrideSet(BaseModel):
         return self
 
 
+class FbsPushBreakdown(BaseModel):
+    """Из чего сложилась разница «Доступно на складе» → «Штук к передаче».
+
+    Цепочка сходится по построению: `ledger_free` минус все `cut_*` равно
+    `total_units`, а `cut_other` — остаток, а не отдельный расчёт.
+    """
+
+    #: Наш свободный остаток по привязанным складам (ledger − резерв сборки) —
+    #: ровно то, что карточка склада показывает как «Доступно».
+    ledger_free: int = 0
+    #: Срезало зеркало ФФ: провайдер видит меньше нашего учёта («Минимум из двух»).
+    cut_by_mirror: int = 0
+    #: Страховой буфер склада продавца (процент + абсолютный).
+    cut_by_buffer: int = 0
+    #: Позиции без chrtId — ключа методов остатков WB у них нет, уехать не могут.
+    cut_no_chrt: int = 0
+    #: Ручное «Кол-во»: работает как ПОТОЛОК (0 — не отдавать), поднять не может.
+    cut_by_override: int = 0
+    #: Открытые FBS-задания, потолок max_qty_per_sku, FBO-гейт.
+    cut_other: int = 0
+
+
 class FbsStockPreviewOut(BaseModel):
     wb_warehouse_id: int
     wb_warehouse_name: str | None = None
@@ -258,6 +285,8 @@ class FbsStockPreviewOut(BaseModel):
     total_rows: int = 0
     total_units: int = 0
     rows_no_chrt: int = 0
+    #: Почему `total_units` меньше «Доступно» на карточке склада.
+    breakdown: FbsPushBreakdown = Field(default_factory=FbsPushBreakdown)
     is_processing: bool = False
 
 
@@ -438,6 +467,9 @@ class FbsOrderListOut(BaseModel):
     total: int = 0
     #: Счётчики по статусам для вкладок (new / confirm / complete / cancel).
     status_counts: dict[str, int] = Field(default_factory=dict)
+    #: Подмножество `complete`, которое ещё едет к покупателю. Отдельным полем,
+    #: а не ключом `status_counts` — сумма счётчиков и так равна вкладке «Все».
+    in_delivery_count: int = 0
 
 
 class FbsOrderBackfillRequest(BaseModel):

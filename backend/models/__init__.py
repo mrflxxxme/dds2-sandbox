@@ -258,9 +258,11 @@ from backend.models.wb_fbo import (
 
 # WB FBS (продажи со склада продавца)
 from backend.models.wb_fbs import (
+    FBS_IN_DELIVERY_STATUS,
     FBS_OPEN_STATUSES,
     FBS_TERMINAL_STATUSES,
     FBS_WB_CANCELLED_STATUSES,
+    FBS_WB_DELIVERED_STATUSES,
     FbsPushStatus,
     FbsPushTrigger,
     FbsStockSource,
@@ -508,9 +510,11 @@ __all__ = [
     "WbFboSupplyItem",
     "WbSupplyStatus",
     # WB FBS (склад продавца)
+    "FBS_IN_DELIVERY_STATUS",
     "FBS_OPEN_STATUSES",
     "FBS_TERMINAL_STATUSES",
     "FBS_WB_CANCELLED_STATUSES",
+    "FBS_WB_DELIVERED_STATUSES",
     "FbsPushStatus",
     "FbsPushTrigger",
     "FbsStockSource",

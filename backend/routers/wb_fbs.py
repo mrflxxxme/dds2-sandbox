@@ -38,8 +38,8 @@ from backend.integrations.wb_fbs_api import (
 from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.wb_fbs import (
+    ALLOWED_ORDER_STATUS_FILTERS,
     ALLOWED_STICKER_TYPES,
-    ALLOWED_SUPPLIER_STATUSES,
     ALLOWED_SUPPLY_STATUSES,
     FbsActionOut,
     FbsLinkCreate,
@@ -562,7 +562,11 @@ async def apply_stock_reconcile(
 
 @router.get("/orders", response_model=FbsOrderListOut)
 async def list_orders(
-    status: str | None = Query(None, description="supplier_status: new/confirm/complete/cancel/cancel_carrier"),
+    status: str | None = Query(
+        None,
+        description="supplier_status: new/confirm/complete/cancel/cancel_carrier "
+        "либо псевдо-статус in_delivery (переданные и ещё не доставленные)",
+    ),
     supply_id: str | None = Query(None, max_length=50),
     wb_warehouse_id: int | None = Query(None, ge=1),
     date_from: date | None = Query(None),
@@ -573,8 +577,8 @@ async def list_orders(
     db: AsyncSession = Depends(get_db),
 ):
     """Список сборочных заданий из нашего зеркала + счётчики по статусам."""
-    if status is not None and status not in ALLOWED_SUPPLIER_STATUSES:
-        raise HTTPException(422, f"status должен быть одним из: {ALLOWED_SUPPLIER_STATUSES}")
+    if status is not None and status not in ALLOWED_ORDER_STATUS_FILTERS:
+        raise HTTPException(422, f"status должен быть одним из: {ALLOWED_ORDER_STATUS_FILTERS}")
     if date_from and date_to and date_from > date_to:
         raise HTTPException(422, "date_from позже date_to")
     with _fbs_errors():

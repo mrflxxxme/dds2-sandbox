@@ -28,6 +28,8 @@ interface WhCounts {
     name: string;
     isNew: number;
     confirm: number;
+    /** Передано в WB и ещё не у покупателя — `in_delivery_count` бэкенда. */
+    inDelivery: number;
 }
 
 export default function OrdersWarehouseSummary({ warehouses, reloadKey, onPick }: Props) {
@@ -46,17 +48,18 @@ export default function OrdersWarehouseSummary({ warehouses, reloadKey, onPick }
                 Promise.all(
                     warehouses.map(w =>
                         api.getFbsOrders({ wbWarehouseId: w.wb_warehouse_id, limit: 1 })
-                            .then(r => ({ w, counts: r.status_counts ?? {} })),
+                            .then(r => ({ w, counts: r.status_counts ?? {}, inDelivery: r.in_delivery_count ?? 0 })),
                     ),
                 ),
             ]);
             if (signal?.aborted) return;
 
-            const list: WhCounts[] = perWh.map(({ w, counts }) => ({
+            const list: WhCounts[] = perWh.map(({ w, counts, inDelivery }) => ({
                 wbWarehouseId: w.wb_warehouse_id,
                 name: w.name || `#${w.wb_warehouse_id}`,
                 isNew: counts.new ?? 0,
                 confirm: counts.confirm ?? 0,
+                inDelivery,
             }));
             const allCounts = allRes.status_counts ?? {};
             const totals: WhCounts = {
@@ -64,18 +67,27 @@ export default function OrdersWarehouseSummary({ warehouses, reloadKey, onPick }
                 name: 'Все склады',
                 isNew: allCounts.new ?? 0,
                 confirm: allCounts.confirm ?? 0,
+                inDelivery: allRes.in_delivery_count ?? 0,
             };
             // Задания склада, которого нет в нашем справочнике, иначе бы просто
             // потерялись из сводки — показываем остаток честной строкой.
             const sumNew = list.reduce((a, r) => a + r.isNew, 0);
             const sumConfirm = list.reduce((a, r) => a + r.confirm, 0);
+            const sumDelivery = list.reduce((a, r) => a + r.inDelivery, 0);
             const restNew = Math.max(0, totals.isNew - sumNew);
             const restConfirm = Math.max(0, totals.confirm - sumConfirm);
+            const restDelivery = Math.max(0, totals.inDelivery - sumDelivery);
 
             setRows(list);
             setTotal(totals);
-            setOrphan(restNew + restConfirm > 0
-                ? { wbWarehouseId: '', name: 'Без склада в справочнике', isNew: restNew, confirm: restConfirm }
+            setOrphan(restNew + restConfirm + restDelivery > 0
+                ? {
+                    wbWarehouseId: '',
+                    name: 'Без склада в справочнике',
+                    isNew: restNew,
+                    confirm: restConfirm,
+                    inDelivery: restDelivery,
+                }
                 : null);
         } catch (e: unknown) {
             if (signal?.aborted) return;
@@ -128,8 +140,11 @@ export default function OrdersWarehouseSummary({ warehouses, reloadKey, onPick }
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
                 Очередь по складам WB — в одну поставку задания разных складов не кладутся
             </div>
+            {/* 240px — минимум под ТРИ ячейки: на прежних 190 подписи «На сборке»
+                и «В доставке» ломались на две строки, и карточка читалась как
+                каша из цифр. Ширину держит подпись, а не число. */}
             <div style={{
-                display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12,
+                display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12,
             }}>
                 {cards.map((c, i) => (
                     <div key={`${c.name}-${i}`} className="glass-card" style={{ padding: '12px 16px' }}>
@@ -139,11 +154,20 @@ export default function OrdersWarehouseSummary({ warehouses, reloadKey, onPick }
                         }} title={c.name}>
                             {c.name}
                         </div>
-                        <div style={{ display: 'flex', gap: 16 }}>
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between' }}>
                             <CountCell label="Новые" value={c.isNew} accent
                                 onClick={() => onPick(c.wbWarehouseId, 'new')} />
                             <CountCell label="На сборке" value={c.confirm}
                                 onClick={() => onPick(c.wbWarehouseId, 'confirm')} />
+                            {/* Третья фаза жизни задания: уехало в WB, но у покупателя
+                                ещё не оказалось. Из `supplierStatus` её не видно — он
+                                застывает на `complete` навсегда. */}
+                            <CountCell
+                                label="В доставке"
+                                value={c.inDelivery}
+                                title="Передано в WB и ещё не получено покупателем"
+                                onClick={() => onPick(c.wbWarehouseId, 'in_delivery')}
+                            />
                         </div>
                     </div>
                 ))}
@@ -152,28 +176,35 @@ export default function OrdersWarehouseSummary({ warehouses, reloadKey, onPick }
     );
 }
 
-function CountCell({ label, value, accent, onClick }: {
+function CountCell({ label, value, accent, title, onClick }: {
     label: string;
     value: number;
     accent?: boolean;
+    /** Чем ячейка отличается от статуса задания; по умолчанию — «Показать: …». */
+    title?: string;
     onClick: () => void;
 }) {
     return (
         <button
             type="button"
             onClick={onClick}
-            title={`Показать: ${label.toLowerCase()}`}
+            title={title ?? `Показать: ${label.toLowerCase()}`}
             style={{
                 background: 'none', border: 'none', padding: 0, cursor: 'pointer', textAlign: 'left',
+                // Ячейка меряется по подписи и не сжимается: без этого flex ужимал
+                // её до ширины числа, и подпись переносилась по слогам.
+                flex: '0 0 auto', minWidth: 0,
             }}
         >
             <div style={{
-                fontSize: 20, fontWeight: 700,
+                fontSize: 20, fontWeight: 700, lineHeight: 1.2,
                 color: accent && value > 0 ? 'var(--color-accent)' : undefined,
             }}>
                 {formatNumber(value, 0)}
             </div>
-            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{label}</div>
+            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
+                {label}
+            </div>
         </button>
     );
 }

@@ -23,6 +23,7 @@ import pytest_asyncio
 from sqlalchemy import func, select
 
 from backend.models import (
+    FBS_IN_DELIVERY_STATUS,
     FbsSupplierStatus,
     Nomenclature,
     WbFbsOrder,
@@ -1242,6 +1243,41 @@ async def test_list_orders_filters_and_money_precision(db_session, env, monkeypa
     # Счётчики вкладок считаются БЕЗ фильтра статуса — иначе вкладка знала бы
     # только про саму себя.
     assert only_new["status_counts"][FbsSupplierStatus.CONFIRM.value] == 1
+
+
+@pytest.mark.asyncio
+async def test_in_delivery_counts_only_what_is_still_on_the_way(db_session, env):
+    """«В доставке» = переданное МИНУС доставленное — по `wbStatus`, не по продавцу.
+
+    `supplierStatus` застывает на `complete` в момент передачи поставки и таким
+    остаётся навсегда, поэтому на вопрос «что сейчас в пути» отвечает только
+    вторая ось. Отдельным полем, а не ключом `status_counts`: сумма счётчиков —
+    это вкладка «Все», и синтетика внутри неё удвоила бы каждое переданное.
+    """
+    done = FbsSupplierStatus.COMPLETE.value
+    await _seed_order(db_session, env.project_id, 9600, supplier_status=done, wb_status="sorted")
+    await _seed_order(db_session, env.project_id, 9601, supplier_status=done, wb_status=None)
+    await _seed_order(db_session, env.project_id, 9602, supplier_status=done, wb_status="sold")
+    await _seed_order(db_session, env.project_id, 9603, supplier_status=done, wb_status="defect")
+    # Передали, но покупатель отказался: effective — `cancel`, в пути ничего нет.
+    await _seed_order(
+        db_session, env.project_id, 9604, supplier_status=done, wb_status="canceled_by_client"
+    )
+    await _seed_order(db_session, env.project_id, 9605)  # new — к доставке отношения не имеет
+
+    listed = await orders_service.list_orders(db_session, env.project_id)
+
+    assert listed["in_delivery_count"] == 2  # 9600 (sorted) и 9601 (пустой wbStatus)
+    assert listed["status_counts"][FbsSupplierStatus.COMPLETE.value] == 4
+    # Сумма счётчиков осталась равной вкладке «Все» — синтетика её не раздула.
+    assert sum(listed["status_counts"].values()) == listed["total"] == 6
+
+    # Цифра на карточке склада и выдача по клику обязаны совпадать до штуки.
+    filtered = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_IN_DELIVERY_STATUS
+    )
+    assert filtered["total"] == 2
+    assert {o["wb_order_id"] for o in filtered["items"]} == {9600, 9601}
 
 
 # ─── Контур: песочница не трогает боевые данные ──────────────────────────────
