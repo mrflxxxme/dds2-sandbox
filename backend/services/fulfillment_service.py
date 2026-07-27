@@ -2659,15 +2659,25 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     # логистики», но физически на складе, а сборка ещё не отгружена (наш сток его
     # держит) → без досчёта расхождение показывает ложную недостачу. Состав сборки
     # — в россыпи (ключ = barcode, без короб-фолда).
+    # КЛАМП: skladbot списывает ПОЗИЦИОННО (по мере физической обработки), а не
+    # заявкой целиком — по непотроганным позициям зеркало товар ещё держит. Досчёт
+    # состава «как есть» кладёт его второй раз и рождает ложный ПРОФИЦИТ ФФ. Поэтому
+    # добавляем не больше наблюдаемой недостачи (our − ff_good): транзит может лишь
+    # маскировать недостачу, но никогда не создавать профицит.
     for barcode, (qty, nom_id) in logistics_in_transit.items():
         lrow = rows.get(barcode)
         if lrow is None:
-            lrow = rows[barcode] = _new_row(barcode, nom_id)
-        elif lrow["nomenclature_id"] is None and nom_id is not None:
+            # Ни нашего остатка, ни зеркала ФФ по этому ШК — компенсировать нечего.
+            continue
+        our_total = lrow["our_quantity"] + (lrow["our_defect"] if is_migfull else 0)
+        add = min(qty, max(our_total - lrow["ff_good"], 0))
+        if add <= 0:
+            continue
+        if lrow["nomenclature_id"] is None and nom_id is not None:
             lrow["nomenclature_id"] = nom_id
             lrow["article_seller"], lrow["subject"], lrow["brand"] = _nom_fields(nom_id)
-        lrow["ff_logistics"] += qty
-        lrow["ff_good"] += qty
+        lrow["ff_logistics"] += add
+        lrow["ff_good"] += add
 
     # migfull: вынести «В приёмке» (свежий приход, залоченный migfull) из «Брака».
     # Резерв под входящий товар (позиции в EXPECTED-приёмках) не «собран» ни в одну
