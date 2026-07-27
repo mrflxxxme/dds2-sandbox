@@ -896,6 +896,119 @@ class WBApiClient:
                     )
                 return True
 
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def answer_feedback(self, feedback_id: str, text: str) -> bool:
+        """
+        Создать/отредактировать ответ на отзыв. WB Feedbacks API: PATCH /api/v1/feedbacks,
+        body {"id": feedback_id, "text": text}. Тот же метод и для редактирования ответа.
+
+        ⚠️ Лимит методов отзывов — 1 rps (до 3 rps → блок на 60 сек): массовую отправку
+        гнать ТОЛЬКО через фоновую очередь с троттлингом, не в HTTP-запросе.
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/feedbacks"
+                payload = {"id": feedback_id, "text": text}
+                logger.info("wb_api.request", method="PATCH", path="/api/v1/feedbacks")
+                response = await client.patch(url, headers=self.headers, json=payload)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Вопросы и отзывы»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Feedbacks API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Feedbacks API server error: HTTP {response.status_code}")
+                if response.status_code not in (200, 204):
+                    raise ValueError(
+                        f"WB feedbacks answer error: HTTP {response.status_code} — {response.text[:200]}"
+                    )
+                return True
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def get_questions(
+        self,
+        is_answered: bool = False,
+        take: int = 100,
+        skip: int = 0,
+        date_from: int | None = None,
+        date_to: int | None = None,
+        order: str = "dateDesc",
+    ) -> dict:
+        """
+        Вопросы покупателей (questions) по товарам продавца.
+        WB Feedbacks API: GET /api/v1/questions?isAnswered=&take=&skip=&order=&dateFrom=&dateTo=
+        take ∈ [1..10000], skip ∈ [0..100000], order = dateAsc|dateDesc,
+        dateFrom/dateTo — unix timestamp (сек). Нужен scope «Вопросы и отзывы».
+
+        Возвращает внутренний data-dict:
+          {countUnanswered, countArchive, questions: [
+             {id, text, answer: {text, editable, createDate} | None, createdDate,
+              userName, isAnswered, productDetails: {nmId, productName, supplierArticle, brandName}}
+          ]}
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                params: dict = {
+                    "isAnswered": str(is_answered).lower(),
+                    "take": take,
+                    "skip": skip,
+                    "order": order,
+                }
+                if date_from is not None:
+                    params["dateFrom"] = date_from
+                if date_to is not None:
+                    params["dateTo"] = date_to
+                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/questions"
+                logger.info("wb_api.request", method="GET", path="/api/v1/questions", params=params)
+                response = await client.get(url, headers=self.headers, params=params)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Вопросы и отзывы»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Feedbacks API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Feedbacks API server error: HTTP {response.status_code}")
+                if response.status_code == 204:
+                    return {"countUnanswered": 0, "countArchive": 0, "questions": []}
+                if response.status_code != 200:
+                    raise ValueError(f"WB questions error: HTTP {response.status_code} — {response.text[:200]}")
+
+                data = response.json()
+                inner = data.get("data") if isinstance(data, dict) else None
+                return inner or {"countUnanswered": 0, "countArchive": 0, "questions": []}
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def answer_question(self, question_id: str, text: str) -> bool:
+        """
+        Ответить на вопрос покупателя. WB Feedbacks API: PATCH /api/v1/questions,
+        body {"id": question_id, "answer": {"text": text}} (по доке dev.wildberries.ru
+        раздел «Вопросы и отзывы»; редактирование ответа — тем же методом).
+
+        ⚠️ Лимит методов отзывов — 1 rps (до 3 rps → блок на 60 сек): массовую отправку
+        гнать ТОЛЬКО через фоновую очередь с троттлингом, не в HTTP-запросе.
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/questions"
+                payload = {"id": question_id, "answer": {"text": text}}
+                logger.info("wb_api.request", method="PATCH", path="/api/v1/questions")
+                response = await client.patch(url, headers=self.headers, json=payload)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Вопросы и отзывы»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Feedbacks API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Feedbacks API server error: HTTP {response.status_code}")
+                if response.status_code not in (200, 204):
+                    raise ValueError(
+                        f"WB questions answer error: HTTP {response.status_code} — {response.text[:200]}"
+                    )
+                return True
+
 
 def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:
     """

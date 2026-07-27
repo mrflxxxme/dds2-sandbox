@@ -106,6 +106,50 @@ class ComplaintCandidatesResponse(BaseModel):
     has_key: bool = True
 
 
+class ComplaintAgentItem(BaseModel):
+    """ИИ-агент подготовки жалоб."""
+
+    id: int
+    name: str
+    enabled: bool = True
+    subject: str | None = None
+    brand: str | None = None
+    nm_ids: str | None = None
+    star_levels: str = "1,2,3"
+    rules: str = ""
+    examples: str | None = None
+    llm_provider: str = "openai_compatible"
+    llm_model: str = "deepseek-chat"
+    llm_base_url: str | None = None
+    last_run_at: str | None = None
+
+
+class ComplaintAgentSave(BaseModel):
+    """Создание/обновление агента (частичное — все поля опциональны при PATCH)."""
+
+    name: str | None = None
+    enabled: bool | None = None
+    subject: str | None = None
+    brand: str | None = None
+    nm_ids: str | None = None
+    star_levels: str | None = None
+    rules: str | None = None
+    examples: str | None = None
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    llm_base_url: str | None = None
+
+
+class ComplaintAgentRunResult(BaseModel):
+    """Итог прогона агента."""
+
+    checked: int = 0  # проверено отзывов
+    qualified: int = 0  # признано основанием
+    created: int = 0  # создано жалоб
+    errors: int = 0  # ошибок LLM/создания
+    limit: int = 0  # кап за прогон
+
+
 class ComplaintCreate(BaseModel):
     """Запрос на подачу жалобы на отзыв."""
 
@@ -272,3 +316,252 @@ class ReviewsSummaryResponse(BaseModel):
     period: str = "1y"
     # False → у проекта не настроен активный WB-ключ (фронт покажет подсказку)
     has_key: bool = True
+
+
+# ─── Вопросы покупателей (зеркало wb_questions) ─────────────────────────────
+
+
+class QuestionItem(BaseModel):
+    """Один вопрос покупателя WB из зеркала."""
+
+    id: str  # wb_id
+    nm_id: int | None = None
+    text: str | None = None
+    answer_text: str | None = None
+    is_answered: bool = False
+    created_date: str | None = None
+    user_name: str | None = None
+    subject: str | None = None
+    product_name: str | None = None
+    article: str | None = None
+    brand: str | None = None
+
+
+class QuestionsListResponse(BaseModel):
+    """Список вопросов проекта + счётчики."""
+
+    items: list[QuestionItem] = []
+    count_unanswered: int = 0
+    count_archive: int = 0
+    has_key: bool = True
+
+
+class QuestionsSyncResult(BaseModel):
+    """Итог on-demand синка вопросов."""
+
+    rows_fetched: int = 0
+    rows_upserted: int = 0
+    has_key: bool = True
+
+
+# ─── ИИ-агенты автоответов ───────────────────────────────────────────────────
+
+
+class ReplyAgentItem(BaseModel):
+    """ИИ-агент автоответов на отзывы/вопросы."""
+
+    id: int
+    name: str
+    enabled: bool = True
+    target: str = "both"  # feedback|question|both
+    star_levels: str = "1,2,3,4,5"
+    nm_ids: str | None = None
+    auto_send: bool = False
+    rules: str = ""
+    examples: str | None = None
+    llm_provider: str = "openai_compatible"
+    llm_model: str = "deepseek-chat"
+    llm_base_url: str | None = None
+    last_run_at: str | None = None
+
+
+class ReplyAgentSave(BaseModel):
+    """Создание/обновление агента автоответов (частичное при PATCH)."""
+
+    name: str | None = None
+    enabled: bool | None = None
+    target: str | None = None  # feedback|question|both
+    star_levels: str | None = None
+    nm_ids: str | None = None
+    auto_send: bool | None = None
+    rules: str | None = None
+    examples: str | None = None
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    llm_base_url: str | None = None
+
+
+class ReplyAgentRunResult(BaseModel):
+    """Итог прогона агента автоответов."""
+
+    checked: int = 0  # проверено целей
+    drafted: int = 0  # создано черновиков
+    needs_info: int = 0  # из них без фактов КБ — на ручную доработку
+    errors: int = 0  # ошибок LLM/сохранения
+    limit: int = 0  # кап за прогон
+    auto_send: bool = False  # автоотправка отключена: всегда False (ручное одобрение)
+
+
+# ─── Ответы на отзывы/вопросы (wb_feedback_replies) ──────────────────────────
+
+
+class ReplyTarget(BaseModel):
+    """Данные цели ответа из зеркала (для UI)."""
+
+    text: str | None = None
+    rating: int | None = None  # только для отзывов
+    nm_id: int | None = None
+    product_name: str | None = None
+    brand: str | None = None
+    subject: str | None = None
+    user_name: str | None = None
+    created_date: str | None = None
+
+
+class ReplyItem(BaseModel):
+    """Один ответ/черновик продавца."""
+
+    id: int
+    target_type: str  # feedback|question
+    target_wb_id: str
+    draft_text: str
+    final_text: str | None = None
+    text: str  # финальный текст (final_text или draft_text)
+    status: str  # draft|approved|sent|error|rejected
+    source: str  # agent|manual
+    agent_id: int | None = None
+    needs_info: bool = False  # True — в КБ нет фактов для ответа, ждёт ручной доработки
+    generation: str | None = None  # llm|kb_direct|None (ручной/needs_info-заглушка)
+    error: str | None = None
+    sent_at: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    target: ReplyTarget | None = None
+
+
+class RepliesListResponse(BaseModel):
+    """Список ответов проекта + счётчики по статусам."""
+
+    items: list[ReplyItem] = []
+    total: int = 0
+    counts: dict[str, int] = {}
+
+
+class ReplyCreate(BaseModel):
+    """Ручной черновик ответа."""
+
+    target_type: str  # feedback|question
+    target_wb_id: str
+    text: str
+
+
+class ReplyUpdate(BaseModel):
+    """Редактирование/модерация ответа: text — правка; action — approve|reject|reopen."""
+
+    text: str | None = None
+    action: str | None = None
+
+
+class ReplySendResult(BaseModel):
+    """Итог отправки approved-ответов."""
+
+    sent: int = 0
+    errors: int = 0
+    pending: int = 0  # сколько approved осталось в очереди
+
+
+# ─── База знаний товаров (wb_product_kb) ─────────────────────────────────────
+
+
+class KbProductItem(BaseModel):
+    """Товар проекта с числом записей базы знаний."""
+
+    nm_id: int
+    kb_count: int = 0
+    product_name: str | None = None
+    article: str | None = None
+    brand: str | None = None
+    card_synced_at: str | None = None  # когда синкнуто зеркало карточки (None — нет карточки)
+
+
+class KbProductsResponse(BaseModel):
+    """Список товаров с записями КБ."""
+
+    items: list[KbProductItem] = []
+    total: int = 0
+
+
+class KbItem(BaseModel):
+    """Одна запись базы знаний товара."""
+
+    id: int
+    nm_id: int
+    topic: str
+    question_example: str | None = None
+    answer: str
+    source: str = "manual"  # manual|import|card
+    enabled: bool = True
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class KbListResponse(BaseModel):
+    """Записи базы знаний + total."""
+
+    items: list[KbItem] = []
+    total: int = 0
+
+
+class KbSave(BaseModel):
+    """Создание/обновление записи КБ (частичное при PATCH)."""
+
+    nm_id: int | None = None
+    topic: str | None = None
+    question_example: str | None = None
+    answer: str | None = None
+    enabled: bool | None = None
+
+
+class KbImportResult(BaseModel):
+    """Итог импорта КБ из архива отвеченных вопросов."""
+
+    source_questions: int = 0  # отвеченных вопросов в зеркале
+    created: int = 0  # создано записей КБ
+    skipped_dupe: int = 0  # пропущено дублей
+    skipped_empty: int = 0  # пропущено пустых текстов
+    nm_count: int = 0  # затронуто товаров (nm_id)
+
+
+# ─── Зеркало карточек WB (wb_product_cards) ──────────────────────────────────
+
+
+class CardItem(BaseModel):
+    """Карточка товара из зеркала (публичный API WB)."""
+
+    nm_id: int
+    title: str | None = None
+    brand: str | None = None
+    subject: str | None = None
+    description: str | None = None
+    contents: str | None = None  # комплектация
+    characteristics: list[dict] = []  # [{"name": "...", "value": "..."}]
+    photo_urls: list[str] = []  # URL big-фото (байты не скачиваем)
+    synced_at: str | None = None
+
+
+class CardSyncResult(BaseModel):
+    """Итог on-demand синка карточек WB."""
+
+    cards_total: int = 0  # сколько nm_id взято в прогон
+    synced: int = 0  # карточек скачано и upsert'нуто
+    not_found: int = 0  # 404 — карточки нет на WB
+    errors: int = 0  # прочие сбои (сеть, HTTP≠200/404)
+
+
+class KbCardImportResult(BaseModel):
+    """Итог импорта КБ из зеркала карточек."""
+
+    cards_total: int = 0  # карточек в зеркале
+    created: int = 0  # создано записей КБ (source='card')
+    updated: int = 0  # обновлено изменившихся значений
+    unchanged: int = 0  # без изменений

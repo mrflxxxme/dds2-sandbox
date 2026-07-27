@@ -81,6 +81,13 @@ class Settings(BaseSettings):
     # Клиент готов; включать, когда WB объявит возврат метода. Учти лимит 1 rps.
     WB_FEEDBACK_COMPLAINTS_API: bool = False
 
+    # LLM для ИИ-агентов подготовки жалоб (сменный, «условно бесплатный»).
+    # OpenAI-совместимый провайдер: DeepSeek / GigaChat / OpenRouter / Groq / локальный.
+    # base_url и модель можно переопределять на самом агенте; ключ — здесь.
+    COMPLAINT_LLM_API_KEY: str = ""
+    COMPLAINT_LLM_BASE_URL: str = "https://api.deepseek.com"
+    COMPLAINT_LLM_MODEL: str = "deepseek-chat"
+
     # Admin panel IP whitelist (comma-separated, empty = no restriction)
     ADMIN_ALLOWED_IPS: str = ""  # e.g. "1.2.3.4,2a01:e5c0:6dac::2"
 

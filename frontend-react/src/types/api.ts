@@ -6624,6 +6624,225 @@ export interface ReviewsSummaryResponse {
   has_key: boolean;
 }
 
+// ─── Вопросы покупателей (зеркало wb_questions) ─────────────────────────────
+
+/** Один вопрос покупателя WB из зеркала. */
+export interface QuestionItem {
+  /** wb_id вопроса */
+  id: string;
+  nm_id: number | null;
+  text: string | null;
+  answer_text: string | null;
+  is_answered: boolean;
+  created_date: string | null;
+  user_name: string | null;
+  subject: string | null;
+  product_name: string | null;
+  article: string | null;
+  brand: string | null;
+}
+
+export interface QuestionsListResponse {
+  items: QuestionItem[];
+  /** Всего неотвеченных (независимо от текущего фильтра) — для пагинации */
+  count_unanswered: number;
+  /** Всего отвеченных (архив) */
+  count_archive: number;
+  has_key: boolean;
+}
+
+/** Итог on-demand синка вопросов. */
+export interface QuestionsSyncResult {
+  rows_fetched: number;
+  rows_upserted: number;
+  has_key: boolean;
+}
+
+// ─── ИИ-агенты автоответов ───────────────────────────────────────────────────
+
+/** На что отвечает агент: отзывы / вопросы / и то и другое. */
+export type ReplyAgentTarget = 'feedback' | 'question' | 'both';
+export type LlmProvider = 'openai_compatible' | 'claude';
+
+/** ИИ-агент автоответов на отзывы/вопросы. */
+export interface ReplyAgent {
+  id: number;
+  name: string;
+  enabled: boolean;
+  target: ReplyAgentTarget;
+  /** Уровни оценок через запятую ("1,2,3") — для отзывов */
+  star_levels: string;
+  /** nm_id через запятую либо null (все товары) */
+  nm_ids: string | null;
+  auto_send: boolean;
+  rules: string;
+  /** JSON few-shot примеров (строкой) */
+  examples: string | null;
+  llm_provider: LlmProvider;
+  llm_model: string;
+  llm_base_url: string | null;
+  last_run_at: string | null;
+}
+
+/** Создание/обновление агента (частичное при PATCH). */
+export interface ReplyAgentSave {
+  name?: string;
+  enabled?: boolean;
+  target?: ReplyAgentTarget;
+  star_levels?: string;
+  nm_ids?: string | null;
+  auto_send?: boolean;
+  rules?: string;
+  examples?: string | null;
+  llm_provider?: LlmProvider;
+  llm_model?: string;
+  llm_base_url?: string | null;
+}
+
+/** Итог прогона агента автоответов. */
+export interface ReplyAgentRunResult {
+  checked: number;
+  drafted: number;
+  errors: number;
+  limit: number;
+  /** True → черновики сразу approved */
+  auto_send: boolean;
+}
+
+// ─── Ответы на отзывы/вопросы (wb_feedback_replies) ──────────────────────────
+
+export type ReplyTargetType = 'feedback' | 'question';
+export type ReplyStatus = 'draft' | 'approved' | 'sent' | 'error' | 'rejected';
+export type ReplyAction = 'approve' | 'reject' | 'reopen';
+
+/** Данные цели ответа из зеркала (для UI). */
+export interface ReplyTarget {
+  text: string | null;
+  /** Только для отзывов */
+  rating: number | null;
+  nm_id: number | null;
+  product_name: string | null;
+  brand: string | null;
+  subject: string | null;
+  user_name: string | null;
+  created_date: string | null;
+}
+
+/** Один ответ/черновик продавца. */
+export interface Reply {
+  id: number;
+  target_type: ReplyTargetType;
+  target_wb_id: string;
+  draft_text: string;
+  final_text: string | null;
+  /** Финальный текст (final_text или draft_text) */
+  text: string;
+  status: ReplyStatus;
+  source: 'agent' | 'manual';
+  agent_id: number | null;
+  /** True — в базе знаний нет фактов для ответа, ждёт ручной доработки */
+  needs_info: boolean;
+  /** Источник генерации: 'llm' | 'kb_direct' | null (ручной/needs_info-заглушка) */
+  generation: 'llm' | 'kb_direct' | null;
+  error: string | null;
+  sent_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  target: ReplyTarget | null;
+}
+
+export interface RepliesListResponse {
+  items: Reply[];
+  total: number;
+  /** Счётчики по статусам: { draft: n, approved: n, ... } */
+  counts: Record<string, number>;
+}
+
+/** Итог отправки approved-ответов (202 — отправка в фоне). */
+export interface ReplySendResult {
+  sent: number;
+  errors: number;
+  /** Сколько approved стоит в очереди на отправку */
+  pending: number;
+}
+
+// ─── База знаний товаров (wb_product_kb) ────────────────────────────────────
+
+/** Темы записей базы знаний. */
+export type KbTopic =
+  | 'Размер'
+  | 'Доставка'
+  | 'Состав'
+  | 'Цвет'
+  | 'Комплект'
+  | 'Гарантия'
+  | 'Качество'
+  | 'Прочее';
+
+/** Товар проекта с числом записей базы знаний. */
+export interface KbProductItem {
+  nm_id: number;
+  kb_count: number;
+  product_name: string | null;
+  article: string | null;
+  brand: string | null;
+}
+
+export interface KbProductsResponse {
+  items: KbProductItem[];
+  total: number;
+}
+
+/** Одна запись базы знаний товара. */
+export interface KbItem {
+  id: number;
+  nm_id: number;
+  topic: string;
+  question_example: string | null;
+  answer: string;
+  /** manual | import */
+  source: 'manual' | 'import';
+  enabled: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface KbListResponse {
+  items: KbItem[];
+  total: number;
+}
+
+/** Создание записи КБ (POST /kb). */
+export interface KbCreate {
+  nm_id: number;
+  topic: string;
+  question_example?: string | null;
+  answer: string;
+}
+
+/** Частичное обновление записи КБ (PATCH /kb/{id}). */
+export interface KbUpdate {
+  nm_id?: number;
+  topic?: string;
+  question_example?: string | null;
+  answer?: string;
+  enabled?: boolean;
+}
+
+/** Итог импорта КБ из архива отвеченных вопросов. */
+export interface KbImportResult {
+  /** Отвеченных вопросов в зеркале */
+  source_questions: number;
+  /** Создано записей КБ */
+  created: number;
+  /** Пропущено дублей */
+  skipped_dupe: number;
+  /** Пропущено пустых текстов */
+  skipped_empty: number;
+  /** Затронуто товаров (nm_id) */
+  nm_count: number;
+}
+
 // ─── Сырые данные (GET /raw-data/sources) ───────────────────────────────────
 
 /** Прогресс принудительной дозагрузки источника (живёт в памяти бэкенда). */

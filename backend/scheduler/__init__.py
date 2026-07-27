@@ -56,6 +56,8 @@ from backend.scheduler.jobs.cbr_bic_sync import sync_cbr_bic_directory
 from backend.scheduler.jobs.faktura_statement_sync import sync_all_projects_faktura_statements
 from backend.scheduler.jobs.wb_goods_returns_sync import sync_all_projects_wb_returns
 from backend.scheduler.jobs.wb_reviews_sync import sync_all_projects_wb_feedbacks
+from backend.scheduler.jobs.wb_questions_sync import sync_all_projects_wb_questions
+from backend.scheduler.jobs.wb_replies_sender import send_all_projects_pending_replies
 from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
 from backend.scheduler.jobs.wb_prices_sync import sync_all_projects_wb_prices
 from backend.scheduler.jobs.measurements_digest import send_measurement_digests
@@ -456,6 +458,30 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=3600,
+    )
+
+    # WB customer questions (вопросы покупателей): ночной прогон 03:25 MSK,
+    # сразу после синка отзывов (общий лимит WB 1 rps на методы отзывов/вопросов).
+    _scheduler.add_job(
+        sync_all_projects_wb_questions,
+        trigger=CronTrigger(hour=3, minute=25, timezone=MSK),
+        id="wb_questions_sync",
+        name="WB questions sync (03:25 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # Отправка approved-ответов на отзывы/вопросы: каждые 2 минуты, троттлинг
+    # 1 rps внутри сервиса. Частый прогон — одобренные в UI ответы не ждут ночи.
+    _scheduler.add_job(
+        send_all_projects_pending_replies,
+        trigger=IntervalTrigger(minutes=2, timezone=MSK),
+        id="wb_replies_sender",
+        name="WB feedback replies sender (every 2 min)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=300,
     )
 
     # Faktura.ru (ВБ Банк) statement auto-sync: 4×/day — 06/12/18/23 MSK.

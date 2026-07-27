@@ -292,6 +292,24 @@ from backend.models.wb_reviews import (
 from backend.models.wb_feedback_complaints import (
     WBFeedbackComplaint,
 )
+from backend.models.wb_complaint_agents import (
+    WBComplaintAgent,
+)
+from backend.models.wb_questions import (
+    WBQuestion,
+)
+from backend.models.wb_reply_agents import (
+    WBReplyAgent,
+)
+from backend.models.wb_feedback_replies import (
+    WBFeedbackReply,
+)
+from backend.models.wb_product_kb import (
+    WBProductKB,
+)
+from backend.models.wb_product_cards import (
+    WBProductCard,
+)
 
 # Alias for backward compatibility
 WbApiKey = IntegrationKey
@@ -420,6 +438,12 @@ __all__ = [
     # WB Customer Feedbacks
     "WBFeedback",
     "WBFeedbackComplaint",
+    "WBComplaintAgent",
+    "WBQuestion",
+    "WBReplyAgent",
+    "WBFeedbackReply",
+    "WBProductKB",
+    "WBProductCard",
     # Telegram bot
     "TelegramBotUser",
     "TelegramChatBinding",
