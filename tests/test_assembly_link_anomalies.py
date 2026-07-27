@@ -834,6 +834,32 @@ async def test_stock_mismatch_logistics_in_transit_partial(db_session, project, 
 
 
 @pytest.mark.asyncio
+async def test_stock_mismatch_logistics_clamped_to_shortfall(db_session, project, warehouse):
+    """Провайдер списывает ПОЗИЦИОННО: досчёт состава «как есть» родил бы ложный
+    профицит ФФ. Кламп по наблюдаемой недостаче — паритет с list_stocks."""
+    await _integrate(db_session, project.id, warehouse.id)
+    # A: зеркало позицию НЕ списало (ff == наш) → досчёт обязан быть 0, не +40.
+    bc_a = f"20{_uid()}"
+    nom_a = await _nom(db_session, project.id, bc_a)
+    await _ff_stock(db_session, project.id, warehouse.id, bc_a, 100, nomenclature_id=nom_a.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom_a.id, bc_a, 100)
+    await _logistics_transit(db_session, project.id, warehouse.id, bc_a, 40, nom_a.id)
+    # B: списало частично (10 из 40) → досчитываем ровно 10.
+    bc_b = f"20{_uid()}"
+    nom_b = await _nom(db_session, project.id, bc_b)
+    await _ff_stock(db_session, project.id, warehouse.id, bc_b, 90, nomenclature_id=nom_b.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom_b.id, bc_b, 100)
+    await _logistics_transit(db_session, project.id, warehouse.id, bc_b, 40, nom_b.id)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    # Обе строки сходятся в 0 → в вывод (только diff != 0) не попадают вовсе.
+    assert row is None or row["surplus_ff_qty"] == 0
+    assert row is None or bc_a not in {r["barcode"] for r in row["rows"]}
+    assert row is None or bc_b not in {r["barcode"] for r in row["rows"]}
+
+
+@pytest.mark.asyncio
 async def test_stock_mismatch_logistics_not_counted_when_shipped(db_session, project, warehouse):
     """SHIPPED-сборка (наш сток уже списан) НЕ досчитывается — иначе ложный излишек."""
     await _integrate(db_session, project.id, warehouse.id)

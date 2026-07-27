@@ -305,7 +305,9 @@ async def compute_stock_mismatch_cells(
     <0 — у нас больше). Короб сводится к россыпи (qty_good × units_per_box, ключ =
     base_barcode|barcode), как в fulfillment_service.list_stocks. ff_good включает
     досчёт логистики (_logistics_in_transit_multi): товар, списанный skladbot на
-    стадии logistics_works, но физически на складе. У migfull «ФФ годный»
+    стадии logistics_works, но физически на складе — досчёт КЛАМПИТСЯ наблюдаемой
+    недостачей (провайдер списывает позиционно, полный состав дал бы ложный профицит
+    ФФ; подробности — в комментарии у досчёта). У migfull «ФФ годный»
     (stock_actual) ВКЛЮЧАЕТ брак → сверяем с нашим ИТОГОМ (годный+брак).
 
     Общий источник истины для живого блока `_stock_mismatch` (вкладка «Связи и
@@ -407,12 +409,22 @@ async def compute_stock_mismatch_cells(
     # логистики», но физически на складе, а сборка ещё не отгружена (наш сток держит).
     # Без досчёта показывает ложную недостачу «у нас больше». Провайдер-специфично:
     # у migfull/wmscelicom стадии logistics_works нет → досчёт пустой, их не трогает.
+    # КЛАМП (паритет с list_stocks): провайдер списывает ПОЗИЦИОННО, а не заявкой
+    # целиком — по непотроганным позициям зеркало товар ещё держит, и досчёт состава
+    # «как есть» кладёт его второй раз, рождая ложный профицит ФФ. Добавляем не больше
+    # наблюдаемой недостачи: транзит маскирует недостачу, но не создаёт профицит.
     transit = await fulfillment_service._logistics_in_transit_multi(db, project_id, ff_wh_list)
     for wid, by_bc in transit.items():
-        for barcode, (qty, nom_id) in by_bc.items():
-            c = _cell(wid, barcode, nom_id)
-            c["ff_good"] += qty
-            c["ff_logistics"] += qty
+        for barcode, (qty, _nom_id) in by_bc.items():
+            tc = cells.get((wid, barcode))
+            if tc is None:
+                continue
+            # our_defect заполнен только для migfull — формула совпадает с diff ниже.
+            add = min(qty, max((tc["our_quantity"] + tc["our_defect"]) - tc["ff_good"], 0))
+            if add <= 0:
+                continue
+            tc["ff_good"] += add
+            tc["ff_logistics"] += add
 
     # Резолв article_seller/brand одним запросом (без N+1).
     nom_ids = {c["nomenclature_id"] for c in cells.values() if c["nomenclature_id"]}

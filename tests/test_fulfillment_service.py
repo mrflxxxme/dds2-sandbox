@@ -4621,3 +4621,96 @@ async def test_list_stocks_logistics_not_counted_when_completed(db_session, proj
     row = {r["barcode"]: r for r in data["rows"]}[bc]
     assert row["ff_logistics"] == 0
     assert row["diff"] == 100
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_logistics_clamped_when_ff_has_not_written_off(db_session, project, warehouse):
+    """skladbot списывает ПОЗИЦИОННО: зеркало эту позицию ещё держит.
+
+    Досчёт состава «как есть» положил бы товар второй раз и родил ложный ПРОФИЦИТ ФФ
+    (прод-эпизод 27.07: +1303 фантома на складе Газпром). Кламп → досчёт 0, diff 0.
+    """
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-NOWRITEOFF")
+    await _make_ff_stock_row(db_session, project, warehouse, bc, nom.id, qty_good=240)  # НЕ списал
+    db_session.add(
+        WarehouseStock(
+            project_id=project.id, warehouse_id=warehouse.id,
+            nomenclature_id=nom.id, barcode=bc, quantity=240,
+        )
+    )
+    await db_session.commit()
+    asm = await _make_assembly_with_items(
+        db_session, project, warehouse, [(bc, nom.id, 80)], status=AssemblyStatus.READY.value
+    )
+    await _make_logistics_ff_request(db_session, project, warehouse, asm.id)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = {r["barcode"]: r for r in data["rows"]}[bc]
+    assert row["ff_logistics"] == 0  # без клампа было бы 80
+    assert row["ff_good"] == 240
+    assert row["diff"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_logistics_clamped_to_partial_writeoff(db_session, project, warehouse):
+    """ФФ списал ЧАСТЬ позиции (40 из 80) → досчитываем ровно недостачу, не весь состав."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-PARTIAL")
+    await _make_ff_stock_row(db_session, project, warehouse, bc, nom.id, qty_good=200)  # списал 40
+    db_session.add(
+        WarehouseStock(
+            project_id=project.id, warehouse_id=warehouse.id,
+            nomenclature_id=nom.id, barcode=bc, quantity=240,
+        )
+    )
+    await db_session.commit()
+    asm = await _make_assembly_with_items(
+        db_session, project, warehouse, [(bc, nom.id, 80)], status=AssemblyStatus.READY.value
+    )
+    await _make_logistics_ff_request(db_session, project, warehouse, asm.id)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = {r["barcode"]: r for r in data["rows"]}[bc]
+    assert row["ff_logistics"] == 40  # без клампа было бы 80 → ложный +40
+    assert row["ff_good"] == 240
+    assert row["diff"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_logistics_does_not_mask_real_ff_surplus(db_session, project, warehouse):
+    """Реальный профицит ФФ виден: транзит маскирует недостачу, но не создаёт профицит."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-SURPLUS")
+    await _make_ff_stock_row(db_session, project, warehouse, bc, nom.id, qty_good=300)
+    db_session.add(
+        WarehouseStock(
+            project_id=project.id, warehouse_id=warehouse.id,
+            nomenclature_id=nom.id, barcode=bc, quantity=240,
+        )
+    )
+    await db_session.commit()
+    asm = await _make_assembly_with_items(
+        db_session, project, warehouse, [(bc, nom.id, 80)], status=AssemblyStatus.READY.value
+    )
+    await _make_logistics_ff_request(db_session, project, warehouse, asm.id)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = {r["barcode"]: r for r in data["rows"]}[bc]
+    assert row["ff_logistics"] == 0
+    assert row["diff"] == 60  # настоящий излишек ФФ не съеден и не раздут
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_logistics_no_phantom_row_without_stock(db_session, project, warehouse):
+    """ШК есть только в составе сборки (ни зеркала, ни нашего остатка) → строки-фантома нет."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-PHANTOM")
+    asm = await _make_assembly_with_items(
+        db_session, project, warehouse, [(bc, nom.id, 50)], status=AssemblyStatus.READY.value
+    )
+    await _make_logistics_ff_request(db_session, project, warehouse, asm.id)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    assert bc not in {r["barcode"] for r in data["rows"]}  # без клампа была бы строка diff=+50
+    assert data["totals"]["ff_logistics"] == 0
