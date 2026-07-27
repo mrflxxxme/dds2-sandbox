@@ -4,11 +4,6 @@ import { useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import type { LoanImportResult } from '@/types/api';
 
-const overlay: React.CSSProperties = {
-    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex',
-    alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16,
-};
-
 export default function ImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
     const [file, setFile] = useState<File | null>(null);
     const [busy, setBusy] = useState(false);
@@ -32,8 +27,8 @@ export default function ImportModal({ onClose, onDone }: { onClose: () => void; 
     };
 
     return (
-        <div style={overlay} onClick={onClose}>
-            <div className="glass-card" style={{ maxWidth: 520, width: '92%', maxHeight: '88vh', overflow: 'auto' }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-card modal-card-solid" style={{ maxHeight: '88vh', overflow: 'auto' }} onClick={(e) => e.stopPropagation()}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                     <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>Импорт реестра займов</h3>
                     <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>

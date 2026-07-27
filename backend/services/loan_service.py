@@ -20,6 +20,8 @@ from backend.models.counterparty import Counterparty
 from backend.models.loan import Loan, LoanPayment
 from backend.models.transactions import Transaction
 from backend.schemas.loan import (
+    LenderDetail,
+    LenderPeriodPoint,
     LoanCreate,
     LoanDetail,
     LoanDirectionTotals,
@@ -27,8 +29,11 @@ from backend.schemas.loan import (
     LoanFilter,
     LoanListResponse,
     LoanPaymentResponse,
+    LoanRepay,
     LoanResponse,
     LoanScheduleSummary,
+    LoanStuckItem,
+    LoanStuckResponse,
     LoanUpdate,
 )
 from backend.services import loan_interest
@@ -58,6 +63,44 @@ def _to_payment_lite(payments: list[LoanPayment]) -> list[loan_interest.PaymentL
         )
         for p in payments
     ]
+
+
+def compute_new_money(loans: list[Loan], pay_by_loan: dict[int, list[LoanPayment]]) -> Decimal:
+    """
+    Сколько заёмщик РЕАЛЬНО занёс за всё время (без учёта продлений).
+
+    Продление — это те же деньги под новым номером, поэтому простая сумма тел
+    двоит: у заёмщика с цепочкой 57 → 57-01 → 57-02 → 57-03 одни 2 млн
+    превращаются в 8. Продление опознаём двумя способами, потому что ни один
+    не полон:
+      1. `parent_loan_id` — надёжно, но проставлен не везде: связка в импорте
+         ищет предшественника по точному номеру, а «10 -01» и «10-01» для неё
+         разные строки, и цепочка рвётся со второго звена.
+      2. Возврат тела в день выдачи нового займа — ловит неслинкованные звенья
+         (там, где деньги физически не двигались).
+    Доплата при продлении (вернули 2 млн, выдали 3) считается новыми деньгами
+    на разницу.
+    """
+    avail: dict[date, Decimal] = {}
+    for pays in pay_by_loan.values():
+        for p in pays:
+            if p.payment_type == "PRINCIPAL_REPAY":
+                avail[p.paid_at] = avail.get(p.paid_at, Decimal("0")) + Decimal(str(p.amount or 0))
+
+    by_id = {loan.id: loan for loan in loans}
+    total = Decimal("0")
+    for loan in sorted(loans, key=lambda x: (x.start_date, x.id)):
+        principal = Decimal(str(loan.principal))
+        parent = by_id.get(loan.parent_loan_id) if loan.parent_loan_id else None
+        if parent is not None:
+            carried = min(principal, Decimal(str(parent.principal)))
+        else:
+            carried = min(principal, avail.get(loan.start_date, Decimal("0")))
+        # Съедаем использованный возврат, чтобы он не зачёлся второй раз
+        pool = avail.get(loan.start_date, Decimal("0"))
+        avail[loan.start_date] = max(Decimal("0"), pool - carried)
+        total += principal - carried
+    return total
 
 
 async def _enrich_loans(db: AsyncSession, loans: list[Loan]) -> list[LoanResponse]:
@@ -103,6 +146,9 @@ async def _enrich_loans(db: AsyncSession, loans: list[Loan]) -> list[LoanRespons
         resp.counterparty_inn = inn
         resp.remaining_principal = calc.remaining_principal
         resp.accrued_interest = calc.accrued_interest
+        resp.interest_due_period = calc.interest_due_period
+        resp.accrual_period_start = calc.accrual_period_start
+        resp.accrual_period_end = calc.accrual_period_end
         resp.monthly_interest = calc.monthly_interest
         resp.days_to_maturity = calc.days_to_maturity
         resp.next_interest_date = calc.next_interest_date
@@ -349,6 +395,9 @@ class LoanService:
             counterparty_inn=cp_inn,
             remaining_principal=calc.remaining_principal,
             accrued_interest=calc.accrued_interest,
+            interest_due_period=calc.interest_due_period,
+            accrual_period_start=calc.accrual_period_start,
+            accrual_period_end=calc.accrual_period_end,
             monthly_interest=calc.monthly_interest,
             days_to_maturity=calc.days_to_maturity,
             next_interest_date=calc.next_interest_date,
@@ -378,6 +427,52 @@ class LoanService:
         return loan
 
     # ─── extend (продление + смена ставки) ──────────────────────────────
+
+    async def repay(self, *, loan_id: int, data: LoanRepay, project_id: int) -> Loan:
+        """
+        Отметить возврат тела: создать PRINCIPAL_REPAY и закрыть займ, если
+        возвращён весь остаток. Частичный возврат оставляет займ активным —
+        движок процентов сам пересчитает начисление на уменьшенное тело.
+        """
+        loan = await self.get(loan_id=loan_id, project_id=project_id)
+        pay_res = await self.db.execute(
+            select(LoanPayment).where(LoanPayment.loan_id == loan_id).limit(1000)
+        )
+        payments = list(pay_res.scalars().all())
+        already = sum(
+            (Decimal(str(p.amount or 0)) for p in payments if p.payment_type == "PRINCIPAL_REPAY"),
+            Decimal("0"),
+        )
+        remaining = max(Decimal("0"), Decimal(str(loan.principal)) - already)
+        if remaining <= 0:
+            raise HTTPException(status_code=400, detail="Тело займа уже возвращено полностью")
+
+        amount = data.amount if data.amount is not None else remaining
+        if amount > remaining:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Возврат {amount} больше остатка тела {remaining}",
+            )
+
+        paid_at = data.paid_at or _today()
+        if paid_at < loan.start_date:
+            raise HTTPException(status_code=400, detail="Дата возврата раньше выдачи займа")
+
+        self.db.add(
+            LoanPayment(
+                loan_id=loan.id,
+                payment_type="PRINCIPAL_REPAY",
+                amount=amount,
+                currency=loan.currency,
+                paid_at=paid_at,
+            )
+        )
+        if data.close and amount >= remaining:
+            loan.status = "CLOSED"
+        await self.db.commit()
+        await self.db.refresh(loan)
+        await invalidate_project_reports(project_id)
+        return loan
 
     async def extend(self, *, loan_id: int, data: LoanExtend, project_id: int) -> Loan:
         """
@@ -409,6 +504,10 @@ class LoanService:
 
         if data.new_maturity_date:
             new_maturity = data.new_maturity_date
+        elif data.term_months:
+            # Пресет из модалки: 1/2/3 месяца от даты продления, с клампом дня
+            # (31 янв + 1 мес → 28 фев), а не «+30 дней».
+            new_maturity = loan_interest.add_months(new_start, data.term_months)
         elif loan.maturity_date and loan.start_date:
             term_days = (loan.maturity_date - loan.start_date).days
             new_maturity = new_start + timedelta(days=term_days)
@@ -581,3 +680,222 @@ class LoanService:
         transaction.loan_payment_id = payment.id
 
         return payment
+
+
+# ─── Карточка заёмщика ───────────────────────────────────────────────────────
+
+
+async def get_lender_detail(
+    db: AsyncSession, *, counterparty_id: int, project_id: int, months_back: int = 12
+) -> LenderDetail:
+    """
+    Всё по одному заёмщику: итоги, история займов и проценты по периодам 25→25.
+
+    Архив вычисляемый (нет активных займов) — флага в БД нет, контрагент
+    остаётся живым в остальных разделах.
+    """
+    cp = (
+        await db.execute(
+            select(Counterparty).where(
+                Counterparty.id == counterparty_id,
+                Counterparty.project_id == project_id,
+                Counterparty.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+    if cp is None:
+        raise HTTPException(status_code=404, detail="Заёмщик не найден")
+
+    loans = list(
+        (
+            await db.execute(
+                select(Loan)
+                .where(
+                    Loan.counterparty_id == counterparty_id,
+                    Loan.project_id == project_id,
+                    Loan.is_deleted == False,  # noqa: E712
+                )
+                .order_by(Loan.start_date.desc(), Loan.id.desc())
+                .limit(1000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    as_of = _today()
+    detail = LenderDetail(
+        counterparty_id=cp.id,
+        name=cp.name,
+        inn=cp.inn,
+        lender_bank=next((loan.lender_bank for loan in loans if loan.lender_bank), None),
+        entity_type=next((loan.entity_type for loan in loans if loan.entity_type), None),
+        total_count=len(loans),
+    )
+    if not loans:
+        detail.is_archived = True
+        return detail
+
+    pay_rows = list(
+        (
+            await db.execute(
+                select(LoanPayment)
+                .where(LoanPayment.loan_id.in_([loan.id for loan in loans]))
+                .order_by(LoanPayment.paid_at)
+                .limit(5000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    pay_by_loan: dict[int, list[LoanPayment]] = {}
+    for pay in pay_rows:
+        pay_by_loan.setdefault(pay.loan_id, []).append(pay)
+
+    p_start, p_end = loan_interest.accrual_period(as_of)
+    detail.accrual_period_start = p_start
+    detail.accrual_period_end = p_end
+    detail.first_loan_date = min(loan.start_date for loan in loans)
+    detail.last_loan_date = max(loan.start_date for loan in loans)
+
+    since = loan_interest.add_months(as_of, -months_back)
+    periods: dict[date, Decimal] = {}
+    weighted_num = Decimal("0")
+
+    for loan in loans:
+        lites = _to_payment_lite(pay_by_loan.get(loan.id, []))
+        calc = loan_interest.compute_loan(
+            principal=Decimal(str(loan.principal)),
+            rate=Decimal(str(loan.rate)) if loan.rate is not None else None,
+            start_date=loan.start_date,
+            maturity_date=loan.maturity_date,
+            status=loan.status,
+            payments=lites,
+            as_of=as_of,
+        )
+        detail.interest_paid += calc.interest_paid
+        detail.accrued_interest += calc.accrued_interest
+        detail.interest_due_period += calc.interest_due_period
+        if loan.status == "ACTIVE":
+            detail.active_count += 1
+            detail.outstanding += calc.remaining_principal
+            if loan.rate is not None:
+                weighted_num += calc.remaining_principal * Decimal(str(loan.rate))
+            if loan.maturity_date and (
+                detail.next_maturity_date is None or loan.maturity_date < detail.next_maturity_date
+            ):
+                detail.next_maturity_date = loan.maturity_date
+
+        for pay_date, amount in loan_interest.period_accrual_series(
+            principal=Decimal(str(loan.principal)),
+            rate=Decimal(str(loan.rate)) if loan.rate is not None else None,
+            start_date=loan.start_date,
+            maturity_date=loan.maturity_date,
+            payments=lites,
+            since=since,
+            until=loan.maturity_date or p_end,
+        ):
+            periods[pay_date] = periods.get(pay_date, Decimal("0")) + amount
+
+    # «Занёс» — только новые деньги; «вернули» — то, что физически ушло назад
+    # (новые деньги минус то, что до сих пор в займе). Сумма всех тел и сумма
+    # всех PRINCIPAL_REPAY для этого не годятся: продления двоят и то, и другое.
+    detail.principal_total = compute_new_money(loans, pay_by_loan)
+    detail.principal_repaid = max(Decimal("0"), detail.principal_total - detail.outstanding)
+    detail.is_archived = detail.active_count == 0
+    if detail.outstanding > 0:
+        detail.weighted_avg_rate = (weighted_num / detail.outstanding).quantize(Decimal("0.0001"))
+    detail.loans = await _enrich_loans(db, loans)
+    detail.periods = [
+        LenderPeriodPoint(
+            period_end=pay_date,
+            period_start=loan_interest.add_months(pay_date, -1),
+            interest=amount.quantize(Decimal("0.01")),
+            is_current=pay_date == p_end,
+            is_forecast=pay_date > p_end,
+        )
+        for pay_date, amount in sorted(periods.items())
+    ]
+    return detail
+
+
+# ─── Зависшие займы ──────────────────────────────────────────────────────────
+
+
+async def list_stuck_loans(db: AsyncSession, *, project_id: int) -> LoanStuckResponse:
+    """
+    Займы, по которым срок вышел, а решения не приняли: ни возврата, ни продления.
+
+    Продление закрывает предшественника, полный возврат тоже — поэтому «зависший»
+    = живой займ с истёкшим сроком и ненулевым остатком. Проценты на нём капают
+    дальше, поэтому показываем, сколько набежало уже ПОСЛЕ срока.
+    """
+    as_of = _today()
+    loans = list(
+        (
+            await db.execute(
+                select(Loan)
+                .where(
+                    Loan.project_id == project_id,
+                    Loan.is_deleted == False,  # noqa: E712
+                    Loan.status == "ACTIVE",
+                    Loan.maturity_date.is_not(None),
+                    Loan.maturity_date <= as_of,
+                )
+                .order_by(Loan.maturity_date)
+                .limit(500)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not loans:
+        return LoanStuckResponse()
+
+    pay_rows = list(
+        (
+            await db.execute(
+                select(LoanPayment).where(LoanPayment.loan_id.in_([loan.id for loan in loans])).limit(5000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    pay_by_loan: dict[int, list[LoanPayment]] = {}
+    for pay in pay_rows:
+        pay_by_loan.setdefault(pay.loan_id, []).append(pay)
+
+    enriched = {resp.id: resp for resp in await _enrich_loans(db, loans)}
+    items: list[LoanStuckItem] = []
+    total_amount = Decimal("0")
+    total_accrued = Decimal("0")
+    for loan in loans:
+        resp = enriched.get(loan.id)
+        if resp is None or loan.maturity_date is None:
+            continue
+        remaining = Decimal(str(resp.remaining_principal or 0))
+        if remaining <= 0:
+            continue  # тело вернули, статус просто не переключили
+        since_maturity = loan_interest.accrued_in_window(
+            principal=Decimal(str(loan.principal)),
+            rate=Decimal(str(loan.rate)) if loan.rate is not None else None,
+            start_date=loan.start_date,
+            payments=_to_payment_lite(pay_by_loan.get(loan.id, [])),
+            win_start=loan.maturity_date,
+            win_end=as_of,
+        )
+        total_amount += remaining
+        total_accrued += since_maturity
+        items.append(
+            LoanStuckItem(
+                loan=resp,
+                days_overdue=(as_of - loan.maturity_date).days,
+                accrued_since_maturity=since_maturity,
+            )
+        )
+    return LoanStuckResponse(
+        items=items,
+        total_amount=total_amount,
+        total_accrued_since_maturity=total_accrued,
+        count=len(items),
+    )

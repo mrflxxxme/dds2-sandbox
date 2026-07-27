@@ -83,7 +83,16 @@ export default function LoansRegistry({ nonce }: { nonce: number }) {
         { key: 'principal', label: 'Сумма', align: 'right' as const, getValue: (r: Loan) => Number(r.principal), render: (_v: unknown, r: Loan) => `${money(r.principal)} ₽` },
         { key: 'remaining_principal', label: 'Остаток', align: 'right' as const, getValue: (r: Loan) => Number(r.remaining_principal ?? 0), render: (_v: unknown, r: Loan) => `${money(r.remaining_principal)} ₽` },
         { key: 'rate', label: 'Ставка', align: 'right' as const, getValue: (r: Loan) => Number(r.rate ?? 0), render: (_v: unknown, r: Loan) => ratePct(r.rate) },
-        { key: 'accrued_interest', label: 'Начислено %', align: 'right' as const, getValue: (r: Loan) => Number(r.accrued_interest ?? 0), render: (_v: unknown, r: Loan) => `${money(r.accrued_interest)} ₽` },
+        {
+            key: 'accrued_interest', label: 'Начислено % (период)', align: 'right' as const,
+            getValue: (r: Loan) => Number(r.accrued_interest ?? 0),
+            render: (_v: unknown, r: Loan) => (
+                <span title={r.accrual_period_start ? `Период ${fmtDate(r.accrual_period_start)} → ${fmtDate(r.accrual_period_end)}` : undefined}>
+                    {money(r.accrued_interest)} ₽
+                </span>
+            ),
+        },
+        { key: 'interest_due_period', label: 'К выплате', align: 'right' as const, getValue: (r: Loan) => Number(r.interest_due_period ?? 0), render: (_v: unknown, r: Loan) => `${money(r.interest_due_period)} ₽` },
         { key: 'start_date', label: 'С', render: (v: string) => fmtDate(v) },
         {
             key: 'maturity_date', label: 'Возврат',

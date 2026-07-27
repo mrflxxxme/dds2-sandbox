@@ -1,6 +1,8 @@
 /** Loans API methods */
 import { ApiClient } from './client';
 import type {
+    LenderDetail,
+    LoanStuckResponse,
     LoanDetail,
     LoanListResponse,
     LoanCreate,
@@ -11,6 +13,7 @@ import type {
     LoanEntityType,
     LoanPaymentMatch,
     LoanExtend,
+    LoanRepay,
     Loan,
     LoanDashboard,
     LoanByLenderResponse,
@@ -74,8 +77,20 @@ export function addLoanMethods(api: ApiClient) {
             return api.request<LoanDashboard>('GET', '/api/v1/loans/dashboard');
         },
 
-        loansByLender() {
-            return api.request<LoanByLenderResponse>('GET', '/api/v1/loans/by-lender');
+        repayLoan(id: number, data: LoanRepay) {
+            return api.request<Loan>('POST', `/api/v1/loans/${id}/repay`, data);
+        },
+        stuckLoans() {
+            return api.request<LoanStuckResponse>('GET', '/api/v1/loans/stuck');
+        },
+        lenderDetail(counterpartyId: number, monthsBack = 12) {
+            return api.request<LenderDetail>(
+                'GET', `/api/v1/loans/lenders/${counterpartyId}?months_back=${monthsBack}`
+            );
+        },
+        loansByLender(periodEnd?: string) {
+            const qs = periodEnd ? `?${new URLSearchParams({ period_end: periodEnd })}` : '';
+            return api.request<LoanByLenderResponse>('GET', `/api/v1/loans/by-lender${qs}`);
         },
 
         loanForecast(horizonMonths = 12) {

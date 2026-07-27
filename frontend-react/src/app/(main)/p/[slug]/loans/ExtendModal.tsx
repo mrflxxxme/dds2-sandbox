@@ -2,20 +2,16 @@
 
 import { useState } from 'react';
 import { api } from '@/lib/api';
-import type { LoanDetail } from '@/types/api';
+import type { Loan } from '@/types/api';
 import { money, ratePct } from './loanFmt';
-
-const overlay: React.CSSProperties = {
-    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex',
-    alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16,
-};
 
 export default function ExtendModal({
     loan, onClose, onExtended,
-}: { loan: LoanDetail; onClose: () => void; onExtended: (newId: number) => void }) {
+}: { loan: Loan; onClose: () => void; onExtended: (newId: number) => void }) {
     const remaining = Number(loan.remaining_principal ?? loan.principal);
     const [ratePctVal, setRatePctVal] = useState(loan.rate != null ? String(+(Number(loan.rate) * 100).toFixed(2)) : '');
     const [maturity, setMaturity] = useState('');
+    const [termMonths, setTermMonths] = useState<number | null>(null);
     const [contract, setContract] = useState('');
     const [principal, setPrincipal] = useState(String(remaining));
     const [recordRepay, setRecordRepay] = useState(true);
@@ -29,6 +25,7 @@ export default function ExtendModal({
             const res = await api.extendLoan(loan.id, {
                 new_rate: ratePctVal ? Number(ratePctVal) / 100 : null,
                 new_maturity_date: maturity || null,
+                term_months: maturity ? null : termMonths,
                 new_contract_number: contract.trim() || null,
                 principal: principal ? Number(principal) : null,
                 record_repayment: recordRepay,
@@ -42,8 +39,8 @@ export default function ExtendModal({
     };
 
     return (
-        <div style={overlay} onClick={onClose}>
-            <div className="glass-card" style={{ maxWidth: 480, width: '92%' }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-card modal-card-solid" onClick={(e) => e.stopPropagation()}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                     <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>Продлить займ</h3>
                     <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
@@ -52,6 +49,29 @@ export default function ExtendModal({
                     Текущий договор <b style={{ fontFamily: 'monospace' }}>{loan.contract_number}</b> ({ratePct(loan.rate)}) будет закрыт,
                     создастся новый на остаток {money(remaining)} ₽ с новой ставкой/сроком.
                 </p>
+
+                <div className="form-group">
+                    <label className="form-label">Срок продления</label>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {[1, 2, 3, 6].map((m) => (
+                            <button
+                                key={m}
+                                type="button"
+                                className={`btn btn-sm ${termMonths === m ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => { setTermMonths(termMonths === m ? null : m); setMaturity(''); }}
+                            >
+                                {m} мес.
+                            </button>
+                        ))}
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 6 }}>
+                        {maturity
+                            ? 'Указана точная дата ниже — пресет не применяется.'
+                            : termMonths
+                                ? `Новый срок: ${termMonths} мес. от даты продления.`
+                                : 'Не выбрано — срок повторит длительность текущего займа.'}
+                    </div>
+                </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                     <Field label="Новая ставка, % год.">
@@ -64,7 +84,7 @@ export default function ExtendModal({
                         <input className="form-input" placeholder={`${loan.contract_number}-…`} value={contract} onChange={(e) => setContract(e.target.value)} />
                     </Field>
                     <Field label="Новый срок возврата">
-                        <input type="date" className="form-input" value={maturity} onChange={(e) => setMaturity(e.target.value)} />
+                        <input type="date" className="form-input" value={maturity} onChange={(e) => { setMaturity(e.target.value); if (e.target.value) setTermMonths(null); }} />
                     </Field>
                 </div>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, fontSize: 13, cursor: 'pointer' }}>
