@@ -272,6 +272,38 @@ def enrich_article(art: dict, total_real: float, total_sales: float, period_days
     art.pop("_period_days", None)
 
 
+# ─── Net payout reconciliation ───────────────────────────────────────────────
+
+def finalize_net_payout(articles: list[dict], summary: dict) -> None:
+    """Свести «Чистую выплату» по категориям к фактической выплате ВБ.
+
+    После enrich_article у каждой строки net_payout = to_pay − adv_sum (реклама
+    по нашему per-nm трекингу). Но реклама/кредиты/прочее в финотчёте ВБ идут
+    строками БЕЗ предмета (котёл), поэтому Σ по категориям расходится с
+    summary['to_pay'] (фактическая выплата) на некатегорийные удержания —
+    в первую очередь КРЕДИТЫ (на проектах вроде «Вяткин» это десятки %).
+
+    Разносим этот остаток (residual) по категориям пропорционально выручке
+    (fallback — по модулю выплаты), строки-котёл без категории обнуляем.
+    После этого Σ net_payout == summary['to_pay'].
+    """
+    total_to_pay = float(summary.get("to_pay", 0))
+    cat_rows = [a for a in articles if a.get("sa_name")]
+    residual = sum(a.get("net_payout", 0) for a in cat_rows) - total_to_pay
+    weights = [max(float(a.get("realization", 0)), 0.0) for a in cat_rows]
+    wsum = sum(weights)
+    if wsum <= 0:  # нет выручки → вес по модулю выплаты
+        weights = [abs(float(a.get("to_pay", 0))) for a in cat_rows]
+        wsum = sum(weights)
+    if wsum > 0 and residual:
+        for a, wi in zip(cat_rows, weights):
+            a["net_payout"] = round(a.get("net_payout", 0) - residual * (wi / wsum), 2)
+    for a in articles:
+        if not a.get("sa_name"):
+            a["net_payout"] = 0.0
+    summary["net_payout"] = round(total_to_pay, 2)
+
+
 # ─── ABC analysis ───────────────────────────────────────────────────────────
 
 def compute_abc(articles: list[dict]):

@@ -469,7 +469,7 @@ export function WbBdr() {
                     {groupBy !== 'abc' && (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
                         <KpiCard label="Итого к оплате" value={formatNumber(s.to_pay)} sub="₽" />
-                        <KpiCard label="Чистая выплата" value={formatNumber(s.net_payout)} sub="₽ (− реклама)" color="#0ea5e9" />
+                        <KpiCard label="Чистая выплата" value={formatNumber(s.net_payout)} sub="₽ · реклама+кредиты по кат." color="#0ea5e9" />
                         <KpiCard label="Реализация" value={formatNumber(s.realization)} sub="₽" />
                         <KpiCard label="Продажи" value={formatNumber(s.sales_amount)} sub={`₽ / ${formatNumber(s.sale_qty)} шт`} />
                         <KpiCard label="Возвраты" value={formatNumber(s.returns_amount)} sub={`₽ / ${formatNumber(s.ret_qty)} шт`} />
