@@ -899,18 +899,19 @@ class WBApiClient:
     @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
     async def answer_feedback(self, feedback_id: str, text: str) -> bool:
         """
-        Создать/отредактировать ответ на отзыв. WB Feedbacks API: PATCH /api/v1/feedbacks,
-        body {"id": feedback_id, "text": text}. Тот же метод и для редактирования ответа.
+        Создать ответ на отзыв. WB Feedbacks API: POST /api/v1/feedbacks/answer,
+        body {"id": feedback_id, "text": text} → 204. Формат проверен живьём 2026-07-27
+        (PATCH /api/v1/feedbacks WB больше не принимает — HTTP 405, Allow: GET, HEAD).
 
         ⚠️ Лимит методов отзывов — 1 rps (до 3 rps → блок на 60 сек): массовую отправку
         гнать ТОЛЬКО через фоновую очередь с троттлингом, не в HTTP-запросе.
         """
         async with self._circuit:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/feedbacks"
+                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/feedbacks/answer"
                 payload = {"id": feedback_id, "text": text}
-                logger.info("wb_api.request", method="PATCH", path="/api/v1/feedbacks")
-                response = await client.patch(url, headers=self.headers, json=payload)
+                logger.info("wb_api.request", method="POST", path="/api/v1/feedbacks/answer")
+                response = await client.post(url, headers=self.headers, json=payload)
 
                 if response.status_code == 401:
                     raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Вопросы и отзывы»")
@@ -983,8 +984,9 @@ class WBApiClient:
     async def answer_question(self, question_id: str, text: str) -> bool:
         """
         Ответить на вопрос покупателя. WB Feedbacks API: PATCH /api/v1/questions,
-        body {"id": question_id, "answer": {"text": text}} (по доке dev.wildberries.ru
-        раздел «Вопросы и отзывы»; редактирование ответа — тем же методом).
+        body {"id": question_id, "answer": {"text": text}, "state": "wbRu"}.
+        Формат проверен живьём 2026-07-27: без state → 400 «Empty state in request»,
+        с валидным телом и чужим id → 404 «Вопрос не найден».
 
         ⚠️ Лимит методов отзывов — 1 rps (до 3 rps → блок на 60 сек): массовую отправку
         гнать ТОЛЬКО через фоновую очередь с троттлингом, не в HTTP-запросе.
@@ -992,7 +994,7 @@ class WBApiClient:
         async with self._circuit:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 url = f"{WB_FEEDBACKS_API_BASE}/api/v1/questions"
-                payload = {"id": question_id, "answer": {"text": text}}
+                payload = {"id": question_id, "answer": {"text": text}, "state": "wbRu"}
                 logger.info("wb_api.request", method="PATCH", path="/api/v1/questions")
                 response = await client.patch(url, headers=self.headers, json=payload)
 
