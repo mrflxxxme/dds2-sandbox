@@ -11,7 +11,10 @@
 | `Counterparty` | Контрагент (`primary_type`, `secondary_types[]`, `inn`, `contract_number`), SoftDelete | UNIQUE `(project_id, inn)` и `(project_id, contract_number)` — partial, WHERE not null + not deleted |
 | `CounterpartyDocument` | Документ в MinIO (`doc_type`: CONTRACT/CERTIFICATE/INVOICE/OTHER), SoftDelete | FK на counterparty |
 | `Loan` | Займ (`direction`: INCOMING/OUTGOING/AFFILIATED; `principal`, `currency`, `rate`, `status`), SoftDelete | FK на counterparty |
-| `LoanPayment` | Платёж по займу (`payment_type`: DISBURSEMENT/PRINCIPAL_REPAY/INTEREST_PAY/PENALTY) | UNIQUE partial `(transaction_id)` WHERE not null |
+| `LoanPayment` | Платёж по займу (`payment_type`: DISBURSEMENT/PRINCIPAL_REPAY/INTEREST_PAY/PENALTY/COMMISSION) | UNIQUE partial `(transaction_id)` WHERE not null |
+| `LoanRatePeriod` | История ставок (плавающая = ключевая ЦБ + спред), `valid_from` | INDEX `(loan_id, valid_from)` |
+| `LoanScheduleEntry` | Строка планового графика платежей (аннуитет) | UNIQUE `(loan_id, seq)` |
+| `LoanFee` | Разовая комиссия (`fee_kind`: ORIGINATION/LIMIT_SETUP/OTHER) с флагом амортизации | INDEX `(loan_id, charged_at)` |
 
 `primary_type` — 13 значений: `SUPPLIER, FULFILLMENT, CARRIER, CUSTOMS_BROKER, DESIGNER, LEGAL, LANDLORD, IT_SERVICE, MARKETPLACE, BANK, GOVERNMENT, AFFILIATED, OTHER`. `secondary_types` — дополнительные роли (пример: ИП Кузнецов primary=FULFILLMENT, secondary=[CARRIER]).
 
@@ -29,6 +32,37 @@
 - Мультивалюта: `currency` на займе и на каждом `LoanPayment` раздельно; проценты — поле `rate`.
 - **Автопривязка платежей при ETL:** `LoanService.auto_link_from_etl()` ищет ACTIVE `Loan` с тем же `contract_number` в проекте, создаёт `LoanPayment` и проставляет `Transaction.loan_id` / `loan_payment_id`. Если займ не найден — `loan_payment_type` всё равно проставляется (видимость в UI).
 - Custom exceptions: `LoanNotFoundError`, `LoanPaymentAlreadyExistsError` (транзакция уже связана).
+
+### Два разных вопроса из одних данных
+Экраны займов отвечают на два вопроса, и их нельзя мешать:
+1. **«Кому и сколько заплатить»** — по ДОГОВОРНЫМ периодам: частные займы 25→25, ВКЛ — календарный
+   месяц с платежом 5-го числа следующего, аннуитет — по своему графику. Живёт на вкладке
+   «Заёмщики», в карточке линии и в графике платежей.
+2. **«Сколько стоят деньги»** — по КАЛЕНДАРНЫМ месяцам, начисление по дням: дашборд и
+   `loan_analytics.accrual_by_month` (база для ОПиУ). Период 25.06→25.07 шестью днями лежит в июне,
+   складывать периоды выплат в один P&L нельзя.
+
+### График платежей (`services/loan_schedule.py`)
+`GET/PUT /loans/{id}/schedule` — плановый график из договора (аннуитет) со сверкой факта.
+- **Аннуитет не выводится формулой.** Платёж фиксирован, а деление на тело и проценты банк считает
+  своим округлением, плюс даёт льготные дни: у Симпл Финанса первые 7 дней процентов нет — за них
+  взята комиссия за выдачу 4,25 %. Поэтому график хранится как факт договора, а
+  `loan_interest.schedule_interest_in_window` раскладывает проценты СТРОКИ по календарным месяцам
+  пропорционально дням (внутри строки проценты линейны — тело и ставка постоянны).
+- **Матч факта — по ближайшей плановой дате** (`MATCH_TOLERANCE_DAYS=20`), не по порядку и не по
+  сумме: платят и раньше срока (24.04 при плане 27.04), и позже (26.05 при плане 25.05), суммы
+  аннуитета одинаковые, а деньги ходят с РАЗНЫХ счетов одного холдинга.
+- `is_fee` на строке — «в колонке процентов напечатана комиссия». В `total_interest` она остаётся
+  (так в договоре), а в стоимость денег заходит через `LoanFee`, иначе расход задвоится.
+
+### Разовые комиссии (`LoanFee`)
+`GET/POST/DELETE /loans/{id}/fees`. Комиссия за выдачу (4,25 % = 1 275 000 ₽) и за установление
+лимита (0,25 % = 252 500 ₽) — плата за доступ к деньгам на ВЕСЬ срок, а не расход одного дня.
+- `amortize=True` (дефолт) → расход размазывается по дням окна `[amortize_from, amortize_to]`
+  (пусто → срок займа). Считается через накопленную сумму на границах окна, поэтому сумма долей
+  по месяцам ровно равна комиссии, без копеечного хвоста.
+- `amortize=False` → падает целиком в месяц `charged_at`.
+- Касса при этом не меняется: деньги живут в `LoanPayment` типа COMMISSION, `payment_id` их связывает.
 
 ### Импорт реестра займов из Excel (`services/loan_import.py`)
 `POST /loans/import` — лист с колонками Дата/Тип/Сумма/Контрагент/Номер договора/Ставка/От/До/Статус

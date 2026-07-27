@@ -28,6 +28,8 @@ from backend.schemas.loan import (
     LoanDashboard,
     LoanDetail,
     LoanExtend,
+    LoanFeeIn,
+    LoanFeeListResponse,
     LoanFilter,
     LoanForecastResponse,
     LoanImportResult,
@@ -37,10 +39,12 @@ from backend.schemas.loan import (
     LoanRepay,
     LoanRatePeriodIn,
     LoanResponse,
+    LoanScheduleReplace,
+    LoanScheduleResponse,
     LoanStuckResponse,
     LoanUpdate,
 )
-from backend.services import lender_access_service, loan_analytics, loan_import
+from backend.services import lender_access_service, loan_analytics, loan_import, loan_schedule
 from backend.services.loan_service import (
     LoanPaymentAlreadyExistsError,
     LoanService,
@@ -369,6 +373,79 @@ async def add_rate_period(
 ):
     """Ставка с даты (плавающая: ключевая ЦБ + надбавка). Повтор даты перезаписывает."""
     return await set_rate_period(db, loan_id=loan_id, project_id=project.id, data=body)
+
+
+# ─── График платежей и разовые комиссии ──────────────────────────────────────
+
+
+@router.get("/{loan_id}/schedule", response_model=LoanScheduleResponse)
+async def loan_schedule_get(
+    loan_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Плановый график платежей со сверкой факта: что заплатили, когда, с каким отклонением."""
+    return await loan_schedule.get_schedule(db, loan_id=loan_id, project_id=project.id)
+
+
+@router.put(
+    "/{loan_id}/schedule",
+    response_model=LoanScheduleResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def loan_schedule_put(
+    loan_id: int,
+    body: LoanScheduleReplace,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Заменить график целиком — он приходит из договора одной таблицей."""
+    return await loan_schedule.replace_schedule(
+        db, loan_id=loan_id, project_id=project.id, data=body
+    )
+
+
+@router.get("/{loan_id}/fees", response_model=LoanFeeListResponse)
+async def loan_fees_list(
+    loan_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Разовые комиссии по займу (за выдачу, за установление лимита)."""
+    return await loan_schedule.list_fees(db, loan_id=loan_id, project_id=project.id)
+
+
+@router.post(
+    "/{loan_id}/fees",
+    response_model=LoanFeeListResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def loan_fee_add(
+    loan_id: int,
+    body: LoanFeeIn,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Завести разовую комиссию. По умолчанию амортизируется на срок договора."""
+    return await loan_schedule.add_fee(db, loan_id=loan_id, project_id=project.id, data=body)
+
+
+@router.delete(
+    "/{loan_id}/fees/{fee_id}",
+    response_model=LoanFeeListResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def loan_fee_delete(
+    loan_id: int,
+    fee_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Удалить разовую комиссию."""
+    return await loan_schedule.delete_fee(
+        db, loan_id=loan_id, project_id=project.id, fee_id=fee_id
+    )
 
 
 # ─── Manual match: attach Transaction ↔ LoanPayment ─────────────────────────

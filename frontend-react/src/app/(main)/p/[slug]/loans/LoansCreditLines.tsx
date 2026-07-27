@@ -3,12 +3,18 @@
 import { useCallback, useEffect, useState } from 'react';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import { api } from '@/lib/api';
-import type { CreditLineDetail, CreditLineListResponse, CreditLineMovement, LoanRatePeriod } from '@/types/api';
+import type { CreditLineDetail, CreditLineListResponse, CreditLineMovement, LoanFee, LoanFeeKind, LoanRatePeriod } from '@/types/api';
 import { fmtDate, money, ratePct } from './loanFmt';
 
 const ACCRUAL_LABEL: Record<string, string> = {
     CALENDAR_MONTH: 'календарный месяц',
     PERIOD_25: 'с 25-го по 25-е',
+};
+
+const FEE_KIND_LABEL: Record<LoanFeeKind, string> = {
+    ORIGINATION: 'за выдачу',
+    LIMIT_SETUP: 'за установление лимита',
+    OTHER: 'прочее',
 };
 
 /** Кредитные линии (ВКЛ): лимит, выборка траншей, плавающая ставка. */
@@ -96,6 +102,30 @@ export default function LoansCreditLines({ nonce, onChanged }: { nonce: number; 
                 </div>
             ),
         },
+        {
+            key: 'unused_fee_period', label: 'Комиссия за резерв', align: 'right' as const,
+            getValue: (r: CreditLineDetail) => Number(r.unused_fee_period),
+            render: (_v: unknown, r: CreditLineDetail) => (
+                <div>
+                    <div>{money(r.unused_fee_period)} ₽</div>
+                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
+                        набежало {money(r.unused_fee_accrued)} ₽ · {ratePct(r.unused_limit_rate)}
+                    </div>
+                </div>
+            ),
+        },
+        {
+            key: 'total_cost_period', label: 'Всего за период', align: 'right' as const,
+            getValue: (r: CreditLineDetail) => Number(r.total_cost_period),
+            render: (_v: unknown, r: CreditLineDetail) => (
+                <div>
+                    <div style={{ fontWeight: 700 }}>{money(r.total_cost_period)} ₽</div>
+                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
+                        % {money(r.interest_due_period)} ₽ + ком. {money(Number(r.total_cost_period) - Number(r.interest_due_period))} ₽
+                    </div>
+                </div>
+            ),
+        },
         { key: 'maturity_date', label: 'Срок', render: (_v: unknown, r: CreditLineDetail) => fmtDate(r.maturity_date) },
         {
             key: '_act', label: '', sortable: false,
@@ -141,6 +171,24 @@ export default function LoansCreditLines({ nonce, onChanged }: { nonce: number; 
         { key: 'spread', label: 'Надбавка', align: 'right' as const, getValue: (r: LoanRatePeriod) => Number(r.spread ?? 0), render: (_v: unknown, r: LoanRatePeriod) => ratePct(r.spread) },
     ];
 
+    const feeColumns = [
+        {
+            key: 'fee_kind', label: 'Вид',
+            render: (_v: unknown, r: LoanFee) => FEE_KIND_LABEL[r.fee_kind] ?? r.fee_kind,
+        },
+        {
+            key: 'amount', label: 'Сумма', align: 'right' as const,
+            getValue: (r: LoanFee) => Number(r.amount),
+            render: (_v: unknown, r: LoanFee) => `${money(r.amount)} ₽`,
+        },
+        { key: 'charged_at', label: 'Дата', render: (_v: unknown, r: LoanFee) => fmtDate(r.charged_at) },
+        {
+            key: 'amortize', label: 'Режим',
+            render: (_v: unknown, r: LoanFee) => r.amortize ? 'размазана на срок' : 'целиком в месяц уплаты',
+        },
+        { key: 'note', label: 'Примечание', render: (v: string | null) => v || '—' },
+    ];
+
     return (
         <div>
             {data && data.items.length > 0 && (
@@ -160,6 +208,14 @@ export default function LoansCreditLines({ nonce, onChanged }: { nonce: number; 
                     <div className="glass-card" style={{ padding: '12px 18px', flex: '1 1 200px' }}>
                         <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>Проценты за период</div>
                         <div style={{ fontSize: 22, fontWeight: 700 }}>{money(data.total_due_period)} ₽</div>
+                    </div>
+                    <div className="glass-card" style={{ padding: '12px 18px', flex: '1 1 200px' }}>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>Комиссии за период</div>
+                        <div style={{ fontSize: 22, fontWeight: 700 }}>{money(data.total_fee_period)} ₽</div>
+                    </div>
+                    <div className="glass-card" style={{ padding: '12px 18px', flex: '1 1 200px' }}>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>Полная стоимость периода</div>
+                        <div style={{ fontSize: 22, fontWeight: 700 }}>{money(data.total_cost_period)} ₽</div>
                     </div>
                 </div>
             )}
@@ -222,6 +278,20 @@ export default function LoansCreditLines({ nonce, onChanged }: { nonce: number; 
                             )}
                         </div>
                     </div>
+
+                    {Number(open.one_off_fee_total) > 0 && (
+                        <div style={{ marginTop: 16 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Разовые комиссии</div>
+                            <TanStackDataTable
+                                columns={feeColumns}
+                                data={open.fees}
+                                exportName={`credit-line-${open.loan_id}-fees`}
+                            />
+                            <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 6 }}>
+                                В стоимость периода такая комиссия входит долей — {money(open.one_off_fee_period)} ₽, не целиком.
+                            </div>
+                        </div>
+                    )}
                 </div>
             )}
 

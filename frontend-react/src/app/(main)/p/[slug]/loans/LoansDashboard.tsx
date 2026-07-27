@@ -8,7 +8,7 @@ import {
 import { api } from '@/lib/api';
 import KpiCard from '@/components/KpiCard';
 import type { LoanDashboard } from '@/types/api';
-import { CHART_COLORS, entityLabel, fmtDate, money, periodLabel, ratePct } from './loanFmt';
+import { CHART_COLORS, entityLabel, fmtDate, money, monthLabel, ratePct } from './loanFmt';
 
 export default function LoansDashboard({ nonce }: { nonce: number }) {
     const [data, setData] = useState<LoanDashboard | null>(null);
@@ -54,21 +54,25 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
         );
     }
 
-    // Точка = период начисления 25→25; ключ приходит датой выплаты (ISO),
-    // подписываем её как «25.08» — так же, как в реестре и на карточке.
+    // Точка = календарный месяц (YYYY-MM); текущий месяц помечен is_partial —
+    // он посчитан не до конца (только с 1-го числа по сегодня).
     const monthly = data.monthly.map((m) => ({
-        month: periodLabel(m.month),
+        month: `${monthLabel(m.month)}${m.is_partial ? ' *' : ''}`,
+        isPartial: m.is_partial,
         outstanding: Number(m.outstanding),
         interest: Number(m.interest),
+        fee: Number(m.fee),
+        cost: Number(m.cost),
         disbursed: Number(m.disbursed),
         repaid: Number(m.repaid),
     }));
+    const hasPartialMonth = monthly.some((m) => m.isPartial);
     const byEntity = data.by_entity.map((e) => ({
         name: entityLabel(e.entity_type),
         value: Number(e.outstanding),
         count: e.count,
     }));
-    // Проценты за текущий период 25→25 отдельно по ИП и физлицам
+    // Стоимость денег за календарный месяц (прогноз/факт) отдельно по ИП и физлицам
     const interestByEntity = data.by_entity
         .filter((e) => Number(e.interest_due_period) > 0 || Number(e.outstanding) > 0)
         .map((e) => ({
@@ -96,7 +100,20 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
                 <KpiCard label="Тело в займах" value={`${money(k.total_outstanding)} ₽`} icon="💼" color="#0071e3" sub={`${k.active_count} активных · ${k.lenders_count} заёмщиков`} />
                 <KpiCard label="Средневзв. ставка" value={ratePct(k.weighted_avg_rate)} icon="📈" color="#5e5ce6" sub="годовых по активным" />
                 <KpiCard label="Проценты в месяц" value={`${money(k.monthly_interest)} ₽`} icon="🗓️" color="#ff9500" sub="текущая нагрузка" />
-                <KpiCard label="Начислено % (период)" value={`${money(k.accrued_interest)} ₽`} icon="⏳" color="#ff3b30" sub="к выплате за период" />
+                <KpiCard
+                    label={`Расходы на займы · ${monthLabel(k.accrual_month)}`}
+                    value={`${money(k.accrued_cost)} ₽`}
+                    icon="⏳"
+                    color="#ff3b30"
+                    sub={`% ${money(k.accrued_interest)} ₽ · комиссии ${money(k.accrued_fee)} ₽ · прогноз ${money(k.month_cost_projected)} ₽`}
+                />
+                <KpiCard
+                    label="Стоимость денег"
+                    value={ratePct(k.effective_rate)}
+                    icon="💹"
+                    color="#af52de"
+                    sub="во сколько реально обходятся деньги, годовых"
+                />
                 <KpiCard
                     label="Ближайший возврат"
                     value={fmtDate(k.next_maturity_date)}
@@ -108,9 +125,11 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
 
             {/* Dynamics chart */}
             <div className="glass-card" style={{ marginBottom: 16 }}>
-                <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>Динамика тела и процентов по периодам</h3>
+                <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>Динамика тела и стоимости денег по месяцам</h3>
                 <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>
-                    Период начисления — с 25-го по 25-е; подпись = дата выплаты.
+                    Считается по календарным месяцам, по дням — поэтому её можно складывать с ОПиУ. У ВКЛ период начисления — месяц,
+                    у частных займов — с 25-го по 25-е, у аннуитета свой график; в одну точку они не складываются.
+                    {hasPartialMonth && ' * текущий месяц — не до конца.'}
                 </div>
                 <ResponsiveContainer width="100%" height={300}>
                     <ComposedChart data={monthly} margin={{ top: 8, right: 12, left: 8, bottom: 0 }}>
@@ -118,20 +137,29 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
                         <XAxis dataKey="month" tick={{ fontSize: 11 }} />
                         <YAxis yAxisId="left" tick={{ fontSize: 11 }} tickFormatter={(v) => money(v)} width={70} />
                         <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} tickFormatter={(v) => money(v)} width={60} />
-                        <Tooltip formatter={(v: number, n) => [`${money(v)} ₽`, n === 'outstanding' ? 'Остаток тела' : n === 'interest' ? 'Проценты за период' : n]} />
-                        <Legend formatter={(v) => (v === 'outstanding' ? 'Остаток тела' : v === 'interest' ? 'Проценты за период' : v)} />
+                        <Tooltip formatter={(v: number, n) => [`${money(v)} ₽`, n === 'outstanding' ? 'Остаток тела' : n === 'interest' ? 'Проценты' : n === 'fee' ? 'Комиссии' : n]} />
+                        <Legend formatter={(v) => (v === 'outstanding' ? 'Остаток тела' : v === 'interest' ? 'Проценты' : v === 'fee' ? 'Комиссии' : v)} />
                         <Area yAxisId="left" type="monotone" dataKey="outstanding" fill="#0071e3" stroke="#0071e3" fillOpacity={0.15} strokeWidth={2} />
-                        <Bar yAxisId="right" dataKey="interest" fill="#ff9500" barSize={14} radius={[4, 4, 0, 0]} />
+                        <Bar yAxisId="right" dataKey="interest" stackId="cost" fill="#ff9500" barSize={14}>
+                            {monthly.map((m, i) => (
+                                <Cell key={i} fillOpacity={m.isPartial ? 0.45 : 1} />
+                            ))}
+                        </Bar>
+                        <Bar yAxisId="right" dataKey="fee" stackId="cost" fill="#5e5ce6" barSize={14} radius={[4, 4, 0, 0]}>
+                            {monthly.map((m, i) => (
+                                <Cell key={i} fillOpacity={m.isPartial ? 0.45 : 1} />
+                            ))}
+                        </Bar>
                     </ComposedChart>
                 </ResponsiveContainer>
             </div>
 
-            {/* Проценты за период — раздельно по ИП и физлицам */}
+            {/* Стоимость денег за месяц — раздельно по ИП и физлицам */}
             {interestByEntity.length > 0 && (
                 <div className="glass-card" style={{ marginBottom: 16 }}>
-                    <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>Проценты за период по сущности</h3>
+                    <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>Стоимость денег за месяц по сущности</h3>
                     <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>
-                        Период начисления — с 25-го по 25-е.
+                        Крупная цифра — прогноз за весь календарный месяц; «набежало» — факт с 1-го числа по сегодня.
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
                         {interestByEntity.map((e) => (
@@ -139,7 +167,7 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
                                 <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>{e.label}</div>
                                 <div style={{ fontSize: 22, fontWeight: 700 }}>{money(e.due)} ₽</div>
                                 <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
-                                    начислено {money(e.accrued)} ₽ · тело {money(e.outstanding)} ₽
+                                    набежало {money(e.accrued)} ₽ · тело {money(e.outstanding)} ₽
                                 </div>
                             </div>
                         ))}

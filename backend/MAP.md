@@ -45,6 +45,7 @@ from backend.models.mixins import SoftDeleteMixin
 | Утилиты | `utils/` (time, crypto, file_validation, queries) |
 | Тесты | `tests/` (корень проекта) |
 | Миграции | `migrations/versions/` + `alembic.ini` (корень) |
+| Займы (частные, ВКЛ, аннуитет) | `models/loan.py`, `schemas/loan.py`, `routers/loans.py`, `services/loan_service.py` (CRUD, линия), `loan_interest.py` (движок: проценты по дням, комиссии, график), `loan_schedule.py` (график платежей + разовые комиссии), `loan_analytics.py` (дашборд по КАЛЕНДАРНЫМ месяцам, свод по заёмщикам, прогноз), `loan_import.py`; лендер-портал — `lender_portal_service.py` |
 | Справочники | `services/refs_service.py` (Account, Override, CounterpartyCategory) |
 | Курсы валют | `services/fx_service.py` (`FxRate`) |
 | Мониторинг и health | `services/monitoring_service.py`, `health_check_service.py` |

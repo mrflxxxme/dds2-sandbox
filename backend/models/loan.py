@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    Boolean,
     Date,
     ForeignKey,
     Index,
@@ -75,6 +76,15 @@ class LoanPaymentType(str, enum.Enum):
     PRINCIPAL_REPAY = "PRINCIPAL_REPAY"  # principal repayment
     INTEREST_PAY = "INTEREST_PAY"  # interest payment
     PENALTY = "PENALTY"  # penalty / late fee
+    COMMISSION = "COMMISSION"  # комиссия банка (за выдачу, за резерв лимита)
+
+
+class LoanFeeKind(str, enum.Enum):
+    """Вид разовой комиссии — то, за что банк взял деньги помимо процентов."""
+
+    ORIGINATION = "ORIGINATION"  # за выдачу займа (Симпл Финанс — 4.25 %)
+    LIMIT_SETUP = "LIMIT_SETUP"  # за установление лимита (ВКЛ — 0.25 %)
+    OTHER = "OTHER"
 
 
 # ─── Loan ────────────────────────────────────────────────────────────────────
@@ -140,6 +150,14 @@ class Loan(Base, TimestampMixin, SoftDeleteMixin):
     rate_periods: Mapped[list["LoanRatePeriod"]] = relationship(
         back_populates="loan",
         foreign_keys="LoanRatePeriod.loan_id",
+    )
+    schedule: Mapped[list["LoanScheduleEntry"]] = relationship(
+        back_populates="loan",
+        foreign_keys="LoanScheduleEntry.loan_id",
+    )
+    fees: Mapped[list["LoanFee"]] = relationship(
+        back_populates="loan",
+        foreign_keys="LoanFee.loan_id",
     )
     parent_loan: Mapped["Loan | None"] = relationship(
         remote_side=[id],
@@ -219,4 +237,98 @@ class LoanRatePeriod(Base, TimestampMixin):
 
     __table_args__ = (
         Index("ix_loan_rate_period_loan_from", "loan_id", "valid_from"),
+    )
+
+
+# ─── LoanScheduleEntry ───────────────────────────────────────────────────────
+
+
+class LoanScheduleEntry(Base, TimestampMixin):
+    """
+    Строка ПЛАНОВОГО графика платежей — как его выдал кредитор.
+
+    У аннуитета (Симпл Финанс) платёж фиксирован, а деление на тело и проценты
+    меняется от строки к строке — вывести его формулой нельзя, банк считает по
+    своему округлению. Поэтому график храним как факт договора и сверяем с ним
+    реальные платежи: «заплатили ли то, что должны, и когда».
+
+    `days` и границы периода нужны, чтобы проверить сам график: проценты строки =
+    остаток × ставка × дни / 365 (сходится с приложением № 1 до копейки).
+    """
+
+    __tablename__ = "loan_schedule_entry"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    loan_id: Mapped[int] = mapped_column(Integer, ForeignKey("loan.id"), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)  # № платежа в графике
+    period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    due_date: Mapped[date] = mapped_column(Date, nullable=False)  # дата платежа
+    days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    principal_due: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=0)
+    interest_due: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=0)
+    payment_total: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=0)
+    # Остаток ссудной задолженности ПОСЛЕ платежа — по графику кредитора.
+    balance_after: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    # Строка графика — комиссия, а не проценты. У Симпл Финанса первый «платёж»
+    # (1 275 000 ₽ за выдачу) напечатан в колонке процентов, но экономически это
+    # разовая комиссия: в стоимость денег она заходит через `LoanFee`, иначе
+    # расход задвоится и весь март покажет цену, которой не было.
+    is_fee: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    loan: Mapped["Loan"] = relationship(back_populates="schedule", foreign_keys=[loan_id])
+
+    __table_args__ = (
+        Index("ix_loan_schedule_loan_seq", "loan_id", "seq", unique=True),
+        Index("ix_loan_schedule_loan_due", "loan_id", "due_date"),
+    )
+
+
+# ─── LoanFee ─────────────────────────────────────────────────────────────────
+
+
+class LoanFee(Base, TimestampMixin):
+    """
+    РАЗОВАЯ комиссия по займу: за выдачу, за установление лимита и т. п.
+
+    Отделена от `LoanPayment` намеренно: платёж — это касса (когда ушли деньги),
+    а комиссия — расход, который относится ко ВСЕМУ сроку договора. 252 500 ₽ за
+    лимит и 1 275 000 ₽ за выдачу — плата за доступ к деньгам на год, а не расход
+    одного дня. Целиком в месяц уплаты они ломают сравнение месяцев: май дорожает
+    вдвое, а остальные выглядят дешевле, чем есть.
+
+    `amortize` = размазывать по дням окна [amortize_from, amortize_to]; иначе
+    расход падает целиком в месяц `charged_at`. Касса при этом не меняется —
+    она живёт в `LoanPayment` с типом COMMISSION (ссылка `payment_id`).
+    """
+
+    __tablename__ = "loan_fee"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    loan_id: Mapped[int] = mapped_column(Integer, ForeignKey("loan.id"), nullable=False)
+    fee_kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=LoanFeeKind.OTHER, server_default="OTHER"
+    )
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    charged_at: Mapped[date] = mapped_column(Date, nullable=False)  # дата начисления/уплаты
+    amortize: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    # Окно амортизации; пусто → срок займа (start_date … maturity_date).
+    amortize_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    amortize_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Касса: строка LoanPayment с типом COMMISSION, если деньги уже ушли.
+    payment_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("loan_payment.id"), nullable=True
+    )
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    loan: Mapped["Loan"] = relationship(back_populates="fees", foreign_keys=[loan_id])
+
+    __table_args__ = (
+        Index("ix_loan_fee_loan_charged", "loan_id", "charged_at"),
+        Index("ix_loan_fee_payment", "payment_id"),
     )

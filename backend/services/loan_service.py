@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_project_reports
 from backend.models.counterparty import Counterparty
-from backend.models.loan import Loan, LoanPayment, LoanRatePeriod
+from backend.models.loan import Loan, LoanFee, LoanPayment, LoanRatePeriod
 from backend.models.transactions import Transaction
 from backend.schemas.loan import (
     CreditLineDetail,
@@ -30,6 +30,7 @@ from backend.schemas.loan import (
     LoanDetail,
     LoanDirectionTotals,
     LoanExtend,
+    LoanFeeResponse,
     LoanFilter,
     LoanListResponse,
     LoanPaymentResponse,
@@ -1002,6 +1003,18 @@ async def get_credit_line(db: AsyncSession, *, loan_id: int, project_id: int) ->
         .scalars()
         .all()
     )
+    fees = list(
+        (
+            await db.execute(
+                select(LoanFee)
+                .where(LoanFee.loan_id == loan.id)
+                .order_by(LoanFee.charged_at, LoanFee.id)
+                .limit(500)
+            )
+        )
+        .scalars()
+        .all()
+    )
     cp_name = (
         await db.execute(select(Counterparty.name).where(Counterparty.id == loan.counterparty_id))
     ).scalar_one_or_none()
@@ -1064,6 +1077,16 @@ async def get_credit_line(db: AsyncSession, *, loan_id: int, project_id: int) ->
             rate_periods=rate_lite,
         )
 
+    # Разовая комиссия (за установление лимита) относится ко всему сроку линии —
+    # в стоимость периода заходит своей долей, а не целиком в месяц уплаты.
+    from backend.services import loan_schedule  # локальный импорт: цикл модулей
+
+    fee_lites = loan_schedule.fees_lite(fees)
+    one_off_period = loan_schedule.fees_in_window(
+        loan, fee_lites, win_start=p_start, win_end=p_end
+    )
+    one_off_total = sum((Decimal(str(f.amount or 0)) for f in fees), Decimal("0"))
+
     return CreditLineDetail(
         loan_id=loan.id,
         contract_number=loan.contract_number,
@@ -1091,12 +1114,15 @@ async def get_credit_line(db: AsyncSession, *, loan_id: int, project_id: int) ->
             (Decimal(str(p.amount or 0)) for p in payments if p.payment_type == "COMMISSION"),
             Decimal("0"),
         ),
-        total_cost_period=accrue(p_end) + fee(p_end),
+        one_off_fee_total=one_off_total,
+        one_off_fee_period=one_off_period,
+        total_cost_period=accrue(p_end) + fee(p_end) + one_off_period,
         payment_due_date=_payment_due(loan, p_end),
         status=loan.status,
         maturity_date=loan.maturity_date,
         movements=movements,
         rate_periods=[LoanRatePeriodResponse.model_validate(rp) for rp in rates],
+        fees=[LoanFeeResponse.model_validate(f) for f in fees],
     )
 
 
@@ -1229,4 +1255,8 @@ async def list_credit_lines(db: AsyncSession, *, project_id: int) -> CreditLineL
         total_drawn=sum((i.drawn for i in items), Decimal("0")),
         total_available=sum((i.available or Decimal("0") for i in items), Decimal("0")),
         total_due_period=sum((i.interest_due_period for i in items), Decimal("0")),
+        total_fee_period=sum(
+            (i.unused_fee_period + i.one_off_fee_period for i in items), Decimal("0")
+        ),
+        total_cost_period=sum((i.total_cost_period for i in items), Decimal("0")),
     )

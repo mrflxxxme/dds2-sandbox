@@ -7,12 +7,14 @@ import type { LoanDetail, LoanPaymentType } from '@/types/api';
 import { money, ratePct, fmtDate, STATUS_LABEL, STATUS_BADGE, entityLabel } from '../loanFmt';
 import LoanFormModal from '../LoanFormModal';
 import ExtendModal from '../ExtendModal';
+import LoanSchedule from '../LoanSchedule';
 
 const PAY_LABEL: Record<LoanPaymentType, string> = {
     DISBURSEMENT: 'Выдача',
     PRINCIPAL_REPAY: 'Возврат тела',
     INTEREST_PAY: 'Выплата %',
     PENALTY: 'Пени',
+    COMMISSION: 'Комиссия',
 };
 
 export default function LoanDetailPage() {
@@ -126,6 +128,10 @@ export default function LoanDetailPage() {
                         </tbody>
                     </table>
                 )}
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+                <LoanSchedule loanId={id} />
             </div>
 
             {d.notes && (

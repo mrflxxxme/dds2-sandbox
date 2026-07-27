@@ -26,6 +26,7 @@ const PAYMENT_TYPE_LABELS: Record<LoanPaymentType, string> = {
     PRINCIPAL_REPAY: 'Погашение основного долга',
     INTEREST_PAY: 'Уплата процентов',
     PENALTY: 'Штраф',
+    COMMISSION: 'Комиссия',
 };
 
 const PAYMENT_TYPE_BADGES: Record<LoanPaymentType, string> = {
@@ -33,6 +34,7 @@ const PAYMENT_TYPE_BADGES: Record<LoanPaymentType, string> = {
     PRINCIPAL_REPAY: 'badge-success',
     INTEREST_PAY: 'badge-warning',
     PENALTY: 'badge-danger',
+    COMMISSION: 'badge-secondary',
 };
 
 export default function LoanDetailPage() {

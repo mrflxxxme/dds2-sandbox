@@ -208,6 +208,105 @@ def unused_limit_fee(
     return _q(max(ZERO, total))
 
 
+@dataclass
+class ScheduleRowLite:
+    """Строка планового графика для движка (без ORM)."""
+
+    period_start: date | None
+    period_end: date | None
+    due_date: date
+    days: int | None
+    interest_due: Decimal
+    is_fee: bool = False
+
+
+def schedule_interest_in_window(
+    rows: list[ScheduleRowLite] | None, *, win_start: date, win_end: date
+) -> Decimal:
+    """
+    Проценты по ГРАФИКУ за окно (win_start, win_end].
+
+    У аннуитета правда — график, а не формула: банк даёт «льготные» дни (у Симпл
+    Финанса первые 7 дней процентов нет, за них взята комиссия за выдачу) и своё
+    округление. Простая ставка × дни разошлась бы с договором.
+
+    Внутри строки проценты линейны по дням (тело и ставка постоянны), поэтому
+    делим сумму строки пропорционально дням, попавшим в окно. Строки-комиссии
+    пропускаем — они учитываются как `LoanFee`, иначе расход задвоится.
+    """
+    total = ZERO
+    for row in rows or []:
+        if row.is_fee or not row.interest_due:
+            continue
+        start = row.period_start or row.due_date
+        end = row.period_end or row.due_date
+        if end < start:
+            continue
+        span = Decimal(row.days or ((end - start).days + 1))
+        if span <= ZERO:
+            continue
+        # Окно (win_start, win_end] — это дни [win_start+1, win_end]
+        lo = max(start, date.fromordinal(win_start.toordinal() + 1))
+        hi = min(end, win_end)
+        overlap = (hi - lo).days + 1
+        if overlap <= 0:
+            continue
+        total += Decimal(str(row.interest_due)) * Decimal(overlap) / span
+    return _q(total)
+
+
+@dataclass
+class FeeLite:
+    """Разовая комиссия для движка (без ORM)."""
+
+    amount: Decimal
+    charged_at: date
+    amortize: bool = True
+    amortize_from: date | None = None
+    amortize_to: date | None = None
+
+
+def fee_in_window(
+    fee: FeeLite,
+    *,
+    win_start: date,
+    win_end: date,
+    fallback_from: date | None = None,
+    fallback_to: date | None = None,
+) -> Decimal:
+    """
+    Доля разовой комиссии, попадающая в окно (win_start, win_end].
+
+    `amortize=False` — вся сумма падает в день `charged_at` (касса и расход
+    совпадают). `amortize=True` — комиссия размазывается по дням окна
+    амортизации: это плата за доступ к деньгам на весь срок, и целиком в один
+    месяц она ломает сравнение месяцев между собой.
+
+    Считаем через НАКОПЛЕННУЮ сумму на границах окна, а не «дневная × дни»:
+    так сумма по всем месяцам ровно равна комиссии, без копеечного хвоста.
+    """
+    amount = Decimal(str(fee.amount or 0))
+    if amount <= ZERO or win_end <= win_start:
+        return ZERO
+    if not fee.amortize:
+        return amount if win_start < fee.charged_at <= win_end else ZERO
+
+    lo = fee.amortize_from or fallback_from or fee.charged_at
+    hi = fee.amortize_to or fallback_to
+    if hi is None or hi < lo:
+        # Срока нет — размазывать не по чему, ведём себя как разовый расход.
+        return amount if win_start < fee.charged_at <= win_end else ZERO
+    total_days = Decimal((hi - lo).days + 1)
+
+    def cum(d: date) -> Decimal:
+        if d < lo:
+            return ZERO
+        elapsed = Decimal((min(d, hi) - lo).days + 1)
+        return _q(amount * elapsed / total_days)
+
+    return max(ZERO, cum(win_end) - cum(win_start))
+
+
 def add_months(d: date, months: int) -> date:
     """Прибавить месяцы, клампя день к длине месяца (31 янв + 1 мес → 28/29 фев)."""
     total = d.month - 1 + months

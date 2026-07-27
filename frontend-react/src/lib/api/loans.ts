@@ -5,7 +5,11 @@ import type {
     CreditLineDraw,
     CreditLineListResponse,
     LenderDetail,
+    LoanFeeIn,
+    LoanFeeListResponse,
     LoanRatePeriodIn,
+    LoanScheduleReplace,
+    LoanScheduleResponse,
     LoanStuckResponse,
     LoanDetail,
     LoanListResponse,
@@ -96,6 +100,23 @@ export function addLoanMethods(api: ApiClient) {
         addRatePeriod(loanId: number, data: LoanRatePeriodIn) {
             return api.request<CreditLineDetail>('POST', `/api/v1/loans/${loanId}/rate-periods`, data);
         },
+        // ─── График платежей и разовые комиссии ───────────────────────────────
+        loanSchedule(loanId: number) {
+            return api.request<LoanScheduleResponse>('GET', `/api/v1/loans/${loanId}/schedule`);
+        },
+        replaceLoanSchedule(loanId: number, data: LoanScheduleReplace) {
+            return api.request<LoanScheduleResponse>('PUT', `/api/v1/loans/${loanId}/schedule`, data);
+        },
+        loanFees(loanId: number) {
+            return api.request<LoanFeeListResponse>('GET', `/api/v1/loans/${loanId}/fees`);
+        },
+        addLoanFee(loanId: number, data: LoanFeeIn) {
+            return api.request<LoanFeeListResponse>('POST', `/api/v1/loans/${loanId}/fees`, data);
+        },
+        deleteLoanFee(loanId: number, feeId: number) {
+            return api.request<LoanFeeListResponse>('DELETE', `/api/v1/loans/${loanId}/fees/${feeId}`);
+        },
+
         stuckLoans() {
             return api.request<LoanStuckResponse>('GET', '/api/v1/loans/stuck');
         },

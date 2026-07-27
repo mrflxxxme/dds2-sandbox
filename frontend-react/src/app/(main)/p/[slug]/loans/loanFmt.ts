@@ -18,6 +18,19 @@ export const periodLabel = (iso: string | null | undefined): string => {
     return y && m && d ? `${d}.${m}` : iso;
 };
 
+const MONTH_SHORT: readonly string[] = [
+    'янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек',
+];
+
+/** Подпись календарного месяца: «2026-07» → «июл 26». */
+export const monthLabel = (iso: string | null | undefined): string => {
+    if (!iso) return '—';
+    const [y, m] = iso.split('-');
+    const mi = m ? Number(m) - 1 : NaN;
+    if (!y || Number.isNaN(mi) || mi < 0 || mi > 11) return iso;
+    return `${MONTH_SHORT[mi]} ${y.slice(-2)}`;
+};
+
 export const STATUS_LABEL: Record<LoanStatus, string> = {
     ACTIVE: 'Активный',
     CLOSED: 'Закрыт',
