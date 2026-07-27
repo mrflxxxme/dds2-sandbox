@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import type { LlmProvider, RepliesListResponse, Reply, ReplyAction, ReplyAgent, ReplyAgentRunResult, ReplyAgentSave, ReplyAgentTarget, ReplyStatus } from '@/types/api';
@@ -40,7 +40,17 @@ function Stars({ rating }: { rating: number }) {
 
 // ─── Очередь ответов ─────────────────────────────────────────────────────────
 
-function ReplyCard({ reply, onChanged }: { reply: Reply; onChanged: () => void }) {
+function ReplyCard({ reply, onChanged, selectable, checked, onSelectMouseDown, onCardMouseEnter }: {
+    reply: Reply;
+    onChanged: () => void;
+    /** true — черновик, доступен массовый выбор */
+    selectable: boolean;
+    checked: boolean;
+    /** mousedown на области чекбокса: начинает drag-выделение с целевым состоянием value */
+    onSelectMouseDown: (id: number, value: boolean) => void;
+    /** mouseenter по карточке во время drag-выделения */
+    onCardMouseEnter: (id: number) => void;
+}) {
     const [text, setText] = useState(reply.text);
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState('');
@@ -68,8 +78,39 @@ function ReplyCard({ reply, onChanged }: { reply: Reply; onChanged: () => void }
     const t = reply.target;
 
     return (
-        <div className="glass-card" style={{ padding: 16, marginBottom: 12 }}>
+        <div
+            className="glass-card"
+            onMouseEnter={() => onCardMouseEnter(reply.id)}
+            style={{
+                padding: 16,
+                marginBottom: 12,
+                ...(selectable && checked
+                    ? { border: '1px solid var(--color-accent)', background: 'var(--color-bg-card)' }
+                    : {}),
+            }}
+        >
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 13 }}>
+                {selectable ? (
+                    <span
+                        onMouseDown={e => {
+                            e.preventDefault(); // не даём начать выделение текста; тоггл делаем сами
+                            onSelectMouseDown(reply.id, !checked);
+                        }}
+                        style={{ display: 'inline-flex', alignItems: 'center', padding: 4, cursor: 'pointer', userSelect: 'none' }}
+                        title={checked ? 'Снять выбор (можно протянуть по списку)' : 'Выбрать (можно протянуть по списку)'}
+                    >
+                        <input type="checkbox" checked={checked} readOnly style={{ pointerEvents: 'none', cursor: 'pointer', width: 15, height: 15 }} />
+                    </span>
+                ) : (
+                    <input
+                        type="checkbox"
+                        checked={false}
+                        disabled
+                        readOnly
+                        style={{ opacity: 0.3, width: 15, height: 15, margin: '0 4px' }}
+                        title="Массовый выбор доступен только для черновиков"
+                    />
+                )}
                 {reply.target_type === 'feedback' ? (
                     <span className="badge badge-secondary">Отзыв {t?.rating != null ? `· ${t.rating}★` : ''}</span>
                 ) : (
@@ -163,23 +204,43 @@ function ReplyCard({ reply, onChanged }: { reply: Reply; onChanged: () => void }
 
 const QUEUE_PAGE = 100;
 const STATUS_FILTERS: { key: ReplyStatus | ''; label: string }[] = [
-    { key: '', label: 'Все' },
     { key: 'draft', label: 'Черновики' },
     { key: 'approved', label: 'Одобренные' },
     { key: 'sent', label: 'Отправленные' },
     { key: 'error', label: 'Ошибки' },
     { key: 'rejected', label: 'Отклонённые' },
+    { key: '', label: 'Все' },
 ];
 
 function RepliesQueue() {
     const [meta, setMeta] = useState<RepliesListResponse | null>(null);
     const [items, setItems] = useState<Reply[]>([]);
-    const [status, setStatus] = useState<ReplyStatus | ''>('');
+    const [status, setStatus] = useState<ReplyStatus | ''>('draft');
     const [loading, setLoading] = useState(true);
     const [loadingMore, setLoadingMore] = useState(false);
     const [sending, setSending] = useState(false);
     const [sendMsg, setSendMsg] = useState('');
     const [error, setError] = useState('');
+    // Массовый выбор черновиков
+    const [selected, setSelected] = useState<Set<number>>(new Set());
+    const [dragging, setDragging] = useState(false);
+    const [bulkBusy, setBulkBusy] = useState(false);
+    const [bulkProgress, setBulkProgress] = useState('');
+    const [bulkMsg, setBulkMsg] = useState('');
+    // dragRef: активен ли drag-выбор и какое состояние применяем (true — выделяем, false — снимаем)
+    const dragRef = useRef<{ active: boolean; value: boolean }>({ active: false, value: false });
+
+    // Завершение drag-выделения по отпусканию кнопки мыши в любой точке окна
+    useEffect(() => {
+        const up = () => {
+            if (dragRef.current.active) {
+                dragRef.current.active = false;
+                setDragging(false);
+            }
+        };
+        window.addEventListener('mouseup', up);
+        return () => window.removeEventListener('mouseup', up);
+    }, []);
 
     const load = useCallback(async (currentStatus: ReplyStatus | '') => {
         setLoading(true);
@@ -188,6 +249,7 @@ function RepliesQueue() {
             const res = await api.getReplies({ status: currentStatus || undefined, take: QUEUE_PAGE, skip: 0 });
             setMeta(res);
             setItems(res.items);
+            setSelected(new Set()); // после перезагрузки списка выбор сбрасываем
         } catch (e) {
             setError(e instanceof Error ? e.message : 'Не удалось загрузить ответы');
             setMeta(null);
@@ -238,6 +300,75 @@ function RepliesQueue() {
     const hasMore = items.length < total;
     const approvedCount = counts.approved ?? 0;
 
+    // ─── Массовый выбор черновиков ───
+
+    const applySelect = useCallback((id: number, value: boolean) => {
+        setSelected(prev => {
+            const next = new Set(prev);
+            if (value) next.add(id); else next.delete(id);
+            return next;
+        });
+    }, []);
+
+    // mousedown на чекбоксе: фиксируем целевое состояние и начинаем drag;
+    // клик без движения = обычный toggle (mousedown → mouseup без mouseenter на других карточках)
+    const handleSelectMouseDown = useCallback((id: number, value: boolean) => {
+        dragRef.current = { active: true, value };
+        setDragging(true);
+        applySelect(id, value);
+    }, [applySelect]);
+
+    // mouseenter на карточке во время drag — применяем целевое состояние (только черновикам)
+    const handleCardMouseEnter = useCallback((id: number) => {
+        if (!dragRef.current.active) return;
+        const r = items.find(x => x.id === id);
+        if (r?.status !== 'draft') return;
+        applySelect(id, dragRef.current.value);
+    }, [items, applySelect]);
+
+    const draftIds = items.filter(r => r.status === 'draft').map(r => r.id);
+    const selectedCount = selected.size;
+
+    const selectAllDrafts = () => setSelected(new Set(draftIds));
+    const clearSelection = () => setSelected(new Set());
+
+    // Массовое одобрение/отклонение: последовательные PATCH, ошибки не валят пачку
+    const bulkAct = async (action: 'approve' | 'reject') => {
+        const label = action === 'approve' ? 'Одобрено' : 'Отклонено';
+        const chosen = items.filter(r => r.status === 'draft' && selected.has(r.id));
+        // needs_info-черновики при массовом одобрении пропускаем (правило одиночного одобрения сохраняется)
+        const skipped = action === 'approve' ? chosen.filter(r => r.needs_info).length : 0;
+        const targets = action === 'approve' ? chosen.filter(r => !r.needs_info) : chosen;
+        if (targets.length === 0) {
+            setBulkMsg(skipped > 0
+                ? `Нечего ${action === 'approve' ? 'одобрять' : 'отклонять'}: пропущено ${formatNumber(skipped, 0)} черновиков без данных в базе знаний.`
+                : 'Нет выбранных черновиков.');
+            return;
+        }
+        setBulkBusy(true);
+        setBulkMsg('');
+        setError('');
+        let done = 0;
+        let failed = 0;
+        for (const r of targets) {
+            try {
+                await api.updateReply(r.id, { action });
+                done += 1;
+            } catch {
+                failed += 1;
+            }
+            setBulkProgress(`${label} ${done + failed} из ${targets.length}…`);
+        }
+        let msg = `✓ ${label} ${formatNumber(done, 0)} из ${formatNumber(targets.length, 0)}`;
+        if (failed > 0) msg += `, ошибок: ${formatNumber(failed, 0)}`;
+        if (skipped > 0) msg += `, пропущено без данных в базе знаний: ${formatNumber(skipped, 0)}`;
+        setBulkMsg(msg);
+        setBulkProgress('');
+        setBulkBusy(false);
+        setSelected(new Set());
+        await load(status);
+    };
+
     return (
         <div>
             <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -262,6 +393,52 @@ function RepliesQueue() {
                 <div className="glass-card" style={{ padding: 12, marginBottom: 16, color: 'var(--color-success)', display: 'flex', alignItems: 'center', gap: 8 }}>
                     {sendMsg}
                     <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setSendMsg('')}>✕</button>
+                </div>
+            )}
+
+            {bulkMsg && (
+                <div className="glass-card" style={{ padding: 12, marginBottom: 16, color: 'var(--color-success)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {bulkMsg}
+                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setBulkMsg('')}>✕</button>
+                </div>
+            )}
+
+            {!loading && !error && draftIds.length > 0 && (
+                <div
+                    className="glass-card"
+                    style={{ padding: 12, marginBottom: 16, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 13, opacity: selectedCount > 0 ? 1 : 0.75 }}
+                >
+                    <span style={{ fontWeight: 600 }}>
+                        Выбрано: {formatNumber(selectedCount, 0)}
+                    </span>
+                    <button
+                        className="btn btn-success btn-sm"
+                        disabled={bulkBusy || selectedCount === 0}
+                        onClick={() => bulkAct('approve')}
+                    >
+                        ✓ Одобрить выбранные
+                    </button>
+                    <button
+                        className="btn btn-danger btn-sm"
+                        disabled={bulkBusy || selectedCount === 0}
+                        onClick={() => bulkAct('reject')}
+                    >
+                        Отклонить выбранные
+                    </button>
+                    <button className="btn btn-secondary btn-sm" disabled={bulkBusy} onClick={selectAllDrafts}>
+                        Выбрать все черновики ({formatNumber(draftIds.length, 0)})
+                    </button>
+                    <button className="btn btn-secondary btn-sm" disabled={bulkBusy || selectedCount === 0} onClick={clearSelection}>
+                        Снять выбор
+                    </button>
+                    {bulkProgress && (
+                        <span style={{ color: 'var(--color-text-dim)' }}>{bulkProgress}</span>
+                    )}
+                    {!bulkBusy && selectedCount === 0 && (
+                        <span style={{ color: 'var(--color-text-dim)' }}>
+                            Чекбокс на карточке можно протянуть вверх/вниз для выделения нескольких черновиков.
+                        </span>
+                    )}
                 </div>
             )}
 
@@ -291,9 +468,17 @@ function RepliesQueue() {
             )}
 
             {!loading && !error && items.length > 0 && (
-                <div>
+                <div style={{ userSelect: dragging ? 'none' : undefined }}>
                     {items.map(r => (
-                        <ReplyCard key={r.id} reply={r} onChanged={() => load(status)} />
+                        <ReplyCard
+                            key={r.id}
+                            reply={r}
+                            onChanged={() => load(status)}
+                            selectable={r.status === 'draft'}
+                            checked={selected.has(r.id)}
+                            onSelectMouseDown={handleSelectMouseDown}
+                            onCardMouseEnter={handleCardMouseEnter}
+                        />
                     ))}
                     {hasMore && (
                         <div style={{ textAlign: 'center', marginTop: 8 }}>
