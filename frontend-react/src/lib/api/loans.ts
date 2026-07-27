@@ -1,7 +1,11 @@
 /** Loans API methods */
 import { ApiClient } from './client';
 import type {
+    CreditLineDetail,
+    CreditLineDraw,
+    CreditLineListResponse,
     LenderDetail,
+    LoanRatePeriodIn,
     LoanStuckResponse,
     LoanDetail,
     LoanListResponse,
@@ -79,6 +83,18 @@ export function addLoanMethods(api: ApiClient) {
 
         repayLoan(id: number, data: LoanRepay) {
             return api.request<Loan>('POST', `/api/v1/loans/${id}/repay`, data);
+        },
+        creditLines() {
+            return api.request<CreditLineListResponse>('GET', '/api/v1/loans/credit-lines');
+        },
+        creditLine(loanId: number) {
+            return api.request<CreditLineDetail>('GET', `/api/v1/loans/${loanId}/credit-line`);
+        },
+        drawCreditLine(loanId: number, data: CreditLineDraw) {
+            return api.request<CreditLineDetail>('POST', `/api/v1/loans/${loanId}/credit-line/draw`, data);
+        },
+        addRatePeriod(loanId: number, data: LoanRatePeriodIn) {
+            return api.request<CreditLineDetail>('POST', `/api/v1/loans/${loanId}/rate-periods`, data);
         },
         stuckLoans() {
             return api.request<LoanStuckResponse>('GET', '/api/v1/loans/stuck');

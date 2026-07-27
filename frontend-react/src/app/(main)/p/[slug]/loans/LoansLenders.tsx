@@ -137,8 +137,24 @@ export default function LoansLenders({ nonce, onChanged }: { nonce: number; onCh
         { key: 'lender_bank', label: 'Банк', render: (v: string | null) => v || '—' },
         { key: 'outstanding', label: 'В займе', align: 'right' as const, getValue: (r: LoanLenderRollup) => Number(r.outstanding), render: (_v: unknown, r: LoanLenderRollup) => `${money(r.outstanding)} ₽` },
         { key: 'weighted_avg_rate', label: 'Ставка', align: 'right' as const, getValue: (r: LoanLenderRollup) => Number(r.weighted_avg_rate ?? 0), render: (_v: unknown, r: LoanLenderRollup) => ratePct(r.weighted_avg_rate) },
-        { key: 'accrued_interest', label: 'Набежало', align: 'right' as const, getValue: (r: LoanLenderRollup) => Number(r.accrued_interest), render: (_v: unknown, r: LoanLenderRollup) => `${money(r.accrued_interest)} ₽` },
-        { key: 'interest_due_period', label: 'К выплате', align: 'right' as const, getValue: (r: LoanLenderRollup) => Number(r.interest_due_period), render: (_v: unknown, r: LoanLenderRollup) => `${money(r.interest_due_period)} ₽` },
+        {
+            // Одна колонка вместо двух: платёж за период — главное число, набежавшее
+            // на сегодня — мелкой подписью и только пока период не закрыт.
+            key: 'interest_due_period',
+            label: period ? `К выплате ${fmtDate(period)}` : 'Проценты за период',
+            align: 'right' as const,
+            getValue: (r: LoanLenderRollup) => Number(r.interest_due_period),
+            render: (_v: unknown, r: LoanLenderRollup) => (
+                <div>
+                    <div>{money(r.interest_due_period)} ₽</div>
+                    {!period && (
+                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
+                            набежало {money(r.accrued_interest)} ₽
+                        </div>
+                    )}
+                </div>
+            ),
+        },
         { key: 'monthly_interest', label: '%/мес', align: 'right' as const, getValue: (r: LoanLenderRollup) => Number(r.monthly_interest), render: (_v: unknown, r: LoanLenderRollup) => `${money(r.monthly_interest)} ₽` },
         { key: 'active_count', label: 'Займов', align: 'right' as const, getValue: (r: LoanLenderRollup) => r.active_count, render: (_v: unknown, r: LoanLenderRollup) => `${r.active_count} / ${r.total_count}` },
         { key: 'next_interest_date', label: 'След. %', render: (_v: unknown, r: LoanLenderRollup) => fmtDate(r.next_interest_date) },
@@ -193,7 +209,7 @@ export default function LoansLenders({ nonce, onChanged }: { nonce: number; onCh
                 <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
                     {period
                         ? `Исторический срез: что было к выплате ${fmtDate(period)}`
-                        : '«Набежало» — на сегодня, «К выплате» — за весь период целиком'}
+                        : 'Период начисления — с 25-го по 25-е'}
                 </span>
             </div>
 
@@ -205,27 +221,19 @@ export default function LoansLenders({ nonce, onChanged }: { nonce: number; onCh
                         </div>
                         <div style={{ fontSize: 22, fontWeight: 700 }}>{money(totals.out)} ₽</div>
                     </div>
-                    <div className="glass-card" style={{ padding: '12px 18px', flex: '1 1 200px' }}>
+                    <div className="glass-card" style={{ padding: '12px 18px', flex: '1 1 280px' }}>
                         <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}
-                             title="Сколько процентов набежало с начала периода по сегодняшний день">
-                            Набежало с {fmtDate(data.accrual_period_start)}
-                        </div>
-                        <div style={{ fontSize: 22, fontWeight: 700 }}>{money(totals.accrued)} ₽</div>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
-                            {period ? 'период закрыт' : 'растёт каждый день'}
-                        </div>
-                    </div>
-                    <div className="glass-card" style={{ padding: '12px 18px', flex: '1 1 200px' }}>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}
-                             title="Проценты за ВЕСЬ период 25→25 — сумма платежа на дату выплаты">
+                             title="Проценты за весь период 25→25 — сумма платежа на дату выплаты">
                             К выплате {fmtDate(data.accrual_period_end)}
                         </div>
                         <div style={{ fontSize: 22, fontWeight: 700 }}>{money(totals.due)} ₽</div>
-                        {entity === 'ALL' && (
-                            <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
-                                ИП {money(entityCard('IP').due)} ₽ · физ {money(entityCard('PHYSICAL').due)} ₽
-                            </div>
-                        )}
+                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
+                            {period
+                                ? `период ${fmtDate(data.accrual_period_start)} — ${fmtDate(data.accrual_period_end)} закрыт`
+                                : `набежало на сегодня ${money(totals.accrued)} ₽`}
+                            {entity === 'ALL'
+                                && ` · ИП ${money(entityCard('IP').due)} ₽ · физ ${money(entityCard('PHYSICAL').due)} ₽`}
+                        </div>
                     </div>
                     <div className="glass-card" style={{ padding: '12px 18px', flex: '1 1 200px' }}>
                         <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>Заёмщиков</div>

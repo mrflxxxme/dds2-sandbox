@@ -11,6 +11,7 @@ from decimal import Decimal
 
 import openpyxl
 import pytest
+from fastapi import HTTPException
 
 from backend.schemas.counterparty import CounterpartyCreate
 from backend.schemas.loan import LenderAccessCreate, LoanCreate, LoanExtend, LoanUpdate
@@ -774,3 +775,139 @@ async def test_by_lender_historical_period(db_session, client, auth_headers):
     assert Decimal(str(row["interest_due_period"])) == Decimal("23671.23")
     # период давно закрыт → «начислено» равно «к выплате», без сдвига на день
     assert Decimal(str(row["accrued_interest"])) == Decimal("23671.23")
+
+
+# ─── Кредитная линия: выборки + плавающая ставка ─────────────────────────────
+
+
+def test_credit_line_matches_bank_statement():
+    """ВКЛ ВБ Банка: 6 траншей, смена ключевой внутри месяца — сверка с выпиской."""
+    from backend.services.loan_interest import RatePeriod, accrued_in_window
+
+    # Выборки по договору РЛ-21/26: лимит 101 млн выбран за месяц
+    tranches = [
+        (date(2026, 5, 25), 70_000_000), (date(2026, 6, 9), 12_000_000),
+        (date(2026, 6, 16), 6_000_000), (date(2026, 6, 19), 4_000_000),
+        (date(2026, 6, 23), 5_000_000), (date(2026, 6, 25), 4_000_000),
+    ]
+    pays = [loan_interest.PaymentLite("DISBURSEMENT", Decimal(a), d) for d, a in tranches]
+    # Ставка = ключевая ЦБ + 5 %: 14.5+5 до 21.06, с 22.06 ключевая упала до 14.25
+    rates = [
+        RatePeriod(date(2026, 5, 25), Decimal("0.195")),
+        RatePeriod(date(2026, 6, 22), Decimal("0.1925")),
+    ]
+
+    def accrue(a: date, b: date) -> Decimal:
+        return accrued_in_window(
+            principal=Decimal("0"), rate=None, start_date=date(2026, 5, 25),
+            payments=pays, win_start=a, win_end=b, rate_periods=rates,
+        )
+
+    # Факт из выписки ВБ Банка — до копейки
+    assert accrue(date(2026, 5, 25), date(2026, 5, 31)) == Decimal("224383.56")
+    assert accrue(date(2026, 5, 31), date(2026, 6, 30)) == Decimal("1348267.12")
+
+
+def test_credit_line_body_grows_on_drawdown():
+    """Тело линии растёт на выборках и падает на погашениях."""
+    from backend.services.loan_interest import accrued_in_window
+
+    pays = [
+        loan_interest.PaymentLite("DISBURSEMENT", Decimal("1000000"), date(2026, 1, 1)),
+        loan_interest.PaymentLite("DISBURSEMENT", Decimal("1000000"), date(2026, 1, 11)),
+        loan_interest.PaymentLite("PRINCIPAL_REPAY", Decimal("2000000"), date(2026, 1, 21)),
+    ]
+    kw = dict(principal=Decimal("0"), rate=Decimal("0.365"), start_date=date(2026, 1, 1), payments=pays)
+    # 10 дней по 1 млн + 10 дней по 2 млн = 30 млн·дней под 36.5 % → 1000 ₽/день на млн
+    assert accrued_in_window(**kw, win_start=date(2026, 1, 1), win_end=date(2026, 1, 21)) == Decimal("30000.00")
+    # после полного погашения начисление прекращается
+    assert accrued_in_window(**kw, win_start=date(2026, 1, 21), win_end=date(2026, 1, 31)) == Decimal("0.00")
+
+
+def test_rate_change_applies_from_its_own_day():
+    """День смены ставки считается уже по новой — иначе расхождение с банком."""
+    from backend.services.loan_interest import RatePeriod, accrued_in_window
+
+    kw = dict(
+        principal=Decimal("36500000"), rate=Decimal("0.10"),
+        start_date=date(2026, 3, 1), payments=[],
+        rate_periods=[RatePeriod(date(2026, 3, 3), Decimal("0.20"))],
+    )
+    # тело 36.5 млн: 10 % = 10 000 ₽/день, 20 % = 20 000 ₽/день
+    # дни 2 и 3 марта: 2-е по старой (10 000), 3-е уже по новой (20 000)
+    assert accrued_in_window(**kw, win_start=date(2026, 3, 1), win_end=date(2026, 3, 3)) == Decimal("30000.00")
+
+
+@pytest.mark.asyncio
+async def test_credit_line_service_end_to_end(db_session, client, auth_headers):
+    """Линия целиком: выборки, лимит, плавающая ставка, сальдо движений."""
+    from backend.models.loan import Loan
+    from backend.schemas.loan import CreditLineDraw, LoanRatePeriodIn
+    from backend.services.loan_service import draw_credit_line, get_credit_line, set_rate_period
+
+    project_id = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id, "ВБ Банк")
+    line = Loan(
+        project_id=project_id, counterparty_id=cp_id, direction="INCOMING",
+        principal=Decimal("0.01"), currency="RUB", contract_number="РЛ-21/26",
+        contract_date=date(2026, 5, 25), start_date=date(2026, 5, 25),
+        maturity_date=date(2027, 5, 25), status="ACTIVE",
+        loan_kind="CREDIT_LINE", accrual_kind="CALENDAR_MONTH",
+        credit_limit=Decimal("101000000"),
+    )
+    db_session.add(line)
+    await db_session.commit()
+    await db_session.refresh(line)
+
+    # Ставка = ключевая ЦБ + 5 %, ключевая упала с 22.06
+    for vf, rate, base in ((date(2026, 5, 25), "0.195", "0.145"), (date(2026, 6, 22), "0.1925", "0.1425")):
+        await set_rate_period(
+            db_session, loan_id=line.id, project_id=project_id,
+            data=LoanRatePeriodIn(valid_from=vf, rate=Decimal(rate), base_rate=Decimal(base), spread=Decimal("0.05")),
+        )
+    for when, amount in (
+        (date(2026, 5, 25), 70_000_000), (date(2026, 6, 9), 12_000_000),
+        (date(2026, 6, 16), 6_000_000), (date(2026, 6, 19), 4_000_000),
+        (date(2026, 6, 23), 5_000_000), (date(2026, 6, 25), 4_000_000),
+    ):
+        await draw_credit_line(
+            db_session, loan_id=line.id, project_id=project_id,
+            data=CreditLineDraw(amount=Decimal(amount), drawn_at=when),
+        )
+
+    cl = await get_credit_line(db_session, loan_id=line.id, project_id=project_id)
+    assert cl.drawn == Decimal("101000000")
+    assert cl.available == Decimal("0")
+    assert cl.utilization == Decimal("1.0000")
+    assert cl.current_rate == Decimal("0.1925")
+    assert len(cl.movements) == 6
+    assert cl.movements[-1].balance_after == Decimal("101000000")
+
+    # Лимит выбран целиком — следующая выборка отбивается
+    with pytest.raises(HTTPException) as exc:
+        await draw_credit_line(
+            db_session, loan_id=line.id, project_id=project_id,
+            data=CreditLineDraw(amount=Decimal("1"), drawn_at=date(2026, 7, 1)),
+        )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_credit_line_rejects_draw_on_term_loan(db_session, client, auth_headers):
+    """По обычному займу выборки запрещены — только по линии."""
+    from backend.schemas.loan import CreditLineDraw
+    from backend.services.loan_service import draw_credit_line, get_credit_line
+
+    project_id = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id)
+    svc = LoanService(db_session)
+    loan = await svc.create(data=_incoming(cp_id, "T-1"), project_id=project_id)
+
+    with pytest.raises(HTTPException) as exc:
+        await draw_credit_line(
+            db_session, loan_id=loan.id, project_id=project_id,
+            data=CreditLineDraw(amount=Decimal("1000"), drawn_at=date(2025, 2, 1)),
+        )
+    assert exc.value.status_code == 400
+    with pytest.raises(HTTPException):
+        await get_credit_line(db_session, loan_id=loan.id, project_id=project_id)

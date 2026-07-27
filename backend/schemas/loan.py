@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ALLOWED_DIRECTIONS = ["INCOMING", "OUTGOING", "AFFILIATED"]
 ALLOWED_STATUSES = ["ACTIVE", "CLOSED", "DEFAULTED"]
-ALLOWED_PAYMENT_TYPES = ["DISBURSEMENT", "PRINCIPAL_REPAY", "INTEREST_PAY", "PENALTY"]
+ALLOWED_PAYMENT_TYPES = ["DISBURSEMENT", "PRINCIPAL_REPAY", "INTEREST_PAY", "PENALTY", "COMMISSION"]
 ALLOWED_ENTITY_TYPES = ["PHYSICAL", "IP"]
 
 # ─── Loan ─────────────────────────────────────────────────────────────────────
@@ -452,6 +452,106 @@ class LoanImportResult(BaseModel):
     skipped_rows: int = 0
     lenders: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class LoanAccrualMonth(BaseModel):
+    """Начислено за КАЛЕНДАРНЫЙ месяц — строка для ОПиУ."""
+
+    month: str  # YYYY-MM
+    interest: Decimal = Decimal("0")
+    fee: Decimal = Decimal("0")  # комиссии (за резерв лимита и т. п.)
+    total: Decimal = Decimal("0")
+    ip: Decimal = Decimal("0")
+    physical: Decimal = Decimal("0")
+    avg_body: Decimal = Decimal("0")  # средний остаток тела за месяц (по дням)
+    effective_rate: Decimal | None = None  # во сколько реально обошлись деньги, годовых
+    days: int = 0
+
+
+class LoanAccrualMonthsResponse(BaseModel):
+    items: list[LoanAccrualMonth] = Field(default_factory=list)
+    total_interest: Decimal = Decimal("0")
+    total_fee: Decimal = Decimal("0")
+    # Средняя стоимость денег за весь показанный отрезок, годовых
+    effective_rate: Decimal | None = None
+
+
+# ─── Кредитная линия (ВКЛ) ───────────────────────────────────────────────────
+
+
+class LoanRatePeriodIn(BaseModel):
+    """Ставка, действующая с даты. Для плавающих: ключевая ЦБ + надбавка."""
+
+    valid_from: date
+    rate: Decimal = Field(..., ge=0, le=1)  # итоговая годовая доля: 0.195
+    base_rate: Decimal | None = Field(None, ge=0, le=1)  # ключевая ЦБ
+    spread: Decimal | None = Field(None, ge=0, le=1)  # надбавка банка
+    note: str | None = Field(None, max_length=200)
+
+
+class LoanRatePeriodResponse(LoanRatePeriodIn):
+    id: int
+    loan_id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CreditLineDraw(BaseModel):
+    """Выборка транша по кредитной линии — увеличивает тело долга."""
+
+    amount: Decimal = Field(..., gt=0)
+    drawn_at: date
+    note: str | None = Field(None, max_length=200)
+
+
+class CreditLineMovement(BaseModel):
+    """Движение по линии: выборка или погашение."""
+
+    payment_id: int
+    kind: str  # DISBURSEMENT (выборка) / PRINCIPAL_REPAY (погашение)
+    amount: Decimal
+    happened_at: date
+    balance_after: Decimal  # тело линии после движения
+
+
+class CreditLineDetail(BaseModel):
+    """Состояние кредитной линии: лимит, выборка, свободный остаток, движения."""
+
+    loan_id: int
+    contract_number: str
+    counterparty_name: str | None = None
+    credit_limit: Decimal | None = None
+    drawn: Decimal = Decimal("0")  # выбрано тело сейчас
+    available: Decimal | None = None  # лимит − выбрано (None, если лимита нет)
+    utilization: Decimal | None = None  # доля выборки лимита, 0..1
+    current_rate: Decimal | None = None  # ставка на сегодня
+    accrual_kind: str = "PERIOD_25"
+    accrual_period_start: date | None = None
+    accrual_period_end: date | None = None
+    accrued_interest: Decimal = Decimal("0")  # набежало в текущем периоде
+    interest_due_period: Decimal = Decimal("0")  # за весь период
+    interest_paid: Decimal = Decimal("0")
+    # Комиссия за НЕиспользованный лимит: банк берёт плату за резерв
+    unused_limit_rate: Decimal | None = None
+    unused_fee_accrued: Decimal = Decimal("0")  # набежало на сегодня
+    unused_fee_period: Decimal = Decimal("0")  # за весь период
+    commission_paid: Decimal = Decimal("0")  # уплачено комиссий всего
+    total_cost_period: Decimal = Decimal("0")  # проценты + комиссия за период
+    payment_due_date: date | None = None  # когда платить за этот период
+    status: str = "ACTIVE"
+    maturity_date: date | None = None
+    movements: list[CreditLineMovement] = Field(default_factory=list)
+    rate_periods: list[LoanRatePeriodResponse] = Field(default_factory=list)
+
+
+class CreditLineListResponse(BaseModel):
+    """Все кредитные линии проекта со сводкой."""
+
+    items: list[CreditLineDetail] = Field(default_factory=list)
+    total_limit: Decimal = Decimal("0")
+    total_drawn: Decimal = Decimal("0")
+    total_available: Decimal = Decimal("0")
+    total_due_period: Decimal = Decimal("0")
 
 
 # ─── Зависшие займы (срок вышел, решения нет) ────────────────────────────────

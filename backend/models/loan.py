@@ -54,6 +54,20 @@ class LoanEntityType(str, enum.Enum):
     IP = "IP"  # индивидуальный предприниматель
 
 
+class LoanKind(str, enum.Enum):
+    """Вид займа: срочный (тело фиксировано) или кредитная линия (выборки/погашения)."""
+
+    TERM = "TERM"  # обычный заём: тело задано при выдаче
+    CREDIT_LINE = "CREDIT_LINE"  # ВКЛ: тело = выборки − погашения, есть лимит
+
+
+class LoanAccrualKind(str, enum.Enum):
+    """Календарь начисления процентов — у разных кредиторов он разный."""
+
+    PERIOD_25 = "PERIOD_25"  # частные займы: с 25-го по 25-е
+    CALENDAR_MONTH = "CALENDAR_MONTH"  # банк: календарный месяц, платёж в начале следующего
+
+
 class LoanPaymentType(str, enum.Enum):
     """Type of loan payment event."""
 
@@ -94,6 +108,22 @@ class Loan(Base, TimestampMixin, SoftDeleteMixin):
     entity_type: Mapped[str | None] = mapped_column(String(12), nullable=True)
     # Банк лендера, куда выплачиваются проценты (сбер/альфа/…) — справочно.
     lender_bank: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Вид займа и календарь начисления. Дефолты повторяют прежнее поведение,
+    # поэтому существующие займы считаются ровно как раньше.
+    loan_kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=LoanKind.TERM, server_default="TERM"
+    )
+    accrual_kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=LoanAccrualKind.PERIOD_25, server_default="PERIOD_25"
+    )
+    # Лимит кредитной линии; у срочного займа не заполняется.
+    credit_limit: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    # Комиссия за НЕиспользованный лимит, годовая доля (0.02 = 2 %). Начисляется
+    # на разницу «лимит − выбрано» — банк берёт плату за зарезервированные деньги.
+    unused_limit_rate: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    # День месяца, когда гасят проценты за период. ВБ Банк — 5-е число следующего
+    # месяца; у частных займов платёж совпадает с концом периода (25-е).
+    payment_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Цепочка продлений: при продлении старый займ закрывается, новый ссылается на него.
     parent_loan_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("loan.id"), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -106,6 +136,10 @@ class Loan(Base, TimestampMixin, SoftDeleteMixin):
     payments: Mapped[list["LoanPayment"]] = relationship(
         back_populates="loan",
         foreign_keys="LoanPayment.loan_id",
+    )
+    rate_periods: Mapped[list["LoanRatePeriod"]] = relationship(
+        back_populates="loan",
+        foreign_keys="LoanRatePeriod.loan_id",
     )
     parent_loan: Mapped["Loan | None"] = relationship(
         remote_side=[id],
@@ -152,4 +186,37 @@ class LoanPayment(Base, TimestampMixin):
         Index("ix_loan_payment_loan_date", "loan_id", "paid_at"),
         # Partial unique index created via CONCURRENTLY in migration:
         #   uq_loan_payment_transaction  UNIQUE (transaction_id) WHERE transaction_id IS NOT NULL
+    )
+
+
+# ─── LoanRatePeriod ──────────────────────────────────────────────────────────
+
+
+class LoanRatePeriod(Base, TimestampMixin):
+    """
+    Период действия ставки по займу — для плавающих ставок.
+
+    У ВКЛ ставка = ключевая ЦБ + спред и меняется вслед за ключевой прямо внутри
+    периода начисления: в июне 2026 половина месяца шла под 19.5 %, остаток под
+    19.25 %. Одним полем `Loan.rate` такое не описать — исторические начисления
+    пересчитались бы по новой ставке и разошлись с выпиской банка.
+
+    Пусто → действует `Loan.rate` (обычный заём с фиксированной ставкой).
+    """
+
+    __tablename__ = "loan_rate_period"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    loan_id: Mapped[int] = mapped_column(Integer, ForeignKey("loan.id"), nullable=False)
+    valid_from: Mapped[date] = mapped_column(Date, nullable=False)  # ставка действует С этого дня
+    rate: Mapped[Decimal] = mapped_column(Numeric(6, 4), nullable=False)  # годовая доля: 0.195
+    # Справочно: из чего сложилась ставка (ключевая ЦБ + фиксированная надбавка)
+    base_rate: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    spread: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    loan: Mapped["Loan"] = relationship(back_populates="rate_periods", foreign_keys=[loan_id])
+
+    __table_args__ = (
+        Index("ix_loan_rate_period_loan_from", "loan_id", "valid_from"),
     )

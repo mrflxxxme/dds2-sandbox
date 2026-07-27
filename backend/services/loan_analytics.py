@@ -18,9 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
 from backend.models.counterparty import Counterparty
-from backend.models.loan import Loan, LoanPayment
+from backend.models.loan import Loan, LoanPayment, LoanRatePeriod
 from backend.models.refs import ProjectSetting
-from backend.services import loan_interest
+from backend.services import loan_interest, loan_service
 from backend.services.loan_interest import add_months
 
 ZERO = Decimal("0")
@@ -37,8 +37,14 @@ logger = __import__("logging").getLogger(__name__)
 
 async def _load(
     db: AsyncSession, project_id: int
-) -> tuple[list[Loan], dict[int, list[LoanPayment]], dict[int, tuple[str, str | None]], set[int]]:
-    """Load INCOMING loans + payments + cp names + portal-access cp ids for a project."""
+) -> tuple[
+    list[Loan],
+    dict[int, list[LoanPayment]],
+    dict[int, tuple[str, str | None]],
+    set[int],
+    dict[int, list[loan_interest.RatePeriod]],
+]:
+    """Load INCOMING loans + payments + cp names + portal-access cp ids + rate history."""
     loan_rows = await db.execute(
         select(Loan)
         .where(
@@ -88,7 +94,21 @@ async def _load(
         except (ValueError, TypeError):
             continue
 
-    return loans, pay_by_loan, cp_map, access_cp_ids
+    # История ставок — только у займов с плавающей (кредитные линии)
+    rates_by_loan: dict[int, list[loan_interest.RatePeriod]] = defaultdict(list)
+    if loans:
+        rate_rows = await db.execute(
+            select(LoanRatePeriod)
+            .where(LoanRatePeriod.loan_id.in_([loan.id for loan in loans]))
+            .order_by(LoanRatePeriod.valid_from)
+            .limit(SCAN_LIMIT)
+        )
+        for rp in rate_rows.scalars().all():
+            rates_by_loan[rp.loan_id].append(
+                loan_interest.RatePeriod(valid_from=rp.valid_from, rate=Decimal(str(rp.rate)))
+            )
+
+    return loans, pay_by_loan, cp_map, access_cp_ids, rates_by_loan
 
 
 def _calc(
@@ -96,6 +116,7 @@ def _calc(
     payments: list[LoanPayment],
     as_of: date,
     period: tuple[date, date] | None = None,
+    rate_periods: list[loan_interest.RatePeriod] | None = None,
 ) -> loan_interest.LoanCalc:
     return loan_interest.compute_loan(
         principal=Decimal(str(loan.principal)),
@@ -112,7 +133,9 @@ def _calc(
             for p in payments
         ],
         as_of=as_of,
-        period=period,
+        # Календарь начисления берём с самого займа: у банка месяц, у частника 25→25.
+        period=period or loan_service.loan_period(loan, as_of),
+        rate_periods=rate_periods,
     )
 
 
@@ -129,7 +152,7 @@ async def dashboard(db: AsyncSession, project_id: int, as_of: date) -> dict:
         LoanTopLender,
     )
 
-    loans, pay_by_loan, cp_map, _access = await _load(db, project_id)
+    loans, pay_by_loan, cp_map, _access, rates_by_loan = await _load(db, project_id)
 
     kpis = LoanKpis()
     weighted_num = ZERO
@@ -140,7 +163,7 @@ async def dashboard(db: AsyncSession, project_id: int, as_of: date) -> dict:
     maturities: list[tuple[date, Decimal]] = []
 
     for loan in loans:
-        calc = _calc(loan, pay_by_loan.get(loan.id, []), as_of)
+        calc = _calc(loan, pay_by_loan.get(loan.id, []), as_of, rate_periods=rates_by_loan.get(loan.id))
         kpis.interest_paid_total += calc.interest_paid
         # Проценты за период копим по ВСЕМ займам, включая закрытые: погашенный
         # в середине периода отработал свои дни. Иначе дашборд разойдётся со
@@ -158,16 +181,17 @@ async def dashboard(db: AsyncSession, project_id: int, as_of: date) -> dict:
         kpis.total_outstanding += out
         kpis.monthly_interest += calc.monthly_interest
         lenders_active.add(loan.counterparty_id)
-        if loan.rate is not None:
-            weighted_num += out * Decimal(str(loan.rate))
+        eff = calc.effective_rate
+        if eff is not None:
+            weighted_num += out * eff
 
         # by entity — тело только по активным, проценты собраны выше по всем
         es.count += 1
         es.outstanding += out
 
         # by rate
-        if loan.rate is not None:
-            rb = by_rate.setdefault(Decimal(str(loan.rate)), LoanRateBucket(rate=Decimal(str(loan.rate))))
+        if eff is not None:
+            rb = by_rate.setdefault(eff, LoanRateBucket(rate=eff))
             rb.count += 1
             rb.outstanding += out
 
@@ -177,8 +201,8 @@ async def dashboard(db: AsyncSession, project_id: int, as_of: date) -> dict:
         )
         la["out"] += out
         la["accrued"] += calc.accrued_interest
-        if loan.rate is not None:
-            la["wnum"] += out * Decimal(str(loan.rate))
+        if eff is not None:
+            la["wnum"] += out * eff
 
         if loan.maturity_date is not None and out > ZERO and loan.maturity_date >= as_of:
             maturities.append((loan.maturity_date, out))
@@ -321,7 +345,7 @@ async def by_lender(
 ) -> dict:
     from backend.schemas.loan import LoanByLenderResponse, LoanEntitySplit, LoanLenderRollup
 
-    loans, pay_by_loan, cp_map, access_cp_ids = await _load(db, project_id)
+    loans, pay_by_loan, cp_map, access_cp_ids, rates_by_loan = await _load(db, project_id)
 
     # Явный период = исторический срез: «сколько было к выплате 25.07». Начисление
     # ограничено сегодня, поэтому у закрытого периода «начислено» == «к выплате».
@@ -330,7 +354,7 @@ async def by_lender(
     )
     agg: dict[int, dict] = {}
     for loan in loans:
-        calc = _calc(loan, pay_by_loan.get(loan.id, []), as_of, period)
+        calc = _calc(loan, pay_by_loan.get(loan.id, []), as_of, period, rates_by_loan.get(loan.id))
         a = agg.setdefault(
             loan.counterparty_id,
             {
@@ -364,8 +388,8 @@ async def by_lender(
             a["active"] += 1
             a["out"] += calc.remaining_principal
             a["monthly"] += calc.monthly_interest
-            if loan.rate is not None:
-                a["wnum"] += calc.remaining_principal * Decimal(str(loan.rate))
+            if calc.effective_rate is not None:
+                a["wnum"] += calc.remaining_principal * calc.effective_rate
             if calc.next_interest_date and (a["next_int"] is None or calc.next_interest_date < a["next_int"]):
                 a["next_int"] = calc.next_interest_date
             if loan.maturity_date and loan.maturity_date >= as_of and (
@@ -435,7 +459,7 @@ async def by_lender(
 async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_months: int = 12) -> dict:
     from backend.schemas.loan import LoanForecastEvent, LoanForecastMonth, LoanForecastResponse
 
-    loans, pay_by_loan, cp_map, _access = await _load(db, project_id)
+    loans, pay_by_loan, cp_map, _access, rates_by_loan = await _load(db, project_id)
 
     month_interest: dict[str, Decimal] = defaultdict(lambda: ZERO)
     month_principal: dict[str, Decimal] = defaultdict(lambda: ZERO)
@@ -444,7 +468,7 @@ async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_month
     for loan in loans:
         if loan.status != "ACTIVE":
             continue
-        calc = _calc(loan, pay_by_loan.get(loan.id, []), as_of)
+        calc = _calc(loan, pay_by_loan.get(loan.id, []), as_of, rate_periods=rates_by_loan.get(loan.id))
         remaining = calc.remaining_principal
         if remaining <= ZERO:
             continue
@@ -507,4 +531,150 @@ async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_month
 
     upcoming.sort(key=lambda e: e.date)
     result = LoanForecastResponse(months=months, upcoming=upcoming[:30])
+    return result.model_dump(mode="json")
+
+
+def _body_days(
+    loan: Loan,
+    lites: list[loan_interest.PaymentLite],
+    win_start: date,
+    win_end: date,
+) -> Decimal:
+    """Сумма «тело × дни» за окно — знаменатель для средней стоимости денег."""
+    moves: list[tuple[date, Decimal]] = []
+    for p in lites:
+        if p.payment_type == "DISBURSEMENT":
+            moves.append((p.paid_at, p.amount))
+        elif p.payment_type == "PRINCIPAL_REPAY":
+            moves.append((p.paid_at, -p.amount))
+    lo = max(win_start, date.fromordinal(loan.start_date.toordinal() - 1))
+    if loan.maturity_date is not None:
+        win_end = min(win_end, loan.maturity_date)
+    if win_end <= lo:
+        return ZERO
+    total = ZERO
+    day = lo
+    base = Decimal(str(loan.principal))
+    while day < win_end:
+        day = date.fromordinal(day.toordinal() + 1)
+        body = base + sum((d for dt, d in moves if dt < day), ZERO)
+        if body > ZERO:
+            total += body
+    return total
+
+
+# ─── Начисление по календарным месяцам (база для ОПиУ) ───────────────────────
+
+
+@cached(prefix="loan_accrual_months", ttl=300)
+async def accrual_by_month(db: AsyncSession, project_id: int, as_of: date, months: int = 12) -> dict:
+    """
+    Начисленные проценты и комиссии по КАЛЕНДАРНЫМ месяцам — база для ОПиУ.
+
+    Периоды ВЫПЛАТ у продуктов разные (частные займы 25→25, ВКЛ — месяц с платежом
+    5-го, аннуитет — по графику), и складывать их в один P&L нельзя: период 25.06→25.07
+    шестью днями лежит в июне. Поэтому расход считаем ПО ДНЯМ и бакетим в календарный
+    месяц — это универсально и не зависит от того, когда деньги реально ушли.
+    """
+    from backend.schemas.loan import LoanAccrualMonth, LoanAccrualMonthsResponse
+
+    loans, pay_by_loan, _cp, _access, rates_by_loan = await _load(db, project_id)
+    if not loans:
+        return LoanAccrualMonthsResponse().model_dump(mode="json")
+
+    first = add_months(date(as_of.year, as_of.month, 1), -(months - 1))
+    buckets: dict[str, dict[str, Decimal]] = {}
+    cur = first
+    while cur <= date(as_of.year, as_of.month, 1):
+        buckets[cur.strftime("%Y-%m")] = {
+            "interest": ZERO, "fee": ZERO, "ip": ZERO, "physical": ZERO,
+            "body_days": ZERO, "days": ZERO,
+        }
+        cur = add_months(cur, 1)
+
+    for loan in loans:
+        lites = [
+            loan_interest.PaymentLite(
+                payment_type=p.payment_type,
+                amount=Decimal(str(p.amount or 0)),
+                paid_at=p.paid_at,
+            )
+            for p in pay_by_loan.get(loan.id, [])
+        ]
+        rates = rates_by_loan.get(loan.id)
+        for key in buckets:
+            year, month = int(key[:4]), int(key[5:])
+            start = date(year, month, 1)
+            end = add_months(start, 1)
+            # Границы окна: начисление идёт за дни ПОСЛЕ левой границы, поэтому
+            # берём последний день предыдущего месяца как левую границу.
+            win_start = date.fromordinal(start.toordinal() - 1)
+            win_end = min(date.fromordinal(end.toordinal() - 1), as_of)
+            if win_end <= win_start:
+                continue
+            interest = loan_interest.accrued_in_window(
+                principal=Decimal(str(loan.principal)),
+                rate=Decimal(str(loan.rate)) if loan.rate is not None else None,
+                start_date=loan.start_date,
+                payments=lites,
+                win_start=win_start,
+                win_end=win_end,
+                rate_periods=rates,
+            )
+            fee = ZERO
+            if loan.credit_limit is not None and loan.unused_limit_rate is not None:
+                fee = loan_interest.unused_limit_fee(
+                    credit_limit=Decimal(str(loan.credit_limit)),
+                    rate=Decimal(str(loan.unused_limit_rate)),
+                    payments=lites,
+                    win_start=win_start,
+                    win_end=win_end,
+                    start_date=loan.start_date,
+                    end_date=loan.maturity_date,
+                )
+            b = buckets[key]
+            b["interest"] += interest
+            b["fee"] += fee
+            # Тело×дни — чтобы получить СРЕДНИЙ остаток за месяц: у линии он
+            # скачет на каждой выборке, простое «тело на конец месяца» соврёт.
+            b["body_days"] += _body_days(loan, lites, win_start, win_end)
+            b["days"] = max(b["days"], Decimal((win_end - win_start).days))
+            if loan.entity_type == "IP":
+                b["ip"] += interest + fee
+            elif loan.entity_type == "PHYSICAL":
+                b["physical"] += interest + fee
+
+    items = []
+    for key, v in sorted(buckets.items()):
+        days = v["days"] or ZERO
+        avg_body = (v["body_days"] / days) if days > ZERO else ZERO
+        cost = v["interest"] + v["fee"]
+        eff = (
+            (cost * loan_interest.DAYS_PER_YEAR / (avg_body * days)).quantize(Decimal("0.0001"))
+            if avg_body > ZERO and days > ZERO
+            else None
+        )
+        items.append(
+            LoanAccrualMonth(
+                month=key,
+                interest=v["interest"].quantize(Decimal("0.01")),
+                fee=v["fee"].quantize(Decimal("0.01")),
+                total=cost.quantize(Decimal("0.01")),
+                ip=v["ip"].quantize(Decimal("0.01")),
+                physical=v["physical"].quantize(Decimal("0.01")),
+                avg_body=avg_body.quantize(Decimal("0.01")),
+                effective_rate=eff,
+                days=int(days),
+            )
+        )
+    body_days_all = sum((v["body_days"] for v in buckets.values()), ZERO)
+    cost_all = sum((i.total for i in items), ZERO)
+    result = LoanAccrualMonthsResponse(
+        items=items,
+        total_interest=sum((i.interest for i in items), ZERO),
+        total_fee=sum((i.fee for i in items), ZERO),
+        effective_rate=(cost_all * loan_interest.DAYS_PER_YEAR / body_days_all).quantize(Decimal("0.0001"))
+        if body_days_all > ZERO
+        else None,
+    )
     return result.model_dump(mode="json")

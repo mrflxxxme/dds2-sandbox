@@ -17,9 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_project_reports
 from backend.models.counterparty import Counterparty
-from backend.models.loan import Loan, LoanPayment
+from backend.models.loan import Loan, LoanPayment, LoanRatePeriod
 from backend.models.transactions import Transaction
 from backend.schemas.loan import (
+    CreditLineDetail,
+    CreditLineDraw,
+    CreditLineListResponse,
+    CreditLineMovement,
     LenderDetail,
     LenderPeriodPoint,
     LoanCreate,
@@ -29,6 +33,8 @@ from backend.schemas.loan import (
     LoanFilter,
     LoanListResponse,
     LoanPaymentResponse,
+    LoanRatePeriodIn,
+    LoanRatePeriodResponse,
     LoanRepay,
     LoanResponse,
     LoanScheduleSummary,
@@ -121,6 +127,15 @@ async def _enrich_loans(db: AsyncSession, loans: list[Loan]) -> list[LoanRespons
     for p in pay_rows.scalars().all():
         pay_by_loan.setdefault(p.loan_id, []).append(p)
 
+    # История ставок нужна кредитным линиям: без неё плавающая ставка схлопнется
+    # в одно поле `rate` и начисления разойдутся с банком.
+    rate_rows = await db.execute(
+        select(LoanRatePeriod).where(LoanRatePeriod.loan_id.in_(loan_ids)).limit(2000)
+    )
+    rates_by_loan: dict[int, list[LoanRatePeriod]] = {}
+    for rp in rate_rows.scalars().all():
+        rates_by_loan.setdefault(rp.loan_id, []).append(rp)
+
     # Loans that are a parent of another loan (i.e. were extended)
     ext_rows = await db.execute(
         select(Loan.parent_loan_id)
@@ -139,6 +154,8 @@ async def _enrich_loans(db: AsyncSession, loans: list[Loan]) -> list[LoanRespons
             status=loan.status,
             payments=_to_payment_lite(pay_by_loan.get(loan.id, [])),
             as_of=as_of,
+            period=loan_period(loan, as_of),
+            rate_periods=_rate_periods_lite(rates_by_loan.get(loan.id, [])),
         )
         name, inn = cp_map.get(loan.counterparty_id, (None, None))
         resp = LoanResponse.model_validate(loan)
@@ -898,4 +915,318 @@ async def list_stuck_loans(db: AsyncSession, *, project_id: int) -> LoanStuckRes
         total_amount=total_amount,
         total_accrued_since_maturity=total_accrued,
         count=len(items),
+    )
+
+
+# ─── Кредитная линия ─────────────────────────────────────────────────────────
+
+
+def _rate_periods_lite(rows: list[LoanRatePeriod]) -> list[loan_interest.RatePeriod]:
+    return [
+        loan_interest.RatePeriod(valid_from=rp.valid_from, rate=Decimal(str(rp.rate)))
+        for rp in sorted(rows, key=lambda x: x.valid_from)
+    ]
+
+
+def _payment_due(loan: Loan, period_end: date) -> date:
+    """
+    Когда платят за период. ВБ Банк списывает 5-го числа СЛЕДУЮЩЕГО месяца
+    (факт: 05.06 за май, 06.07 за июнь), а по частным займам платёж совпадает
+    с концом периода 25→25.
+    """
+    if loan.payment_day is None:
+        return period_end
+    nxt = loan_interest.add_months(date(period_end.year, period_end.month, 1), 1)
+    return loan_interest._anchor(nxt.year, nxt.month, loan.payment_day)
+
+
+def loan_period(loan: Loan, as_of: date) -> tuple[date, date]:
+    """Период начисления по календарю займа: банк — месяц, частник — 25→25."""
+    return _line_period(loan, as_of)
+
+
+def _line_period(loan: Loan, as_of: date) -> tuple[date, date]:
+    """Период начисления линии: банк считает по календарному месяцу, частник — 25→25."""
+    if loan.accrual_kind == "CALENDAR_MONTH":
+        first = date(as_of.year, as_of.month, 1)
+        nxt = loan_interest.add_months(first, 1)
+        # Начисление идёт за дни ПОСЛЕ левой границы, поэтому границей месяца
+        # берём последний день предыдущего: так первый день месяца не теряется.
+        return date.fromordinal(first.toordinal() - 1), date.fromordinal(nxt.toordinal() - 1)
+    return loan_interest.accrual_period(as_of)
+
+
+async def get_credit_line(db: AsyncSession, *, loan_id: int, project_id: int) -> CreditLineDetail:
+    """
+    Состояние кредитной линии: лимит, выбрано, свободно, движения и ставки.
+
+    Тело линии = Σ выборок − Σ погашений (у линии `principal` не используется как
+    тело: деньги приходят траншами). Проценты считает общий движок — он умеет и
+    ступенчатое тело, и смену ставки внутри периода.
+    """
+    loan = (
+        await db.execute(
+            select(Loan).where(
+                Loan.id == loan_id,
+                Loan.project_id == project_id,
+                Loan.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+    if loan is None:
+        raise HTTPException(status_code=404, detail="Займ не найден")
+    if loan.loan_kind != "CREDIT_LINE":
+        raise HTTPException(status_code=400, detail="Это не кредитная линия")
+
+    payments = list(
+        (
+            await db.execute(
+                select(LoanPayment)
+                .where(LoanPayment.loan_id == loan.id)
+                .order_by(LoanPayment.paid_at, LoanPayment.id)
+                .limit(2000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    rates = list(
+        (
+            await db.execute(
+                select(LoanRatePeriod)
+                .where(LoanRatePeriod.loan_id == loan.id)
+                .order_by(LoanRatePeriod.valid_from)
+                .limit(500)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    cp_name = (
+        await db.execute(select(Counterparty.name).where(Counterparty.id == loan.counterparty_id))
+    ).scalar_one_or_none()
+
+    as_of = _today()
+    p_start, p_end = _line_period(loan, as_of)
+    lites = _to_payment_lite(payments)
+    rate_lite = _rate_periods_lite(rates)
+
+    balance = Decimal("0")
+    movements: list[CreditLineMovement] = []
+    for pay in payments:
+        amount = Decimal(str(pay.amount or 0))
+        if pay.payment_type == "DISBURSEMENT":
+            balance += amount
+        elif pay.payment_type == "PRINCIPAL_REPAY":
+            balance -= amount
+        else:
+            continue
+        movements.append(
+            CreditLineMovement(
+                payment_id=pay.id,
+                kind=pay.payment_type,
+                amount=amount,
+                happened_at=pay.paid_at,
+                balance_after=balance,
+            )
+        )
+
+    drawn = max(Decimal("0"), balance)
+    limit = Decimal(str(loan.credit_limit)) if loan.credit_limit is not None else None
+    current_rate = rate_lite[-1].rate if rate_lite else (
+        Decimal(str(loan.rate)) if loan.rate is not None else None
+    )
+    for rp in rate_lite:
+        if rp.valid_from <= as_of:
+            current_rate = rp.rate
+
+    def fee(win_end: date) -> Decimal:
+        if loan.credit_limit is None or loan.unused_limit_rate is None:
+            return Decimal("0")
+        return loan_interest.unused_limit_fee(
+            credit_limit=Decimal(str(loan.credit_limit)),
+            rate=Decimal(str(loan.unused_limit_rate)),
+            payments=lites,
+            win_start=p_start,
+            win_end=win_end,
+            start_date=loan.start_date,
+            end_date=loan.maturity_date,
+        )
+
+    def accrue(win_end: date) -> Decimal:
+        return loan_interest.accrued_in_window(
+            principal=Decimal("0"),
+            rate=Decimal(str(loan.rate)) if loan.rate is not None else None,
+            start_date=loan.start_date,
+            payments=lites,
+            win_start=p_start,
+            win_end=win_end,
+            rate_periods=rate_lite,
+        )
+
+    return CreditLineDetail(
+        loan_id=loan.id,
+        contract_number=loan.contract_number,
+        counterparty_name=cp_name,
+        credit_limit=limit,
+        drawn=drawn,
+        available=(limit - drawn) if limit is not None else None,
+        utilization=(drawn / limit).quantize(Decimal("0.0001")) if limit and limit > 0 else None,
+        current_rate=current_rate,
+        accrual_kind=loan.accrual_kind,
+        accrual_period_start=p_start,
+        accrual_period_end=p_end,
+        accrued_interest=accrue(min(as_of, p_end)),
+        interest_due_period=accrue(p_end),
+        interest_paid=sum(
+            (Decimal(str(p.amount or 0)) for p in payments if p.payment_type == "INTEREST_PAY"),
+            Decimal("0"),
+        ),
+        unused_limit_rate=Decimal(str(loan.unused_limit_rate))
+        if loan.unused_limit_rate is not None
+        else None,
+        unused_fee_accrued=fee(min(as_of, p_end)),
+        unused_fee_period=fee(p_end),
+        commission_paid=sum(
+            (Decimal(str(p.amount or 0)) for p in payments if p.payment_type == "COMMISSION"),
+            Decimal("0"),
+        ),
+        total_cost_period=accrue(p_end) + fee(p_end),
+        payment_due_date=_payment_due(loan, p_end),
+        status=loan.status,
+        maturity_date=loan.maturity_date,
+        movements=movements,
+        rate_periods=[LoanRatePeriodResponse.model_validate(rp) for rp in rates],
+    )
+
+
+async def draw_credit_line(
+    db: AsyncSession, *, loan_id: int, project_id: int, data: CreditLineDraw
+) -> CreditLineDetail:
+    """Выборка транша: увеличивает тело линии. Проверяет лимит."""
+    loan = (
+        await db.execute(
+            select(Loan).where(
+                Loan.id == loan_id,
+                Loan.project_id == project_id,
+                Loan.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+    if loan is None:
+        raise HTTPException(status_code=404, detail="Займ не найден")
+    if loan.loan_kind != "CREDIT_LINE":
+        raise HTTPException(status_code=400, detail="Выборка возможна только по кредитной линии")
+    if loan.status != "ACTIVE":
+        raise HTTPException(status_code=400, detail="Линия закрыта")
+    if data.drawn_at < loan.start_date:
+        raise HTTPException(status_code=400, detail="Дата выборки раньше начала линии")
+
+    if loan.credit_limit is not None:
+        moves = (
+            await db.execute(
+                select(LoanPayment.payment_type, LoanPayment.amount).where(
+                    LoanPayment.loan_id == loan.id
+                )
+            )
+        ).all()
+        drawn = sum(
+            (
+                Decimal(str(a or 0)) if t == "DISBURSEMENT" else -Decimal(str(a or 0))
+                for t, a in moves
+                if t in ("DISBURSEMENT", "PRINCIPAL_REPAY")
+            ),
+            Decimal("0"),
+        )
+        free = Decimal(str(loan.credit_limit)) - max(Decimal("0"), drawn)
+        if data.amount > free:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Выборка {data.amount} превышает свободный лимит {free}",
+            )
+
+    db.add(
+        LoanPayment(
+            loan_id=loan.id,
+            payment_type="DISBURSEMENT",
+            amount=data.amount,
+            currency=loan.currency,
+            paid_at=data.drawn_at,
+        )
+    )
+    await db.commit()
+    await invalidate_project_reports(project_id)
+    return await get_credit_line(db, loan_id=loan_id, project_id=project_id)
+
+
+async def set_rate_period(
+    db: AsyncSession, *, loan_id: int, project_id: int, data: LoanRatePeriodIn
+) -> CreditLineDetail:
+    """Добавить/обновить ставку с даты. Повтор той же даты перезаписывает строку."""
+    loan = (
+        await db.execute(
+            select(Loan).where(
+                Loan.id == loan_id,
+                Loan.project_id == project_id,
+                Loan.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+    if loan is None:
+        raise HTTPException(status_code=404, detail="Займ не найден")
+
+    existing = (
+        await db.execute(
+            select(LoanRatePeriod).where(
+                LoanRatePeriod.loan_id == loan.id,
+                LoanRatePeriod.valid_from == data.valid_from,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        existing.rate = data.rate
+        existing.base_rate = data.base_rate
+        existing.spread = data.spread
+        existing.note = data.note
+    else:
+        db.add(
+            LoanRatePeriod(
+                loan_id=loan.id,
+                valid_from=data.valid_from,
+                rate=data.rate,
+                base_rate=data.base_rate,
+                spread=data.spread,
+                note=data.note,
+            )
+        )
+    await db.commit()
+    await invalidate_project_reports(project_id)
+    return await get_credit_line(db, loan_id=loan_id, project_id=project_id)
+
+
+async def list_credit_lines(db: AsyncSession, *, project_id: int) -> CreditLineListResponse:
+    """Все кредитные линии проекта со сводкой по лимитам и платежу за период."""
+    ids = list(
+        (
+            await db.execute(
+                select(Loan.id)
+                .where(
+                    Loan.project_id == project_id,
+                    Loan.is_deleted == False,  # noqa: E712
+                    Loan.loan_kind == "CREDIT_LINE",
+                )
+                .order_by(Loan.start_date.desc())
+                .limit(200)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    items = [await get_credit_line(db, loan_id=i, project_id=project_id) for i in ids]
+    return CreditLineListResponse(
+        items=items,
+        total_limit=sum((i.credit_limit or Decimal("0") for i in items), Decimal("0")),
+        total_drawn=sum((i.drawn for i in items), Decimal("0")),
+        total_available=sum((i.available or Decimal("0") for i in items), Decimal("0")),
+        total_due_period=sum((i.interest_due_period for i in items), Decimal("0")),
     )

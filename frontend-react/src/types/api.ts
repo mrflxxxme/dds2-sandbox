@@ -7468,6 +7468,69 @@ export interface LoanByLenderResponse {
   archived_count: number;
 }
 
+/** Ставка, действующая с даты (плавающая: ключевая ЦБ + надбавка). */
+export interface LoanRatePeriod {
+  id: number;
+  loan_id: number;
+  valid_from: string;
+  rate: number;
+  base_rate: number | null;
+  spread: number | null;
+  note: string | null;
+}
+
+/** Движение по кредитной линии: выборка или погашение. */
+export interface CreditLineMovement {
+  payment_id: number;
+  kind: 'DISBURSEMENT' | 'PRINCIPAL_REPAY';
+  amount: number;
+  happened_at: string;
+  balance_after: number;
+}
+
+export interface CreditLineDetail {
+  loan_id: number;
+  contract_number: string;
+  counterparty_name: string | null;
+  credit_limit: number | null;
+  drawn: number;
+  available: number | null;
+  utilization: number | null;
+  current_rate: number | null;
+  accrual_kind: 'PERIOD_25' | 'CALENDAR_MONTH';
+  accrual_period_start: string | null;
+  accrual_period_end: string | null;
+  accrued_interest: number;
+  interest_due_period: number;
+  interest_paid: number;
+  status: LoanStatus;
+  maturity_date: string | null;
+  movements: CreditLineMovement[];
+  rate_periods: LoanRatePeriod[];
+}
+
+export interface CreditLineListResponse {
+  items: CreditLineDetail[];
+  total_limit: number;
+  total_drawn: number;
+  total_available: number;
+  total_due_period: number;
+}
+
+export interface CreditLineDraw {
+  amount: number;
+  drawn_at: string;
+  note?: string | null;
+}
+
+export interface LoanRatePeriodIn {
+  valid_from: string;
+  rate: number;
+  base_rate?: number | null;
+  spread?: number | null;
+  note?: string | null;
+}
+
 /** Займ, по которому срок кончился, а решения не приняли. */
 export interface LoanStuckItem {
   loan: Loan;
@@ -8110,11 +8173,33 @@ export interface FbsOrderListResponse {
   /** Счётчики по статусам для вкладок (new / confirm / complete / cancel). */
   status_counts: Record<string, number>;
   /**
-   * Подмножество `complete`, которое ЕЩЁ едет к покупателю (wbStatus не
-   * `sold`/`defect`). Отдельным полем, а не ключом `status_counts`: сумма
-   * счётчиков — это вкладка «Все», синтетика внутри неё двоила бы задания.
+   * Две ФАЗЫ внутри `complete`: «ещё едет, не отсортировано» и «принято
+   * сортировочным центром». Отдельными полями, а не ключами `status_counts`:
+   * сумма счётчиков — это вкладка «Все», синтетика внутри неё двоила бы задания.
    */
   in_delivery_count: number;
+  sorted_count: number;
+}
+
+/** Очередь одного склада продавца по фазам жизни задания. */
+export interface FbsWarehouseQueueRow {
+  wb_warehouse_id: number;
+  /** Очередь сборки — БЕЗ периода: старое несобранное задание не должно пропасть. */
+  new: number;
+  confirm: number;
+  /** Фазы доставки — за выбранный период (`complete` копится вечно). */
+  in_delivery: number;
+  sorted: number;
+}
+
+/** GET /fbs/orders/warehouse-summary — очередь по складам одним запросом. */
+export interface FbsWarehouseSummary {
+  /** Границы окна для фаз доставки (включительно). */
+  date_from: string | null;
+  date_to: string | null;
+  warehouses: FbsWarehouseQueueRow[];
+  /** Итог по всем складам — считает бэкенд. */
+  totals: Record<string, number>;
 }
 
 /**

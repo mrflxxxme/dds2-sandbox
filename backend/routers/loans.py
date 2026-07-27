@@ -14,6 +14,10 @@ from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.loan import (
+    CreditLineDetail,
+    CreditLineDraw,
+    CreditLineListResponse,
+    LoanAccrualMonthsResponse,
     LenderAccessCreate,
     LenderDetail,
     LenderAccessCreated,
@@ -31,6 +35,7 @@ from backend.schemas.loan import (
     LoanPaymentMatch,
     LoanPaymentResponse,
     LoanRepay,
+    LoanRatePeriodIn,
     LoanResponse,
     LoanStuckResponse,
     LoanUpdate,
@@ -40,8 +45,12 @@ from backend.services.loan_service import (
     LoanPaymentAlreadyExistsError,
     LoanService,
     ProjectMismatchError,
+    draw_credit_line,
+    get_credit_line,
     get_lender_detail,
+    list_credit_lines,
     list_stuck_loans,
+    set_rate_period,
 )
 from backend.utils.rate_limit import rate_limit_write
 from backend.utils.time import utcnow
@@ -169,6 +178,30 @@ async def revoke_lender_access(
     return await lender_access_service.revoke_access(db, project.id, counterparty_id)
 
 
+@router.get("/accrual-months", response_model=LoanAccrualMonthsResponse)
+async def accrual_months(
+    months: int = Query(12, ge=1, le=36),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Начисленные проценты и комиссии по КАЛЕНДАРНЫМ месяцам — база для ОПиУ.
+
+    Считается по дням, поэтому разные календари выплат (25→25, месяц + 5-е,
+    аннуитет) сводятся в один месячный P&L без искажений.
+    """
+    return await loan_analytics.accrual_by_month(db, project.id, utcnow().date(), months)
+
+
+@router.get("/credit-lines", response_model=CreditLineListResponse)
+async def credit_lines(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Все кредитные линии проекта: лимиты, выборка, свободный остаток."""
+    return await list_credit_lines(db, project_id=project.id)
+
+
 @router.get("/stuck", response_model=LoanStuckResponse)
 async def stuck_loans(
     project: Project = Depends(get_current_project),
@@ -291,6 +324,51 @@ async def repay_loan(
     service = LoanService(db)
     loan = await service.repay(loan_id=loan_id, data=body, project_id=project.id)
     return LoanResponse.model_validate(loan)
+
+
+# ─── Кредитная линия ─────────────────────────────────────────────────────────
+
+
+@router.get("/{loan_id}/credit-line", response_model=CreditLineDetail)
+async def credit_line(
+    loan_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Состояние линии: лимит, выбрано, свободно, движения и история ставок."""
+    return await get_credit_line(db, loan_id=loan_id, project_id=project.id)
+
+
+@router.post(
+    "/{loan_id}/credit-line/draw",
+    response_model=CreditLineDetail,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def credit_line_draw(
+    loan_id: int,
+    body: CreditLineDraw,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Выборка транша по линии — увеличивает тело долга, проверяет лимит."""
+    return await draw_credit_line(db, loan_id=loan_id, project_id=project.id, data=body)
+
+
+@router.post(
+    "/{loan_id}/rate-periods",
+    response_model=CreditLineDetail,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def add_rate_period(
+    loan_id: int,
+    body: LoanRatePeriodIn,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ставка с даты (плавающая: ключевая ЦБ + надбавка). Повтор даты перезаписывает."""
+    return await set_rate_period(db, loan_id=loan_id, project_id=project.id, data=body)
 
 
 # ─── Manual match: attach Transaction ↔ LoanPayment ─────────────────────────
