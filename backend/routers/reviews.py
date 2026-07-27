@@ -53,8 +53,11 @@ from backend.schemas.reviews import (
     ReviewBreakdownResponse,
     ReviewsListResponse,
     ReviewsSummaryResponse,
+    StockWatchItem,
+    StockWatchListResponse,
+    StockWatchScanResult,
 )
-from backend.services import complaint_agents_service, complaints_service, reply_service, reviews_service
+from backend.services import complaint_agents_service, complaints_service, reply_service, reviews_service, stock_watch_service
 from backend.services import wb_cards_service
 from backend.services.wb_reviews_sync import sync_project_feedbacks
 from backend.utils.rate_limit import rate_limit_write
@@ -576,6 +579,33 @@ async def get_card(
     if card is None:
         raise HTTPException(404, "Карточка не синкнута (POST /cards/sync)")
     return CardItem(**card)
+
+
+# ─── Слежение за поступлением товара (wb_stock_watches) ──────────────────────
+
+
+@router.get("/stock-watches", response_model=StockWatchListResponse)
+async def list_stock_watches(
+    status: str | None = Query(None, description="Фильтр: watching|drafted|dismissed"),
+    take: int = Query(100, ge=1, le=500),
+    skip: int = Query(0, ge=0),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> StockWatchListResponse:
+    """Список слежений «вопрос → ждём поступление» (+ текст вопроса, счётчики статусов)."""
+    return StockWatchListResponse(
+        **await stock_watch_service.list_stock_watches(db, project.id, status=status, take=take, skip=skip)
+    )
+
+
+@router.post("/stock-watches/scan", response_model=StockWatchScanResult)
+async def scan_stock_watches(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+) -> StockWatchScanResult:
+    """On-demand перескан неотвеченных вопросов о наличии → watches (идемпотентно)."""
+    return StockWatchScanResult(**await stock_watch_service.scan_stock_questions(db, project.id))
 
 
 # ─── Ответы на отзывы/вопросы (черновики → отправка) ─────────────────────────

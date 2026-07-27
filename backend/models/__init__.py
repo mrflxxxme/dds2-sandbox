@@ -307,6 +307,9 @@ from backend.models.wb_feedback_replies import (
 from backend.models.wb_product_kb import (
     WBProductKB,
 )
+from backend.models.wb_stock_watches import (
+    WBStockWatch,
+)
 from backend.models.wb_product_cards import (
     WBProductCard,
 )
@@ -443,6 +446,7 @@ __all__ = [
     "WBReplyAgent",
     "WBFeedbackReply",
     "WBProductKB",
+    "WBStockWatch",
     "WBProductCard",
     # Telegram bot
     "TelegramBotUser",

@@ -190,6 +190,11 @@ async def sync_project_questions(
     upserted = await _upsert_question_rows(db, rows)
     await db.commit()
 
+    # Вопросы о наличии («когда появится?») → слежение за поступлением (идемпотентно)
+    from backend.services import stock_watch_service
+
+    await stock_watch_service.scan_stock_questions(db, project_id)
+
     logger.info(
         "WB questions sync: project %d — fetched=%d, upserted=%d (backfill=%s)",
         project_id, len(rows), upserted, full_backfill,
@@ -235,6 +240,11 @@ async def list_questions(
         )
     ).scalars().all()
 
+    # бейдж «следим за наличием» для вопросов о поступлении
+    from backend.services import stock_watch_service
+
+    watched = await stock_watch_service.watched_question_ids(db, project_id)
+
     return {
         "items": [
             {
@@ -249,6 +259,7 @@ async def list_questions(
                 "product_name": q.product_name,
                 "article": q.article,
                 "brand": q.brand,
+                "has_stock_watch": q.wb_id in watched,
             }
             for q in rows
         ],
@@ -1030,6 +1041,7 @@ def _reply_to_dict(r: WBFeedbackReply, target: dict | None = None) -> dict:
         "agent_id": r.agent_id,
         "needs_info": r.needs_info,
         "generation": r.generation,
+        "is_stock_reply": r.is_stock_reply,
         "error": r.error,
         "sent_at": r.sent_at.isoformat() if r.sent_at else None,
         "created_at": r.created_at.isoformat() if r.created_at else None,

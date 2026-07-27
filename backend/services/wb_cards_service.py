@@ -304,6 +304,41 @@ async def collect_project_nm_ids(db: AsyncSession, project_id: int) -> list[int]
     return sorted(out)
 
 
+_CARD_STALE_DAYS = 7  # карточка старше недели — перекачиваем (ночной job)
+
+
+async def collect_stale_card_nm_ids(
+    db: AsyncSession, project_id: int, stale_days: int = _CARD_STALE_DAYS
+) -> list[int]:
+    """
+    nm_id проекта, по которым НЕТ wb_product_cards или карточка устарела.
+
+    Пул кандидатов — зеркала/КБ (collect_project_nm_ids); «свежие» карточки
+    (synced_at >= now - stale_days) отбрасываются. Для ночного job'а
+    «новые товары → карточки → база знаний».
+    """
+    from datetime import timedelta
+
+    nm_ids = await collect_project_nm_ids(db, project_id)
+    if not nm_ids:
+        return []
+    threshold = utcnow() - timedelta(days=stale_days)
+    fresh = {
+        int(nm)
+        for (nm,) in (
+            await db.execute(
+                select(WBProductCard.nm_id).where(
+                    WBProductCard.project_id == project_id,
+                    WBProductCard.nm_id.in_(nm_ids),
+                    WBProductCard.synced_at.isnot(None),
+                    WBProductCard.synced_at >= threshold,
+                )
+            )
+        ).all()
+    }
+    return [nm for nm in nm_ids if nm not in fresh]
+
+
 async def upsert_card_rows(db: AsyncSession, rows: list[dict]) -> int:
     """Upsert карточек по (project_id, nm_id). Возвращает число строк."""
     if not rows:

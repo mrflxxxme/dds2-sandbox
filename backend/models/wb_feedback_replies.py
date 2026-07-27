@@ -62,8 +62,12 @@ class WBFeedbackReply(Base, TimestampMixin):
     needs_info: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # Как получен черновик: llm — сгенерирован моделью из записей КБ;
     # kb_direct — эталонный ответ КБ взят напрямую (точное совпадение, без LLM);
+    # template — шаблонный ответ без LLM (например, поступление товара);
     # None — ручной черновик или needs_info-заглушка.
     generation: Mapped[str | None] = mapped_column(String(16))
+    # True — черновик создан слежением за поступлением (wb_stock_watches):
+    # ответ на вопрос «когда появится в наличии?» после появления остатков.
+    is_stock_reply: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     __table_args__ = (
         Index("ix_wb_feedback_replies_project_status", "project_id", "status"),

@@ -73,6 +73,11 @@ function QuestionCard({ question, onDraftCreated }: {
                         ) : (
                             <span className="badge badge-warning">Без ответа</span>
                         )}
+                        {question.has_stock_watch && (
+                            <span className="badge badge-info" title="Следим за остатками: когда товар появится, подготовим черновик ответа">
+                                ⏳ следим за наличием
+                            </span>
+                        )}
                     </div>
                     <div style={{ color: 'var(--color-text-dim)', fontSize: 13, marginTop: 4 }}>
                         {[question.subject, question.product_name].filter(Boolean).join(' · ') || '—'}

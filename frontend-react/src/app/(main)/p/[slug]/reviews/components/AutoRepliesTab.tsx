@@ -124,6 +124,7 @@ function ReplyCard({ reply, onChanged, selectable, checked, onSelectMouseDown, o
                 <span className={`badge ${STATUS_BADGE[reply.status]}`}>{STATUS_LABEL[reply.status]}</span>
                 {reply.generation === 'kb_direct' && <span className="badge badge-info">📚 из базы знаний</span>}
                 {reply.generation === 'llm' && <span className="badge badge-info">🤖 ИИ</span>}
+                {reply.is_stock_reply && <span className="badge badge-info" title="Черновик создан автоматически: товар появился в наличии">📦 поступление</span>}
                 {reply.needs_info && <span className="badge badge-danger">⚠️ Нет данных в базе знаний</span>}
                 {reply.source === 'agent' && <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>🤖 агент</span>}
                 <span style={{ marginLeft: 'auto', color: 'var(--color-text-dim)' }}>

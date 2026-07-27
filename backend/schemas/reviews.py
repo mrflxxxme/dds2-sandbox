@@ -335,6 +335,7 @@ class QuestionItem(BaseModel):
     product_name: str | None = None
     article: str | None = None
     brand: str | None = None
+    has_stock_watch: bool = False  # True — следим за поступлением (wb_stock_watches)
 
 
 class QuestionsListResponse(BaseModel):
@@ -431,7 +432,8 @@ class ReplyItem(BaseModel):
     source: str  # agent|manual
     agent_id: int | None = None
     needs_info: bool = False  # True — в КБ нет фактов для ответа, ждёт ручной доработки
-    generation: str | None = None  # llm|kb_direct|None (ручной/needs_info-заглушка)
+    generation: str | None = None  # llm|kb_direct|template|None (ручной/needs_info-заглушка)
+    is_stock_reply: bool = False  # True — черновик «товар появился в наличии» (wb_stock_watches)
     error: str | None = None
     sent_at: str | None = None
     created_at: str | None = None
@@ -565,3 +567,36 @@ class KbCardImportResult(BaseModel):
     created: int = 0  # создано записей КБ (source='card')
     updated: int = 0  # обновлено изменившихся значений
     unchanged: int = 0  # без изменений
+
+
+# ─── Слежение за поступлением товара (wb_stock_watches) ──────────────────────
+
+
+class StockWatchItem(BaseModel):
+    """Одно слежение «вопрос → ждём поступление товара»."""
+
+    id: int
+    nm_id: int
+    question_wb_id: str
+    status: str  # watching|drafted|dismissed
+    reply_id: int | None = None
+    created_at: str | None = None
+    resolved_at: str | None = None
+    question_text: str | None = None
+    product_name: str | None = None
+
+
+class StockWatchListResponse(BaseModel):
+    """Список watches проекта + счётчики по статусам."""
+
+    items: list[StockWatchItem] = []
+    total: int = 0
+    counts: dict[str, int] = {}
+
+
+class StockWatchScanResult(BaseModel):
+    """Итог on-demand скана вопросов о наличии."""
+
+    scanned: int = 0  # неотвеченных вопросов о наличии найдено
+    created: int = 0  # создано watches
+    dismissed: int = 0  # снято слежение (вопрос отвечен)

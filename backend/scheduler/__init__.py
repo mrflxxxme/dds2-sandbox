@@ -58,6 +58,8 @@ from backend.scheduler.jobs.wb_goods_returns_sync import sync_all_projects_wb_re
 from backend.scheduler.jobs.wb_reviews_sync import sync_all_projects_wb_feedbacks
 from backend.scheduler.jobs.wb_questions_sync import sync_all_projects_wb_questions
 from backend.scheduler.jobs.wb_replies_sender import send_all_projects_pending_replies
+from backend.scheduler.jobs.wb_cards_kb_refresh import refresh_all_projects_cards_kb
+from backend.scheduler.jobs.wb_stock_watch import stock_watch_tick_all_projects
 from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
 from backend.scheduler.jobs.wb_prices_sync import sync_all_projects_wb_prices
 from backend.scheduler.jobs.measurements_digest import send_measurement_digests
@@ -482,6 +484,32 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=300,
+    )
+
+    # Карточки товаров → база знаний: ночной прогон 03:45 MSK (после синков
+    # зеркал). Докачивает карточки новых/устаревших nm_id (>7 дней) и обновляет
+    # записи КБ source='card'. Публичный API WB — ключа не надо.
+    _scheduler.add_job(
+        refresh_all_projects_cards_kb,
+        trigger=CronTrigger(hour=3, minute=45, timezone=MSK),
+        id="wb_cards_kb_refresh",
+        name="WB product cards + KB refresh (03:45 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # Слежение за поступлением товара: каждые 30 минут проверяем остатки по
+    # вопросам «когда появится в наличии?»; появился → черновик draft
+    # (отправка только вручную после одобрения).
+    _scheduler.add_job(
+        stock_watch_tick_all_projects,
+        trigger=IntervalTrigger(minutes=30, timezone=MSK),
+        id="wb_stock_watch_tick",
+        name="WB stock watch tick (every 30 min)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=600,
     )
 
     # Faktura.ru (ВБ Банк) statement auto-sync: 4×/day — 06/12/18/23 MSK.

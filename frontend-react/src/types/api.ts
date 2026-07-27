@@ -6640,6 +6640,8 @@ export interface QuestionItem {
   product_name: string | null;
   article: string | null;
   brand: string | null;
+  /** True — следим за поступлением товара (wb_stock_watches, бейдж ⏳) */
+  has_stock_watch: boolean;
 }
 
 export interface QuestionsListResponse {
@@ -6742,8 +6744,10 @@ export interface Reply {
   agent_id: number | null;
   /** True — в базе знаний нет фактов для ответа, ждёт ручной доработки */
   needs_info: boolean;
-  /** Источник генерации: 'llm' | 'kb_direct' | null (ручной/needs_info-заглушка) */
-  generation: 'llm' | 'kb_direct' | null;
+  /** Источник генерации: 'llm' | 'kb_direct' | 'template' | null (ручной/needs_info-заглушка) */
+  generation: 'llm' | 'kb_direct' | 'template' | null;
+  /** True — черновик «товар появился в наличии» (wb_stock_watches, бейдж 📦) */
+  is_stock_reply: boolean;
   error: string | null;
   sent_at: string | null;
   created_at: string | null;
