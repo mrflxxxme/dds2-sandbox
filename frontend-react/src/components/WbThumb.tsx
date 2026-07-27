@@ -2,11 +2,12 @@
 import React, { useState } from 'react';
 import { productImageUrl } from '@/lib/wbMedia';
 
-/** Миниатюра главного фото товара WB по nm_id. При 404/ошибке — нейтральный плейсхолдер. */
-export default function WbThumb({ nmId, size = 40, rounded = 8 }: { nmId: number | null | undefined; size?: number; rounded?: number }) {
+/** Миниатюра главного фото товара WB по nm_id. При 404/ошибке — нейтральный плейсхолдер.
+ *  height — для непрямоугольных миниатюр (по умолчанию квадрат size×size). */
+export default function WbThumb({ nmId, size = 40, height, rounded = 8 }: { nmId: number | null | undefined; size?: number; height?: number; rounded?: number }) {
     const [failed, setFailed] = useState(false);
     const box: React.CSSProperties = {
-        width: size, height: size, borderRadius: rounded, flexShrink: 0,
+        width: size, height: height ?? size, borderRadius: rounded, flexShrink: 0,
         border: '1px solid var(--color-border)', background: 'var(--color-bg-hover)', objectFit: 'cover',
         display: 'inline-block', verticalAlign: 'middle',
     };
