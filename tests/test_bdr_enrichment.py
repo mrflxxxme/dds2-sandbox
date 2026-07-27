@@ -181,6 +181,19 @@ class TestEnrichArticle:
         enrich_article(art, total_real=1000000, total_sales=800000, period_days=30)
         assert art["avg_profit_per_item"] == 800.0  # 80000 / 100
 
+    def test_net_payout(self):
+        """net_payout = to_pay − adv_sum (реклама категории)."""
+        art = self._base_article()
+        art["to_pay"] = 350000.0
+        enrich_article(art, total_real=1000000, total_sales=800000, period_days=30)
+        assert art["net_payout"] == 320000.0  # 350000 − 30000
+
+    def test_net_payout_no_to_pay(self):
+        """Без to_pay net_payout = −adv_sum (котёл-строка)."""
+        art = self._base_article()  # adv_sum=30000, без to_pay
+        enrich_article(art, total_real=1000000, total_sales=800000, period_days=30)
+        assert art["net_payout"] == -30000.0
+
     def test_margin_pct(self):
         art = self._base_article()
         enrich_article(art, total_real=1000000, total_sales=800000, period_days=30)

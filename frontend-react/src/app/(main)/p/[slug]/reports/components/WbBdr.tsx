@@ -159,6 +159,7 @@ export function WbBdr() {
     const bdrColumns: { key: string; label: string; color?: string; sticky?: boolean }[] = [
         { key: 'sa_name', label: groupLabel, sticky: true },
         { key: 'to_pay', label: 'К оплате' },
+        { key: 'net_payout', label: 'Чистая выплата' },
         ...(groupBy !== 'brand' && groupBy !== 'tag' && groupBy !== 'imt' ? [{ key: 'brand', label: 'Бренд' }] : []),
         ...(groupBy !== 'subject' && groupBy !== 'tag' && groupBy !== 'imt' ? [{ key: 'subject', label: 'Категория' }] : []),
         ...(groupBy === 'article' ? [{ key: 'nm_id', label: 'Арт. МП' }] : []),
@@ -375,6 +376,7 @@ export function WbBdr() {
                     {groupBy !== 'abc' && (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
                         <KpiCard label="Итого к оплате" value={formatNumber(s.to_pay)} sub="₽" />
+                        <KpiCard label="Чистая выплата" value={formatNumber(s.net_payout)} sub="₽ (− реклама)" color="#0ea5e9" />
                         <KpiCard label="Реализация" value={formatNumber(s.realization)} sub="₽" />
                         <KpiCard label="Продажи" value={formatNumber(s.sales_amount)} sub={`₽ / ${formatNumber(s.sale_qty)} шт`} />
                         <KpiCard label="Возвраты" value={formatNumber(s.returns_amount)} sub={`₽ / ${formatNumber(s.ret_qty)} шт`} />
@@ -422,6 +424,7 @@ export function WbBdr() {
                                             <tr style={{ fontWeight: 700, background: '#eef2ff', color: '#111827' }}>
                                                 <td style={{ position: 'sticky', left: 0, background: '#e0e7ff', zIndex: 11, borderRight: '1px solid #c7d2fe' }}>Итого:</td>
                                                 <td style={{ textAlign: 'right' }}>{formatNumber(r.to_pay)}</td>
+                                                <td style={{ textAlign: 'right', color: '#0ea5e9' }}>{formatNumber(r.net_payout)}</td>
                                                 <td>-</td><td>-</td><td>-</td>
                                                 <td style={{ textAlign: 'right' }}>--</td>
                                                 <td style={{ textAlign: 'right' }}>{formatNumber(r.other_deduction || 0)}</td>
@@ -510,6 +513,7 @@ export function WbBdr() {
                                                                 Итого
                                                             </td>
                                                             <td style={{ textAlign: 'right' }}>{formatNumber(gs.to_pay || 0)}</td>
+                                                            <td style={{ textAlign: 'right', color: '#0ea5e9' }}>{formatNumber(gs.net_payout || 0)}</td>
                                                             <td>-</td><td>-</td><td>-</td>
                                                             <td style={{ textAlign: 'right' }}>--</td>
                                                             <td style={{ textAlign: 'right' }}>{formatNumber(gs.other_deduction || 0)}</td>
@@ -557,6 +561,7 @@ export function WbBdr() {
                                                             <tr key={a.sa_name || i} style={{ background: rowBg, color: '#111827' }}>
                                                                 <td style={{ position: 'sticky', left: 0, background: rowBg, zIndex: 11, fontWeight: 500, borderRight: '1px solid #e5e7eb' }}>{a.sa_name || '--'}</td>
                                                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.to_pay)}</td>
+                                                                <td style={{ textAlign: 'right', color: '#0ea5e9' }}>{formatNumber(a.net_payout)}</td>
                                                                 <td>{a.brand || '--'}</td>
                                                                 <td>{a.subject || '--'}</td>
                                                                 <td>{a.nm_id || '--'}</td>
@@ -628,6 +633,7 @@ export function WbBdr() {
                                     <tr style={{ fontWeight: 700, background: '#eef2ff', color: '#111827' }}>
                                         <td style={{ position: 'sticky', left: 0, background: '#e0e7ff', zIndex: 11, borderRight: '1px solid #c7d2fe' }}>Итого:</td>
                                         <td style={{ textAlign: 'right' }}>{formatNumber(r.to_pay)}</td>
+                                        <td style={{ textAlign: 'right', color: '#0ea5e9' }}>{formatNumber(r.net_payout)}</td>
                                         {groupBy !== 'brand' && groupBy !== 'tag' && groupBy !== 'imt' && <td>-</td>}
                                         {groupBy !== 'subject' && groupBy !== 'tag' && groupBy !== 'imt' && <td>-</td>}
                                         {groupBy === 'article' && <td>-</td>}
@@ -677,6 +683,7 @@ export function WbBdr() {
                                         <tr key={a.sa_name || i} style={{ background: rowBg, color: '#111827' }}>
                                             <td style={{ position: 'sticky', left: 0, background: rowBg, zIndex: 11, fontWeight: 500, borderRight: '1px solid #e5e7eb' }}>{a.sa_name || '—'}</td>
                                             <td style={{ textAlign: 'right' }}>{formatNumber(a.to_pay)}</td>
+                                            <td style={{ textAlign: 'right', color: '#0ea5e9' }}>{formatNumber(a.net_payout)}</td>
                                             {groupBy !== 'brand' && groupBy !== 'tag' && groupBy !== 'imt' && <td>{a.brand || '—'}</td>}
                                             {groupBy !== 'subject' && groupBy !== 'tag' && groupBy !== 'imt' && <td>{a.subject || '—'}</td>}
                                             {groupBy === 'article' && <td>{a.nm_id || '—'}</td>}
