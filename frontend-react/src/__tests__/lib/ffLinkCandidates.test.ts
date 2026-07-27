@@ -4,6 +4,7 @@ import type { FfLinkCandidate } from '@/types/api';
 
 function makeCandidate(overrides: Partial<FfLinkCandidate> & { doc_id: number }): FfLinkCandidate {
     return {
+        doc_kind: 'assembly',
         number: `ASM-${overrides.doc_id}`,
         status: 'PENDING',
         created_at: null,

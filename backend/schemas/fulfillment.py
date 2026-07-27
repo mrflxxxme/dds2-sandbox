@@ -164,6 +164,9 @@ class FfRequestRow(BaseModel):
     synced_at: datetime
     assembly_request_id: int | None = None
     inbound_receipt_id: int | None = None
+    # Приёмка внутреннего перемещения: товар приехал с нашего же склада, и
+    # `inbound_receipts` для такого переезда не существует.
+    stock_transfer_id: int | None = None
     # Обогащение по связанному документу (заполняет сервис)
     linked_number: str | None = None
     linked_status: str | None = None
@@ -277,19 +280,28 @@ class FfRequestDetail(FfRequestRow):
 
 
 class FfLinkPayload(BaseModel):
+    """Ровно один id — какой именно, проверяет сервис (`link_request`)."""
+
     assembly_request_id: int | None = None
     inbound_receipt_id: int | None = None
+    stock_transfer_id: int | None = None
 
 
 class FfLinkCandidate(BaseModel):
     """Кандидат для связывания ФФ-заявки с нашим документом (модал «Связать»).
 
-    kind=assembly → заявка на сборку; kind=inbound → приёмка.
+    kind=assembly → заявка на сборку; kind=inbound → приёмка ИЛИ входящее
+    перемещение (товар мог приехать с нашего же склада).
     score/reason заполнены, когда эвристика считает кандидата похожим
     (дата ± дни, пересечение ШК состава, близость количества).
+
+    🔴 `doc_id` уникален только внутри своего `doc_kind`: приёмка №7 и
+    перемещение №7 существуют одновременно.
     """
 
     doc_id: int
+    #: assembly | inbound | transfer — в какой слот связи уедет этот кандидат.
+    doc_kind: str = "inbound"
     number: str
     status: str
     created_at: datetime | None = None

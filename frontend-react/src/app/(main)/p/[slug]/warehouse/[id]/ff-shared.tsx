@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import { filterFfLinkCandidates, splitFfLinkCandidates } from '@/lib/utils/ffLinkCandidates';
-import type { FfLinkCandidate, FfLinkCandidatesResponse, FfRequestKind, FfRequestRow, FfStatusCode, FfStatusEvent } from '@/types/api';
+import type { FfLinkCandidate, FfLinkCandidatesResponse, FfLinkPayload, FfRequestKind, FfRequestRow, FfStatusCode, FfStatusEvent } from '@/types/api';
 
 // Статусы наших документов (заявки на сборку + приёмки) — для колонки/строки «Связь»
 export const FF_LINKED_STATUS_LABELS: Record<string, string> = {
@@ -128,13 +128,17 @@ export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
         return () => controller.abort();
     }, [warehouseId, request.id]);
 
-    const handleLink = async (docId: number) => {
+    // Слот связи задаёт САМ КАНДИДАТ, а не kind заявки: приёмка ФФ бывает и
+    // приёмкой поставщика, и приходом внутреннего перемещения — в одном списке.
+    const handleLink = async (c: FfLinkCandidate) => {
         setActing(true);
         setError('');
         try {
-            const payload = kind === 'assembly'
-                ? { assembly_request_id: docId }
-                : { inbound_receipt_id: docId };
+            const payload: FfLinkPayload = c.doc_kind === 'assembly'
+                ? { assembly_request_id: c.doc_id }
+                : c.doc_kind === 'transfer'
+                    ? { stock_transfer_id: c.doc_id }
+                    : { inbound_receipt_id: c.doc_id };
             const updated = await api.linkFulfillmentRequest(warehouseId, request.id, payload);
             onLinked(updated);
         } catch (e: unknown) {
@@ -156,11 +160,22 @@ export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
     }, [data, search, showAllWh]);
     const hasCandidates = (data?.candidates.length ?? 0) > 0;
 
+    // Ключ — пара (тип, id): нумерация приёмок и перемещений независима,
+    // и по одному doc_id строки схлопнулись бы.
     const candidateRow = (c: FfLinkCandidate, withScore: boolean) => (
-        <div key={c.doc_id} className="ff-link-row">
+        <div key={`${c.doc_kind}-${c.doc_id}`} className="ff-link-row">
             <div className="ff-link-row-main">
                 <div className="ff-link-row-head">
                     <span className="ff-link-row-number">{c.number}</span>
+                    {c.doc_kind === 'transfer' && (
+                        <span
+                            className="badge badge-info"
+                            style={{ fontSize: 11, padding: '2px 8px' }}
+                            title="Товар приехал с нашего же склада — приёмки поставщика для него нет"
+                        >
+                            перемещение
+                        </span>
+                    )}
                     <span className="badge badge-secondary" style={{ fontSize: 11, padding: '2px 8px' }}>
                         {FF_LINKED_STATUS_LABELS[c.status] || c.status}
                     </span>
@@ -186,7 +201,7 @@ export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
                 </div>
                 {withScore && c.reason && <div className="ff-link-row-reason">{c.reason}</div>}
             </div>
-            <button className="btn btn-sm btn-primary" onClick={() => handleLink(c.doc_id)} disabled={acting}>
+            <button className="btn btn-sm btn-primary" onClick={() => handleLink(c)} disabled={acting}>
                 {acting ? '...' : 'Выбрать'}
             </button>
         </div>
@@ -202,7 +217,7 @@ export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
                     )}
                 </h2>
                 <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
-                    Выберите {kind === 'assembly' ? 'заявку на сборку' : 'приёмку'} этого склада
+                    Выберите {kind === 'assembly' ? 'заявку на сборку' : 'приёмку или входящее перемещение'} этого склада
                     {kind === 'assembly' && data?.ff_dest_warehouse
                         ? <> со складом сдачи <b style={{ color: 'var(--color-text)' }}>{data.ff_dest_warehouse}</b></>
                         : ':'}
@@ -221,7 +236,9 @@ export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
                     <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка...</div>
                 ) : !hasCandidates ? (
                     <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                        {kind === 'assembly' ? 'Нет заявок на сборку у этого склада' : 'Нет приёмок у этого склада'}
+                        {kind === 'assembly'
+                            ? 'Нет заявок на сборку у этого склада'
+                            : 'Нет приёмок и входящих перемещений у этого склада'}
                     </div>
                 ) : (
                     <>
