@@ -4918,6 +4918,9 @@ export interface Loan extends LoanShort {
   counterparty_inn?: string | null;
   remaining_principal?: number | null;
   accrued_interest?: number | null;
+  interest_due_period?: number | null;
+  accrual_period_start?: string | null;
+  accrual_period_end?: string | null;
   monthly_interest?: number | null;
   days_to_maturity?: number | null;
   next_interest_date?: string | null;
@@ -7353,10 +7356,19 @@ export interface DashboardOperations {
 
 /* ─── Loans: дашборд/аналитика/лендер-портал + финансы поставщиков (порт f6fcfd35) ─── */
 export type LoanEntityType = 'PHYSICAL' | 'IP';
+/** Возврат тела займа: полный (закрывает) или частичный. */
+export interface LoanRepay {
+  amount?: number | null;
+  paid_at?: string | null;
+  close?: boolean;
+}
+
 export interface LoanExtend {
   new_rate?: number | null;
   new_start_date?: string | null;
   new_maturity_date?: string | null;
+  /** Пресет срока продления: 1/2/3 месяца от даты продления. */
+  term_months?: number | null;
   new_contract_number?: string | null;
   principal?: number | null;
   record_repayment?: boolean;
@@ -7381,6 +7393,8 @@ export interface LoanEntitySplit {
   entity_type: LoanEntityType | null;
   count: number;
   outstanding: number;
+  accrued_interest: number;
+  interest_due_period: number;
 }
 
 export interface LoanRateBucket {
@@ -7431,12 +7445,69 @@ export interface LoanLenderRollup {
   first_loan_date: string | null;
   last_loan_date: string | null;
   has_portal_access: boolean;
+  interest_due_period: number;
+  /** Вычисляемый архив: нет активных займов. Флага в БД нет. */
+  is_archived: boolean;
 }
 
 export interface LoanByLenderResponse {
   items: LoanLenderRollup[];
   total_outstanding: number;
   total_accrued: number;
+  total_due_period: number;
+  by_entity: LoanEntitySplit[];
+  accrual_period_start: string | null;
+  accrual_period_end: string | null;
+  archived_count: number;
+}
+
+/** Займ, по которому срок кончился, а решения не приняли. */
+export interface LoanStuckItem {
+  loan: Loan;
+  days_overdue: number;
+  accrued_since_maturity: number;
+}
+
+export interface LoanStuckResponse {
+  items: LoanStuckItem[];
+  total_amount: number;
+  total_accrued_since_maturity: number;
+  count: number;
+}
+
+/** Проценты за один период начисления 25→25 (метка = дата выплаты). */
+export interface LenderPeriodPoint {
+  period_end: string;
+  period_start: string;
+  interest: number;
+  is_current: boolean;
+  is_forecast: boolean;
+}
+
+export interface LenderDetail {
+  counterparty_id: number;
+  name: string;
+  inn: string | null;
+  entity_type: LoanEntityType | null;
+  lender_bank: string | null;
+  is_archived: boolean;
+  active_count: number;
+  total_count: number;
+  outstanding: number;
+  weighted_avg_rate: number | null;
+  principal_total: number;
+  principal_repaid: number;
+  interest_paid: number;
+  accrued_interest: number;
+  interest_due_period: number;
+  accrual_period_start: string | null;
+  accrual_period_end: string | null;
+  first_loan_date: string | null;
+  last_loan_date: string | null;
+  next_maturity_date: string | null;
+  has_portal_access: boolean;
+  loans: Loan[];
+  periods: LenderPeriodPoint[];
 }
 
 export interface LoanForecastEvent {
@@ -7767,6 +7838,20 @@ export interface FbsStockRow {
   // Слагаемые формулы
   qty_ledger: number;
   qty_ff_mirror?: number | null;
+  /**
+   * Те же две стороны, но СВОБОДНЫЕ — после снятия резерва сборки. Именно их
+   * сравнивает подпись под «Остатком»: наш учёт держит товар до отгрузки, а WMS
+   * обычно снимает его при отборе под заявку, и сравнение сырых цифр читалось как
+   * расхождение там, где его нет. `qty_source` — один из этих двух.
+   */
+  qty_ledger_free: number;
+  qty_ff_free?: number | null;
+  /**
+   * Лежит у ФФ КОРОБАМИ — в остаток не входит: продать штуку из невскрытого
+   * короба нельзя, нужна поштучная приёмка. Рабочий список «что вскрыть».
+   */
+  qty_ff_boxed: number;
+  ff_box_count: number;
   qty_source: number;
   /** Остаток на складах WB (FBO), сумма по всем складам. null — не считали. */
   fbo_qty?: number | null;
@@ -8205,6 +8290,9 @@ export interface FbsMatrixCell {
   wb: number | null;
   /** Наш расчёт «сколько отдадим» по привязанным складам. */
   can: number;
+  /** Лежит у ФФ коробами — в `can` не входит (нужна поштучная приёмка). */
+  boxed?: number;
+  boxes?: number;
 }
 
 export interface FbsMatrixRow {
@@ -8218,6 +8306,16 @@ export interface FbsMatrixRow {
   cells: Record<string, FbsMatrixCell>;
   total_wb: number;
   total_can: number;
+  /** Сколько добавится к «можем» после поштучной приёмки коробов у ФФ. */
+  total_boxed?: number;
+  total_boxes?: number;
+  /** Остаток на складах WB (FBO). null — зеркала нет / судить нечем. */
+  fbo?: number | null;
+  /**
+   * Где именно он лежит — раскрывается по клику. Без СЦ, транзита и возвратов
+   * «в пути», без исключённых и сгоревших складов: те же правила, что у гейта.
+   */
+  fbo_by_warehouse?: { name: string; qty: number }[];
   /** Деньги за окно тренда — по карточке, по складам не делятся. */
   revenue: number | string;
   profit: number | string;

@@ -15,7 +15,7 @@ import CampaignIntradayChart from '../../components/CampaignIntradayChart';
 import CampaignMetricsChart, { DEFAULT_CHART_METRICS, type MetricKey } from '../../components/CampaignMetricsChart';
 import ScheduleModal from '../../components/ScheduleModal';
 import BudgetLedgerModal from '../../components/BudgetLedgerModal';
-import WbThumb from '../../components/WbThumb';
+import WbThumb from '@/components/WbThumb';
 import AdsPeriodPicker from '../../components/AdsPeriodPicker';
 import Tooltip from '../../components/Tooltip';
 import EditableName from '../../components/EditableName';

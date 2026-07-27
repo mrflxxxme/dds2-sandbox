@@ -2445,6 +2445,169 @@ async def _migfull_inbound_locked_by_barcode(
     return {bc: int(q or 0) for bc, q in result.all() if bc}
 
 
+async def ff_defect_by_nomenclature(
+    db: AsyncSession, project_id: int, warehouse_ids: list[int]
+) -> dict[int, dict[int, int]]:
+    """ИЗМЕРЕННЫЙ брак на складах ФФ в штуках россыпи: `{warehouse_id: {nom_id: брак}}`.
+
+    Только то, что провайдер СЧИТАЕТ браком и отдаёт полем:
+      • **skladbot** — `repair_amount` → `qty_defect` (`qty_good` уже без него);
+      • **wmscelicom** — поля нет → пусто;
+      • **migfull** — поля нет → ПУСТО.
+
+    Про migfull отдельно, потому что соблазн велик и он уже приводил к ошибке.
+    У них есть только `stock_actual` / `stock_locked` / `stock_available`, и
+    «брак» на вкладке склада — это ОСТАТОК от вычитания (`locked` минус собранное
+    под активные отгрузки минус приёмки), а не измерение. Живая сверка кабинета
+    натали 27.07.2026: заблокировано 6821, активные отгрузки объясняют 2707,
+    активные приёмки — 862, и 3252 (48 %) не объясняет НИЧТО из того, что отдаёт
+    их API. На конкретном SKU (BZ-YY8820A/30x60) из 29 заблокированных коробов
+    отгрузки объясняли 1, а остальные 28 в точности сходились с планом отгрузок,
+    ЗАКРЫТЫХ за последнюю неделю, — то есть товар стоял на сборке, а не был битым.
+    Признака фактической отгрузки в API нет (`is_processed`/`processed_at` пусты у
+    всех 327 отгрузок), поэтому надёжно отделить «уже уехало» от «ещё лежит
+    собранным» нечем, и выдавать остаток за брак — врать. Вычитать его из остатка
+    FBS тем более нельзя: см. `wb_fbs/stock_service._net_mirror`.
+
+    Строки без номенклатуры (неопознанный товар провайдера) отбрасываются. Лимита
+    нет намеренно — усечение кросс-складской выборки дало бы ЛОЖНО нулевой брак у
+    случайных позиций, а он вычитается из остатка.
+    """
+    if not warehouse_ids:
+        return {}
+    result = await db.execute(
+        select(
+            FulfillmentStock.warehouse_id,
+            FulfillmentStock.nomenclature_id,
+            func.sum(FulfillmentStock.qty_defect * FulfillmentStock.units_per_box).label("qty"),
+        )
+        .where(
+            FulfillmentStock.project_id == project_id,
+            FulfillmentStock.warehouse_id.in_(warehouse_ids),
+            FulfillmentStock.nomenclature_id.is_not(None),
+        )
+        .group_by(FulfillmentStock.warehouse_id, FulfillmentStock.nomenclature_id)
+    )
+    out: dict[int, dict[int, int]] = {}
+    for row in result.all():
+        qty = int(row.qty or 0)
+        if qty > 0:
+            out.setdefault(row.warehouse_id, {})[row.nomenclature_id] = qty
+    return out
+
+
+async def ff_unavailable_by_nomenclature(
+    db: AsyncSession, project_id: int, warehouse_ids: list[int]
+) -> dict[int, dict[int, int]]:
+    """Сколько у провайдера НЕДОСТУПНО к отгрузке сверх наших заявок, в штуках россыпи.
+
+    Отвечает на вопрос FBS: «этот товар лежит у ФФ, но взять и отправить его
+    покупателю прямо сейчас нельзя». Что именно мешает — брак, сборка под чужую
+    отгрузку, идущая приёмка — для витрины WB безразлично: продавать его нельзя.
+
+    Провайдер-специфика:
+      • **skladbot / wmscelicom** — `qty_good` уже свободный, мешает только
+        измеренный брак (`qty_defect`; у wmscelicom поля нет → 0);
+      • **migfull** — `qty_good` это `stock_actual`, ВЕСЬ физический остаток, а
+        свободное они отдают отдельным полем `stock_available` (`qty_nominal`).
+        Берём ИХ цифру: `qty_good − qty_nominal`.
+
+    **Реконструировать блокировку из наших зеркал НЕЛЬЗЯ** — на этом уже обожглись
+    (27.07.2026). Попытка вычитать «`stock_locked` минус собранное под наши активные
+    отгрузки» стояла на допущении, что остаток снимет наш резерв заявок на сборку.
+    Допущение неверное: активные отгрузки migfull и наши `AssemblyRequest` — разные
+    множества. Прод-кейс 120х170_серыйоднотон: `actual 478 / locked 466 /
+    available 12`, Натали выставила в WB **11**, а реконструкция давала **443**,
+    потому что нашей заявки на сборку не существовало вовсе и вычитать было нечем.
+
+    **Это НЕ брак, и называть его так нельзя.** Поля брака у migfull в API нет:
+    живая сверка кабинета натали показала, что 3252 из 6821 заблокированных (48 %)
+    не объясняет ничто из того, что отдаёт их API, а на SKU BZ-YY8820A/30x60
+    28 «битых» коробов оказались товаром НА СБОРКЕ. Реальный брак по такому складу
+    виден только в нашем `defect_quantity`.
+
+    Лимита нет намеренно: усечение кросс-складской выборки дало бы ложно нулевую
+    блокировку у случайных позиций, и они уехали бы в WB как свободные.
+    """
+    if not warehouse_ids:
+        return {}
+    result = await db.execute(
+        select(FulfillmentStock).where(
+            FulfillmentStock.project_id == project_id,
+            FulfillmentStock.warehouse_id.in_(warehouse_ids),
+            FulfillmentStock.nomenclature_id.is_not(None),
+            # Только россыпь: короб в FBS не участвует вовсе (`ff_boxed_by_nomenclature`),
+            # и вычитать его блокировку из россыпного остатка значило бы съесть чужое.
+            FulfillmentStock.base_barcode.is_(None),
+        )
+    )
+    out: dict[int, dict[int, int]] = {}
+    for r in result.scalars().all():
+        if r.nomenclature_id is None:
+            continue
+        units = r.units_per_box or 1
+        if r.provider == "migfull":
+            # `stock_available` (qty_nominal) — СОБСТВЕННЫЙ ответ провайдера
+            # «свободно к отгрузке». Реконструировать блокировку из наших зеркал
+            # отгрузок нельзя: их активные отгрузки — не то же самое, что наши
+            # заявки на сборку. Прод-кейс 120х170_серыйоднотон 27.07.2026:
+            # actual 478, locked 466, available 12 — Натали выставила в WB 11,
+            # а реконструкция («минус собранное под наши отгрузки») оставляла 443,
+            # потому что нашей заявки на сборку не существовало вовсе.
+            qty = max(0, r.qty_good - r.qty_nominal) * units
+        else:
+            qty = r.qty_defect * units
+        if qty > 0:
+            out.setdefault(r.warehouse_id, {})[r.nomenclature_id] = (
+                out.get(r.warehouse_id, {}).get(r.nomenclature_id, 0) + qty
+            )
+    return out
+
+
+async def ff_boxed_by_nomenclature(
+    db: AsyncSession, project_id: int, warehouse_ids: list[int]
+) -> dict[int, dict[int, tuple[int, int]]]:
+    """Товар, лежащий у ФФ КОРОБАМИ: `{warehouse_id: {nom_id: (штук, коробов)}}`.
+
+    Продать по FBS его нельзя: маркетплейс покупает штуку, а провайдер отдаёт
+    короб. Чтобы остаток «встал» в FBS, короб надо вскрыть и **принять поштучно** —
+    до этого момента содержимое не является доступным остатком, сколько бы штук
+    в нём ни лежало. Канон владельца 27.07.2026.
+
+    Поэтому короб-строки НЕ входят в зеркало FBS (`_load_mirror` берёт только
+    россыпь), а едут отдельным полем — как рабочий список «что вскрыть». На
+    натали это 55 882 штуки в 3 932 коробах против 7 041 штуки россыпью: считая
+    короба штуками, экран обещал вчетверо больше отгружаемого.
+
+    Короб-строку узнаём по `base_barcode` (ШК россыпи, к которому её свёл
+    нормализатор). Коробами торгует только migfull; у skladbot и wmscelicom
+    таких строк нет вовсе, и функция вернёт для них пусто.
+    """
+    if not warehouse_ids:
+        return {}
+    result = await db.execute(
+        select(
+            FulfillmentStock.warehouse_id,
+            FulfillmentStock.nomenclature_id,
+            func.sum(FulfillmentStock.qty_good * FulfillmentStock.units_per_box).label("pieces"),
+            func.sum(FulfillmentStock.qty_good).label("boxes"),
+        )
+        .where(
+            FulfillmentStock.project_id == project_id,
+            FulfillmentStock.warehouse_id.in_(warehouse_ids),
+            FulfillmentStock.nomenclature_id.is_not(None),
+            FulfillmentStock.base_barcode.is_not(None),
+        )
+        .group_by(FulfillmentStock.warehouse_id, FulfillmentStock.nomenclature_id)
+    )
+    out: dict[int, dict[int, tuple[int, int]]] = {}
+    for row in result.all():
+        pieces = int(row.pieces or 0)
+        if pieces > 0:
+            out.setdefault(row.warehouse_id, {})[row.nomenclature_id] = (pieces, int(row.boxes or 0))
+    return out
+
+
 # Сборка ещё «наша» (сток у нас на складе, ship_request не списал) — пред-отгрузочные
 # статусы. SHIPPED и далее (наш сток уже списан) сюда не входят.
 _PRESHIP_ASSEMBLY_STATUSES = (

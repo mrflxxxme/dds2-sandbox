@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import { IcX } from './icons';
-import WbThumb from './WbThumb';
+import WbThumb from '@/components/WbThumb';
 import AddProductsModal from './AddProductsModal';
 import Switch from './Switch';
 import { useToast } from './Toasts';

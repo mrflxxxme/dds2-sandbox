@@ -8,17 +8,22 @@ import { api } from '@/lib/api';
 import { formatDateTime, formatNumber } from '@/lib/utils';
 import type {
     FbsOffice,
+    FbsStockSource,
     FbsWarehouse,
     FbsWarehouseMode,
     FbsWarehouseSettingsPayload,
     Warehouse,
 } from '@/types/api';
 import {
+    STOCK_SOURCES,
+    STOCK_SOURCE_HINT,
+    STOCK_SOURCE_LABEL,
     cargoLabel,
     deliveryLabel,
     giveModeOf,
     isTranslating,
     num,
+    stockSourceOf,
     warehouseModeLabel,
 } from './fbsShared';
 import { EnableTranslationModal } from './fbsReconcile';
@@ -152,6 +157,13 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
     const [mode, setMode] = useState<FbsWarehouseMode>(
         isTranslating(wh.mode) ? 'translate' : 'observe',
     );
+    /**
+     * Откуда берём остаток. Раньше было прибито к «минимуму из двух», и это
+     * молча решало за пользователя: на складе, где WMS ведёт учёт, а наши книги
+     * отстают, минимум давал ноль при полном зеркале (wms Домодедово 27.07.2026 —
+     * 48 позиций и 18 840 штук, которые FBS не отдавал). Выбор вернули.
+     */
+    const [source, setSource] = useState<FbsStockSource>(stockSourceOf(wh.stock_source));
     const [pct, setPct] = useState(String(num(wh.safety_stock_pct)));
     const [abs, setAbs] = useState(String(wh.safety_stock_abs ?? 0));
     const [maxQty, setMaxQty] = useState(String(wh.max_qty_per_sku ?? 0));
@@ -166,6 +178,9 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
      */
     const [askEnable, setAskEnable] = useState(false);
 
+    /** Есть ли у склада хоть одно зеркало ФФ — без него выбирать источник не из чего. */
+    const hasMirror = wh.links.some(l => l.has_mirror);
+
     // Внешнее обновление (после sync / привязки) не должно теряться в локальном стейте.
     //
     // Зависимости — ЗНАЧЕНИЯ, а не объект `wh`: список складов перечитывается
@@ -176,10 +191,12 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
     useEffect(() => {
         setIsActive(wh.is_active);
         setMode(isTranslating(wh.mode) ? 'translate' : 'observe');
+        setSource(stockSourceOf(wh.stock_source));
         setPct(String(num(wh.safety_stock_pct)));
         setAbs(String(wh.safety_stock_abs ?? 0));
         setMaxQty(String(wh.max_qty_per_sku ?? 0));
-    }, [wh.is_active, wh.mode, wh.safety_stock_pct, wh.safety_stock_abs, wh.max_qty_per_sku]);
+    }, [wh.is_active, wh.mode, wh.stock_source, wh.safety_stock_pct, wh.safety_stock_abs,
+        wh.max_qty_per_sku]);
 
     const doSave = async () => {
         setSaving(true);
@@ -187,10 +204,9 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
         const payload: FbsWarehouseSettingsPayload = {
             is_active: isActive,
             mode,
-            // Источник больше не выбирается руками: он определяется по самому складу
-            // (есть зеркало WMS → min(наш учёт, зеркало), нет → наш учёт).
-            // Нормализуем легаси-значения, чтобы старые карточки не залипали на ledger.
-            stock_source: 'min_of_both',
+            // Склад без зеркала физически может считать только по нашему учёту —
+            // не даём сохранить туда «Система ФФ», иначе настройка молча не работала бы.
+            stock_source: hasMirror ? source : 'ledger',
             safety_stock_pct: Number(pct.replace(',', '.')) || 0,
             safety_stock_abs: Number(abs) || 0,
             max_qty_per_sku: Number(maxQty) || 0,
@@ -309,7 +325,13 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
 
             {/* Привязки наших складов */}
             <div style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Наши склады — источник остатка</div>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>Привязанные наши склады</div>
+                {/* Раньше заголовок обещал «источник остатка», а чип говорил «зеркало
+                    wmscelicom» — читалось как «источник уже зеркало», хотя брался
+                    минимум из двух. Сам выбор теперь живёт отдельным блоком ниже. */}
+                <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                    Отсюда берётся остаток; какую из двух цифр брать — задаёт «Источник остатка».
+                </div>
                 {wh.links.length === 0 ? (
                     <div style={{ fontSize: 13, color: 'var(--color-warning)', marginBottom: 8 }}>
                         Привязок нет — остатки на этот склад WB не транслируются.
@@ -331,7 +353,7 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
                                     <span style={{ fontSize: 11, color: 'var(--color-text-dim)', marginLeft: 6 }}>
                                         {link.has_mirror
                                             ? `зеркало ${link.mirror_provider || 'ФФ'} · ${formatNumber(link.mirror_rows, 0)} поз.`
-                                            : 'наш складской учёт'}
+                                            : 'зеркала нет — только наш учёт'}
                                         {link.has_mirror && !link.integration_active && ' · интеграция выключена'}
                                     </span>
                                 </span>
@@ -362,6 +384,42 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
                         Привязать
                     </button>
                 </div>
+            </div>
+
+            {/* Источник остатка — что именно кормит FBS */}
+            <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Источник остатка</div>
+                {hasMirror ? (
+                    <>
+                        <div style={{ display: 'flex', gap: 0, marginBottom: 6, flexWrap: 'wrap' }}>
+                            {STOCK_SOURCES.map((s, i) => (
+                                <button
+                                    key={s}
+                                    className={`btn btn-sm ${source === s ? 'btn-primary' : 'btn-secondary'}`}
+                                    style={{
+                                        borderTopLeftRadius: i === 0 ? undefined : 0,
+                                        borderBottomLeftRadius: i === 0 ? undefined : 0,
+                                        borderTopRightRadius: i === STOCK_SOURCES.length - 1 ? undefined : 0,
+                                        borderBottomRightRadius: i === STOCK_SOURCES.length - 1 ? undefined : 0,
+                                    }}
+                                    onClick={() => setSource(s)}
+                                    title={STOCK_SOURCE_HINT[s]}
+                                >
+                                    {STOCK_SOURCE_LABEL[s]}
+                                </button>
+                            ))}
+                        </div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
+                            {STOCK_SOURCE_HINT[source]}
+                            {' '}Применяется после «Сохранить настройки».
+                        </div>
+                    </>
+                ) : (
+                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
+                        Наш складской учёт — у привязанных складов нет зеркала ФФ, брать остаток
+                        больше неоткуда.
+                    </div>
+                )}
             </div>
 
             {/* Режим склада: наблюдение — штатное состояние, не авария */}

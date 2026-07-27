@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { exportToExcel } from '@/lib/utils';
 import type { AdGlueRow, AdTabProduct, AdCampaign } from '@/types/api';
-import WbThumb from './WbThumb';
+import WbThumb from '@/components/WbThumb';
 import InfoTip from './InfoTip';
 import { IcColumns, IcDownload, IcSearch } from './icons';
 import { fmt, fmtPct, tdStyle, tdLeft, cThStyle, cThLeft, STATUS_BADGE } from './adsShared';

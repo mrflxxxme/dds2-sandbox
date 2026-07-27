@@ -12,6 +12,7 @@ import type {
     FbsPickList,
     FbsSticker,
     FbsStickerType,
+    FbsStockSource,
     FbsSupplierStatus,
     FbsSupply,
     FbsSupplyStatus,
@@ -99,11 +100,33 @@ export const WB_STATUS_LABEL: Record<string, string> = {
     sent_to_carrier: 'Передано перевозчику',
 };
 
+/** Порядок кнопок переключателя: от консервативного к «доверяем провайдеру». */
+export const STOCK_SOURCES: readonly FbsStockSource[] = ['min_of_both', 'ff_mirror', 'ledger'];
+
 export const STOCK_SOURCE_LABEL: Record<string, string> = {
-    ledger: 'Наш учёт (WarehouseStock)',
-    ff_mirror: 'Зеркало ФФ (WMS провайдера)',
-    min_of_both: 'Минимум из двух (консервативно)',
+    ledger: 'Наш учёт',
+    ff_mirror: 'Система ФФ',
+    min_of_both: 'Минимум из двух',
 };
+
+/**
+ * Что означает каждый источник — текстом под переключателем. Выбор реально
+ * меняет, сколько товара увидит покупатель, поэтому цена ошибки названа прямо.
+ */
+export const STOCK_SOURCE_HINT: Record<FbsStockSource, string> = {
+    min_of_both: 'Консервативно: берём меньшее из нашего учёта и остатка в системе ФФ. '
+        + 'Там, где наши книги отстают от склада, часть товара не уедет в WB.',
+    ff_mirror: 'Доверяем системе ФФ: остаток берётся из неё, наш учёт не ограничивает. '
+        + 'Подходит, когда учёт на складе ведёт провайдер. Помните, что расхождения '
+        + 'с нашими книгами при этом перестают удерживать выдачу.',
+    ledger: 'Только наш складской учёт, зеркало ФФ игнорируется. Для складов без '
+        + 'интеграции это единственный вариант — он и подставится сам.',
+};
+
+/** Нормализация значения с сервера: неизвестное/пустое читаем как «минимум из двух». */
+export function stockSourceOf(v: string | null | undefined): FbsStockSource {
+    return v === 'ledger' || v === 'ff_mirror' ? v : 'min_of_both';
+}
 
 export const PUSH_STATUS_BADGE: Record<string, string> = {
     RUNNING: 'badge-info',
@@ -158,9 +181,10 @@ export function blockedReasonLabel(reason: string): string {
  * тремя разными формулировками.
  */
 export const OVERRIDE_HINT =
-    'Сколько отдаём по этому товару. Итог = min(введённое, доступное) — '
-    + 'поднять выдачу выше физического остатка нельзя. 0 — не отдавать вовсе, '
-    + 'пустое поле — снять ограничение и вернуться к расчёту.';
+    'Сколько отдаём по этому товару. Пока своего числа нет, в поле подставлен '
+    + 'остаток из кабинета WB — правьте прямо в нём. Итог = min(введённое, «Можем '
+    + 'отдать») — поднять выдачу выше физического остатка нельзя. 0 — не отдавать '
+    + 'вовсе, пустое поле — снять ограничение и вернуться к расчёту.';
 
 /** Режим склада продавца: наблюдение — штатное состояние, не авария. */
 export const WAREHOUSE_MODE_LABEL: Record<string, string> = {

@@ -299,6 +299,11 @@ class TestOverrideFormula:
         min(100, 10) − 3 открытых задания − 2 буфера = 5. Если бы потолок
         накладывался последним, в WB уехало бы 10 — на 5 штук больше, чем
         физически свободно под обязательствами.
+
+        `qty_computed` («Можем отдать») те же вычеты позиции тоже получает —
+        100 − 3 − 2 = 95, — но БЕЗ ручного количества: колонка обязана показывать
+        потолок до вмешательства человека, и при этом сходиться с тем, что реально
+        уедет. Пока она стояла «до вычетов», экран показывал 100 против 5.
         """
         wh = await _mk_warehouse(db_session, project.id)
         fbs_wh = await _mk_fbs_warehouse(db_session, project.id, safety_stock_abs=2)
@@ -323,7 +328,7 @@ class TestOverrideFormula:
         await stock_service.set_overrides(db_session, project.id, fbs_wh.wb_warehouse_id, [nom.id], 10)
 
         row = await _row_for(db_session, project.id, fbs_wh, nom)
-        assert row["qty_computed"] == 100
+        assert row["qty_computed"] == 95  # 100 − 3 задания − 2 буфера, без ручного потолка
         assert row["qty_available"] == 5
 
         await stock_service.push_stocks(db_session, project.id)
@@ -835,6 +840,29 @@ class TestFboNameFilter:
             "Коледино",
             "Казань",
         ]
+
+    def test_drops_sorting_centres(self):
+        """СЦ — перевалка: товар там расписан по заказам и к продаже не доступен.
+
+        Матчим ПРЕФИКС со следующим пробелом: без него под правило попали бы
+        обычные склады на те же буквы («Сарапул», «Самара»), и живой остаток
+        FBO молча пропал бы из расчёта.
+        """
+        names = [
+            "СЦ Ижевск", "СЦ Чита 2", "SC Tbilisi",
+            "Сарапул", "Самара (Новосемейкино)", "Коледино",
+        ]
+        assert stock_service._fbo_allowed_names(names, set(), set()) == [
+            "Сарапул",
+            "Самара (Новосемейкино)",
+            "Коледино",
+        ]
+
+    def test_sorting_centre_check_is_case_insensitive(self):
+        assert stock_service._is_sorting_centre("сц Липецк") is True
+        assert stock_service._is_sorting_centre("СЦ Брянск 2") is True
+        assert stock_service._is_sorting_centre("Сарапул") is False
+        assert stock_service._is_sorting_centre("Сочи") is False
 
 
 class TestBlockedReasonContract:
