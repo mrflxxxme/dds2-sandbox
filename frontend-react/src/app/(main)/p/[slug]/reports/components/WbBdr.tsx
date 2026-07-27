@@ -117,6 +117,37 @@ export function WbBdr() {
     const [sortKey, setSortKey] = useState<string>('profit');
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
     const [expandedAbc, setExpandedAbc] = useState<Record<string, boolean>>({});
+    const [selectedCats, setSelectedCats] = useState<string[]>([]);
+    const [catOpen, setCatOpen] = useState(false);
+    const catRef = React.useRef<HTMLDivElement>(null);
+
+    // Персист режима свода, группировки и выбранных категорий: заходишь — раздел
+    // уже в твоём виде (напр. «По отчётам ВБ» + «По категориям» + твои категории),
+    // лишних кликов нет.
+    React.useEffect(() => {
+        try {
+            const pm = localStorage.getItem('wbbdr_period_mode');
+            if (pm === 'sale' || pm === 'report') setPeriodMode(pm);
+            const gb = localStorage.getItem('wbbdr_group_by');
+            if (gb && ['article', 'brand', 'subject', 'tag', 'imt', 'abc'].includes(gb)) setGroupBy(gb as typeof groupBy);
+            const cats = localStorage.getItem('wbbdr_selected_cats');
+            if (cats) { const arr = JSON.parse(cats); if (Array.isArray(arr)) setSelectedCats(arr.filter((x: unknown) => typeof x === 'string')); }
+        } catch { /* localStorage недоступен — тихо игнорируем */ }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Закрытие выпадашки категорий по клику вне её
+    React.useEffect(() => {
+        if (!catOpen) return;
+        const onDown = (e: MouseEvent) => { if (catRef.current && !catRef.current.contains(e.target as Node)) setCatOpen(false); };
+        document.addEventListener('mousedown', onDown);
+        return () => document.removeEventListener('mousedown', onDown);
+    }, [catOpen]);
+
+    const persistCats = React.useCallback((next: string[]) => {
+        setSelectedCats(next);
+        try { localStorage.setItem('wbbdr_selected_cats', JSON.stringify(next)); } catch { /* noop */ }
+    }, []);
 
     React.useEffect(() => {
         api.getWbBdrSyncStatus(dateFrom, dateTo).then(setSyncStatus).catch(() => {});
@@ -222,6 +253,38 @@ export function WbBdr() {
         return arr;
     }, [rawArticles, sortKey, sortDir]);
 
+    // Категория строки: в группировке «По категориям» это sa_name, иначе поле subject.
+    const catOf = (a: any) => (a.subject || (groupBy === 'subject' ? a.sa_name : '')) as string;
+
+    // Список категорий для чекбоксов — из загруженных данных за период.
+    const catOptions = React.useMemo(() => {
+        const set = new Set<string>();
+        for (const a of rawArticles) { const c = catOf(a); if (c) set.add(c); }
+        return Array.from(set).sort((x, y) => x.localeCompare(y, 'ru'));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [rawArticles, groupBy]);
+
+    // Фильтр по категориям применим только там, где строка = категория/имеет предмет.
+    const catApplicable = groupBy === 'subject' || groupBy === 'article';
+
+    // Строки после фильтра по выбранным категориям.
+    const shownArticles = React.useMemo(() => {
+        if (!selectedCats.length || !catApplicable) return articles;
+        const sel = new Set(selectedCats);
+        return articles.filter((a: any) => sel.has(catOf(a)));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [articles, selectedCats, groupBy, catApplicable]);
+
+    // Итог по выбранным категориям (аддитивные поля суммируются корректно).
+    const selTotals = React.useMemo(() => {
+        if (!selectedCats.length || !catApplicable) return null;
+        let net = 0, pay = 0, adv = 0;
+        for (const a of shownArticles) {
+            net += Number(a.net_payout) || 0; pay += Number(a.to_pay) || 0; adv += Number(a.adv_sum) || 0;
+        }
+        return { net, pay, adv, count: shownArticles.length };
+    }, [shownArticles, selectedCats, catApplicable]);
+
     const abcGroups = React.useMemo(() => {
         if (groupBy !== 'abc') return [];
         const groups: { label: string; color: string; bg: string; articles: any[] }[] = [
@@ -280,8 +343,8 @@ export function WbBdr() {
     const pct = (val: number, base: number) => base ? ((val / base) * 100).toFixed(2) + '%' : '—';
 
     const handleExcel = () => {
-        if (!articles.length) return;
-        const rows = articles.map((a: any, i: number) => {
+        if (!shownArticles.length) return;
+        const rows = shownArticles.map((a: any, i: number) => {
             const row: Record<string, any> = { '№': i + 1 };
             bdrColumns.forEach(col => { row[col.label] = a[col.key] ?? ''; });
             return row;
@@ -339,12 +402,38 @@ export function WbBdr() {
                             {brands.map((b: string) => <option key={b} value={b}>{b}</option>)}
                         </select>
                     </div>
+                    {catApplicable && <div ref={catRef} style={{ position: 'relative' }}>
+                        <label style={{ fontSize: 12, opacity: 0.7, display: 'block', marginBottom: 4 }}>Категории</label>
+                        <button type="button" className="input" onClick={() => setCatOpen(o => !o)}
+                            style={{ width: 190, textAlign: 'left', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {selectedCats.length ? `Выбрано: ${selectedCats.length}` : 'Все категории'}
+                            </span>
+                            <span style={{ opacity: 0.5 }}>▾</span>
+                        </button>
+                        {catOpen && (
+                            <div style={{ position: 'absolute', zIndex: 50, top: '100%', left: 0, marginTop: 4, width: 240, maxHeight: 320, overflowY: 'auto', background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', padding: 6 }}>
+                                <div style={{ display: 'flex', gap: 8, padding: '4px 8px 8px', borderBottom: '1px solid #f3f4f6', marginBottom: 4 }}>
+                                    <button type="button" onClick={() => persistCats(catOptions)} style={{ fontSize: 12, color: '#6366f1', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600 }}>Все</button>
+                                    <button type="button" onClick={() => persistCats([])} style={{ fontSize: 12, color: '#6b7280', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600 }}>Сбросить</button>
+                                </div>
+                                {catOptions.length === 0 && <div style={{ padding: '6px 8px', fontSize: 12, color: '#9ca3af' }}>Загрузите отчёт</div>}
+                                {catOptions.map(c => (
+                                    <label key={c} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 13, cursor: 'pointer', borderRadius: 6 }}>
+                                        <input type="checkbox" checked={selectedCats.includes(c)}
+                                            onChange={() => persistCats(selectedCats.includes(c) ? selectedCats.filter(x => x !== c) : [...selectedCats, c])} />
+                                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        )}
+                    </div>}
                     <div><label style={{ fontSize: 12, opacity: 0.7, display: 'block', marginBottom: 4 }}>Артикул</label><input className="input" placeholder="Поиск..." value={articleSearch} onChange={e => setArticleSearch(e.target.value)} style={{ width: 160 }} /></div>
                     <div>
                         <label style={{ fontSize: 12, opacity: 0.7, display: 'block', marginBottom: 4 }}>Группировка</label>
                         <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid #e5e7eb', background: '#f3f4f6', height: 38 }}>
                             {([['article', 'По артикулам'], ['brand', 'По брендам'], ['subject', 'По категориям'], ['tag', 'По ярлыкам'], ['imt', 'По склейкам'], ['abc', 'ABC анализ']] as const).map(([val, lbl]) => (
-                                <button key={val} onClick={() => { setGroupBy(val); }}
+                                <button key={val} onClick={() => { setGroupBy(val); try { localStorage.setItem('wbbdr_group_by', val); } catch { /* noop */ } }}
                                     style={{ padding: '0 14px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer', background: groupBy === val ? '#6366f1' : 'transparent', color: groupBy === val ? '#fff' : '#6b7280', transition: 'all 0.2s ease', whiteSpace: 'nowrap' }}>
                                     {lbl}
                                 </button>
@@ -355,7 +444,7 @@ export function WbBdr() {
                         <label style={{ fontSize: 12, opacity: 0.7, display: 'block', marginBottom: 4 }} title="«По дате продажи» — учёт по дате реализации (БДР accrual). «По отчётам ВБ» — по отчётному периоду, сходится с «Итого к оплате» в кабинете ВБ.">Свод</label>
                         <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid #e5e7eb', background: '#f3f4f6', height: 38 }}>
                             {([['sale', 'По дате продажи'], ['report', 'По отчётам ВБ']] as const).map(([val, lbl]) => (
-                                <button key={val} onClick={() => { setPeriodMode(val); }}
+                                <button key={val} onClick={() => { setPeriodMode(val); try { localStorage.setItem('wbbdr_period_mode', val); } catch { /* noop */ } }}
                                     style={{ padding: '0 14px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer', background: periodMode === val ? '#6366f1' : 'transparent', color: periodMode === val ? '#fff' : '#6b7280', transition: 'all 0.2s ease', whiteSpace: 'nowrap' }}>
                                     {lbl}
                                 </button>
@@ -391,6 +480,18 @@ export function WbBdr() {
                         <KpiCard label="Чистая прибыль" value={formatNumber(s.profit || 0)} sub={pct(s.profit || 0, s.realization)} color={s.profit >= 0 ? '#22c55e' : '#ff6b6b'} />
                         <KpiCard label="% выкупа" value={s.buyout_pct?.toFixed(2) + '%'} sub="" />
                     </div>
+                    )}
+
+                    {/* Итог по выбранным категориям */}
+                    {selTotals && (
+                        <div className="glass-card" style={{ padding: '16px 20px', marginBottom: 16, border: '1px solid #bae6fd', background: 'linear-gradient(90deg, rgba(14,165,233,0.06), rgba(14,165,233,0.02))' }}>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '4px 20px' }}>
+                                <span style={{ fontSize: 13, fontWeight: 600, color: '#0369a1' }}>✅ Выбрано категорий: {selectedCats.length} · строк: {selTotals.count}</span>
+                                <span style={{ marginLeft: 'auto', fontSize: 13, opacity: 0.7 }}>К оплате: <b>{formatNumber(selTotals.pay)} ₽</b></span>
+                                <span style={{ fontSize: 13, opacity: 0.7 }}>Реклама: <b>{formatNumber(selTotals.adv)} ₽</b></span>
+                                <span style={{ fontSize: 15, color: '#0ea5e9' }}>Чистая выплата: <b style={{ fontSize: 20 }}>{formatNumber(selTotals.net)} ₽</b></span>
+                            </div>
+                        </div>
                     )}
 
                     {/* Top-10 — hide for ABC view */}
@@ -631,7 +732,7 @@ export function WbBdr() {
                                     {/* Summary row */}
                                     {(() => { const r = s; return (
                                     <tr style={{ fontWeight: 700, background: '#eef2ff', color: '#111827' }}>
-                                        <td style={{ position: 'sticky', left: 0, background: '#e0e7ff', zIndex: 11, borderRight: '1px solid #c7d2fe' }}>Итого:</td>
+                                        <td style={{ position: 'sticky', left: 0, background: '#e0e7ff', zIndex: 11, borderRight: '1px solid #c7d2fe' }}>{selTotals ? 'Итого (весь период):' : 'Итого:'}</td>
                                         <td style={{ textAlign: 'right' }}>{formatNumber(r.to_pay)}</td>
                                         <td style={{ textAlign: 'right', color: '#0ea5e9' }}>{formatNumber(r.net_payout)}</td>
                                         {groupBy !== 'brand' && groupBy !== 'tag' && groupBy !== 'imt' && <td>-</td>}
@@ -677,7 +778,7 @@ export function WbBdr() {
                                         <td>-</td><td>-</td>
                                     </tr>
                                     ); })()}
-                                    {articles.map((a: any, i: number) => {
+                                    {shownArticles.map((a: any, i: number) => {
                                         const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
                                         return (
                                         <tr key={a.sa_name || i} style={{ background: rowBg, color: '#111827' }}>
@@ -731,7 +832,7 @@ export function WbBdr() {
                                     })}
                                 </tbody>
                             </table>
-                            {articles.length === 0 && <div className="empty-state" style={{ padding: 20 }}>Нет данных за выбранный период</div>}
+                            {shownArticles.length === 0 && <div className="empty-state" style={{ padding: 20 }}>{selectedCats.length ? 'Нет строк по выбранным категориям' : 'Нет данных за выбранный период'}</div>}
                         </div>
                     </div>
                     )}
@@ -751,7 +852,7 @@ export function WbBdr() {
                     )}
 
                     <div style={{ marginTop: 8, opacity: 0.5, fontSize: 12 }}>
-                        Строк в БД: {data?.total_rows || 0} · Артикулов: {articles.length}
+                        Строк в БД: {data?.total_rows || 0} · Показано: {shownArticles.length}{selectedCats.length ? ` из ${articles.length}` : ''}
                     </div>
                 </>
             )}

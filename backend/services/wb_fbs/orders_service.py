@@ -43,7 +43,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,9 +51,11 @@ from backend.cache import cached, invalidate_cache
 from backend.integrations.wb_fbs_api import WbFbsApiError, WbFbsClient
 from backend.models import (
     FBS_IN_DELIVERY_STATUS,
+    FBS_SORTED_STATUS,
     FBS_TERMINAL_STATUSES,
     FBS_WB_CANCELLED_STATUSES,
     FBS_WB_DELIVERED_STATUSES,
+    FBS_WB_SORTED_STATUSES,
     FbsSupplierStatus,
     Nomenclature,
     WbFbsOrder,
@@ -136,12 +138,14 @@ def alive_condition() -> Any:
 
 
 def in_delivery_condition() -> Any:
-    """«Задание ЕЩЁ едет»: поставка передана в WB, покупатель товар не получил.
+    """«Задание ЕЩЁ едет и ещё НЕ отсортировано» — первая фаза после передачи.
 
     Одного `supplierStatus` тут мало: он застывает на `complete` в момент
     передачи поставки и остаётся таким навсегда — и через день, и через месяц
     после вручения. Ответ «что сейчас в пути» знает только `wbStatus`, поэтому
-    из `complete` вычитаем доставленное (`FBS_WB_DELIVERED_STATUSES`).
+    из `complete` вычитаем и доставленное (`FBS_WB_DELIVERED_STATUSES`), и
+    принятое сортировочным центром (`FBS_WB_SORTED_STATUSES`) — последнее живёт
+    своим счётчиком: это разные этапы и разная зона ответственности.
 
     Отменённые сюда не попадают по построению: `effective_status_expr()` уже
     схлопнул WB-отмену в `cancel`, даже если продавец успел передать поставку.
@@ -153,8 +157,18 @@ def in_delivery_condition() -> Any:
         effective_status_expr() == FbsSupplierStatus.COMPLETE.value,
         or_(
             WbFbsOrder.wb_status.is_(None),
-            WbFbsOrder.wb_status.notin_(FBS_WB_DELIVERED_STATUSES),
+            WbFbsOrder.wb_status.notin_(
+                (*FBS_WB_DELIVERED_STATUSES, *FBS_WB_SORTED_STATUSES)
+            ),
         ),
+    )
+
+
+def sorted_condition() -> Any:
+    """«Принято сортировочным центром WB» — вторая фаза, ещё не у покупателя."""
+    return and_(
+        effective_status_expr() == FbsSupplierStatus.COMPLETE.value,
+        WbFbsOrder.wb_status.in_(FBS_WB_SORTED_STATUSES),
     )
 
 
@@ -934,17 +948,29 @@ def _as_dt_from(value: Any) -> datetime | None:
 
 
 def _as_dt_to(value: Any) -> datetime | None:
-    """Верхняя граница: для календарной даты — начало СЛЕДУЮЩИХ суток (строгое <)."""
+    """Верхняя граница: для календарной даты — начало СЛЕДУЮЩИХ суток (строгое <).
+
+    🔴 Строка «2026-07-27» — это КАЛЕНДАРНАЯ дата, а не полночь. Раньше её
+    первым перехватывал `_parse_wb_datetime` и возвращал `2026-07-27 00:00`
+    as-is, из-за чего строгое `<` выкидывало последний день периода целиком —
+    в отличие от того же значения, переданного объектом `date`. Роутер приводит
+    query-параметр к `date` и на боевом пути это не стреляло, но любой прямой
+    вызов со строкой молча терял сутки. Признак времени — `T` или `:`.
+    """
     if value is None:
         return None
     if isinstance(value, datetime):
         return value
     if isinstance(value, date):
         return datetime.combine(value + timedelta(days=1), time.min)
-    parsed = _parse_wb_datetime(str(value))
+    text = str(value)
+    if "T" not in text and ":" not in text:
+        parsed_date = _parse_wb_date(text)
+        return datetime.combine(parsed_date + timedelta(days=1), time.min) if parsed_date else None
+    parsed = _parse_wb_datetime(text)
     if parsed is not None:
         return parsed
-    parsed_date = _parse_wb_date(str(value))
+    parsed_date = _parse_wb_date(text)
     return datetime.combine(parsed_date + timedelta(days=1), time.min) if parsed_date else None
 
 
@@ -992,6 +1018,74 @@ def _order_to_dict(order: WbFbsOrder) -> dict[str, Any]:
     }
 
 
+@cached(prefix="fbs:orders", ttl=60)  # литерал: гейт ищет префикс регуляркой
+async def warehouse_summary(
+    db: AsyncSession,
+    project_id: int,
+    *,
+    date_from: Any = None,
+    date_to: Any = None,
+) -> dict:
+    """Очередь по складам продавца: сколько на каждой фазе (`FbsWarehouseSummaryOut`).
+
+    ОДИН запрос с `GROUP BY wb_warehouse_id` вместо запроса на склад: карточек
+    столько же, сколько складов, и прежняя схема «limit=1 на каждый» упиралась
+    в 9 параллельных походов в БД ради девяти чисел.
+
+    🔴 **Период применяется ТОЛЬКО к фазам доставки.** «Новые» и «На сборке» —
+    это ОЧЕРЕДЬ, а не поток: задание, созданное два месяца назад и до сих пор
+    не собранное, обязано быть в цифре сборщика, иначе он его просто не увидит.
+    А `complete` копится вечно (WB его уже не двинет), и без окна «В доставке»
+    показывает всё, что когда-либо уезжало, — цифра растёт и ничего не значит.
+
+    Заодно окно чинит вторую беду: синк статусов опрашивает не больше
+    `_STATUS_MAX_ORDERS` НЕ-терминальных заданий, поэтому у старых `complete`
+    `wbStatus` со временем застывает — вне периода они висели бы «в доставке»
+    вечно.
+    """
+    base = [WbFbsOrder.project_id == project_id, contour_condition(WbFbsOrder.raw)]
+    period: list[Any] = []
+    dt_from = _as_dt_from(date_from)
+    if dt_from is not None:
+        period.append(WbFbsOrder.created_at_wb >= dt_from)
+    dt_to = _as_dt_to(date_to)
+    if dt_to is not None:
+        period.append(WbFbsOrder.created_at_wb < dt_to)
+
+    eff = effective_status_expr()
+    in_period = and_(*period) if period else true()
+    result = await db.execute(
+        select(
+            WbFbsOrder.wb_warehouse_id,
+            func.count().filter(eff == FbsSupplierStatus.NEW.value),
+            func.count().filter(eff == FbsSupplierStatus.CONFIRM.value),
+            func.count().filter(and_(in_delivery_condition(), in_period)),
+            func.count().filter(and_(sorted_condition(), in_period)),
+        )
+        .where(*base)
+        .group_by(WbFbsOrder.wb_warehouse_id)
+    )
+    rows = [
+        {
+            "wb_warehouse_id": row[0],
+            "new": int(row[1] or 0),
+            "confirm": int(row[2] or 0),
+            "in_delivery": int(row[3] or 0),
+            "sorted": int(row[4] or 0),
+        }
+        for row in result.all()
+    ]
+    totals = {
+        key: sum(r[key] for r in rows) for key in ("new", "confirm", "in_delivery", "sorted")
+    }
+    return {
+        "date_from": dt_from.date() if dt_from else None,
+        "date_to": (dt_to - timedelta(days=1)).date() if dt_to else None,
+        "warehouses": rows,
+        "totals": totals,
+    }
+
+
 # TTL короткий: задания живые, а любая наша мутация и так инвалидирует префикс.
 @cached(prefix="fbs:orders", ttl=60)
 async def list_orders(
@@ -1011,13 +1105,13 @@ async def list_orders(
     `status_counts` считается по ТЕМ ЖЕ фильтрам, но без фильтра статуса —
     иначе вкладка показывала бы только собственный счётчик.
 
-    `in_delivery_count` — подмножество `complete`, которое ЕЩЁ едет
-    (см. `in_delivery_condition`). Отдельным полем, а НЕ шестым ключом
-    `status_counts`: сумма счётчиков — это `total` вкладки «Все», и синтетика
-    внутри неё удвоила бы каждое переданное задание.
+    `in_delivery_count` / `sorted_count` — две ФАЗЫ внутри `complete`: «ещё
+    едет, не отсортировано» и «принято сортировочным центром». Отдельными
+    полями, а НЕ ключами `status_counts`: сумма счётчиков — это `total` вкладки
+    «Все», и синтетика внутри неё удвоила бы каждое переданное задание.
 
-    `status=in_delivery` — тот же псевдо-статус в фильтре: цифра на карточке
-    склада и выдача по клику обязаны совпадать до штуки.
+    `status=in_delivery` / `status=sorted` — те же псевдо-статусы в фильтре:
+    цифра на карточке склада и выдача по клику обязаны совпадать до штуки.
 
     Выдача скоуплена по контуру: боевой список не должен показывать задания
     песочницы (и наоборот) — цифры вкладок обязаны совпадать с тем, что
@@ -1043,16 +1137,25 @@ async def list_orders(
     # одним и тем же — «wb_status must appear in the GROUP BY clause».
     eff_status = effective_status_expr().label("eff")
     counts_result = await db.execute(
-        select(eff_status, func.count(), func.count().filter(in_delivery_condition()))
+        select(
+            eff_status,
+            func.count(),
+            func.count().filter(in_delivery_condition()),
+            func.count().filter(sorted_condition()),
+        )
         .where(*base)
         .group_by(eff_status)
     )
     counts_rows = counts_result.all()
     status_counts = {row[0]: int(row[1]) for row in counts_rows}
     in_delivery_count = sum(int(row[2] or 0) for row in counts_rows)
+    sorted_count = sum(int(row[3] or 0) for row in counts_rows)
 
     conditions = list(base)
-    if status == FBS_IN_DELIVERY_STATUS:
+    if status == FBS_SORTED_STATUS:
+        conditions.append(sorted_condition())
+        total = sorted_count
+    elif status == FBS_IN_DELIVERY_STATUS:
         conditions.append(in_delivery_condition())
         total = in_delivery_count
     elif status:
@@ -1074,6 +1177,7 @@ async def list_orders(
         "total": total,
         "status_counts": status_counts,
         "in_delivery_count": in_delivery_count,
+        "sorted_count": sorted_count,
     }
 
 

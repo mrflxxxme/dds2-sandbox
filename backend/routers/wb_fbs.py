@@ -69,6 +69,7 @@ from backend.schemas.wb_fbs import (
     FbsSupplyPlanOut,
     FbsWarehouseCreate,
     FbsWarehouseOut,
+    FbsWarehouseSummaryOut,
     FbsWarehouseRename,
     FbsWarehouseSettingsUpdate,
 )
@@ -558,6 +559,26 @@ async def apply_stock_reconcile(
 
 
 # ─── Сборочные задания ───────────────────────────────────────────────────────
+
+
+@router.get("/orders/warehouse-summary", response_model=FbsWarehouseSummaryOut)
+async def orders_warehouse_summary(
+    date_from: date | None = Query(None, description="окно ТОЛЬКО для фаз доставки"),
+    date_to: date | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Очередь по складам продавца одним запросом: новые / на сборке / фазы доставки.
+
+    Период сужает ТОЛЬКО «в доставке» и «отсортировано»: очередь сборки резать
+    окном нельзя — старое несобранное задание пропало бы у сборщика с глаз.
+    """
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(422, "date_from позже date_to")
+    with _fbs_errors():
+        return await orders_service.warehouse_summary(
+            db, project.id, date_from=date_from, date_to=date_to
+        )
 
 
 @router.get("/orders", response_model=FbsOrderListOut)

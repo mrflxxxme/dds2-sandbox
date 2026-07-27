@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from backend.models.wb_fbs import FBS_IN_DELIVERY_STATUS
+from backend.models.wb_fbs import FBS_IN_DELIVERY_STATUS, FBS_SORTED_STATUS
 
 # ─── Allowed enum values ─────────────────────────────────────────────────────
 
@@ -21,7 +21,11 @@ ALLOWED_FBS_MODES = ["safe", "sandbox", "prod"]
 ALLOWED_SUPPLIER_STATUSES = ["new", "confirm", "complete", "cancel", "cancel_carrier"]
 #: То же + псевдо-статус «ещё в доставке» (`complete` минус доставленное) —
 #: он валиден в фильтре списка заданий, но значением `supplierStatus` не является.
-ALLOWED_ORDER_STATUS_FILTERS = [*ALLOWED_SUPPLIER_STATUSES, FBS_IN_DELIVERY_STATUS]
+ALLOWED_ORDER_STATUS_FILTERS = [
+    *ALLOWED_SUPPLIER_STATUSES,
+    FBS_IN_DELIVERY_STATUS,
+    FBS_SORTED_STATUS,
+]
 ALLOWED_STICKER_TYPES = ["svg", "zplv", "zplh", "png"]
 #: Производные состояния поставки (см. `models.wb_fbs.supply_status`) — своего
 #: поля статуса Marketplace API не отдаёт.
@@ -467,9 +471,36 @@ class FbsOrderListOut(BaseModel):
     total: int = 0
     #: Счётчики по статусам для вкладок (new / confirm / complete / cancel).
     status_counts: dict[str, int] = Field(default_factory=dict)
-    #: Подмножество `complete`, которое ещё едет к покупателю. Отдельным полем,
-    #: а не ключом `status_counts` — сумма счётчиков и так равна вкладке «Все».
+    #: Две ФАЗЫ внутри `complete`: «ещё едет, не отсортировано» и «принято
+    #: сортировочным центром». Отдельными полями, а не ключами `status_counts` —
+    #: сумма счётчиков и так равна вкладке «Все».
     in_delivery_count: int = 0
+    sorted_count: int = 0
+
+
+class FbsWarehouseQueueRow(BaseModel):
+    """Очередь одного склада продавца по фазам жизни задания."""
+
+    wb_warehouse_id: int
+    #: Очередь сборки — БЕЗ периода: задание, созданное два месяца назад и до
+    #: сих пор не собранное, обязано быть в цифре сборщика.
+    new: int = 0
+    confirm: int = 0
+    #: Фазы доставки — за выбранный период (`complete` копится вечно).
+    in_delivery: int = 0
+    sorted: int = 0
+
+
+class FbsWarehouseSummaryOut(BaseModel):
+    """Сводка «сколько на каждом складе и на какой фазе» одним запросом."""
+
+    #: Границы окна для фаз доставки (включительно). None — окно не задано.
+    date_from: date | None = None
+    date_to: date | None = None
+    warehouses: list[FbsWarehouseQueueRow] = Field(default_factory=list)
+    #: Итог по всем складам — считает бэкенд, чтобы «Все склады» не расходились
+    #: с суммой карточек при обрезке выдачи.
+    totals: dict[str, int] = Field(default_factory=dict)
 
 
 class FbsOrderBackfillRequest(BaseModel):
