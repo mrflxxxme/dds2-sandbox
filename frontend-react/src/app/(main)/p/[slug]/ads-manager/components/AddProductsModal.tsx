@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import type { AdSubject, AdNmCard } from '@/types/api';
 import { IcSearch, IcX } from './icons';
-import WbThumb from './WbThumb';
+import WbThumb from '@/components/WbThumb';
 
 const MAX = 50;
 

@@ -6,13 +6,18 @@
 
     qty_ledger  = WarehouseStock.quantity          # ГОДНЫЙ; брак (defect_quantity)
                                                    # и in_transit намеренно не входят
-    qty_mirror  = Σ FulfillmentStock.qty_good × units_per_box   # зеркало WMS провайдера
-    qty_source  = по WbFbsWarehouse.stock_source: ledger | ff_mirror | min_of_both
+    qty_mirror  = Σ max(0, qty_good × units_per_box − недоступное у ФФ)
+                                                   # зеркало WMS провайдера, только то,
+                                                   # что реально отгрузим: см. `_net_mirror`
     reserved    = резерв активных заявок на сборку (PENDING/IN_PROGRESS/READY/
                   VEHICLE_ASSIGNED; PRE_DISTRIBUTED исключён — см. warehouse_stock_engine)
+                  СНИМАЕТСЯ С ОБЕИХ СТОРОН ДО выбора источника (`_free_sides`),
+                  иначе на складе, где WMS уже отобрал товар, вычет идёт дважды
+    qty_source  = по WbFbsWarehouse.stock_source от УЖЕ свободных сторон:
+                  ledger | ff_mirror | min_of_both
     buf_pct     = ceil(qty_source × safety_stock_pct / 100)   # ПО КАЖДОМУ складу
 
-    qty_computed(стр.) = Σ по складам max(0, qty_source − reserved − buf_pct)
+    qty_computed(стр.) = Σ по складам max(0, qty_source − buf_pct)
                      Черновики сборки НЕ вычитаются: обязательство — только заявка.
     override           = ручное количество ПО ТОВАРУ на этом складе продавца
                          (`WbFbsStockOverride.qty`; строки нет — ограничения нет)
@@ -31,6 +36,16 @@
     chrtId может стоять у нескольких баркодов.
 
 Инварианты, которые легко потерять:
+  • Обе стороны источника — то, что РЕАЛЬНО МОЖНО ОТГРУЗИТЬ. Наш ledger таким
+    приходит сам (`quantity` без `defect_quantity`), из зеркала ФФ недоступное
+    вычитается явно (`_net_mirror` поверх
+    `fulfillment_service.ff_unavailable_by_nomenclature`): битое, собранное под
+    чужую отгрузку, идущее в приёмке. Собранное под НАШИ активные заявки туда не
+    входит — его убирает `reserved`, иначе вычли бы дважды.
+    Недоступное ≠ брак: у migfull поля брака в API нет вовсе, и в заблокированном
+    лежит в том числе товар на сборке. Поэтому колонка «Брак» показывает только
+    ИЗМЕРЕННЫЙ брак — цифру провайдера, где он её считает, иначе наш
+    `defect_quantity` (`_row_defect`); складывать их нельзя, это один товар.
   • «Заявка на сборку вычитает остаток из FBS» работает САМО: reserved считается
     на лету из активных заявок, отдельного поля резерва в БД нет.
   • Позиции без `Nomenclature.chrt_id` физически не транслируются (с 09.02.2026
@@ -55,8 +70,8 @@
     WB продолжит продавать то, чего физически нет. Задаётся ПО ТОВАРУ (одна
     строка `wb_fbs_stock_overrides` = один товар на одном складе продавца);
     очистка поля = удаление строки, ограничение снимается.
-  • Ручное количество накладывается ДВАЖДЫ: построчно в `_build_row` (колонка
-    «= Отдаём» честна и для строк без chrtId, которые в WB не уезжают) и на
+  • Ручное количество накладывается ДВАЖДЫ: построчно в `_build_row` (`qty_available`
+    честен и для строк без chrtId, которые в WB не уезжают) и на
     сумму позиции в `_apply_chrt_limits._group_override_limit` — в WB уходит
     сумма группы по chrtId, и построчный `min` её не удерживает.
   • «Не отдавать» (`qty = 0`) отправляет на WB ИМЕННО НОЛЬ, а не выкидывает
@@ -104,7 +119,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import delete, exists, func, select, update
+from sqlalchemy import case, delete, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -128,6 +143,7 @@ from backend.models.wb_fbs import (
     WbFbsWarehouseLink,
 )
 from backend.schemas.wb_fbs import FbsOverrideSet
+from backend.services import fulfillment_service
 from backend.services.wb_fbs import orders_service, warehouse_service
 from backend.services.wb_fbs.contour import contour_condition
 from backend.services.wb_fbs.locks import PUSH_LOCK_NAME, acquire_lock, release_lock
@@ -327,19 +343,38 @@ async def _load_ledger(
 
 
 async def _load_mirror(db: AsyncSession, project_id: int, warehouse_ids: list[int]) -> dict[int, dict[int, int]]:
-    """Зеркало ФФ: {nom_id: {wh_id: годный в штуках россыпи}}.
+    """Зеркало ФФ: {nom_id: {wh_id: годная РОССЫПЬ в штуках}}.
 
-    Коробá приводим к россыпи (`qty_good × units_per_box`) — так же, как
-    `fulfillment_service.list_stocks`. Строки без номенклатуры (неопознанный
-    товар провайдера) в формулу не входят: транслировать их всё равно нечем.
+    Только россыпь. Короб-строки (`base_barcode` заполнен) в зеркало не входят:
+    маркетплейс покупает штуку, а короб продать нельзя, пока его не вскрыли и не
+    приняли поштучно. Считая короба штуками (`qty_good × units_per_box`, как в
+    `list_stocks`), экран обещал вчетверо больше отгружаемого — на натали 29 776
+    против 7 041 реальных. Сколько лежит коробами, отдельно считает
+    `fulfillment_service.ff_boxed_by_nomenclature` — это рабочий список «что вскрыть».
+
+    Строки без номенклатуры (неопознанный товар провайдера) в формулу не входят:
+    транслировать их всё равно нечем.
     """
     if not warehouse_ids:
         return {}
+    # Короб-строки НЕ фильтруем в WHERE, а обнуляем в SUM. Разница принципиальная:
+    # `_source_qty` трактует отсутствие ключа как «зеркала нет» и падает на наш
+    # учёт, и позиция, которая у провайдера лежит ЦЕЛИКОМ коробами, уехала бы в WB
+    # по нашим книгам — ровно то, чего короб-правило и должно не допустить.
+    # Ключ есть → «провайдер эту позицию знает», значение 0 → «россыпью нет ничего».
     result = await db.execute(
         select(
             FulfillmentStock.warehouse_id,
             FulfillmentStock.nomenclature_id,
-            func.sum(FulfillmentStock.qty_good * FulfillmentStock.units_per_box).label("qty"),
+            func.sum(
+                case(
+                    (
+                        FulfillmentStock.base_barcode.is_(None),
+                        FulfillmentStock.qty_good * FulfillmentStock.units_per_box,
+                    ),
+                    else_=0,
+                )
+            ).label("qty"),
         )
         .where(
             FulfillmentStock.project_id == project_id,
@@ -352,6 +387,56 @@ async def _load_mirror(db: AsyncSession, project_id: int, warehouse_ids: list[in
     for row in result.all():
         mirror.setdefault(row.nomenclature_id, {})[row.warehouse_id] = int(row.qty or 0)
     return mirror
+
+
+def _net_mirror(
+    mirror: dict[int, dict[int, int]], unavailable: dict[int, dict[int, int]]
+) -> dict[int, dict[int, int]]:
+    """Зеркало ФФ за вычетом недоступного к отгрузке (клампится нулём).
+
+    В WB уходит обещание отгрузить. Всё, что у ФФ лежит, но взять и отправить
+    покупателю нельзя — битое, собранное под чужую отгрузку, идущее в приёмке —
+    таким обещанием быть не может: заказ придёт, а собрать будет нечем.
+    Что именно недоступно, знает домен ФФ
+    (`fulfillment_service.ff_unavailable_by_nomenclature`) — здесь только вычитание.
+
+    Двойного вычета нет: собранное под НАШИ активные заявки в `unavailable` не
+    входит, его убирает сам расчёт (`reserved` в `_sum_by_warehouse`).
+
+    Наш ledger в вычете не нуждается: `WarehouseStock.quantity` — годный, брак
+    лежит отдельным счётчиком `defect_quantity` и в источник не входит.
+    """
+    if not unavailable:
+        return mirror
+    return {
+        nom_id: {
+            wid: max(0, qty - int(unavailable.get(wid, {}).get(nom_id, 0)))
+            for wid, qty in per_wh.items()
+        }
+        for nom_id, per_wh in mirror.items()
+    }
+
+
+def _row_defect(
+    nom_id: int | None,
+    mirror: dict[int, dict[int, int]],
+    ff_defect: dict[int, dict[int, int]],
+    ledger_defects: dict[int, int],
+) -> int:
+    """Брак строки превью: цифра провайдера, если он её отдаёт, иначе наш ledger.
+
+    Складывать их нельзя — это ДВА взгляда на один и тот же физический брак.
+    Где провайдер брак СЧИТАЕТ (skladbot), авторитет у него: битый товар лежит у
+    него, а наш `defect_quantity` наполняется документами и отстаёт от факта.
+    Где не считает (migfull, wmscelicom — поля в API нет), показываем свой:
+    выводить брак из заблокированного нельзя, там лежит в том числе товар на
+    сборке (см. `fulfillment_service.ff_defect_by_nomenclature`).
+    """
+    if nom_id is None:
+        return 0
+    per_wh = mirror.get(nom_id) or {}
+    from_provider = sum(int(ff_defect.get(wid, {}).get(nom_id, 0)) for wid in per_wh)
+    return from_provider or int(ledger_defects.get(nom_id, 0))
 
 
 async def _load_open_fbs_by_wh(
@@ -539,13 +624,27 @@ def _strip_parens(name: str) -> str:
     return _PARENS_RE.sub("", name or "").strip()
 
 
+def _is_sorting_centre(name: str) -> bool:
+    """Сортировочный центр WB — перевалка, а не склад хранения.
+
+    Товар там уже расписан по заказам и к продаже не доступен, поэтому в
+    «остаток на FBO» он входить не должен. Имена: «СЦ Ижевск», «SC Tbilisi» —
+    матчим ПРЕФИКС со следующим пробелом, иначе под правило попали бы обычные
+    склады, начинающиеся на те же буквы («Сарапул», «Самара»).
+    """
+    low = (name or "").strip().casefold()
+    return low.startswith("сц ") or low.startswith("sc ")
+
+
 def _fbo_allowed_names(names: Iterable[str], ignored: set[str], excluded: set[str]) -> list[str]:
     """Имена складов WB, чьему остатку верим (для фильтра `IN`).
 
     Выкидываем: итоговую псевдо-строку (дубль суммы), транзит «в пути» (товар
-    едет между складами WB, к продаже не доступен), исключённые склады и
-    сгоревшие (🔥): WB продолжает отдавать их остатки как живые, и гейт по ним
-    решил бы «на FBO ещё полно» — товар навсегда остался бы вне FBS.
+    едет между складами WB и возвраты от клиентов — к продаже не доступны),
+    сортировочные центры (перевалка, товар уже расписан по заказам),
+    исключённые склады и сгоревшие (🔥, они же «остатки не учитывать» на вкладке
+    «Сборка»): WB продолжает отдавать их остатки как живые, и гейт по ним решил
+    бы «на FBO ещё полно» — товар навсегда остался бы вне FBS.
     """
     out: list[str] = []
     for raw in names:
@@ -553,6 +652,8 @@ def _fbo_allowed_names(names: Iterable[str], ignored: set[str], excluded: set[st
         if not name or name == _FBO_TOTAL_ROW:
             continue
         if _FBO_TRANSIT_MARK in name.casefold():
+            continue
+        if _is_sorting_centre(name):
             continue
         base = _strip_parens(name)
         if base in excluded or base in ignored or name in ignored:
@@ -694,6 +795,87 @@ async def _sum_fbo(
     return out
 
 
+async def fbo_by_warehouse(
+    db: AsyncSession, project_id: int, nom_ids: Iterable[int]
+) -> dict[int, list[tuple[str, int]]]:
+    """Остаток FBO В РАЗРЕЗЕ СКЛАДОВ WB: `{nom_id: [(склад, штук), …]}`, по убыванию.
+
+    Тот же фильтр доверия, что и у гейта (`_fbo_allowed_names`): без итоговой
+    строки, транзита и возвратов «в пути», без сортировочных центров, без
+    исключённых и сгоревших складов. Суммы поэтому сходятся с колонкой «FBO»
+    — иначе раскрывающийся список противоречил бы числу над ним.
+
+    Нужен матрице складов: «где именно лежит остаток» — вопрос, на который
+    агрегат не отвечает, а вести человека за этим в кабинет WB глупо.
+    """
+    ids = sorted({int(i) for i in nom_ids})
+    if not ids:
+        return {}
+    has_remains = (
+        await db.execute(
+            select(WbWarehouseRemains.id).where(WbWarehouseRemains.project_id == project_id).limit(1)
+        )
+    ).first() is not None
+    names = await _fbo_warehouse_names(db, project_id, remains=has_remains)
+    if not names:
+        return {}
+
+    out: dict[int, dict[str, int]] = {}
+    for chunk in _chunked(ids, _IN_CHUNK):
+        # Ветки разведены явно: remains джойнится по баркоду (точно per-size),
+        # stocks — по nm_id (размерности в нём нет). Общей переменной модели тут
+        # не сделать — у `WbWarehouseStock` поля `barcode` попросту нет.
+        if has_remains:
+            query = (
+                select(
+                    Nomenclature.id,
+                    WbWarehouseRemains.warehouse_name,
+                    func.sum(WbWarehouseRemains.quantity).label("qty"),
+                )
+                .join(
+                    WbWarehouseRemains,
+                    (WbWarehouseRemains.barcode == Nomenclature.barcode)
+                    & (WbWarehouseRemains.project_id == project_id),
+                )
+                .where(
+                    Nomenclature.project_id == project_id,
+                    Nomenclature.id.in_(chunk),
+                    WbWarehouseRemains.warehouse_name.in_(names),
+                )
+                .group_by(Nomenclature.id, WbWarehouseRemains.warehouse_name)
+            )
+        else:
+            query = (
+                select(
+                    Nomenclature.id,
+                    WbWarehouseStock.warehouse_name,
+                    func.sum(WbWarehouseStock.quantity).label("qty"),
+                )
+                .join(
+                    WbWarehouseStock,
+                    (WbWarehouseStock.nm_id == Nomenclature.article_wb)
+                    & (WbWarehouseStock.project_id == project_id),
+                )
+                .where(
+                    Nomenclature.project_id == project_id,
+                    Nomenclature.id.in_(chunk),
+                    WbWarehouseStock.warehouse_name.in_(names),
+                )
+                .group_by(Nomenclature.id, WbWarehouseStock.warehouse_name)
+            )
+        for nom_id, wh_name, qty in (await db.execute(query)).all():
+            amount = int(qty or 0)
+            if amount <= 0:
+                continue
+            out.setdefault(int(nom_id), {})[str(wh_name)] = (
+                out.get(int(nom_id), {}).get(str(wh_name), 0) + amount
+            )
+    return {
+        nom_id: sorted(by_wh.items(), key=lambda kv: -kv[1])
+        for nom_id, by_wh in out.items()
+    }
+
+
 def _remains_by_nm_query(project_id: int, chunk: list[int], names: list[str]) -> Any:
     """Остаток remains по строкам, чей баркод НЕ заведён в номенклатуре (джойн по nm_id)."""
     nom_bc = aliased(Nomenclature)
@@ -775,6 +957,31 @@ def _apply_override(qty_computed: int, override_qty: int | None) -> int:
     return max(0, min(qty_computed, int(override_qty)))
 
 
+def _free_sides(qty_ledger: int, qty_mirror: int | None, reserved: int) -> tuple[int, int | None]:
+    """Снять резерв активных заявок на сборку с ОБЕИХ сторон, не вычтя его дважды.
+
+    Резерв — это наше обязательство: товар обещан заявке и продаваться по FBS не
+    должен. Раньше он вычитался ПОСЛЕ выбора источника, и на складах, где WMS уже
+    отобрал товар под заявку, вычет шёл вторым разом. Прод-кейс wms Домодедово
+    27.07.2026 (chashka_vasilki): наш учёт 252, три заявки READY на 108, зеркало
+    Целиком 144 — ровно 252 − 108. Формула брала min(252, 144) = 144 и снимала 108
+    ещё раз → 36 вместо 144, товар зря снимался с продажи.
+
+    Провайдер-специфики тут нет намеренно: одна и та же Целиком у части позиций
+    товар уже отобрала, у части — ещё нет (40 позиций из 81 против 13), и правила
+    «этот провайдер всегда вычитает» не существует. Смотрим на факт: насколько
+    зеркало НИЖЕ наших книг — ровно столько провайдер из-под резерва уже и забрал,
+    остаток резерва снимаем с зеркала сами.
+
+    Возвращает (свободно по нашему учёту, свободно по зеркалу | None).
+    """
+    ledger_free = max(0, qty_ledger - reserved)
+    if qty_mirror is None:
+        return ledger_free, None
+    already_taken = max(0, qty_ledger - int(qty_mirror))
+    return ledger_free, max(0, int(qty_mirror) - max(0, reserved - already_taken))
+
+
 def _sum_by_warehouse(
     nom_id: int | None,
     barcode: str,
@@ -784,8 +991,17 @@ def _sum_by_warehouse(
     mirror: dict[int, int],
     reserved: dict[int, dict[int, int]],
 ) -> tuple[dict[str, int], bool]:
-    """Слагаемые формулы, просуммированные по привязанным складам (+ был ли зеркальный)."""
-    totals = {"ledger": 0, "mirror": 0, "source": 0, "reserved": 0, "buffer": 0, "available": 0}
+    """Слагаемые формулы, просуммированные по привязанным складам (+ был ли зеркальный).
+
+    Порядок важен: резерв сборки снимается с КАЖДОЙ стороны ДО выбора источника
+    (`_free_sides`), и только потом берётся ledger / зеркало / минимум. Сравнивать
+    «наш учёт с обязательствами» против «свободного у провайдера» — сравнивать
+    разные величины; именно из этого рождалось расхождение на экране.
+    """
+    totals = {
+        "ledger": 0, "mirror": 0, "ledger_free": 0, "mirror_free": 0,
+        "source": 0, "reserved": 0, "buffer": 0, "available": 0,
+    }
     has_mirror = False
     for wid in warehouse_ids:
         qty_ledger = int(ledger.get(wid, 0))
@@ -793,14 +1009,18 @@ def _sum_by_warehouse(
         if qty_mirror is not None:
             has_mirror = True
             totals["mirror"] += int(qty_mirror)
-        qty_source = _source_qty(wh.stock_source, qty_ledger, qty_mirror)
         res = int(reserved.get(wid, {}).get(nom_id, 0)) if nom_id else 0
+        ledger_free, mirror_free = _free_sides(qty_ledger, qty_mirror, res)
+        qty_source = _source_qty(wh.stock_source, ledger_free, mirror_free)
         buf = _buffer_pct(qty_source, wh.safety_stock_pct)
         totals["ledger"] += qty_ledger
+        totals["ledger_free"] += ledger_free
+        if mirror_free is not None:
+            totals["mirror_free"] += mirror_free
         totals["source"] += qty_source
         totals["reserved"] += res
         totals["buffer"] += buf
-        totals["available"] += max(0, qty_source - res - buf)
+        totals["available"] += max(0, qty_source - buf)
     return totals, has_mirror
 
 
@@ -853,6 +1073,8 @@ def _build_row(
         "nm_id": getattr(nom, "article_wb", None),
         "qty_ledger": totals["ledger"],
         "qty_ff_mirror": totals["mirror"] if has_mirror else None,
+        "qty_ledger_free": totals["ledger_free"],
+        "qty_ff_free": totals["mirror_free"] if has_mirror else None,
         "qty_source": totals["source"],
         "fbo_qty": fbo_qty,
         "reserved_assembly": totals["reserved"],
@@ -909,7 +1131,15 @@ async def _build_rows(
     на весь набор номенклатур — построчный резолв дал бы N+1 на каждой позиции.
     """
     ledger, defects, ledger_barcodes = await _load_ledger(db, project_id, warehouse_ids)
-    mirror = await _load_mirror(db, project_id, warehouse_ids)
+    # Зеркало ФФ ОБЯЗАНО быть тем, что реально можно отгрузить: у migfull
+    # `qty_good` (stock_actual) — весь физический остаток, включая собранное и
+    # битое, и без вычета мы обещали бы WB то, чего не отправим (`_net_mirror`).
+    unavailable = await fulfillment_service.ff_unavailable_by_nomenclature(db, project_id, warehouse_ids)
+    ff_defect = await fulfillment_service.ff_defect_by_nomenclature(db, project_id, warehouse_ids)
+    # Короба в зеркало не входят — их нельзя продать поштучно. Но показать их
+    # обязаны: это ровно тот запас, который «встанет» в FBS после вскрытия.
+    boxed = await fulfillment_service.ff_boxed_by_nomenclature(db, project_id, warehouse_ids)
+    mirror = _net_mirror(await _load_mirror(db, project_id, warehouse_ids), unavailable)
     fbs_open = await _load_open_fbs(db, project_id, [wh.wb_warehouse_id])
     states = await _load_states(db, project_id, wh.wb_warehouse_id)
     reserved = await _load_reserves(db, project_id, warehouse_ids)
@@ -951,7 +1181,14 @@ async def _build_rows(
             fbo_qty=None if fbo is None else fbo.get(nom_id, 0),
             subcategory=subcats.get(int(nm_id)) if nm_id else None,
         )
-        row["defect"] = int(defects.get(nom_id, 0))
+        row["defect"] = _row_defect(nom_id, mirror, ff_defect, defects)
+        box_pieces = box_count = 0
+        for wid in warehouse_ids:
+            pieces, boxes_n = boxed.get(wid, {}).get(nom_id, (0, 0))
+            box_pieces += pieces
+            box_count += boxes_n
+        row["qty_ff_boxed"] = box_pieces
+        row["ff_box_count"] = box_count
         rows.append(row)
         if chrt:
             covered_chrts.add(chrt)
@@ -983,13 +1220,13 @@ def _open_by_chrt(fbs_open: dict[int, int], noms: dict[int, Any]) -> dict[int, i
     return out
 
 
-def _trim_group(group: list[dict[str, Any]], excess: int) -> None:
-    """Снять `excess` штук с хвоста группы строк (мутирует `qty_available`)."""
+def _trim_group(group: list[dict[str, Any]], excess: int, field: str = "qty_available") -> None:
+    """Снять `excess` штук с хвоста группы строк (мутирует указанное поле)."""
     for row in reversed(group):
         if excess <= 0:
             return
-        cut = min(excess, int(row["qty_available"]))
-        row["qty_available"] = int(row["qty_available"]) - cut
+        cut = min(excess, int(row[field]))
+        row[field] = int(row[field]) - cut
         excess -= cut
 
 
@@ -1068,7 +1305,10 @@ def _apply_chrt_limits(
 
     for chrt, group in groups.items():
         total = sum(int(r["qty_available"]) for r in group)
-        amount = total - int(open_by_chrt.get(chrt, 0)) - abs_buffer
+        open_qty = int(open_by_chrt.get(chrt, 0))
+        amount = total - open_qty - abs_buffer
+        # Потолок ручных количеств считаем от ИСХОДНОГО `qty_computed`: ниже он
+        # сам уменьшится на те же вычеты, и взятый после — вычел бы их дважды.
         override_limit = _group_override_limit(group)
         if override_limit is not None:
             amount = min(amount, override_limit)
@@ -1076,6 +1316,16 @@ def _apply_chrt_limits(
             amount = min(amount, max_qty_per_sku)
         amount = max(0, min(amount, _WB_MAX_AMOUNT))
         _trim_group(group, total - amount)
+        # То же самое — по «Можем отдать»: колонка обязана уже учитывать проданное
+        # по FBS и абсолютный буфер, иначе на экране «Остаток» и «Можем отдать»
+        # не сходятся с тем, что реально уедет. Ручное количество сюда не входит
+        # намеренно: `qty_computed` — это потолок ДО вмешательства человека.
+        computed_total = sum(int(r["qty_computed"]) for r in group)
+        computed_amount = computed_total - open_qty - abs_buffer
+        if max_qty_per_sku > 0:
+            computed_amount = min(computed_amount, max_qty_per_sku)
+        computed_amount = max(0, min(computed_amount, _WB_MAX_AMOUNT))
+        _trim_group(group, computed_total - computed_amount, "qty_computed")
         if abs_buffer:
             # Буфер — величина позиции, а не строки: показываем его один раз
             # на группе, иначе расшифровка снова разойдётся с отправленным.
@@ -1083,9 +1333,12 @@ def _apply_chrt_limits(
 
     for row in loose:
         amount = int(row["qty_available"]) - int(row["fbs_open"]) - abs_buffer
+        computed = int(row["qty_computed"]) - int(row["fbs_open"]) - abs_buffer
         if max_qty_per_sku > 0:
             amount = min(amount, max_qty_per_sku)
+            computed = min(computed, max_qty_per_sku)
         row["qty_available"] = max(0, min(amount, _WB_MAX_AMOUNT))
+        row["qty_computed"] = max(0, min(computed, _WB_MAX_AMOUNT))
         if abs_buffer:
             row["buffer"] = int(row["buffer"]) + abs_buffer
 
@@ -1109,6 +1362,10 @@ def _orphan_state_rows(states: dict[int, WbFbsStockState], covered: set[int]) ->
                 "nm_id": None,
                 "qty_ledger": 0,
                 "qty_ff_mirror": None,
+                "qty_ledger_free": 0,
+                "qty_ff_free": None,
+                "qty_ff_boxed": 0,
+                "ff_box_count": 0,
                 "qty_source": 0,
                 "fbo_qty": None,
                 "reserved_assembly": 0,
@@ -1301,13 +1558,33 @@ async def stock_matrix(db: AsyncSession, project_id: int, trend_days: int = 14) 
                     "cells": {},
                     "total_wb": 0,
                     "total_can": 0,
+                    "total_boxed": 0,
+                    "total_boxes": 0,
+                    "fbo": None,
+                    "fbo_by_warehouse": [],
                 },
             )
             wb_qty = r.get("qty_wb")
             can_qty = int(r.get("qty_available") or 0)
-            row["cells"][str(wh.wb_warehouse_id)] = {"wb": wb_qty, "can": can_qty}
+            # Короба показываем прямо в ячейке склада: на Натали это основная
+            # масса товара, и без них «можем поставить 0» выглядит как «нечего
+            # везти», хотя на складе лежат тысячи штук — просто невскрытые.
+            boxed_qty = int(r.get("qty_ff_boxed") or 0)
+            boxes_n = int(r.get("ff_box_count") or 0)
+            row["cells"][str(wh.wb_warehouse_id)] = {
+                "wb": wb_qty,
+                "can": can_qty,
+                "boxed": boxed_qty,
+                "boxes": boxes_n,
+            }
             row["total_wb"] += int(wb_qty or 0)
             row["total_can"] += can_qty
+            row["total_boxed"] += boxed_qty
+            row["total_boxes"] += boxes_n
+            # FBO приходит уже посчитанным в превью — берём оттуда, чтобы колонка
+            # не разошлась с гейтом «только то, чего нет на FBO».
+            if row.get("fbo") is None:
+                row["fbo"] = r.get("fbo_qty")
 
     # Деньги одним запросом на всю выдачу — не по складу и не по строке.
     money: dict[int, dict[str, Any]] = {}
@@ -1319,8 +1596,24 @@ async def stock_matrix(db: AsyncSession, project_id: int, trend_days: int = 14) 
     except Exception as exc:  # тренда нет — матрица обязана остаться рабочей
         logger.warning("wb_fbs.matrix project=%s тренд недоступен: %s", project_id, exc)
 
+    # Разбивка FBO по складам — одним запросом на всю выдачу, не по строке.
+    fbo_split = await fbo_by_warehouse(db, project_id, by_nom.keys())
+
     rows = []
     for row in by_nom.values():
+        # `fbo` берётся из превью, а превью КЭШИРУЕТСЯ — разбивка же считается
+        # каждый раз заново, и на устаревшем кэше число расходилось с раскрытым
+        # списком (ловилось живьём: 1617 против 1059). Внутри одного экрана
+        # цифра и её расшифровка обязаны сходиться, поэтому итог берём из
+        # разбивки. `None` не трогаем: это «зеркала нет / судить нечем», и
+        # подменять его суммой значило бы обойти собственный отказ доверять.
+        split = fbo_split.get(row["nomenclature_id"], [])
+        if row.get("fbo") is None:
+            row["fbo_by_warehouse"] = []
+        else:
+            row["fbo_by_warehouse"] = [{"name": name, "qty": qty} for name, qty in split]
+            if split:
+                row["fbo"] = sum(qty for _name, qty in split)
         t = money.get(row["nomenclature_id"], {})
         revenue = Decimal(str(t.get("revenue") or 0))
         profit = Decimal(str(t.get("profit") or 0))

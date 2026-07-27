@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.cost import Nomenclature
-from backend.models.fulfillment import FulfillmentStock
+from backend.models.fulfillment import FulfillmentRequest, FulfillmentStock
 from backend.models.warehouse import Warehouse, WarehouseStock
 from backend.models.wb_fbs import (
     FbsPushStatus,
@@ -109,15 +109,26 @@ async def _mk_mirror(
     *,
     units_per_box: int = 1,
     barcode: str | None = None,
+    provider: str = "skladbot",
+    qty_defect: int = 0,
+    qty_reserve: int = 0,
+    #: `stock_available` migfull — их собственное «свободно к отгрузке».
+    #: По умолчанию = весь остаток: у провайдеров без этого поля оно не читается.
+    qty_nominal: int | None = None,
+    external_product_id: str | None = None,
 ) -> None:
     db.add(
         FulfillmentStock(
             project_id=project_id,
             warehouse_id=wh.id,
-            provider="skladbot",
+            provider=provider,
             barcode=barcode or nom.barcode,
             nomenclature_id=nom.id,
             qty_good=qty_good,
+            qty_defect=qty_defect,
+            qty_reserve=qty_reserve,
+            qty_nominal=qty_good if qty_nominal is None else qty_nominal,
+            external_product_id=external_product_id,
             units_per_box=units_per_box,
         )
     )
@@ -332,6 +343,47 @@ class TestFormulaHelpers:
         assert stock_service._source_qty("min_of_both", 3, 10) == 3
         assert stock_service._source_qty("min_of_both", 7, None) == 7
 
+    def test_reserve_not_subtracted_twice_when_wms_already_picked(self):
+        """Прод-кейс wms Домодедово 27.07.2026 (chashka_vasilki).
+
+        Наш учёт 252, три заявки READY на 108, зеркало Целиком 144 = 252 − 108:
+        WMS уже отобрал товар под сборку. Старая формула брала min(252, 144) = 144
+        и снимала 108 ВТОРОЙ раз → 36 вместо 144, товар зря снимался с продажи.
+        """
+        assert stock_service._free_sides(252, 144, 108) == (144, 144)
+
+    def test_reserve_subtracted_from_mirror_when_provider_has_not_picked(self):
+        """Провайдер ещё не отобрал (зеркало == наш учёт) — резерв обязан уйти с обеих."""
+        assert stock_service._free_sides(339, 339, 138) == (201, 201)
+
+    def test_reserve_partially_taken_by_provider(self):
+        """Провайдер забрал часть резерва — с зеркала снимаем только остаток."""
+        # ниже наших книг на 40 из 100 резерва → с зеркала снять ещё 60
+        assert stock_service._free_sides(200, 160, 100) == (100, 100)
+
+    def test_reserve_over_stock_clamps_to_zero(self):
+        """Обещали больше, чем есть — ноль, а не отрицательный остаток."""
+        assert stock_service._free_sides(30, 22, 36) == (0, 0)
+
+    def test_free_sides_without_mirror(self):
+        """Склад без интеграции: зеркала нет, резерв снимается только с нашего учёта."""
+        assert stock_service._free_sides(100, None, 30) == (70, None)
+
+    def test_computed_absorbs_position_level_deductions(self):
+        """«Можем отдать» обязано учитывать проданное по FBS и абсолютный буфер.
+
+        Раньше `qty_computed` фиксировался ДО вычетов уровня позиции, и экран
+        показывал «Остаток 100 · Можем отдать 100», хотя уезжало 95 — колонки
+        между собой не сходились.
+        """
+        rows = [
+            {"chrt_id": 7, "qty_available": 100, "qty_computed": 100, "fbs_open": 3,
+             "buffer": 0, "override_qty": None},
+        ]
+        stock_service._apply_chrt_limits(rows, {7: 3}, abs_buffer=2, max_qty_per_sku=0)
+        assert rows[0]["qty_computed"] == 95
+        assert rows[0]["qty_available"] == 95
+
     def test_buffer_pct_rounds_up(self):
         # 5% от 11 = 0.55 → 1 (вверх). Абсолют сюда НЕ входит: он вычитается
         # один раз на позицию, после суммирования по складам.
@@ -513,6 +565,245 @@ class TestFormulaHelpers:
         rows = [_limit_row(None, 10, override_qty=10), _limit_row(None, 10, override_qty=10)]
         stock_service._apply_chrt_limits(rows, {}, abs_buffer=0, max_qty_per_sku=0)
         assert [r["qty_available"] for r in rows] == [10, 10]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Брак: зеркало ФФ отдаётся ГОДНЫМ
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestMirrorNetOfDefect:
+    """В WB уходит обещание отгрузить — значит зеркало ФФ обязано быть тем, что
+    реально можно взять и отправить.
+
+    Из него вычитается всё недоступное (битое, собранное под чужую отгрузку, идущее
+    в приёмке), КРОМЕ собранного под наши активные заявки: его убирает `reserved`,
+    и вычесть здесь значило бы вычесть дважды.
+
+    Отдельно закреплено, что недоступное ≠ брак: колонка «Брак» показывает только
+    измеренную провайдером цифру (см. `test_migfull_locked_is_not_defect_in_column`).
+    """
+
+    def test_unavailable_is_subtracted_per_warehouse(self):
+        mirror = {5: {1: 100, 2: 40}}
+        blocked = {1: {5: 30}}
+        assert stock_service._net_mirror(mirror, blocked) == {5: {1: 70, 2: 40}}
+
+    def test_never_pushes_mirror_below_zero(self):
+        """Блокировка больше остатка (дрейф синков) — ноль, а не отрицательный остаток."""
+        assert stock_service._net_mirror({5: {1: 10}}, {1: {5: 25}}) == {5: {1: 0}}
+
+    def test_empty_map_is_identity(self):
+        """Склад без интеграции: вычитать нечего — зеркало не трогаем."""
+        mirror = {5: {1: 100}}
+        assert stock_service._net_mirror(mirror, {}) == mirror
+
+    def test_row_defect_prefers_provider_where_measured(self):
+        """Наш `defect_quantity` и брак ФФ — один и тот же товар: складывать нельзя."""
+        assert stock_service._row_defect(5, {5: {1: 70}}, {1: {5: 30}}, {5: 12}) == 30
+
+    def test_row_defect_falls_back_to_ledger_when_provider_is_silent(self):
+        """Провайдер брак не считает (migfull/wmscelicom) — показываем свой."""
+        assert stock_service._row_defect(5, {5: {1: 70}}, {}, {5: 12}) == 12
+        assert stock_service._row_defect(5, {}, {}, {5: 12}) == 12
+
+    @pytest.mark.asyncio
+    async def test_skladbot_defect_leaves_mirror(self, db_session, project, fbs_env):
+        """skladbot отдаёт брак отдельным полем — вычитаем ровно его."""
+        wh, fbs_wh = fbs_env
+        fbs_wh.stock_source = FbsStockSource.FF_MIRROR.value
+        nom = await _mk_nom(db_session, project.id, chrt_id=901)
+        await _mk_stock(db_session, project.id, wh, nom, 0)
+        await _mk_mirror(db_session, project.id, wh, nom, 100, qty_defect=30)
+        await db_session.commit()
+
+        row = await _row_for(db_session, project.id, fbs_wh, nom)
+        assert row["qty_ff_mirror"] == 70
+        assert row["qty_source"] == 70
+        assert row["defect"] == 30
+
+    @pytest.mark.asyncio
+    async def test_migfull_uses_provider_own_available(self, db_session, project, fbs_env):
+        """migfull: берём ИХ `stock_available`, а не реконструкцию блокировки.
+
+        `qty_good` у них — `stock_actual`, весь физический остаток; свободное они
+        отдают отдельным полем. Прод-кейс 120х170_серыйоднотон 27.07.2026:
+        actual 478 / locked 466 / available 12 — Натали выставила в WB 11, а наша
+        реконструкция («минус собранное под наши отгрузки») оставляла 443, потому
+        что нашей заявки на сборку не существовало и вычитать было нечем.
+
+        Поля брака у migfull в API нет вовсе, поэтому в колонке «Брак» обязан
+        остаться наш `defect_quantity` — единственная честная цифра брака.
+        """
+        wh, fbs_wh = fbs_env
+        fbs_wh.stock_source = FbsStockSource.FF_MIRROR.value
+        nom = await _mk_nom(db_session, project.id, chrt_id=902)
+        await _mk_stock(db_session, project.id, wh, nom, 0, defect=7)
+        await _mk_mirror(
+            db_session, project.id, wh, nom, 478,
+            provider="migfull", qty_reserve=466, qty_nominal=12,
+        )
+        await db_session.commit()
+
+        row = await _row_for(db_session, project.id, fbs_wh, nom)
+        assert row["qty_ff_mirror"] == 12
+        assert row["qty_source"] == 12
+        assert row["defect"] == 7  # НЕ 466: заблокированное браком не является
+
+    @pytest.mark.asyncio
+    async def test_migfull_own_assembly_is_not_subtracted_twice(
+        self, db_session, project, fbs_env,
+    ):
+        """Наша заявка на сборку не должна вычитаться поверх блокировки провайдера.
+
+        Провайдер уже снял товар под неё со своего свободного остатка. Если снять
+        его ещё и нашим `reserved`, позиция ложно уходит в ноль и снимается с
+        продажи — это удерживает `_free_sides` (зеркало ниже наших книг ровно на
+        то, что провайдер уже забрал).
+        """
+        wh, fbs_wh = fbs_env
+        fbs_wh.stock_source = FbsStockSource.MIN_OF_BOTH.value
+        nom = await _mk_nom(db_session, project.id, chrt_id=904)
+        await _mk_stock(db_session, project.id, wh, nom, 100)
+        # Натали залочила 40 под нашу сборку: свободно у них 60
+        await _mk_mirror(
+            db_session, project.id, wh, nom, 100,
+            provider="migfull", qty_reserve=40, qty_nominal=60,
+        )
+        await _mk_assembly(db_session, project.id, wh, nom, 40, AssemblyStatus.READY)
+        await db_session.commit()
+
+        row = await _row_for(db_session, project.id, fbs_wh, nom)
+        assert row["reserved_assembly"] == 40
+        assert row["qty_source"] == 60  # НЕ 20
+
+    @pytest.mark.asyncio
+    async def test_ff_mirror_source_ignores_stale_ledger(self, db_session, project, fbs_env):
+        """Источник «Система ФФ»: наш отставший учёт не должен удерживать выдачу.
+
+        Прод-кейс wms Домодедово 27.07.2026: товар физически у ФФ (640), а в наших
+        книгах по этому складу ноль — 48 позиций и 18 840 штук, которые `min_of_both`
+        не отдавал вовсе. Владелец: «нужно брать за основу остатки по системе их WMS».
+        """
+        wh, fbs_wh = fbs_env
+        fbs_wh.stock_source = FbsStockSource.FF_MIRROR.value
+        nom = await _mk_nom(db_session, project.id, chrt_id=905)
+        await _mk_stock(db_session, project.id, wh, nom, 0)
+        await _mk_mirror(db_session, project.id, wh, nom, 640)
+        await db_session.commit()
+
+        row = await _row_for(db_session, project.id, fbs_wh, nom)
+        assert row["qty_ledger"] == 0
+        assert row["qty_source"] == 640
+        assert row["qty_computed"] == 640
+
+    @pytest.mark.asyncio
+    async def test_ff_mirror_source_still_holds_back_assembly(self, db_session, project, fbs_env):
+        """Но обязательства остаются: собранное под заявку не продаём и на «Системе ФФ»."""
+        wh, fbs_wh = fbs_env
+        fbs_wh.stock_source = FbsStockSource.FF_MIRROR.value
+        nom = await _mk_nom(db_session, project.id, chrt_id=906)
+        await _mk_stock(db_session, project.id, wh, nom, 100)
+        await _mk_mirror(db_session, project.id, wh, nom, 100)  # провайдер ещё не отобрал
+        await _mk_assembly(db_session, project.id, wh, nom, 40, AssemblyStatus.READY)
+        await db_session.commit()
+
+        row = await _row_for(db_session, project.id, fbs_wh, nom)
+        assert row["reserved_assembly"] == 40
+        assert row["qty_source"] == 60
+
+    @pytest.mark.asyncio
+    async def test_boxes_are_not_sellable_stock(self, db_session, project, fbs_env):
+        """Короб — НЕ остаток: продать штуку из невскрытого короба нельзя.
+
+        Маркетплейс покупает штуку, а провайдер отдаёт короб; чтобы остаток «встал»
+        в FBS, короб надо вскрыть и принять поштучно. Пока `qty_good × units_per_box`
+        падало прямо в зеркало, экран обещал вчетверо больше отгружаемого (натали
+        27.07.2026: 29 776 против 7 041). Содержимое коробов уходит отдельным полем —
+        это рабочий список «что вскрыть», а не доступный товар.
+        """
+        wh, fbs_wh = fbs_env
+        fbs_wh.stock_source = FbsStockSource.FF_MIRROR.value
+        nom = await _mk_nom(db_session, project.id, chrt_id=903)
+        await _mk_stock(db_session, project.id, wh, nom, 0)
+        db_session.add(
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=wh.id,
+                provider="migfull",
+                barcode=f"1{nom.barcode}",
+                base_barcode=nom.barcode,
+                nomenclature_id=nom.id,
+                qty_good=10,
+                units_per_box=18,
+            )
+        )
+        await db_session.commit()
+
+        row = await _row_for(db_session, project.id, fbs_wh, nom)
+        assert row["qty_source"] == 0          # отдавать нечего
+        assert row["qty_ff_boxed"] == 10 * 18  # но 180 шт можно достать
+        assert row["ff_box_count"] == 10
+
+    @pytest.mark.asyncio
+    async def test_box_only_position_does_not_fall_back_to_ledger(
+        self, db_session, project, fbs_env,
+    ):
+        """Позиция ЦЕЛИКОМ в коробах — это «россыпью ноль», а не «зеркала нет».
+
+        `_source_qty` трактует отсутствие зеркала как «склад без интеграции» и берёт
+        наш учёт. Если короб-строки просто отфильтровать, такая позиция теряет ключ
+        в зеркале и уезжает в WB по нашим книгам — ровно мимо короб-правила.
+        """
+        wh, fbs_wh = fbs_env
+        fbs_wh.stock_source = FbsStockSource.MIN_OF_BOTH.value
+        nom = await _mk_nom(db_session, project.id, chrt_id=908)
+        await _mk_stock(db_session, project.id, wh, nom, 500)  # наши книги полны
+        db_session.add(
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=wh.id,
+                provider="migfull",
+                barcode=f"1{nom.barcode}",
+                base_barcode=nom.barcode,
+                nomenclature_id=nom.id,
+                qty_good=20,
+                units_per_box=25,
+            )
+        )
+        await db_session.commit()
+
+        row = await _row_for(db_session, project.id, fbs_wh, nom)
+        assert row["qty_ff_mirror"] == 0    # провайдер позицию знает, россыпью — ноль
+        assert row["qty_source"] == 0       # НЕ 500
+        assert row["qty_ff_boxed"] == 500
+
+    @pytest.mark.asyncio
+    async def test_loose_and_boxes_live_side_by_side(self, db_session, project, fbs_env):
+        """Есть и россыпь, и короба: продаём россыпь, короба показываем к вскрытию."""
+        wh, fbs_wh = fbs_env
+        fbs_wh.stock_source = FbsStockSource.FF_MIRROR.value
+        nom = await _mk_nom(db_session, project.id, chrt_id=907)
+        await _mk_stock(db_session, project.id, wh, nom, 0)
+        await _mk_mirror(db_session, project.id, wh, nom, 24, provider="migfull")
+        db_session.add(
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=wh.id,
+                provider="migfull",
+                barcode=f"1{nom.barcode}",
+                base_barcode=nom.barcode,
+                nomenclature_id=nom.id,
+                qty_good=5,
+                units_per_box=20,
+            )
+        )
+        await db_session.commit()
+
+        row = await _row_for(db_session, project.id, fbs_wh, nom)
+        assert row["qty_source"] == 24
+        assert row["qty_ff_boxed"] == 100
+        assert row["ff_box_count"] == 5
 
 
 # ═════════════════════════════════════════════════════════════════════════════

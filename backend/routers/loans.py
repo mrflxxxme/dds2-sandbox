@@ -4,6 +4,8 @@ Router: /loans — Loan CRUD + manual payment match.
 
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +15,7 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.loan import (
     LenderAccessCreate,
+    LenderDetail,
     LenderAccessCreated,
     LenderAccessInfo,
     LenderAccessListResponse,
@@ -27,7 +30,9 @@ from backend.schemas.loan import (
     LoanListResponse,
     LoanPaymentMatch,
     LoanPaymentResponse,
+    LoanRepay,
     LoanResponse,
+    LoanStuckResponse,
     LoanUpdate,
 )
 from backend.services import lender_access_service, loan_analytics, loan_import
@@ -35,6 +40,8 @@ from backend.services.loan_service import (
     LoanPaymentAlreadyExistsError,
     LoanService,
     ProjectMismatchError,
+    get_lender_detail,
+    list_stuck_loans,
 )
 from backend.utils.rate_limit import rate_limit_write
 from backend.utils.time import utcnow
@@ -81,11 +88,19 @@ async def loan_dashboard(
 
 @router.get("/by-lender", response_model=LoanByLenderResponse)
 async def loan_by_lender(
+    period_end: date | None = Query(
+        None, description="Дата выплаты (конец периода 25→25). По умолчанию — текущий период."
+    ),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Per-lender rollup: outstanding, weighted rate, accrued interest, next dates."""
-    return await loan_analytics.by_lender(db, project.id, utcnow().date())
+    """
+    Свод по заёмщикам: остаток, ставка, начисленные проценты, ближайшие даты.
+
+    `period_end` показывает исторический срез: «сколько было к выплате 25.07».
+    Считаем на день ДО даты выплаты — иначе попадаем уже в следующий период.
+    """
+    return await loan_analytics.by_lender(db, project.id, utcnow().date(), period_end)
 
 
 @router.get("/forecast", response_model=LoanForecastResponse)
@@ -152,6 +167,28 @@ async def revoke_lender_access(
 ):
     """Отозвать доступ заёмщика (блокировка входа)."""
     return await lender_access_service.revoke_access(db, project.id, counterparty_id)
+
+
+@router.get("/stuck", response_model=LoanStuckResponse)
+async def stuck_loans(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Зависшие займы: срок вышел, а возврата или продления не сделали."""
+    return await list_stuck_loans(db, project_id=project.id)
+
+
+@router.get("/lenders/{counterparty_id}", response_model=LenderDetail)
+async def lender_detail(
+    counterparty_id: int,
+    months_back: int = Query(12, ge=1, le=60),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Карточка заёмщика: итоги, история займов, проценты по периодам 25→25."""
+    return await get_lender_detail(
+        db, counterparty_id=counterparty_id, project_id=project.id, months_back=months_back
+    )
 
 
 # ─── Excel import ────────────────────────────────────────────────────────────
@@ -236,6 +273,24 @@ async def extend_loan(
     service = LoanService(db)
     successor = await service.extend(loan_id=loan_id, data=body, project_id=project.id)
     return LoanResponse.model_validate(successor)
+
+
+@router.post(
+    "/{loan_id}/repay",
+    response_model=LoanResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def repay_loan(
+    loan_id: int,
+    body: LoanRepay,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Отметить возврат тела займа. Полный возврат закрывает займ."""
+    service = LoanService(db)
+    loan = await service.repay(loan_id=loan_id, data=body, project_id=project.id)
+    return LoanResponse.model_validate(loan)
 
 
 # ─── Manual match: attach Transaction ↔ LoanPayment ─────────────────────────

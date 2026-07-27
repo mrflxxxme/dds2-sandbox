@@ -8,7 +8,7 @@ import {
 import { api } from '@/lib/api';
 import KpiCard from '@/components/KpiCard';
 import type { LoanDashboard } from '@/types/api';
-import { money, ratePct, fmtDate, entityLabel, CHART_COLORS } from './loanFmt';
+import { CHART_COLORS, entityLabel, fmtDate, money, periodLabel, ratePct } from './loanFmt';
 
 export default function LoansDashboard({ nonce }: { nonce: number }) {
     const [data, setData] = useState<LoanDashboard | null>(null);
@@ -54,8 +54,10 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
         );
     }
 
+    // Точка = период начисления 25→25; ключ приходит датой выплаты (ISO),
+    // подписываем её как «25.08» — так же, как в реестре и на карточке.
     const monthly = data.monthly.map((m) => ({
-        month: m.month,
+        month: periodLabel(m.month),
         outstanding: Number(m.outstanding),
         interest: Number(m.interest),
         disbursed: Number(m.disbursed),
@@ -66,6 +68,16 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
         value: Number(e.outstanding),
         count: e.count,
     }));
+    // Проценты за текущий период 25→25 отдельно по ИП и физлицам
+    const interestByEntity = data.by_entity
+        .filter((e) => Number(e.interest_due_period) > 0 || Number(e.outstanding) > 0)
+        .map((e) => ({
+            key: e.entity_type ?? 'NONE',
+            label: entityLabel(e.entity_type),
+            due: Number(e.interest_due_period),
+            accrued: Number(e.accrued_interest),
+            outstanding: Number(e.outstanding),
+        }));
     const byRate = data.by_rate.map((r) => ({
         name: ratePct(r.rate),
         outstanding: Number(r.outstanding),
@@ -96,20 +108,44 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
 
             {/* Dynamics chart */}
             <div className="glass-card" style={{ marginBottom: 16 }}>
-                <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 12px' }}>Динамика тела и процентов по месяцам</h3>
+                <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>Динамика тела и процентов по периодам</h3>
+                <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>
+                    Период начисления — с 25-го по 25-е; подпись = дата выплаты.
+                </div>
                 <ResponsiveContainer width="100%" height={300}>
                     <ComposedChart data={monthly} margin={{ top: 8, right: 12, left: 8, bottom: 0 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
                         <XAxis dataKey="month" tick={{ fontSize: 11 }} />
                         <YAxis yAxisId="left" tick={{ fontSize: 11 }} tickFormatter={(v) => money(v)} width={70} />
                         <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} tickFormatter={(v) => money(v)} width={60} />
-                        <Tooltip formatter={(v: number, n) => [`${money(v)} ₽`, n === 'outstanding' ? 'Остаток тела' : n === 'interest' ? 'Проценты за месяц' : n]} />
-                        <Legend formatter={(v) => (v === 'outstanding' ? 'Остаток тела' : v === 'interest' ? 'Проценты за месяц' : v)} />
+                        <Tooltip formatter={(v: number, n) => [`${money(v)} ₽`, n === 'outstanding' ? 'Остаток тела' : n === 'interest' ? 'Проценты за период' : n]} />
+                        <Legend formatter={(v) => (v === 'outstanding' ? 'Остаток тела' : v === 'interest' ? 'Проценты за период' : v)} />
                         <Area yAxisId="left" type="monotone" dataKey="outstanding" fill="#0071e3" stroke="#0071e3" fillOpacity={0.15} strokeWidth={2} />
                         <Bar yAxisId="right" dataKey="interest" fill="#ff9500" barSize={14} radius={[4, 4, 0, 0]} />
                     </ComposedChart>
                 </ResponsiveContainer>
             </div>
+
+            {/* Проценты за период — раздельно по ИП и физлицам */}
+            {interestByEntity.length > 0 && (
+                <div className="glass-card" style={{ marginBottom: 16 }}>
+                    <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>Проценты за период по сущности</h3>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>
+                        Период начисления — с 25-го по 25-е.
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
+                        {interestByEntity.map((e) => (
+                            <div key={e.key} style={{ padding: '12px 16px', border: '1px solid var(--color-border)', borderRadius: 12 }}>
+                                <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>{e.label}</div>
+                                <div style={{ fontSize: 22, fontWeight: 700 }}>{money(e.due)} ₽</div>
+                                <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
+                                    начислено {money(e.accrued)} ₽ · тело {money(e.outstanding)} ₽
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             {/* Two columns: by entity + by rate */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginBottom: 16 }}>

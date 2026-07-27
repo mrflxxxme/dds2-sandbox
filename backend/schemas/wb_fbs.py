@@ -169,6 +169,16 @@ class FbsStockRow(BaseModel):
     # Слагаемые формулы
     qty_ledger: int = 0
     qty_ff_mirror: int | None = None
+    #: Те же две стороны, но СВОБОДНЫЕ — после снятия резерва сборки (`_free_sides`).
+    #: Именно их сравнивает подпись под «Остатком»: наш учёт держит товар до отгрузки,
+    #: а WMS обычно снимает его при отборе под заявку, и сравнение сырых цифр
+    #: читалось как расхождение там, где его нет. `qty_source` = один из них.
+    qty_ledger_free: int = 0
+    qty_ff_free: int | None = None
+    #: Лежит у ФФ КОРОБАМИ — в остаток не входит: продать штуку из невскрытого
+    #: короба нельзя, нужна поштучная приёмка. Это рабочий список «что вскрыть».
+    qty_ff_boxed: int = 0
+    ff_box_count: int = 0
     qty_source: int = 0
     #: Доступный остаток на складах WB (FBO), сумма по всем складам. None — не считали.
     fbo_qty: int | None = None
@@ -258,6 +268,17 @@ class FbsMatrixCell(BaseModel):
     wb: int | None = None
     #: Наш расчёт «сколько отдадим» по привязанным складам.
     can: int = 0
+    #: Лежит у ФФ коробами — в `can` не входит (нужна поштучная приёмка).
+    #: Реально бывает только у migfull; у прочих провайдеров всегда 0.
+    boxed: int = 0
+    boxes: int = 0
+
+
+class FbsFboWarehouse(BaseModel):
+    """Строка разбивки «где лежит остаток на FBO»."""
+
+    name: str
+    qty: int = 0
 
 
 class FbsMatrixRow(BaseModel):
@@ -271,6 +292,14 @@ class FbsMatrixRow(BaseModel):
     cells: dict[str, FbsMatrixCell] = Field(default_factory=dict)
     total_wb: int = 0
     total_can: int = 0
+    #: Сколько добавится к «можем» после поштучной приёмки коробов у ФФ.
+    total_boxed: int = 0
+    total_boxes: int = 0
+    #: Остаток на складах WB (FBO). None — зеркала нет / судить нечем.
+    fbo: int | None = None
+    #: Где именно он лежит — раскрывается по клику. Без СЦ, транзита и
+    #: возвратов «в пути», без исключённых и сгоревших складов.
+    fbo_by_warehouse: list[FbsFboWarehouse] = Field(default_factory=list)
     #: Деньги за окно тренда — по КАРТОЧКЕ, по складам не делятся.
     revenue: Decimal = Decimal(0)
     profit: Decimal = Decimal(0)

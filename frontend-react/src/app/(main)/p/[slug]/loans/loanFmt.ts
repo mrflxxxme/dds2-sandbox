@@ -11,6 +11,13 @@ export const ratePct = (x: number | string | null | undefined): string =>
 
 export const fmtDate = formatDate;
 
+/** Подпись периода начисления по дате выплаты: «2026-08-25» → «25.08». */
+export const periodLabel = (iso: string | null | undefined): string => {
+    if (!iso) return '—';
+    const [y, m, d] = iso.split('-');
+    return y && m && d ? `${d}.${m}` : iso;
+};
+
 export const STATUS_LABEL: Record<LoanStatus, string> = {
     ACTIVE: 'Активный',
     CLOSED: 'Закрыт',

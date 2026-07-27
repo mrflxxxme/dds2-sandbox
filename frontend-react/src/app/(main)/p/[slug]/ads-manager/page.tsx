@@ -11,7 +11,7 @@ import AdSections from './components/AdSections';
 import GlueTable from './components/GlueTable';
 import ScheduleModal from './components/ScheduleModal';
 import BudgetLedgerModal from './components/BudgetLedgerModal';
-import WbThumb from './components/WbThumb';
+import WbThumb from '@/components/WbThumb';
 import AdsPeriodPicker from './components/AdsPeriodPicker';
 import InfoTip from './components/InfoTip';
 import Tooltip from './components/Tooltip';

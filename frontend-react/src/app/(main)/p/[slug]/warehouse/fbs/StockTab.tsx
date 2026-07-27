@@ -1,10 +1,14 @@
 'use client';
 /**
- * Вкладка «Остатки» — превью того, что уйдёт в WB, с ПОЛНОЙ расшифровкой вычетов
- * (сток → в сборке → открытые FBS-заказы → буфер → расчёт → ручное кол-во → отдаём),
- * выбор «что отдаём» (все остатки / только то, чего нет на FBO), потоварная
- * замена количества прямо в строке, массовые действия, кнопка «Передать остатки»
- * (асинхронно) и лог прогонов трансляции.
+ * Вкладка «Остатки» — что стоит в кабинете WB против того, что мы можем отдать,
+ * с ПОЛНОЙ расшифровкой вычетов (остаток → в сборке → продано по FBS → буфер →
+ * можем отдать), редактируемым полем «Кол-во» прямо в строке, выбором «что
+ * отдаём» (все остатки / только то, чего нет на FBO), массовыми действиями,
+ * кнопкой «Передать остатки» (асинхронно) и логом прогонов трансляции.
+ *
+ * Два расхождения с кабинетом подсвечены строкой и вынесены в счётчики-фильтры:
+ * «в WB больше, чем отдадим» (WB продаёт то, чего нет) и «в WB ноль, а товар
+ * есть» (позиция не продаётся) — см. `stockAlertOf`.
  *
  * Ручное количество пишется в НАШУ базу и в WB ничего не меняет, поэтому его
  * поля работают в любом режиме контура (writeEnabled гасит только передачу).
@@ -21,6 +25,7 @@ import type {
 } from '@/types/api';
 import {
     OVERRIDE_HINT,
+    STOCK_SOURCE_LABEL,
     giveModeOf,
     giveModePayloadValue,
     isTranslating,
@@ -29,15 +34,23 @@ import {
 } from './fbsShared';
 import { EnableTranslationModal, ReconcileModal, isFirstTimeWarehouse } from './fbsReconcile';
 import {
+    BOX_FILTER_LABEL,
     GROUP_LABEL,
     GROUP_NONE_KEY,
     MiniKpi,
+    STOCK_ALERT_HINT,
+    boxStateOf,
     buildGroupColumns,
     buildPushColumns,
     buildStockColumns,
+    matchesBoxFilter,
     parseOverrideInput,
+    stockAlertOf,
+    stockRowClassName,
+    type BoxState,
     type GroupAgg,
     type GroupBy,
+    type StockAlert,
 } from './stockColumns';
 
 /** Опрос лога: 3 с × 40 = 2 минуты — дольше прогон не живёт (таймаут джоба 300 c). */
@@ -78,6 +91,10 @@ export default function StockTab({
     const [onlyOverridden, setOnlyOverridden] = useState(false);
     /** Спрятать позиции с нулевым расчётом — их в списке большинство, а уедет ноль. */
     const [hideZero, setHideZero] = useState(false);
+    /** Показать только строки с расхождением с кабинетом WB ('' — все). */
+    const [alertFilter, setAlertFilter] = useState<StockAlert | ''>('');
+    /** Срез по коробам: все с коробами / без россыпи / не продаётся нигде ('' — не фильтруем). */
+    const [boxFilter, setBoxFilter] = useState<BoxState | ''>('');
 
     // Разрезы: фильтры + группировка
     const [brandFilter, setBrandFilter] = useState('');
@@ -123,9 +140,22 @@ export default function StockTab({
     const giveMode = giveModeOf(selected?.fbo_max_qty);
     const translating = isTranslating(selected?.mode);
 
-    // Смена склада WB обнуляет выделение: id номенклатур на другом складе другие
+    // Смена склада WB обнуляет выделение: id номенклатур на другом складе другие.
+    //
+    // Заодно снимаем ВСЕ срезы, привязанные к данным склада. Иначе фильтр
+    // переживает переключение и молча прячет всё: у склада без коробов счётчик
+    // «Не продаётся нигде» не рисуется вовсе, сбросить его нечем, и экран читается
+    // как «склад перестал работать» (поймано на «Газик Диваны»: 1 462 позиции в
+    // счётчиках против пустой таблицы). Бренд/предмет/под-категория — та же беда:
+    // их список свой у каждого склада. Общие тумблеры (поиск, «скрыть нулевые»)
+    // работают везде одинаково и переживают смену склада намеренно.
     useEffect(() => {
         setSelectedIds(new Set());
+        setBoxFilter('');
+        setAlertFilter('');
+        setBrandFilter('');
+        setSubjectFilter('');
+        setSubcatFilter('');
     }, [wbWarehouseId]);
 
     const loadPreview = useCallback(async (signal?: AbortSignal) => {
@@ -368,6 +398,8 @@ export default function StockTab({
             if (!showFboHeld && r.blocked_reason === 'fbo_in_stock') return false;
             if (onlyProblems && !r.blocked_reason && r.chrt_id != null) return false;
             if (onlyOverridden && r.override_qty == null) return false;
+            if (alertFilter && stockAlertOf(r) !== alertFilter) return false;
+            if (boxFilter && !matchesBoxFilter(r, boxFilter)) return false;
             // Нули в списке не мусор: позиция могла быть продана (открытый
             // FBS-заказ) или уже уехать в WB и теперь обязана уехать нулём.
             // Поэтому это фильтр показа, а не отбрасывание строк из расчёта.
@@ -386,8 +418,84 @@ export default function StockTab({
                 || String(r.chrt_id ?? '').includes(q)
             );
         });
-    }, [allRows, search, showFboHeld, onlyProblems, onlyOverridden, hideZero,
-        brandFilter, subjectFilter, subcatFilter]);
+    }, [allRows, search, showFboHeld, onlyProblems, onlyOverridden, hideZero, alertFilter,
+        boxFilter, brandFilter, subjectFilter, subcatFilter]);
+
+    /**
+     * Коробá в трёх срезах — очередь на поштучную приёмку у ФФ, от «просто лежит»
+     * к «мёртвый груз». Считаем по всему превью: включённый фильтр не должен
+     * обнулять собственный счётчик.
+     */
+    const boxed = useMemo(() => {
+        const mk = () => ({ positions: 0, pieces: 0, boxes: 0 });
+        const acc = { boxed: mk(), no_loose: mk(), dead: mk() };
+        for (const r of allRows) {
+            const state = boxStateOf(r);
+            if (state === null) continue;
+            const pieces = num(r.qty_ff_boxed);
+            const boxes = num(r.ff_box_count);
+            for (const key of ['boxed', 'no_loose', 'dead'] as const) {
+                if (!matchesBoxFilter(r, key)) continue;
+                acc[key].positions += 1;
+                acc[key].pieces += pieces;
+                acc[key].boxes += boxes;
+            }
+        }
+        return acc;
+    }, [allRows]);
+
+    /**
+     * Счётчики расхождений с кабинетом — по ВСЕМУ превью, а не по видимым
+     * строкам: иначе включённый фильтр «в WB ноль» обнулял бы счётчик «в WB
+     * больше», и казалось бы, что проблема ушла.
+     */
+    const alertCounts = useMemo(() => {
+        let over = 0;
+        let missing = 0;
+        for (const r of allRows) {
+            // Придержанные FBO-гейтом позиции в счёт не берём: их ноль в кабинете
+            // — это наше собственное решение, а не потерянная продажа.
+            if (r.blocked_reason === 'fbo_in_stock') continue;
+            const alert = stockAlertOf(r);
+            if (alert === 'over') over += 1;
+            else if (alert === 'missing') missing += 1;
+        }
+        return { over, missing };
+    }, [allRows]);
+
+    /**
+     * Какие срезы сейчас что-то прячут. Нужны, чтобы пустая таблица объяснялась
+     * фильтром, а не выглядела сломанным складом: часть счётчиков-фильтров
+     * (короба) на складе без коробов не рисуется вовсе, и снять их было бы нечем.
+     */
+    const activeFilters = useMemo(() => {
+        const list: string[] = [];
+        if (boxFilter) list.push(BOX_FILTER_LABEL[boxFilter]);
+        if (alertFilter) {
+            list.push(alertFilter === 'over' ? 'В WB больше, чем отдадим' : 'В WB ноль, а товар есть');
+        }
+        if (search.trim()) list.push(`поиск «${search.trim()}»`);
+        if (brandFilter) list.push(`бренд «${brandFilter}»`);
+        if (subjectFilter) list.push(`предмет «${subjectFilter}»`);
+        if (subcatFilter !== '') list.push('под-категория');
+        if (onlyProblems) list.push('только проблемные');
+        if (onlyOverridden) list.push('только с ручным кол-вом');
+        if (hideZero) list.push('скрыть нулевые');
+        return list;
+    }, [boxFilter, alertFilter, search, brandFilter, subjectFilter, subcatFilter,
+        onlyProblems, onlyOverridden, hideZero]);
+
+    const resetFilters = useCallback(() => {
+        setBoxFilter('');
+        setAlertFilter('');
+        setSearch('');
+        setBrandFilter('');
+        setSubjectFilter('');
+        setSubcatFilter('');
+        setOnlyProblems(false);
+        setOnlyOverridden(false);
+        setHideZero(false);
+    }, []);
 
     /** Варианты разрезов берём из самих строк — это ровно то, что есть на складе. */
     const facets = useMemo(() => {
@@ -490,7 +598,7 @@ export default function StockTab({
         [allRows],
     );
 
-    /** Сколько выделенных позиций получат своё число из «Источника». */
+    /** Сколько выделенных позиций получат своё число из колонки «Остаток». */
     const selectedFactCount = useMemo(() => {
         let n = 0;
         for (const r of allRows) {
@@ -501,7 +609,7 @@ export default function StockTab({
     }, [allRows, selectedIds]);
 
     /**
-     * Проставить фактический остаток: каждой выделенной позиции — её «Источник».
+     * Проставить фактический остаток: каждой выделенной позиции — её «Остаток».
      *
      * Берём именно `qty_source`, а не зеркало напрямую: источник УЖЕ собран по
      * правилу склада (есть интеграция WMS → зеркало участвует, нет — наш учёт),
@@ -867,6 +975,13 @@ export default function StockTab({
                     (или проверьте ключ WB), затем пересчитайте превью.
                 </div>
             )}
+            {preview && preview.wb_stock_known === false && (
+                <div className="glass-card" style={{ padding: 12, marginBottom: 12, fontSize: 13, color: 'var(--color-warning)' }}>
+                    ⚠️ Кабинет WB не прочитан — колонка <strong>«В WB»</strong> пуста, поле «Кол-во»
+                    предзаполнить нечем, а расхождения посчитать не из чего. Проверьте ключ
+                    «Маркетплейс» в Настройках → Интеграции и нажмите «Пересчитать».
+                </div>
+            )}
             {preview && preview.rows_no_chrt > 0 && (
                 <div className="glass-card" style={{ padding: 12, marginBottom: 12, fontSize: 13, color: 'var(--color-warning)' }}>
                     ⚠️ Позиций без chrtId: <strong>{formatNumber(preview.rows_no_chrt, 0)}</strong> — они не транслируются
@@ -917,7 +1032,7 @@ export default function StockTab({
                         className="btn btn-secondary btn-sm"
                         disabled={qtyBusy || selectedFactCount === 0}
                         onClick={() => applyFactQty([...selectedIds])}
-                        title="Каждой позиции проставить её остаток из колонки «Источник» — там, где склад интегрирован с WMS, это остаток по зеркалу ФФ"
+                        title="Каждой позиции проставить её остаток из колонки «Остаток» — там, где склад интегрирован с WMS, это остаток по зеркалу ФФ"
                     >
                         📥 Проставить остаток ({selectedFactCount})
                     </button>
@@ -983,15 +1098,71 @@ export default function StockTab({
                     }}>
                         <MiniKpi label="Позиций" value={preview.total_rows} />
                         <MiniKpi label="Штук к передаче" value={preview.total_units} />
+                        <MiniKpi
+                            label="В WB больше, чем отдадим"
+                            value={alertCounts.over}
+                            danger={alertCounts.over > 0}
+                            title={`${STOCK_ALERT_HINT.over} Клик — показать только такие позиции.`}
+                            active={alertFilter === 'over'}
+                            onClick={() => setAlertFilter(f => (f === 'over' ? '' : 'over'))}
+                        />
+                        <MiniKpi
+                            label="В WB ноль, а товар есть"
+                            value={alertCounts.missing}
+                            warning={alertCounts.missing > 0}
+                            title={`${STOCK_ALERT_HINT.missing} Клик — показать только такие позиции.`}
+                            active={alertFilter === 'missing'}
+                            onClick={() => setAlertFilter(f => (f === 'missing' ? '' : 'missing'))}
+                        />
+                        {boxed.boxed.pieces > 0 && (
+                            <MiniKpi
+                                label={`В коробах · ${formatNumber(boxed.boxed.boxes, 0)} кор.`}
+                                value={boxed.boxed.pieces}
+                                title={`${formatNumber(boxed.boxed.positions, 0)} позиций лежат у ФФ коробами `
+                                    + 'и в остаток не входят: продать штуку из невскрытого короба нельзя. '
+                                    + 'Столько встанет в FBS после поштучной приёмки. Клик — показать их.'}
+                                active={boxFilter === 'boxed'}
+                                onClick={() => setBoxFilter(f => (f === 'boxed' ? '' : 'boxed'))}
+                            />
+                        )}
+                        {boxed.no_loose.pieces > 0 && (
+                            <MiniKpi
+                                label={`В коробах, нет в остатке · ${formatNumber(boxed.no_loose.boxes, 0)} кор.`}
+                                value={boxed.no_loose.pieces}
+                                warning
+                                title={`${formatNumber(boxed.no_loose.positions, 0)} позиций: товар у ФФ есть, `
+                                    + 'но весь в коробах, а россыпи ноль — по FBS они не продаются вовсе, '
+                                    + 'пока ФФ не вскроет короб и не примет поштучно. Клик — показать их.'}
+                                active={boxFilter === 'no_loose'}
+                                onClick={() => setBoxFilter(f => (f === 'no_loose' ? '' : 'no_loose'))}
+                            />
+                        )}
+                        {boxed.dead.pieces > 0 && (
+                            <MiniKpi
+                                label={`Не продаётся нигде · ${formatNumber(boxed.dead.boxes, 0)} кор.`}
+                                value={boxed.dead.pieces}
+                                danger
+                                title={`${formatNumber(boxed.dead.positions, 0)} позиций лежат мёртвым грузом: `
+                                    + 'россыпи нет (по FBS не продаются) и на складах WB тоже ноль '
+                                    + '(с FBO не продаются). Первые кандидаты на поштучную приёмку. '
+                                    + 'Клик — показать их.'}
+                                active={boxFilter === 'dead'}
+                                onClick={() => setBoxFilter(f => (f === 'dead' ? '' : 'dead'))}
+                            />
+                        )}
                         <MiniKpi label="Без chrtId" value={preview.rows_no_chrt} danger={preview.rows_no_chrt > 0} />
                         <MiniKpi label="С ручным кол-вом" value={overriddenCount} />
                     </div>
 
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
-                        Расчёт = max(0, Источник − В сборке − Буфер) по всем привязанным складам
-                        − открытые FBS-заказы{selected && selected.max_qty_per_sku > 0
+                        Остаток = что реально свободно; сборка снимается с обеих сторон, чтобы не
+                        вычесть её дважды. Источник склада — <strong>{
+                            STOCK_SOURCE_LABEL[selected?.stock_source ?? 'min_of_both']
+                        }</strong> (меняется на вкладке «Склады»).
+                        Можем отдать = max(0, Остаток − Буфер) по всем привязанным складам
+                        − проданное по FBS{selected && selected.max_qty_per_sku > 0
                             ? `, но не больше ${formatNumber(selected.max_qty_per_sku, 0)} шт на SKU`
-                            : ''}. Отдаём = min(ручное кол-во, Расчёт); позиции с кол-вом 0 уходят нулём
+                            : ''}. В WB уедет min(Кол-во, Можем отдать); позиции с кол-вом 0 уходят нулём
                         {giveMode === 'no_fbo'
                             ? (fboMirrorMissing
                                 // Утверждать блокировку, когда зеркала FBO нет, нельзя:
@@ -1045,26 +1216,57 @@ export default function StockTab({
                                 </span>
                             </label>
                         )}
+                        {alertFilter && (
+                            <button
+                                className="btn btn-sm"
+                                onClick={() => setAlertFilter('')}
+                                title="Вернуть все позиции"
+                            >
+                                ✕ {alertFilter === 'over' ? 'В WB больше, чем отдадим' : 'В WB ноль, а товар есть'}
+                            </button>
+                        )}
+                        {boxFilter && (
+                            <button className="btn btn-sm" onClick={() => setBoxFilter('')} title="Вернуть все позиции">
+                                ✕ {BOX_FILTER_LABEL[boxFilter]}
+                            </button>
+                        )}
                         {selectedCount > 0 && (
                             <button className="btn btn-sm" onClick={() => setSelectedIds(new Set())}>
                                 Снять выделение
                             </button>
                         )}
                         <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                            Поле «Кол-во» пишется в нашу базу и работает в любом режиме контура.
-                            Пусто — расчёт, 0 — не отдавать.
+                            В поле «Кол-во» подставлен остаток из кабинета WB — правьте прямо в строке.
+                            Пусто — расчёт, 0 — не отдавать. Пишется в нашу базу и работает в любом
+                            режиме контура.
                         </span>
                     </div>
 
-                    <TanStackDataTable
-                        columns={cols}
-                        data={rows}
-                        exportName={`FBS_остатки_${warehouseName || wbWarehouseId}`}
-                        enableSorting
-                        enablePagination={rows.length > 100}
-                        pageSize={100}
-                        emptyText="Ничего не найдено"
-                    />
+                    {rows.length === 0 && activeFilters.length > 0 ? (
+                        <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>
+                            <div style={{ fontSize: 32, marginBottom: 8 }}>🔍</div>
+                            <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>
+                                Под фильтры не попала ни одна из {formatNumber(allRows.length, 0)} позиций
+                            </div>
+                            <div style={{ color: 'var(--color-text-muted)', fontSize: 13, marginBottom: 14 }}>
+                                Активные срезы: {activeFilters.join(' · ')}
+                            </div>
+                            <button className="btn btn-primary btn-sm" onClick={resetFilters}>
+                                Сбросить фильтры
+                            </button>
+                        </div>
+                    ) : (
+                        <TanStackDataTable
+                            columns={cols}
+                            data={rows}
+                            exportName={`FBS_остатки_${warehouseName || wbWarehouseId}`}
+                            enableSorting
+                            enablePagination={rows.length > 100}
+                            pageSize={100}
+                            rowClassName={stockRowClassName}
+                            emptyText="Ничего не найдено"
+                        />
+                    )}
                 </>
             )}
 

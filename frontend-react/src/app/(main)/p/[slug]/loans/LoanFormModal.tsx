@@ -4,11 +4,6 @@ import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import type { Loan, LoanCreate, LoanEntityType, LoanDirection, LoanStatus, CounterpartyListItem } from '@/types/api';
 
-const overlay: React.CSSProperties = {
-    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex',
-    alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16,
-};
-
 const today = () => new Date().toISOString().slice(0, 10);
 
 type Mode = 'create' | 'edit';
@@ -125,8 +120,8 @@ export default function LoanFormModal({
     );
 
     return (
-        <div style={overlay} onClick={onClose}>
-            <div className="glass-card" style={{ maxWidth: 640, width: '94%', maxHeight: '90vh', overflow: 'auto' }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-card modal-card-solid modal-card-wide" style={{ maxHeight: '90vh', overflow: 'auto' }} onClick={(e) => e.stopPropagation()}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                     <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>{mode === 'create' ? 'Новый займ' : 'Редактировать займ'}</h3>
                     <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>

@@ -20,10 +20,88 @@ ZERO = Decimal("0")
 _CENTS = Decimal("0.01")
 DAYS_PER_YEAR = Decimal("365")
 
+# День месяца, которым режется период начисления процентов. Проценты у нас
+# считаются НЕ от годовщины выдачи займа, а по календарной сетке «25 → 25»:
+# период (25 прошлого месяца → 25 текущего], метка периода = дата выплаты.
+# Сверено с боевым реестром: период «25.06.2026» по Прохорову = 262 863,01 ₽
+# копейка-в-копейку (34 заёмщика из 35). Переопределяется настройкой проекта
+# `loan_accrual_day`.
+ACCRUAL_DAY = 25
+
 
 def _q(value: Decimal) -> Decimal:
     """Округление денег до копеек."""
     return value.quantize(_CENTS, rounding=ROUND_HALF_UP)
+
+
+def _anchor(year: int, month: int, day: int) -> date:
+    """Дата `day`-го числа в месяце, с клампом к длине месяца (31 → 30/28)."""
+    return date(year, month, min(day, calendar.monthrange(year, month)[1]))
+
+
+def accrual_period(as_of: date, day: int = ACCRUAL_DAY) -> tuple[date, date]:
+    """
+    Период начисления, содержащий `as_of`: (начало, конец].
+
+    Конец — дата выплаты процентов и одновременно метка периода: период
+    «25.08» = 25.07 → 25.08. Якоря считаются от (год, месяц), а не сдвигом
+    предыдущей даты, иначе при `day=31` границы уползают (28 фев → 28 мар).
+    """
+    if as_of >= _anchor(as_of.year, as_of.month, day):
+        y, m = as_of.year, as_of.month
+    else:
+        prev = add_months(date(as_of.year, as_of.month, 1), -1)
+        y, m = prev.year, prev.month
+    start = _anchor(y, m, day)
+    nxt = add_months(date(y, m, 1), 1)
+    return start, _anchor(nxt.year, nxt.month, day)
+
+
+def accrued_in_window(
+    *,
+    principal: Decimal,
+    rate: Decimal | None,
+    start_date: date,
+    payments: list[PaymentLite] | None,
+    win_start: date,
+    win_end: date,
+) -> Decimal:
+    """
+    Проценты за окно [win_start, win_end) на ФАКТИЧЕСКИЙ остаток тела.
+
+    Тело ступенчато падает на каждом PRINCIPAL_REPAY, поэтому займ, погашенный
+    в середине периода, начисляет ровно за дни, что был жив (боевой кейс:
+    Семериков вернул 3 млн на второй день периода → 4 602,74 ₽, а не полный
+    месяц и не ноль).
+    """
+    r = Decimal(str(rate)) if rate is not None else ZERO
+    if r <= ZERO or principal <= ZERO:
+        return ZERO
+    lo = max(win_start, start_date)
+    if win_end <= lo:
+        return ZERO
+
+    repays = sorted(
+        (
+            (p.paid_at, Decimal(str(p.amount or 0)))
+            for p in (payments or [])
+            if p.payment_type == "PRINCIPAL_REPAY"
+        ),
+        key=lambda x: x[0],
+    )
+    outstanding = principal - sum((amt for d, amt in repays if d <= lo), ZERO)
+    total = ZERO
+    cursor = lo
+    for d, amt in repays:
+        if d <= lo or d >= win_end:
+            continue
+        if outstanding > ZERO:
+            total += outstanding * r * Decimal((d - cursor).days) / DAYS_PER_YEAR
+        outstanding -= amt
+        cursor = d
+    if outstanding > ZERO:
+        total += outstanding * r * Decimal((win_end - cursor).days) / DAYS_PER_YEAR
+    return _q(max(ZERO, total))
 
 
 def add_months(d: date, months: int) -> date:
@@ -51,7 +129,10 @@ class LoanCalc:
     remaining_principal: Decimal = ZERO  # тело за вычетом возвратов
     principal_repaid: Decimal = ZERO
     interest_paid: Decimal = ZERO
-    accrued_interest: Decimal = ZERO  # начислено с последней выплаты % до as_of
+    accrued_interest: Decimal = ZERO  # начислено в текущем периоде 25→25 до as_of
+    interest_due_period: Decimal = ZERO  # за ВЕСЬ текущий период — платёж на дату выплаты
+    accrual_period_start: date | None = None  # начало периода (25-е прошлого месяца)
+    accrual_period_end: date | None = None  # дата выплаты = метка периода
     accrued_interest_total: Decimal = ZERO  # начислено с начала срока до as_of
     monthly_interest: Decimal = ZERO  # остаток × ставка / 12 (run-rate)
     daily_interest: Decimal = ZERO  # остаток × ставка / 365
@@ -72,6 +153,8 @@ def compute_loan(
     status: str,
     payments: list[PaymentLite] | None = None,
     as_of: date,
+    accrual_day: int = ACCRUAL_DAY,
+    period: tuple[date, date] | None = None,
 ) -> LoanCalc:
     """Полный расчёт по займу. `rate` — годовая доля (0.28). CLOSED → нули по остатку."""
     payments = payments or []
@@ -95,6 +178,34 @@ def compute_loan(
         calc.days_to_maturity = (maturity_date - as_of).days
         calc.is_overdue = (not closed) and maturity_date < as_of and remaining > ZERO
 
+    # Период начисления 25→25. Считаем ВСЕГДА, в том числе для закрытых займов:
+    # погашенный в середине периода начисляет за дни, что был жив. Исключение —
+    # CLOSED без единой строки возврата: дату закрытия взять неоткуда, начислять
+    # нечего (иначе закрытый «вручную» займ капал бы проценты вечно).
+    # `period` — явный выбор периода (исторический срез «что было к выплате 25.07»).
+    # Начисление всё равно ограничиваем сегодняшним днём: у закрытого периода это
+    # даёт полную сумму (начислено == к выплате), у текущего — набежавшее на сейчас.
+    p_start, p_end = period if period is not None else accrual_period(as_of, accrual_day)
+    calc.accrual_period_start = p_start
+    calc.accrual_period_end = p_end
+    if r > ZERO and (not closed or any(p.payment_type == "PRINCIPAL_REPAY" for p in payments)):
+        calc.accrued_interest = accrued_in_window(
+            principal=principal,
+            rate=r,
+            start_date=start_date,
+            payments=payments,
+            win_start=p_start,
+            win_end=min(as_of, p_end),
+        )
+        calc.interest_due_period = accrued_in_window(
+            principal=principal,
+            rate=r,
+            start_date=start_date,
+            payments=payments,
+            win_start=p_start,
+            win_end=p_end,
+        )
+
     if closed or r <= ZERO or remaining <= ZERO:
         return calc
 
@@ -112,21 +223,10 @@ def compute_loan(
     elapsed = Decimal(max(0, (as_of - start_date).days))
     calc.accrued_interest_total = _q(remaining * r * elapsed / DAYS_PER_YEAR)
 
-    # Текущий период: с последней выплаты % (если есть) или с последней
-    # ежемесячной годовщины — % платятся ежемесячно, поэтому «начислено» = долг
-    # за текущий месяц, а не за весь срок (совпадает со снимком реестра).
     interest_dates = sorted(p.paid_at for p in payments if p.payment_type == "INTEREST_PAY")
     calc.last_interest_date = interest_dates[-1] if interest_dates else None
-    anchor = _recent_monthly(start_date, as_of)
-    if interest_dates and interest_dates[-1] > anchor:
-        anchor = interest_dates[-1]
-    if anchor < start_date:
-        anchor = start_date
-    since = Decimal(max(0, (as_of - anchor).days))
-    calc.accrued_interest = _q(remaining * r * since / DAYS_PER_YEAR)
-
-    # Следующая ежемесячная дата выплаты процентов (по дню start_date)
-    calc.next_interest_date = _next_monthly(start_date, as_of)
+    # Проценты платятся в конце периода начисления — это и есть дата выплаты.
+    calc.next_interest_date = p_end
 
     return calc
 
@@ -139,6 +239,51 @@ def _next_monthly(anchor: date, as_of: date) -> date:
         months += 1
         candidate = add_months(anchor, months)
     return candidate
+
+
+def period_accrual_series(
+    *,
+    principal: Decimal,
+    rate: Decimal | None,
+    start_date: date,
+    maturity_date: date | None,
+    payments: list[PaymentLite] | None,
+    since: date,
+    until: date,
+    accrual_day: int = ACCRUAL_DAY,
+) -> list[tuple[date, Decimal]]:
+    """
+    Проценты по периодам 25→25 в диапазоне [since, until]: [(дата выплаты, сумма)].
+
+    Работает и назад (факт), и вперёд (прогноз): будущие периоды считаются на
+    остаток тела до `maturity_date`. Ключ — дата выплаты, она же метка периода.
+    """
+    r = Decimal(str(rate)) if rate is not None else ZERO
+    if r <= ZERO or principal <= ZERO or until < since:
+        return []
+
+    out: list[tuple[date, Decimal]] = []
+    p_start, p_end = accrual_period(since, accrual_day)
+    guard = 0
+    while p_start <= until and guard < 600:
+        guard += 1
+        win_end = p_end
+        if maturity_date is not None and maturity_date < win_end:
+            win_end = maturity_date
+        amount = accrued_in_window(
+            principal=principal,
+            rate=r,
+            start_date=start_date,
+            payments=payments,
+            win_start=p_start,
+            win_end=win_end,
+        )
+        if amount > ZERO:
+            out.append((p_end, amount))
+        p_start = p_end
+        nxt = add_months(date(p_end.year, p_end.month, 1), 1)
+        p_end = _anchor(nxt.year, nxt.month, accrual_day)
+    return out
 
 
 def _recent_monthly(anchor: date, as_of: date) -> date:

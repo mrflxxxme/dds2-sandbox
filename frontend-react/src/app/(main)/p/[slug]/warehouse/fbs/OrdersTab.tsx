@@ -13,6 +13,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
+import WbThumb from '@/components/WbThumb';
+import { wbProductUrl } from '@/lib/wbMedia';
 import type { Column } from '@/components/DataTable';
 import type {
     FbsOrder,
@@ -403,13 +405,38 @@ export default function OrdersTab({
             ),
         },
         {
-            key: 'article', label: 'Товар', width: '200px',
+            key: 'article', label: 'Товар', width: '250px',
             render: (v: string | null, row: FbsOrder) => (
-                <div>
-                    <div style={{ fontWeight: 500 }}>{v || row.barcode || '—'}</div>
-                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                        {row.subject ? `${row.subject} · ` : ''}{row.nm_id ? `nm ${row.nm_id}` : ''}
-                        {row.chrt_id ? ` · chrt ${row.chrt_id}` : ''}
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                    {row.nm_id ? (
+                        <a
+                            href={wbProductUrl(row.nm_id)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title="Открыть карточку товара на Wildberries"
+                        >
+                            <WbThumb nmId={row.nm_id} size={36} />
+                        </a>
+                    ) : (
+                        <WbThumb nmId={null} size={36} />
+                    )}
+                    <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 500 }}>{v || row.barcode || '—'}</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                            {row.subject ? `${row.subject} · ` : ''}
+                            {row.nm_id ? (
+                                <a
+                                    href={wbProductUrl(row.nm_id)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    style={{ color: 'var(--color-accent)' }}
+                                    title="Открыть карточку товара на Wildberries"
+                                >
+                                    nm {row.nm_id}
+                                </a>
+                            ) : null}
+                            {row.chrt_id ? ` · chrt ${row.chrt_id}` : ''}
+                        </div>
                     </div>
                 </div>
             ),

@@ -2086,7 +2086,20 @@ function FfStocksTab({ warehouseId, provider }: { warehouseId: number; provider:
             { key: 'ff_inbound_locked', label: 'В приёмке', align: 'right', format: 'number' },
         ] as Column[]) : []),
         {
-            key: 'ff_defect', label: 'ФФ брак', align: 'right',
+            // У migfull поля брака в API НЕТ, и эта цифра — остаток от вычитания
+            // (заблокировано − собрано − в приёмке), а не измерение. Живая сверка
+            // кабинета натали 27.07.2026: половина заблокированного не объясняется
+            // ничем из того, что отдаёт их API, а на разобранном SKU это оказался
+            // товар НА СБОРКЕ. Называть такое браком — врать, поэтому у migfull
+            // колонка честно зовётся «Прочая блокировка».
+            key: 'ff_defect', label: isMigfull ? 'Блокировка проч.' : 'ФФ брак',
+            align: 'right', headerWrap: true,
+            headerTitle: isMigfull
+                ? 'Заблокировано у ФФ БЕЗ объяснения: резерв минус собранное под активные '
+                  + 'отгрузки минус приёмки. Это НЕ брак — поля брака у Натали в API нет. '
+                  + 'Сюда попадает в том числе товар на сборке по недавно закрытым отгрузкам. '
+                  + 'Реальный брак по такому складу — только в колонке «У нас брак».'
+                : 'Брак по данным провайдера (отдельное поле API)',
             render: (v: number) => (
                 <span style={{ color: v > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)', fontWeight: v > 0 ? 600 : 400 }}>
                     {formatNumber(v, 0)}
@@ -2112,7 +2125,11 @@ function FfStocksTab({ warehouseId, provider }: { warehouseId: number; provider:
             { label: 'Собрано', value: totals.ff_reserve_ready, color: 'var(--color-accent)' },
             ...(totals.ff_inbound_locked > 0 ? [{ label: 'В приёмке', value: totals.ff_inbound_locked, color: 'var(--color-accent)' }] : []),
         ] : []),
-        { label: 'Брак ФФ', value: totals.ff_defect, color: totals.ff_defect > 0 ? 'var(--color-warning)' : undefined },
+        {
+            label: isMigfull ? 'Блокировка проч.' : 'Брак ФФ',
+            value: totals.ff_defect,
+            color: totals.ff_defect > 0 ? 'var(--color-warning)' : undefined,
+        },
         ...(totals.ff_box_units > 0 ? [{ label: 'В коробах', value: totals.ff_box_units, color: 'var(--color-accent)' }] : []),
         { label: 'У нас', value: totals.our_quantity },
         { label: 'Расхождение', value: totals.diff, color: totals.diff > 0 ? 'var(--color-success)' : totals.diff < 0 ? 'var(--color-danger)' : undefined, filter: 'diff' },

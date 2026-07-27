@@ -3,7 +3,7 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import { cThStyle as thStyle, cThLeft as thLeft, tdStyle, tdLeft, mskTime } from './adsShared';
-import WbThumb from './WbThumb';
+import WbThumb from '@/components/WbThumb';
 import { IcCopy } from './icons';
 import { useToast } from './Toasts';
 import type { AdTabProduct, FunnelSkuRow, AdsBudgetGap, AdsBudgetGapHistory } from '@/types/api';

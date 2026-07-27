@@ -362,6 +362,14 @@ def _pick_repay_target(
     return max(chosen, key=lambda loan: loan.start_date)
 
 
+def _norm_contract(contract: str) -> str:
+    """Ключ номера договора без пробелов и ведущих нулей в суффиксе: «10 -01» → «10-1»."""
+    parts = [p.strip() for p in re.split(r"\s*-\s*", contract.strip())]
+    head = parts[0]
+    tail = [p.lstrip("0") or "0" for p in parts[1:]]
+    return "-".join([head, *tail]).lower()
+
+
 def _link_extension_chains(by_cp_contract: dict[tuple[int, str], list[Loan]]) -> None:
     """Link parent_loan_id for «X-NN» contracts to their predecessor (same cp)."""
     per_cp: dict[int, dict[str, Loan]] = {}
@@ -370,14 +378,21 @@ def _link_extension_chains(by_cp_contract: dict[tuple[int, str], list[Loan]]) ->
         per_cp.setdefault(cp_id, {})[contract] = min(loans, key=lambda loan: loan.start_date)
 
     for cp_id, contracts in per_cp.items():
+        # Номера в реестре записаны неровно («08 -02», «54 - 02», «40-01»), поэтому
+        # ищем предшественника по НОРМАЛИЗОВАННОМУ ключу, иначе цепочка рвётся со
+        # второго звена: «10 -02» искал «10-01» и не находил «10 -01».
+        norm = {_norm_contract(c): loan for c, loan in contracts.items()}
         for contract, loan in contracts.items():
             m = re.match(r"^(.+?)\s*-\s*(\d+)\s*$", contract)
             if not m or loan.parent_loan_id is not None:
                 continue
             base, num = m.group(1).strip(), int(m.group(2))
-            predecessor = f"{base}-{num - 1:02d}" if num > 1 else None
-            cands = [predecessor] if predecessor else [base, base.lstrip("0"), f"0{base}"]
+            if num > 1:
+                cands = [f"{base}-{num - 1:02d}", f"{base}-{num - 1}"]
+            else:
+                cands = [base, base.lstrip("0"), f"0{base}"]
             for cand in cands:
-                if cand and cand in contracts and contracts[cand] is not loan:
-                    loan.parent_loan_id = contracts[cand].id
+                target = norm.get(_norm_contract(cand))
+                if target is not None and target is not loan:
+                    loan.parent_loan_id = target.id
                     break

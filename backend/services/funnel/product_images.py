@@ -5,9 +5,11 @@
 и не зависеть от угадывания basket-хоста (серые плейсхолдеры).
 """
 
+import asyncio
 import io
 import logging
 import math
+import time
 
 import aiohttp
 import httpx
@@ -62,23 +64,43 @@ async def get_cached(nm_id: int) -> bytes | None:
         return None
 
 
+async def _try_basket(client: httpx.AsyncClient, nm_id: int, basket: int) -> bytes | None:
+    """Одна попытка: None — этого фото на этом хосте нет."""
+    try:
+        r = await client.get(_url(nm_id, basket))
+    except httpx.HTTPError:
+        return None
+    if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
+        return r.content
+    return None
+
+
 async def _download_from_wb(nm_id: int) -> bytes | None:
-    """Найти рабочий basket-хост и скачать фото. Сначала — вычисленный кандидат,
-    затем ограниченный перебор (для nm_id, где формула промахивается)."""
-    vol = nm_id // 100000
-    candidate = _candidate_basket(vol)
-    order: list[int] = [candidate]
-    for n in range(1, 41):  # фолбэк-скан, cap 40
-        if n not in order:
-            order.append(n)
-    async with httpx.AsyncClient(timeout=6.0, follow_redirects=False) as client:
-        for basket in order:
-            try:
-                r = await client.get(_url(nm_id, basket))
-            except httpx.HTTPError:
-                continue
-            if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
-                return r.content
+    """Найти рабочий basket-хост и скачать фото.
+
+    Сначала — вычисленный кандидат (в подавляющем большинстве случаев он и верный),
+    и только при промахе формулы — остальные хосты ВЕЕРОМ, а не по одному.
+
+    Последовательный скан 40 хостов по 6 секунд был самоубийственным: у товара, фото
+    которого нет вовсе, каждый показ строки стоил до 40 запросов подряд, а таблица
+    остатков рисует сотню строк разом. Бэкенд захлёбывался, картинки не успевали
+    загрузиться, и на экране оставались серые плейсхолдеры — «фото не везде».
+    """
+    candidate = _candidate_basket(nm_id // 100000)
+    async with httpx.AsyncClient(timeout=4.0, follow_redirects=False) as client:
+        data = await _try_basket(client, nm_id, candidate)
+        if data:
+            return data
+        others = [n for n in range(1, 41) if n != candidate]
+        tasks = [asyncio.create_task(_try_basket(client, nm_id, n)) for n in others]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                found = await fut
+                if found:
+                    return found
+        finally:
+            for t in tasks:
+                t.cancel()
     return None
 
 
@@ -99,9 +121,46 @@ async def fetch_and_cache(nm_id: int) -> bytes | None:
     return data
 
 
+#: «У WB этого фото нет» — помним, чтобы не сканировать хосты на каждый показ строки.
+#: Не навсегда: карточку могут наполнить позже, и картинка должна появиться сама.
+_MISS_TTL_SEC = 6 * 3600
+_misses: dict[int, float] = {}
+#: Один и тот же nm_id в полёте качаем ОДИН раз: таблица остатков рисует сотню
+#: строк разом, и без дедупа один товар уходил бы в WB столько раз, сколько его
+#: строк на экране.
+_inflight: dict[int, asyncio.Task[bytes | None]] = {}
+
+
+def _miss_is_fresh(nm_id: int) -> bool:
+    until = _misses.get(nm_id)
+    if until is None:
+        return False
+    if until > time.monotonic():
+        return True
+    _misses.pop(nm_id, None)
+    return False
+
+
 async def get_or_fetch(nm_id: int) -> bytes | None:
-    """Главная точка: из кэша, иначе скачать+сохранить."""
+    """Главная точка: из кэша, иначе скачать+сохранить (с дедупом и памятью промахов)."""
     cached = await get_cached(nm_id)
     if cached is not None:
         return cached
-    return await fetch_and_cache(nm_id)
+    if _miss_is_fresh(nm_id):
+        return None
+
+    task = _inflight.get(nm_id)
+    if task is None:
+        task = asyncio.create_task(fetch_and_cache(nm_id))
+        _inflight[nm_id] = task
+        try:
+            data = await asyncio.shield(task)
+        finally:
+            _inflight.pop(nm_id, None)
+    else:
+        # Чужую задачу не шилдим и не отменяем: её владелец доведёт до конца.
+        data = await asyncio.shield(task)
+
+    if data is None:
+        _misses[nm_id] = time.monotonic() + _MISS_TTL_SEC
+    return data

@@ -132,7 +132,10 @@ class LoanResponse(LoanBase):
     counterparty_name: str | None = None
     counterparty_inn: str | None = None
     remaining_principal: Decimal | None = None  # тело за вычетом возвратов
-    accrued_interest: Decimal | None = None  # начислено с последней выплаты %
+    accrued_interest: Decimal | None = None  # начислено в текущем периоде 25→25
+    interest_due_period: Decimal | None = None  # за весь период — платёж на дату выплаты
+    accrual_period_start: date | None = None  # начало периода начисления
+    accrual_period_end: date | None = None  # дата выплаты = метка периода
     monthly_interest: Decimal | None = None  # ставка/12 от остатка (run-rate)
     days_to_maturity: int | None = None  # до возврата (может быть отрицательным = просрочка)
     next_interest_date: date | None = None  # ближайшая дата выплаты %
@@ -267,12 +270,21 @@ class LoanFilter(BaseModel):
 # ─── Extend (продление) ──────────────────────────────────────────────────────
 
 
+class LoanRepay(BaseModel):
+    """Возврат тела займа: частичный или полный (полный закрывает займ)."""
+
+    amount: Decimal | None = Field(None, gt=0)  # None = весь остаток
+    paid_at: date | None = None  # None = сегодня
+    close: bool = True  # закрыть займ, если возвращён весь остаток
+
+
 class LoanExtend(BaseModel):
     """Продление займа: закрыть текущий и создать преемника с новой ставкой/сроком."""
 
     new_rate: Decimal | None = Field(None, ge=0, le=1)  # None = та же ставка
     new_start_date: date | None = None  # дата продления (по умолч. maturity старого / сегодня)
     new_maturity_date: date | None = None  # новый срок возврата
+    term_months: int | None = Field(None, ge=1, le=36)  # пресет срока: 1/2/3 мес от даты продления
     new_contract_number: str | None = Field(None, max_length=100)  # None = авто-суффикс «-NN»
     principal: Decimal | None = Field(None, gt=0)  # None = остаток тела старого
     record_repayment: bool = True  # отметить возврат тела на старом (закрытие)
@@ -307,6 +319,8 @@ class LoanEntitySplit(BaseModel):
     entity_type: str | None = None  # PHYSICAL / IP / None
     count: int = 0
     outstanding: Decimal = Decimal("0")
+    accrued_interest: Decimal = Decimal("0")  # начислено в текущем периоде 25→25
+    interest_due_period: Decimal = Decimal("0")  # к выплате за весь период
 
 
 class LoanRateBucket(BaseModel):
@@ -360,12 +374,21 @@ class LoanLenderRollup(BaseModel):
     first_loan_date: date | None = None
     last_loan_date: date | None = None
     has_portal_access: bool = False
+    interest_due_period: Decimal = Decimal("0")  # к выплате за текущий период
+    # Архив вычисляемый: нет ни одного активного займа. Флага в БД нет — контрагент
+    # остаётся живым в остальных разделах, скрывается только в «Займах».
+    is_archived: bool = False
 
 
 class LoanByLenderResponse(BaseModel):
     items: list[LoanLenderRollup] = Field(default_factory=list)
     total_outstanding: Decimal = Decimal("0")
     total_accrued: Decimal = Decimal("0")
+    total_due_period: Decimal = Decimal("0")
+    by_entity: list[LoanEntitySplit] = Field(default_factory=list)
+    accrual_period_start: date | None = None
+    accrual_period_end: date | None = None
+    archived_count: int = 0
 
 
 # ─── Forecast (Прогноз) ──────────────────────────────────────────────────────
@@ -429,3 +452,64 @@ class LoanImportResult(BaseModel):
     skipped_rows: int = 0
     lenders: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+# ─── Зависшие займы (срок вышел, решения нет) ────────────────────────────────
+
+
+class LoanStuckItem(BaseModel):
+    """Займ, по которому срок кончился, а решения не приняли."""
+
+    loan: LoanResponse
+    days_overdue: int
+    accrued_since_maturity: Decimal = Decimal("0")  # набежало после срока
+
+
+class LoanStuckResponse(BaseModel):
+    items: list[LoanStuckItem] = Field(default_factory=list)
+    total_amount: Decimal = Decimal("0")  # остаток тела зависших
+    total_accrued_since_maturity: Decimal = Decimal("0")
+    count: int = 0
+
+
+# ─── Карточка заёмщика (клик по имени в «Заёмщиках») ─────────────────────────
+
+
+class LenderPeriodPoint(BaseModel):
+    """Проценты за один период начисления 25→25 (метка = дата выплаты)."""
+
+    period_end: date  # дата выплаты и метка периода
+    period_start: date
+    interest: Decimal = Decimal("0")
+    is_current: bool = False  # период ещё не закрыт
+    is_forecast: bool = False  # будущий период
+
+
+class LenderDetail(BaseModel):
+    """Всё по одному заёмщику: итоги, история займов, проценты по периодам."""
+
+    counterparty_id: int
+    name: str
+    inn: str | None = None
+    entity_type: str | None = None
+    lender_bank: str | None = None
+    is_archived: bool = False
+
+    active_count: int = 0
+    total_count: int = 0
+    outstanding: Decimal = Decimal("0")
+    weighted_avg_rate: Decimal | None = None
+    principal_total: Decimal = Decimal("0")  # сколько всего заносил за историю
+    principal_repaid: Decimal = Decimal("0")
+    interest_paid: Decimal = Decimal("0")
+    accrued_interest: Decimal = Decimal("0")
+    interest_due_period: Decimal = Decimal("0")
+    accrual_period_start: date | None = None
+    accrual_period_end: date | None = None
+    first_loan_date: date | None = None
+    last_loan_date: date | None = None
+    next_maturity_date: date | None = None
+    has_portal_access: bool = False
+
+    loans: list[LoanResponse] = Field(default_factory=list)
+    periods: list[LenderPeriodPoint] = Field(default_factory=list)
