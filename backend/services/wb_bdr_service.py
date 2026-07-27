@@ -455,16 +455,24 @@ async def get_wb_bdr(
     sum_orders_count = 0
     sum_orders_sum = 0.0
     sum_stocks_wb = 0
+    sum_net_payout = 0.0
     for art_row in result_articles:
         enrich_article(art_row, total_real, total_sales, period_days)
         sum_orders_count += art_row.get("orders_count", 0)
         sum_orders_sum += art_row.get("orders_sum", 0)
         sum_stocks_wb += art_row.get("stocks_wb", 0)
+        # Чистая выплата суммируется ТОЛЬКО по строкам с категорией: у котла без
+        # категории (пустой sa_name) to_pay = рекламные/кредитные удержания, а
+        # их мы уже разнесли по категориям через adv_sum — иначе двойной счёт.
+        if art_row.get("sa_name"):
+            sum_net_payout += art_row.get("net_payout", 0)
 
     summary_result["orders_count"] = sum_orders_count
     summary_result["orders_sum"] = round(sum_orders_sum, 2)
     summary_result["stocks_wb"] = sum_stocks_wb
     enrich_article(summary_result, total_real, total_sales, period_days)
+    # Переопределяем сводную «Чистую выплату» суммой по категориям (см. выше).
+    summary_result["net_payout"] = round(sum_net_payout, 2)
 
     # ── 10. ABC analysis ──
     compute_abc(result_articles)
@@ -533,6 +541,7 @@ async def _reaggregate_by_classification(
         "sales_amount",
         "ret_amount",
         "to_pay",
+        "net_payout",
         "logistics",
         "storage_fee",
         "acceptance",
