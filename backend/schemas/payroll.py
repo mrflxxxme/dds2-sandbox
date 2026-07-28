@@ -5,7 +5,7 @@ Payroll schemas: сотрудники, команды, тарифная лест
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ALLOWED_SCOPE_KINDS = ["brand", "subject"]
 
@@ -127,12 +127,13 @@ class TeamScopeIn(BaseModel):
     brand: str | None = Field(None, min_length=1, max_length=300)
     subject: str | None = Field(None, min_length=1, max_length=300)
 
-    @field_validator("subject")
-    @classmethod
-    def validate_at_least_one(cls, v: str | None, info) -> str | None:
-        if v is None and info.data.get("brand") is None:
+    @model_validator(mode="after")
+    def validate_at_least_one(self) -> "TeamScopeIn":
+        # model_validator: field-валидатор не запускается на ОПУЩЕННОМ поле
+        # с дефолтом — пустой скоуп {} проходил бы валидацию.
+        if self.brand is None and self.subject is None:
             raise ValueError("scope requires brand and/or subject")
-        return v
+        return self
 
 
 class TeamIn(BaseModel):

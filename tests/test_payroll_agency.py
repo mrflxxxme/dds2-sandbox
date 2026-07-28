@@ -17,6 +17,7 @@ from backend.schemas.payroll import (
     ClientProjectUpdate,
     EmployeeIn,
     TeamIn,
+    TeamMemberIn,
     TeamMembersReplace,
 )
 from backend.services import payroll_agency_service as agency
@@ -81,8 +82,19 @@ async def _other_user_project(client) -> int:
 
 
 def _client_in(**kw) -> ClientProjectIn:
+    """Флэт-параметры формата (billing_mode/fixed_amount/fee_percent)
+    сворачиваются в один billing-период с 2020-01 — новый контракт."""
     base = dict(name=f"Клиент-{uuid.uuid4().hex[:6]}", billing_mode="fixed")
     base.update(kw)
+    mode = base.pop("billing_mode")
+    fixed = base.pop("fixed_amount", None)
+    feep = base.pop("fee_percent", None)
+    if mode == "fixed" and fixed is None:
+        fixed = D("0")  # валидатор периода требует сумму для fixed
+    if "billing_periods" not in base:
+        base["billing_periods"] = [
+            dict(month="2020-01", billing_mode=mode, fixed_amount=fixed, fee_percent=feep)
+        ]
     return ClientProjectIn(**base)
 
 
@@ -252,7 +264,7 @@ async def test_sheet_integration_agency_accruals(db_session, client, auth_header
     e2 = await payroll_service.create_employee(db_session, pid, EmployeeIn(name="Боря"))
     team = await payroll_service.create_team(db_session, pid, TeamIn(name="Ковры"))
     await payroll_service.replace_team_members(
-        db_session, pid, team.id, TeamMembersReplace(employee_ids=[e1.id, e2.id])
+        db_session, pid, team.id, TeamMembersReplace(members=[TeamMemberIn(employee_id=_x) for _x in [e1.id, e2.id]])
     )
     await _create_client_svc(
         db_session, pid,
@@ -300,7 +312,7 @@ async def test_sheet_split_remainder_three_members(db_session, client, auth_head
         emp_ids.append(emp.id)
     team = await payroll_service.create_team(db_session, pid, TeamIn(name="Трио"))
     await payroll_service.replace_team_members(
-        db_session, pid, team.id, TeamMembersReplace(employee_ids=emp_ids)
+        db_session, pid, team.id, TeamMembersReplace(members=[TeamMemberIn(employee_id=_x) for _x in emp_ids])
     )
     # fee 100000.02 × 0.45 = 45000.009 → manager 45000.01; 45000.01 / 3 не делится
     await _create_client_svc(
@@ -362,7 +374,13 @@ async def test_ladder_revision_next_month_not_applied(db_session, client, auth_h
     from backend.models.payroll import PayrollTariffStep
 
     pid = await _create_project(client, auth_headers)
-    cl = await _create_client_svc(db_session, pid, _client_in(billing_mode="percent"))
+    # Песочница-1995: период формата должен начинаться раньше дефолтного 2020-01.
+    cl = await _create_client_svc(
+        db_session, pid,
+        _client_in(billing_periods=[
+            dict(month="1990-01", billing_mode="percent", fixed_amount=None, fee_percent=None)
+        ]),
+    )
     monday = payroll_service.weeks_for_month(date(1995, 6, 1))[0][0]
     await agency.upsert_entry(
         db_session, pid, cl.id,
@@ -465,12 +483,18 @@ async def test_agency_api_crud_flow(client, auth_headers):
 
     resp = await client.post(
         "/api/v1/payroll/agency/clients",
-        json={"name": "API-клиент", "billing_mode": "profit_share", "fee_percent": "0.1"},
+        json={
+            "name": "API-клиент",
+            "billing_periods": [
+                {"month": "2020-01", "billing_mode": "profit_share", "fee_percent": "0.1"}
+            ],
+        },
         headers=headers,
     )
     assert resp.status_code == 201, resp.text
     cl = resp.json()
-    assert cl["billing_mode"] == "profit_share"
+    assert cl["current_billing"]["billing_mode"] == "profit_share"
+    assert len(cl["billing_periods"]) == 1
 
     # PATCH + entry PUT/DELETE
     resp = await client.patch(
@@ -524,7 +548,12 @@ async def test_agency_api_foreign_client_404(client, auth_headers):
     headers2, _ = await _project_headers(client, auth_headers)
     resp = await client.post(
         "/api/v1/payroll/agency/clients",
-        json={"name": "Свой", "billing_mode": "fixed", "fixed_amount": "1000"},
+        json={
+            "name": "Свой",
+            "billing_periods": [
+                {"month": "2020-01", "billing_mode": "fixed", "fixed_amount": "1000"}
+            ],
+        },
         headers=headers1,
     )
     cl_id = resp.json()["id"]

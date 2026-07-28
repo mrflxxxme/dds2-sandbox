@@ -50,7 +50,7 @@ from backend.schemas.payroll import (
     TeamUpdate,
 )
 from backend.services import payroll_agency_service, payroll_service
-from backend.services.payroll_service import PayrollNotFoundError
+from backend.services.payroll_service import PayrollConflictError, PayrollNotFoundError
 from backend.utils.rate_limit import rate_limit_write
 from backend.utils.time import utcnow
 
@@ -258,11 +258,15 @@ async def replace_team_scopes(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Полная замена скоупов (брендов/категорий) команды."""
+    """Полная замена скоупов команды: бренд / категория / композит «бренд × категория».
+
+    Композит-дубль с другой командой проекта → 409 (иначе двойной счёт базы)."""
     try:
         result = await payroll_service.replace_team_scopes(db, project.id, team_id, body)
     except PayrollNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from None
+    except PayrollConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from None
     await _invalidate_accruals(project.id)
     return result
 
@@ -279,11 +283,13 @@ async def replace_team_members(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Полная замена участников команды (все id — сотрудники этого проекта)."""
+    """Полная замена участников команды с границами членства (from/to_month)."""
     try:
         result = await payroll_service.replace_team_members(db, project.id, team_id, body)
     except PayrollNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from None
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
     await _invalidate_accruals(project.id)
     return result
 
@@ -422,6 +428,8 @@ async def create_agency_client(
         result = await payroll_agency_service.create_client(db, project.id, body, user.id)
     except PayrollNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from None
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
     await _invalidate_accruals(project.id)
     return result
 
@@ -448,6 +456,8 @@ async def update_agency_client(
         )
     except PayrollNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from None
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
     await _invalidate_accruals(project.id)
     return result
 

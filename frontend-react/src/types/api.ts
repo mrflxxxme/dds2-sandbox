@@ -8769,11 +8769,14 @@ export interface PayrollEmployeeListResponse {
   items: PayrollEmployee[];
 }
 
-export type PayrollScopeKind = 'brand' | 'subject';
-
+/**
+ * Скоуп команды: бренд, категория или пересечение (бренд × категория).
+ * Хотя бы одно поле; композит (оба) вытесняет одноимённые общие скоупы
+ * других команд — их база считается за вычетом закреплённых композитов.
+ */
 export interface PayrollTeamScope {
-  kind: PayrollScopeKind;
-  value: string;
+  brand?: string | null;
+  subject?: string | null;
 }
 
 export interface PayrollTeamIn {
@@ -8786,9 +8789,18 @@ export interface PayrollTeamUpdate {
   is_active?: boolean | null;
 }
 
+/** Участие в команде с границами по месяцам ('YYYY-MM'; null = без границы, to_month включительно). */
+export interface PayrollTeamMemberIn {
+  employee_id: number;
+  from_month?: string | null;
+  to_month?: string | null;
+}
+
 export interface PayrollTeamMember {
   employee_id: number;
   name: string;
+  from_month?: string | null;
+  to_month?: string | null;
 }
 
 export interface PayrollTeam {
@@ -8930,16 +8942,28 @@ export interface PayrollPayoutMarkIn {
 export type PayrollBillingMode = 'fixed' | 'percent' | 'profit_share';
 export type PayrollClientEntryKind = 'week_base' | 'month_profit';
 
-/** Клиент агентства. Сплит: manager_share команде, остаток агентству. */
+/** Период формата оплаты: с месяца month действует billing_mode с параметрами. */
+export interface PayrollClientBillingPeriod {
+  /** 'YYYY-MM'. */
+  month: string;
+  billing_mode: PayrollBillingMode;
+  /** Для fixed. */
+  fixed_amount?: number | string | null;
+  /** Доля от ЧП (profit_share), 0..1. */
+  fee_percent?: number | string | null;
+}
+
+/**
+ * Клиент агентства. Сплит: manager_share команде, остаток агентству.
+ * Формат оплаты — историей периодов: формат месяца M = период с max(month) <= M;
+ * до первого периода начисления нет.
+ */
 export interface PayrollClientProjectIn {
   name: string;
-  billing_mode: PayrollBillingMode;
   team_id?: number | null;
   /** Кабинет клиента в системе (percent). */
   linked_project_id?: number | null;
-  fixed_amount?: number | null;
-  /** Доля от ЧП (profit_share), 0..1. */
-  fee_percent?: number | null;
+  billing_periods?: PayrollClientBillingPeriod[] | null;
   /** Доля команды, дефолт 0.45. */
   manager_share?: number;
   is_active?: boolean;
@@ -8948,13 +8972,12 @@ export interface PayrollClientProjectIn {
 
 export interface PayrollClientProjectUpdate {
   name?: string | null;
-  billing_mode?: PayrollBillingMode | null;
   team_id?: number | null;
   clear_team?: boolean;
   linked_project_id?: number | null;
   clear_linked_project?: boolean;
-  fixed_amount?: number | null;
-  fee_percent?: number | null;
+  /** undefined — не трогать; массив (в т.ч. пустой []) — полная замена истории. */
+  billing_periods?: PayrollClientBillingPeriod[] | null;
   manager_share?: number | null;
   is_active?: boolean | null;
   notes?: string | null;
@@ -8970,13 +8993,13 @@ export interface PayrollClientEntry {
 export interface PayrollClientProject {
   id: number;
   name: string;
-  billing_mode: PayrollBillingMode;
   team_id: number | null;
   team_name?: string | null;
   linked_project_id: number | null;
   linked_project_name?: string | null;
-  fixed_amount: number | string | null;
-  fee_percent: number | string | null;
+  billing_periods: PayrollClientBillingPeriod[];
+  /** Формат, действующий в текущем месяце (для карточки; null — нет периода). */
+  current_billing: PayrollClientBillingPeriod | null;
   manager_share: number | string;
   is_active: boolean;
   notes: string | null;
@@ -9022,7 +9045,8 @@ export interface PayrollAgencyClientWeek {
 export interface PayrollAgencySheetClient {
   client_id: number;
   name: string;
-  billing_mode: PayrollBillingMode;
+  /** Формат оплаты, действовавший В РАСЧЁТНОМ месяце (null — период не задан). */
+  billing_mode: PayrollBillingMode | null;
   team_id: number | null;
   team_name: string | null;
   manager_share: number | string;

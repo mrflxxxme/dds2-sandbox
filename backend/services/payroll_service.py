@@ -25,7 +25,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Sequence
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -95,6 +95,10 @@ _SCOPE_OPTIONS_LIMIT = 500
 
 class PayrollNotFoundError(Exception):
     """Сущность не найдена в этом проекте (чужой или несуществующий id)."""
+
+
+class PayrollConflictError(Exception):
+    """Конфликт данных (напр. композит-скоуп уже закреплён за другой командой)."""
 
 
 def _money(value: Decimal | int | float | str) -> Decimal:
@@ -174,6 +178,19 @@ def resolve_salary(
             best_from = period.valid_from
             best_amount = period.amount
     return best_amount
+
+
+def member_active_in_month(member: PayrollTeamMember, month: date) -> bool:
+    """Членство в команде на расчётный месяц: valid_from <= M <= valid_to.
+
+    Границы — первые числа месяцев (NULL = без границы). Участник вне периода
+    не получает начисление месяца и НЕ участвует в делёже."""
+    first = month.replace(day=1)
+    if member.valid_from is not None and member.valid_from.replace(day=1) > first:
+        return False
+    if member.valid_to is not None and member.valid_to.replace(day=1) < first:
+        return False
+    return True
 
 
 def build_payout_plan(
@@ -288,20 +305,36 @@ async def _get_team(db: AsyncSession, project_id: int, team_id: int) -> PayrollT
     return team
 
 
+def _scope_in(scope: PayrollTeamScope) -> TeamScopeIn:
+    return TeamScopeIn(brand=scope.brand_value, subject=scope.subject_value)
+
+
+def _sorted_scopes(team: PayrollTeam) -> list[TeamScopeIn]:
+    return [
+        _scope_in(s)
+        for s in sorted(team.scopes, key=lambda s: (s.brand_value or "", s.subject_value or ""))
+    ]
+
+
 def _team_response(team: PayrollTeam) -> TeamResponse:
     """Team → TeamResponse. Члены — только не удалённые сотрудники (selectinload
     НЕ фильтрует is_deleted — фильтруем в Python)."""
     members = [
-        TeamMemberOut(employee_id=m.employee_id, name=m.employee.name)
+        TeamMemberOut(
+            employee_id=m.employee_id,
+            name=m.employee.name,
+            from_month=m.valid_from.strftime("%Y-%m") if m.valid_from else None,
+            to_month=m.valid_to.strftime("%Y-%m") if m.valid_to else None,
+        )
         for m in sorted(team.members, key=lambda m: m.id)
         if m.employee is not None and not m.employee.is_deleted
     ]
-    scopes = [
-        TeamScopeIn(kind=s.kind, value=s.value)
-        for s in sorted(team.scopes, key=lambda s: (s.kind, s.value))
-    ]
     return TeamResponse(
-        id=team.id, name=team.name, is_active=team.is_active, scopes=scopes, members=members
+        id=team.id,
+        name=team.name,
+        is_active=team.is_active,
+        scopes=_sorted_scopes(team),
+        members=members,
     )
 
 
@@ -354,31 +387,64 @@ async def get_sheet(db: AsyncSession, project_id: int, month: str) -> dict:
 
     steps = await _load_tariff_steps(db, month_end)
 
-    # БДР по неделям: один вызов на (неделя × kind), только если скоупы kind есть
-    kinds_needed = {s.kind for t in active_teams for s in t.scopes}
-    week_payouts: dict[tuple[date, str], dict[str, Decimal]] = {}
+    # ── БДР по неделям ──
+    # Скоупы: бренд / категория / композит «бренд × категория» (кейс Марии).
+    # Композиты, закреплённые ЛЮБОЙ командой проекта (включая свою), вычитаются
+    # из brand-only/subject-only баз одноимённого бренда/категории — без
+    # двойного счёта. База композита — строка категории БДР с фильтром по
+    # бренду; вызовы батчатся по уникальным брендам композитов.
+    all_scopes = [s for t in active_teams for s in t.scopes]
+    brand_only_needed = any(
+        s.brand_value is not None and s.subject_value is None for s in all_scopes
+    )
+    subject_only_needed = any(
+        s.subject_value is not None and s.brand_value is None for s in all_scopes
+    )
+    composite_pairs: set[tuple[str, str]] = {
+        (s.brand_value, s.subject_value)
+        for s in all_scopes
+        if s.brand_value is not None and s.subject_value is not None
+    }
+    composite_brands = sorted({b for b, _ in composite_pairs})
+
+    def _payout_map(bdr: dict) -> dict[str, Decimal]:
+        out: dict[str, Decimal] = {}
+        for art in bdr.get("articles", []):
+            name = art.get("sa_name") or ""
+            if name:
+                out[name] = Decimal(str(art.get("net_payout", 0) or 0))
+        return out
+
+    week_brand: dict[date, dict[str, Decimal]] = {}
+    week_subject: dict[date, dict[str, Decimal]] = {}
+    week_comp: dict[date, dict[tuple[str, str], Decimal]] = {}
     for week_from, week_to in weeks:
-        for kind in ("brand", "subject"):
-            if kind not in kinds_needed:
-                continue
+        # Ведомости нужен только net_payout — себестоимость/налог не считаем
+        # (fifo-оценка гоняла бы сотни тысяч строк на каждый вызов недели).
+        if brand_only_needed:
             bdr = await wb_bdr_service.get_wb_bdr(
-                db,
-                project_id,
-                week_from,
-                week_to,
-                group_by=kind,
-                period_mode="report",
-                # Ведомости нужен только net_payout — себестоимость/налог не
-                # считаем (fifo-оценка гоняла бы сотни тысяч строк на КАЖДУЮ
-                # из ~8 недель-вызовов месяца).
-                include_cost_tax=False,
+                db, project_id, week_from, week_to,
+                group_by="brand", period_mode="report", include_cost_tax=False,
             )
-            payouts_map: dict[str, Decimal] = {}
-            for art in bdr.get("articles", []):
-                name = art.get("sa_name") or ""
-                if name:
-                    payouts_map[name] = Decimal(str(art.get("net_payout", 0) or 0))
-            week_payouts[(week_from, kind)] = payouts_map
+            week_brand[week_from] = _payout_map(bdr)
+        if subject_only_needed:
+            bdr = await wb_bdr_service.get_wb_bdr(
+                db, project_id, week_from, week_to,
+                group_by="subject", period_mode="report", include_cost_tax=False,
+            )
+            week_subject[week_from] = _payout_map(bdr)
+        comp_map: dict[tuple[str, str], Decimal] = {}
+        for comp_brand in composite_brands:
+            # brand-фильтр + group_by='subject' → строки-категории ВНУТРИ бренда
+            # (sa_name = subject_name)
+            bdr = await wb_bdr_service.get_wb_bdr(
+                db, project_id, week_from, week_to,
+                brand=comp_brand, group_by="subject",
+                period_mode="report", include_cost_tax=False,
+            )
+            for subject_name, value in _payout_map(bdr).items():
+                comp_map[(comp_brand, subject_name)] = value
+        week_comp[week_from] = comp_map
 
     # Начисления команд по неделям
     sheet_teams: list[SheetTeam] = []
@@ -389,12 +455,14 @@ async def get_sheet(db: AsyncSession, project_id: int, month: str) -> dict:
 
     for team in active_teams:
         team_names[team.id] = team.name
+        # Участники расчётного месяца: живые, активные И в границах членства
         active_members = [
             m.employee
             for m in sorted(team.members, key=lambda m: m.id)
             if m.employee is not None
             and not m.employee.is_deleted
             and m.employee.is_active
+            and member_active_in_month(m, month_start)
         ]
         team_active_members[team.id] = active_members
         n_members = len(active_members)
@@ -402,8 +470,32 @@ async def get_sheet(db: AsyncSession, project_id: int, month: str) -> dict:
         team_total = ZERO
         for week_from, week_to in weeks:
             base = ZERO
+            comp_map = week_comp.get(week_from, {})
             for scope in team.scopes:
-                base += week_payouts.get((week_from, scope.kind), {}).get(scope.value, ZERO)
+                s_brand = scope.brand_value
+                s_subject = scope.subject_value
+                if s_brand is not None and s_subject is not None:
+                    base += comp_map.get((s_brand, s_subject), ZERO)
+                elif s_brand is not None:
+                    # Бренд МИНУС закреплённые композиты этого бренда
+                    base += week_brand.get(week_from, {}).get(s_brand, ZERO) - sum(
+                        (
+                            comp_map.get(pair, ZERO)
+                            for pair in composite_pairs
+                            if pair[0] == s_brand
+                        ),
+                        ZERO,
+                    )
+                elif s_subject is not None:
+                    # Категория МИНУС закреплённые композиты этой категории
+                    base += week_subject.get(week_from, {}).get(s_subject, ZERO) - sum(
+                        (
+                            comp_map.get(pair, ZERO)
+                            for pair in composite_pairs
+                            if pair[1] == s_subject
+                        ),
+                        ZERO,
+                    )
             base = _money(base)
             step = resolve_step(base, steps)
             if step is None:
@@ -435,10 +527,7 @@ async def get_sheet(db: AsyncSession, project_id: int, month: str) -> dict:
             SheetTeam(
                 team_id=team.id,
                 name=team.name,
-                scopes=[
-                    TeamScopeIn(kind=s.kind, value=s.value)
-                    for s in sorted(team.scopes, key=lambda s: (s.kind, s.value))
-                ],
+                scopes=_sorted_scopes(team),
                 member_names=[e.name for e in active_members],
                 weeks=week_rows,
                 total_amount=_money(team_total),
@@ -992,16 +1081,59 @@ async def delete_team(db: AsyncSession, project_id: int, team_id: int) -> OkResp
 async def replace_team_scopes(
     db: AsyncSession, project_id: int, team_id: int, data: TeamScopesReplace
 ) -> TeamResponse:
-    """Полная замена скоупов команды (kind+value, дедуп)."""
+    """
+    Полная замена скоупов команды (brand/subject/композит, дедуп).
+
+    Композит вытесняет общий скоуп из базы, поэтому дубль композита между
+    командами проекта запрещён (409): одна и та же пара «бренд × категория» у
+    двух команд означала бы двойной счёт.
+    """
     team = await _get_team(db, project_id, team_id)
-    await db.execute(delete(PayrollTeamScope).where(PayrollTeamScope.team_id == team.id))
-    seen: set[tuple[str, str]] = set()
+
+    seen: set[tuple[str | None, str | None]] = set()
+    unique_scopes = []
     for scope in data.scopes:
-        key = (scope.kind, scope.value)
+        key = (scope.brand, scope.subject)
         if key in seen:
             continue
         seen.add(key)
-        db.add(PayrollTeamScope(team_id=team.id, kind=scope.kind, value=scope.value))
+        unique_scopes.append(scope)
+
+    new_composites = [
+        (s.brand, s.subject) for s in unique_scopes if s.brand and s.subject
+    ]
+    if new_composites:
+        dup = (
+            await db.execute(
+                select(
+                    PayrollTeamScope.brand_value,
+                    PayrollTeamScope.subject_value,
+                    PayrollTeam.name,
+                )
+                .join(PayrollTeam, PayrollTeam.id == PayrollTeamScope.team_id)
+                .where(
+                    PayrollTeam.project_id == project_id,
+                    PayrollTeam.is_deleted == False,  # noqa: E712
+                    PayrollTeamScope.team_id != team.id,
+                    tuple_(
+                        PayrollTeamScope.brand_value, PayrollTeamScope.subject_value
+                    ).in_(new_composites),
+                )
+                .limit(1)
+            )
+        ).first()
+        if dup is not None:
+            raise PayrollConflictError(
+                f"Композит «{dup[0]} × {dup[1]}» уже закреплён за командой «{dup[2]}»"
+            )
+
+    await db.execute(delete(PayrollTeamScope).where(PayrollTeamScope.team_id == team.id))
+    for scope in unique_scopes:
+        db.add(
+            PayrollTeamScope(
+                team_id=team.id, brand_value=scope.brand, subject_value=scope.subject
+            )
+        )
     await db.commit()
     team = await _get_team(db, project_id, team_id)
     return _team_response(team)
@@ -1010,30 +1142,50 @@ async def replace_team_scopes(
 async def replace_team_members(
     db: AsyncSession, project_id: int, team_id: int, data: TeamMembersReplace
 ) -> TeamResponse:
-    """Полная замена участников. Все employee_ids обязаны принадлежать проекту."""
+    """
+    Полная замена участников с границами членства по месяцам.
+
+    Все employee_id обязаны принадлежать проекту; from_month <= to_month.
+    """
     team = await _get_team(db, project_id, team_id)
-    unique_ids = list(dict.fromkeys(data.employee_ids))
-    if unique_ids:
+    member_ids = [m.employee_id for m in data.members]  # уникальность — в схеме
+    if member_ids:
         found = {
             int(r)
             for r in (
                 await db.execute(
                     select(PayrollEmployee.id).where(
                         PayrollEmployee.project_id == project_id,
-                        PayrollEmployee.id.in_(unique_ids),
+                        PayrollEmployee.id.in_(member_ids),
                         PayrollEmployee.is_deleted == False,  # noqa: E712
                     )
                 )
             ).scalars()
         }
-        missing = [eid for eid in unique_ids if eid not in found]
+        missing = [eid for eid in member_ids if eid not in found]
         if missing:
             raise PayrollNotFoundError(f"Сотрудники не найдены: {missing}")
+
+    rows: list[PayrollTeamMember] = []
+    for member in data.members:
+        valid_from = _parse_month(member.from_month) if member.from_month else None
+        valid_to = _parse_month(member.to_month) if member.to_month else None
+        if valid_from is not None and valid_to is not None and valid_from > valid_to:
+            raise ValueError(
+                f"Участник {member.employee_id}: from_month позже to_month"
+            )
+        rows.append(
+            PayrollTeamMember(
+                team_id=team.id,
+                employee_id=member.employee_id,
+                valid_from=valid_from,
+                valid_to=valid_to,
+            )
+        )
     await db.execute(
         delete(PayrollTeamMember).where(PayrollTeamMember.team_id == team.id)
     )
-    for employee_id in unique_ids:
-        db.add(PayrollTeamMember(team_id=team.id, employee_id=employee_id))
+    db.add_all(rows)
     await db.commit()
     team = await _get_team(db, project_id, team_id)
     return _team_response(team)

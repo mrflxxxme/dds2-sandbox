@@ -495,7 +495,7 @@ function TeamMonthCard({ team }: { team: PayrollSheetTeam }) {
                 )}
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                     {team.scopes.map((s, i) => (
-                        <span key={i} className={scopeBadgeClass(s.kind)}>{scopeLabel(s)}</span>
+                        <span key={i} className={scopeBadgeClass(s)}>{scopeLabel(s)}</span>
                     ))}
                 </div>
                 <span style={{ marginLeft: 'auto', fontWeight: 700, fontSize: 15 }}>

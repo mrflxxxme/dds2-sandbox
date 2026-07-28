@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import KpiCard from '@/components/KpiCard';
 import { api } from '@/lib/api';
@@ -9,13 +9,14 @@ import type {
     PayrollAgencySheetClient,
     PayrollAgencySheetResponse,
     PayrollBillingMode,
+    PayrollClientBillingPeriod,
     PayrollClientEntryKind,
     PayrollClientProject,
     PayrollClientProjectUpdate,
     PayrollProjectOption,
     PayrollTeam,
 } from '@/types/api';
-import { money, ratePct, monthTitle, weekLabel, prevMonthIso, shiftMonth } from './payrollFmt';
+import { money, ratePct, monthGenLabel, monthTitle, weekLabel, prevMonthIso, shiftMonth } from './payrollFmt';
 
 const MODE_LABEL: Record<PayrollBillingMode, string> = {
     fixed: 'Фикс',
@@ -30,6 +31,21 @@ const MODE_BADGE: Record<PayrollBillingMode, string> = {
 };
 
 const entryKey = (clientId: number, kind: string, dateFrom: string) => `${clientId}:${kind}:${dateFrom}`;
+
+/** Описание периода формата: «фикс 100 000 ₽/мес» / «10% от ЧП» / «процент по лестнице». */
+const billingDesc = (p: PayrollClientBillingPeriod): string =>
+    p.billing_mode === 'fixed'
+        ? `фикс ${money(p.fixed_amount ?? 0, 0)} ₽/мес`
+        : p.billing_mode === 'profit_share'
+            ? `${ratePct(p.fee_percent)} от ЧП`
+            : 'процент по лестнице';
+
+/** Полная история форматов для тултипа. */
+const billingHistory = (c: PayrollClientProject): string =>
+    [...c.billing_periods]
+        .sort((a, b) => a.month.localeCompare(b.month))
+        .map((p) => `с ${monthGenLabel(p.month)}: ${billingDesc(p)}`)
+        .join('\n');
 
 export default function SalaryAgency({
     nonce, onChanged,
@@ -188,10 +204,14 @@ export default function SalaryAgency({
         },
         {
             key: 'billing_mode', label: 'Режим',
-            getValue: (r: PayrollAgencySheetClient) => MODE_LABEL[r.billing_mode],
-            render: (_v: unknown, r: PayrollAgencySheetClient) => (
-                <span className={MODE_BADGE[r.billing_mode]}>{MODE_LABEL[r.billing_mode]}</span>
-            ),
+            getValue: (r: PayrollAgencySheetClient) => (r.billing_mode ? MODE_LABEL[r.billing_mode] : 'не задан'),
+            render: (_v: unknown, r: PayrollAgencySheetClient) => r.billing_mode
+                ? <span className={MODE_BADGE[r.billing_mode]}>{MODE_LABEL[r.billing_mode]}</span>
+                : (
+                    <span className="badge badge-warning" title="Формат оплаты для расчётного месяца не задан — добавь период в карточке клиента">
+                        формат не задан
+                    </span>
+                ),
         },
         {
             key: 'team_name', label: 'Команда',
@@ -393,9 +413,17 @@ export default function SalaryAgency({
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 16 }}>
                         {(clients ?? []).map((c) => (
                             <div key={c.id} className="glass-card static" style={{ padding: 20, opacity: c.is_active ? 1 : 0.6 }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
                                     <span style={{ fontWeight: 700, fontSize: 15 }}>{c.name}</span>
-                                    <span className={MODE_BADGE[c.billing_mode]}>{MODE_LABEL[c.billing_mode]}</span>
+                                    {c.current_billing ? (
+                                        <span className={MODE_BADGE[c.current_billing.billing_mode]} title={billingHistory(c) || undefined}>
+                                            {MODE_LABEL[c.current_billing.billing_mode]}
+                                        </span>
+                                    ) : (
+                                        <span className="badge badge-warning" title={billingHistory(c) || 'История форматов пуста — начислений не будет'}>
+                                            формат не задан
+                                        </span>
+                                    )}
                                     {!c.is_active && <span className="badge badge-secondary">выключен</span>}
                                     <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
                                         <button className="btn btn-secondary btn-sm" onClick={() => setEditClient(c)}>✎</button>
@@ -416,16 +444,24 @@ export default function SalaryAgency({
                                                 ⚠ команда не привязана
                                             </span>
                                         )}
-                                    {c.billing_mode === 'percent' && (
+                                    {c.billing_periods.some((p) => p.billing_mode === 'percent') && (
                                         c.linked_project_id != null
                                             ? <span className="badge badge-success">кабинет: {c.linked_project_name ?? `#${c.linked_project_id}`}</span>
                                             : <span className="badge badge-secondary">внешний (базы руками)</span>
                                     )}
-                                    {c.billing_mode === 'fixed' && c.fixed_amount != null && (
-                                        <span className="badge badge-secondary">фикс {money(c.fixed_amount, 0)} ₽/мес</span>
+                                    {c.current_billing && c.current_billing.billing_mode !== 'percent' && (
+                                        <span className="badge badge-secondary" title={billingHistory(c) || undefined}>
+                                            {billingDesc(c.current_billing)}
+                                        </span>
                                     )}
-                                    {c.billing_mode === 'profit_share' && c.fee_percent != null && (
-                                        <span className="badge badge-secondary">{ratePct(c.fee_percent)} от ЧП</span>
+                                    {c.current_billing && c.billing_periods.length > 1 && (
+                                        <span
+                                            className="badge badge-secondary"
+                                            style={{ opacity: 0.7 }}
+                                            title={billingHistory(c) || undefined}
+                                        >
+                                            с {monthGenLabel(c.current_billing.month)}
+                                        </span>
                                     )}
                                     {Number(c.manager_share) !== 0.45 && (
                                         <span className="badge badge-secondary" title="Нестандартная доля команды (дефолт 45%)">
@@ -476,6 +512,13 @@ function ClientDetail({
 }) {
     // Внешний кабинет — признак из sheet-ответа (manual-недели), не из реестра.
     const external = client.weeks.some((w) => w.manual);
+    if (client.billing_mode == null) {
+        return (
+            <div style={{ padding: '10px 8px', fontSize: 13, color: 'var(--color-text-dim)' }}>
+                Формат оплаты для этого месяца не задан — добавь период в карточке клиента.
+            </div>
+        );
+    }
     if (client.billing_mode === 'fixed') {
         return (
             <div style={{ padding: '10px 8px', fontSize: 13, color: 'var(--color-text-muted)' }}>
@@ -564,6 +607,15 @@ function ClientDetail({
 
 // ─── Модалка клиента ────────────────────────────────────────────────────────
 
+/** Строка редактора истории форматов оплаты; uid — стабильный ключ. */
+interface BillingRowDraft {
+    uid: number;
+    month: string;
+    mode: PayrollBillingMode;
+    fixedAmount: string;
+    feePct: string;
+}
+
 function ClientFormModal({
     client, teams, projectOptions, onClose, onSaved,
 }: {
@@ -574,18 +626,25 @@ function ClientFormModal({
     onSaved: () => void | Promise<void>;
 }) {
     const [name, setName] = useState(client?.name ?? '');
-    const [mode, setMode] = useState<PayrollBillingMode>(client?.billing_mode ?? 'percent');
     const [teamId, setTeamId] = useState<number | null>(client?.team_id ?? null);
     const [cabinet, setCabinet] = useState<'linked' | 'external'>(
         client == null || client.linked_project_id != null ? 'linked' : 'external'
     );
     const [linkedProjectId, setLinkedProjectId] = useState<number | null>(client?.linked_project_id ?? null);
-    const [fixedAmount, setFixedAmount] = useState(
-        client?.fixed_amount != null ? String(Number(client.fixed_amount)) : ''
+    // История форматов оплаты: undefined на сабмите = секцию не трогали (не слать поле).
+    const [billingRows, setBillingRows] = useState<BillingRowDraft[]>(() =>
+        [...(client?.billing_periods ?? [])]
+            .sort((a, b) => a.month.localeCompare(b.month))
+            .map((p, i) => ({
+                uid: i,
+                month: p.month,
+                mode: p.billing_mode,
+                fixedAmount: p.fixed_amount != null ? String(Number(p.fixed_amount)) : '',
+                feePct: p.fee_percent != null ? String(+(Number(p.fee_percent) * 100).toFixed(2)) : '',
+            }))
     );
-    const [feePct, setFeePct] = useState(
-        client?.fee_percent != null ? String(+(Number(client.fee_percent) * 100).toFixed(2)) : ''
-    );
+    const [billingTouched, setBillingTouched] = useState(false);
+    const billingUidRef = useRef((client?.billing_periods ?? []).length);
     const [managerPct, setManagerPct] = useState(
         client != null ? String(+(Number(client.manager_share) * 100).toFixed(2)) : '45'
     );
@@ -597,19 +656,64 @@ function ClientFormModal({
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
 
+    const patchBillingRow = (uid: number, patch: Partial<Omit<BillingRowDraft, 'uid'>>) => {
+        setBillingTouched(true);
+        setBillingRows((rows) => rows.map((r) => (r.uid === uid ? { ...r, ...patch } : r)));
+    };
+
+    const addBillingRow = () => {
+        setBillingTouched(true);
+        const uid = billingUidRef.current++;
+        // Дефолт месяца: следующий за последним периодом, но не раньше текущего.
+        const nowIso = new Date().toISOString().slice(0, 7);
+        const months = billingRows.map((r) => r.month).filter(Boolean).sort();
+        const max = months[months.length - 1];
+        const month = max && max >= nowIso ? shiftMonth(max, 1) : nowIso;
+        setBillingRows((rows) => [...rows, { uid, month, mode: 'percent', fixedAmount: '', feePct: '' }]);
+    };
+
+    const removeBillingRow = (uid: number) => {
+        setBillingTouched(true);
+        setBillingRows((rows) => rows.filter((r) => r.uid !== uid));
+    };
+
+    const buildBillingPeriods = (): { periods: PayrollClientBillingPeriod[]; err?: string } => {
+        const out: PayrollClientBillingPeriod[] = [];
+        for (const r of billingRows) {
+            if (!/^\d{4}-\d{2}$/.test(r.month)) {
+                return { periods: [], err: 'У каждого периода формата укажите месяц' };
+            }
+            if (r.mode === 'fixed') {
+                const amt = r.fixedAmount.trim() === '' ? null : Number(r.fixedAmount);
+                if (amt == null || !Number.isFinite(amt) || amt < 0) {
+                    return { periods: [], err: 'Для фикса укажите сумму (неотрицательное число)' };
+                }
+                out.push({ month: r.month, billing_mode: 'fixed', fixed_amount: amt, fee_percent: null });
+            } else if (r.mode === 'profit_share') {
+                const pct = r.feePct.trim() === '' ? null : Number(r.feePct);
+                if (pct == null || !Number.isFinite(pct) || pct < 0 || pct > 100) {
+                    return { periods: [], err: 'Для «% от ЧП» укажите процент от 0 до 100' };
+                }
+                out.push({ month: r.month, billing_mode: 'profit_share', fixed_amount: null, fee_percent: pct / 100 });
+            } else {
+                out.push({ month: r.month, billing_mode: 'percent', fixed_amount: null, fee_percent: null });
+            }
+        }
+        if (new Set(out.map((p) => p.month)).size !== out.length) {
+            return { periods: [], err: 'Месяцы периодов формата не должны повторяться' };
+        }
+        out.sort((a, b) => a.month.localeCompare(b.month));
+        return { periods: out };
+    };
+
+    const hasPercentUi = billingRows.some((r) => r.mode === 'percent');
+
     const submit = async () => {
         if (!name.trim()) { setError('Укажите имя клиента'); return; }
-        const fixed = fixedAmount.trim() === '' ? null : Number(fixedAmount);
-        if (mode === 'fixed' && (fixed == null || !Number.isFinite(fixed) || fixed < 0)) {
-            setError('Укажите сумму фикса (неотрицательное число)');
-            return;
-        }
-        const fee = feePct.trim() === '' ? null : Number(feePct);
-        if (mode === 'profit_share' && (fee == null || !Number.isFinite(fee) || fee < 0 || fee > 100)) {
-            setError('Процент от ЧП — число от 0 до 100');
-            return;
-        }
-        if (mode === 'percent' && cabinet === 'linked' && linkedProjectId == null) {
+        const { periods, err: billErr } = buildBillingPeriods();
+        if (billErr) { setError(billErr); return; }
+        const hasPercent = periods.some((p) => p.billing_mode === 'percent');
+        if (hasPercent && cabinet === 'linked' && linkedProjectId == null) {
             setError('Выберите кабинет клиента в системе (или переключите на «внешний»)');
             return;
         }
@@ -621,12 +725,11 @@ function ClientFormModal({
 
         setSaving(true);
         setError('');
-        const wantLinked = mode === 'percent' && cabinet === 'linked' ? linkedProjectId : null;
+        const wantLinked = hasPercent && cabinet === 'linked' ? linkedProjectId : null;
         try {
             if (client) {
                 const payload: PayrollClientProjectUpdate = {
                     name: name.trim(),
-                    billing_mode: mode,
                     manager_share: manager / 100,
                     is_active: isActive,
                     notes: notes.trim() || null,
@@ -635,17 +738,15 @@ function ClientFormModal({
                 else if (client.team_id != null) payload.clear_team = true;
                 if (wantLinked != null) payload.linked_project_id = wantLinked;
                 else if (client.linked_project_id != null) payload.clear_linked_project = true;
-                if (mode === 'fixed' && fixed != null) payload.fixed_amount = fixed;
-                if (mode === 'profit_share' && fee != null) payload.fee_percent = fee / 100;
+                // Полная замена истории (в т.ч. [] = очистить); не трогали — поле не шлём.
+                if (billingTouched) payload.billing_periods = periods;
                 await api.updatePayrollAgencyClient(client.id, payload);
             } else {
                 await api.createPayrollAgencyClient({
                     name: name.trim(),
-                    billing_mode: mode,
                     team_id: teamId,
                     linked_project_id: wantLinked,
-                    fixed_amount: mode === 'fixed' ? fixed : null,
-                    fee_percent: mode === 'profit_share' && fee != null ? fee / 100 : null,
+                    billing_periods: periods.length > 0 ? periods : null,
                     manager_share: manager / 100,
                     is_active: isActive,
                     notes: notes.trim() || null,
@@ -693,32 +794,50 @@ function ClientFormModal({
                     </div>
 
                     <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                        <label className="form-label">Режим оплаты</label>
-                        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-                            {([
-                                ['fixed', 'Фикс/мес'],
-                                ['percent', 'Процент от «Чистой выплаты» кабинета'],
-                                ['profit_share', '% от чистой прибыли'],
-                            ] as [PayrollBillingMode, string][]).map(([m, label]) => (
-                                <label key={m} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
-                                    <input type="radio" name="billing-mode" checked={mode === m} onChange={() => setMode(m)} />
-                                    {label}
-                                </label>
-                            ))}
+                        <label className="form-label">Формат оплаты (история изменений)</label>
+                        {billingRows.length === 0 && (
+                            <div style={{ fontSize: 12.5, color: 'var(--color-warning)', marginBottom: 6 }}>
+                                Без периода формата начислений по клиенту не будет.
+                            </div>
+                        )}
+                        {[...billingRows].sort((a, b) => a.month.localeCompare(b.month)).map((r) => (
+                            <div key={r.uid} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' }}>
+                                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>с</span>
+                                <input
+                                    type="month" className="form-input" style={{ width: 150 }} value={r.month}
+                                    onChange={(e) => patchBillingRow(r.uid, { month: e.target.value })}
+                                />
+                                <select
+                                    className="form-input" style={{ width: 230 }} value={r.mode}
+                                    onChange={(e) => patchBillingRow(r.uid, { mode: e.target.value as PayrollBillingMode })}
+                                >
+                                    <option value="percent">Процент от «Чистой выплаты»</option>
+                                    <option value="fixed">Фикс/мес</option>
+                                    <option value="profit_share">% от чистой прибыли</option>
+                                </select>
+                                {r.mode === 'fixed' && (
+                                    <input
+                                        type="number" min={0} className="form-input" style={{ width: 140 }} placeholder="сумма, ₽/мес"
+                                        value={r.fixedAmount} onChange={(e) => patchBillingRow(r.uid, { fixedAmount: e.target.value })}
+                                    />
+                                )}
+                                {r.mode === 'profit_share' && (
+                                    <input
+                                        type="number" min={0} max={100} step={0.1} className="form-input" style={{ width: 110 }} placeholder="% от ЧП"
+                                        value={r.feePct} onChange={(e) => patchBillingRow(r.uid, { feePct: e.target.value })}
+                                    />
+                                )}
+                                <button className="btn btn-secondary btn-sm" onClick={() => removeBillingRow(r.uid)}>✕</button>
+                            </div>
+                        ))}
+                        <button className="btn btn-secondary btn-sm" onClick={addBillingRow}>+ Добавить период</button>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
+                            Формат действует с указанного месяца до следующего периода.
+                            Пример: процент до июня, фикс 60 000 с июля.
                         </div>
                     </div>
 
-                    {mode === 'fixed' && (
-                        <div className="form-group">
-                            <label className="form-label">Фикс, ₽/мес *</label>
-                            <input
-                                type="number" min={0} className="form-input" placeholder="100 000"
-                                value={fixedAmount} onChange={(e) => setFixedAmount(e.target.value)}
-                            />
-                        </div>
-                    )}
-
-                    {mode === 'percent' && (
+                    {hasPercentUi && (
                         <div className="form-group" style={{ gridColumn: '1 / -1' }}>
                             <label className="form-label">Кабинет клиента</label>
                             <div style={{ display: 'flex', gap: 14, marginBottom: 8 }}>
@@ -743,19 +862,6 @@ function ClientFormModal({
                             )}
                             <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
                                 Fee недели = «Чистая выплата» кабинета × ставка «Команда» тарифной лестницы.
-                            </div>
-                        </div>
-                    )}
-
-                    {mode === 'profit_share' && (
-                        <div className="form-group">
-                            <label className="form-label">% от чистой прибыли *</label>
-                            <input
-                                type="number" min={0} max={100} step={0.1} className="form-input" placeholder="10"
-                                value={feePct} onChange={(e) => setFeePct(e.target.value)}
-                            />
-                            <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
-                                ЧП месяца вводится руками в расчёте.
                             </div>
                         </div>
                     )}

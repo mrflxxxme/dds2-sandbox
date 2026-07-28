@@ -168,9 +168,9 @@ async def test_team_scopes_members_flow(client, auth_headers):
     resp = await client.put(
         f"/api/v1/payroll/teams/{team['id']}/scopes",
         json={"scopes": [
-            {"kind": "brand", "value": "BrandA"},
-            {"kind": "subject", "value": "Ковры"},
-            {"kind": "brand", "value": "BrandA"},
+            {"brand": "BrandA"},
+            {"subject": "Ковры"},
+            {"brand": "BrandA"},
         ]},
         headers=headers,
     )
@@ -181,7 +181,7 @@ async def test_team_scopes_members_flow(client, auth_headers):
     # Полная замена участников
     resp = await client.put(
         f"/api/v1/payroll/teams/{team['id']}/members",
-        json={"employee_ids": [e1["id"], e2["id"]]},
+        json={"members": [{"employee_id": e1["id"]}, {"employee_id": e2["id"]}]},
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
@@ -190,7 +190,7 @@ async def test_team_scopes_members_flow(client, auth_headers):
     # Замена на одного — второй уходит
     resp = await client.put(
         f"/api/v1/payroll/teams/{team['id']}/members",
-        json={"employee_ids": [e2["id"]]},
+        json={"members": [{"employee_id": e2["id"]}]},
         headers=headers,
     )
     assert [m["employee_id"] for m in resp.json()["members"]] == [e2["id"]]
@@ -220,18 +220,19 @@ async def test_team_members_foreign_employee_404(client, auth_headers):
 
     resp = await client.put(
         f"/api/v1/payroll/teams/{team['id']}/members",
-        json={"employee_ids": [foreign_emp["id"]]},
+        json={"members": [{"employee_id": foreign_emp["id"]}]},
         headers=headers1,
     )
     assert resp.status_code == 404
 
 
-async def test_team_scope_invalid_kind_422(client, auth_headers):
+async def test_team_scope_empty_422(client, auth_headers):
+    """Скоуп без бренда И без категории — невалиден."""
     headers, _ = await _project_headers(client, auth_headers)
     team = await _create_team(client, headers)
     resp = await client.put(
         f"/api/v1/payroll/teams/{team['id']}/scopes",
-        json={"scopes": [{"kind": "category", "value": "X"}]},
+        json={"scopes": [{}]},
         headers=headers,
     )
     assert resp.status_code == 422

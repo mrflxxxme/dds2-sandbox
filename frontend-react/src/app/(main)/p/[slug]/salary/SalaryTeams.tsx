@@ -6,9 +6,19 @@ import type {
     PayrollEmployee,
     PayrollScopeOptions,
     PayrollTeam,
+    PayrollTeamMember,
+    PayrollTeamMemberIn,
     PayrollTeamScope,
 } from '@/types/api';
-import { scopeBadgeClass, scopeLabel } from './payrollFmt';
+import { monthGenLabel, monthTitle, scopeBadgeClass, scopeLabel } from './payrollFmt';
+
+/** «с июля 2026, по июнь 2027» — границы участия в команде. */
+const memberBoundsLabel = (m: PayrollTeamMember): string => {
+    const parts: string[] = [];
+    if (m.from_month) parts.push(`с ${monthGenLabel(m.from_month)}`);
+    if (m.to_month) parts.push(`по ${monthTitle(m.to_month).toLowerCase()}`);
+    return parts.join(', ');
+};
 
 export default function SalaryTeams({
     nonce, onChanged,
@@ -122,7 +132,7 @@ export default function SalaryTeams({
                             ) : (
                                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 10 }}>
                                     {t.scopes.map((s, i) => (
-                                        <span key={i} className={scopeBadgeClass(s.kind)}>{scopeLabel(s)}</span>
+                                        <span key={i} className={scopeBadgeClass(s)}>{scopeLabel(s)}</span>
                                     ))}
                                 </div>
                             )}
@@ -134,9 +144,14 @@ export default function SalaryTeams({
                                 </div>
                             ) : (
                                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                                    {t.members.map((m) => (
-                                        <span key={m.employee_id} className="badge badge-success">{m.name}</span>
-                                    ))}
+                                    {t.members.map((m) => {
+                                        const bounds = memberBoundsLabel(m);
+                                        return (
+                                            <span key={m.employee_id} className="badge badge-success">
+                                                {m.name}{bounds ? ` (${bounds})` : ''}
+                                            </span>
+                                        );
+                                    })}
                                 </div>
                             )}
                         </div>
@@ -165,6 +180,9 @@ export default function SalaryTeams({
 
 // ─── Модалка создания/редактирования команды ─────────────────────────────────
 
+/** Строка редактора скоупов; uid — стабильный ключ. */
+interface ScopeRowDraft { uid: number; brand: string; subject: string; }
+
 function TeamFormModal({
     team, employees, options, onClose, onSaved, onDirty,
 }: {
@@ -178,15 +196,21 @@ function TeamFormModal({
 }) {
     const [name, setName] = useState(team?.name ?? '');
     const [isActive, setIsActive] = useState(team?.is_active ?? true);
-    const [brands, setBrands] = useState<Set<string>>(
-        new Set(team?.scopes.filter((s) => s.kind === 'brand').map((s) => s.value) ?? [])
+    const [scopeRows, setScopeRows] = useState<ScopeRowDraft[]>(() =>
+        (team?.scopes ?? []).map((s, i) => ({ uid: i, brand: s.brand ?? '', subject: s.subject ?? '' }))
     );
-    const [subjects, setSubjects] = useState<Set<string>>(
-        new Set(team?.scopes.filter((s) => s.kind === 'subject').map((s) => s.value) ?? [])
-    );
+    const scopeUidRef = useRef(team?.scopes.length ?? 0);
     const [memberIds, setMemberIds] = useState<Set<number>>(
         new Set(team?.members.map((m) => m.employee_id) ?? [])
     );
+    // Границы участия по месяцам ('' = без границы, to — включительно).
+    const [memberBounds, setMemberBounds] = useState<Record<number, { from: string; to: string }>>(() => {
+        const acc: Record<number, { from: string; to: string }> = {};
+        (team?.members ?? []).forEach((m) => {
+            acc[m.employee_id] = { from: m.from_month ?? '', to: m.to_month ?? '' };
+        });
+        return acc;
+    });
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
     // Ретрай-безопасность: после успешного POST повторный сабмит НЕ должен
@@ -194,21 +218,46 @@ function TeamFormModal({
     // и при ретрае идём по PATCH/replace-пути.
     const createdIdRef = useRef<number | null>(null);
 
-    const toggle = <T,>(set: React.Dispatch<React.SetStateAction<Set<T>>>) => (v: T) =>
-        set((prev) => {
+    const toggleMember = (id: number) =>
+        setMemberIds((prev) => {
             const next = new Set(prev);
-            if (next.has(v)) next.delete(v); else next.add(v);
+            if (next.has(id)) next.delete(id); else next.add(id);
             return next;
+        });
+
+    const setScopeRow = (uid: number, patch: Partial<Omit<ScopeRowDraft, 'uid'>>) =>
+        setScopeRows((rows) => rows.map((r) => (r.uid === uid ? { ...r, ...patch } : r)));
+
+    const setBound = (id: number, patch: Partial<{ from: string; to: string }>) =>
+        setMemberBounds((prev) => {
+            const cur = prev[id] ?? { from: '', to: '' };
+            return { ...prev, [id]: { ...cur, ...patch } };
         });
 
     const submit = async () => {
         if (!name.trim()) { setError('Укажите название команды'); return; }
+        const scopes: PayrollTeamScope[] = [];
+        for (const r of scopeRows) {
+            const brand = r.brand.trim();
+            const subject = r.subject.trim();
+            if (!brand && !subject) {
+                setError('В каждом скоупе укажите бренд и/или категорию (пустую строку удалите)');
+                return;
+            }
+            scopes.push({ brand: brand || null, subject: subject || null });
+        }
+        const members: PayrollTeamMemberIn[] = [];
+        for (const id of memberIds) {
+            const b = memberBounds[id] ?? { from: '', to: '' };
+            if (b.from && b.to && b.from > b.to) {
+                const emp = employees.find((e) => e.id === id);
+                setError(`У «${emp?.name ?? id}» граница «с» позже границы «по»`);
+                return;
+            }
+            members.push({ employee_id: id, from_month: b.from || null, to_month: b.to || null });
+        }
         setSaving(true);
         setError('');
-        const scopes: PayrollTeamScope[] = [
-            ...[...brands].map((value) => ({ kind: 'brand' as const, value })),
-            ...[...subjects].map((value) => ({ kind: 'subject' as const, value })),
-        ];
         let mutated = false;
         try {
             const existingId = team?.id ?? createdIdRef.current;
@@ -218,7 +267,7 @@ function TeamFormModal({
             mutated = true;
             if (existingId == null) createdIdRef.current = saved.id;
             await api.replacePayrollTeamScopes(saved.id, scopes);
-            await api.replacePayrollTeamMembers(saved.id, [...memberIds]);
+            await api.replacePayrollTeamMembers(saved.id, members);
             await onSaved();
         } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : 'Ошибка сохранения';
@@ -252,21 +301,72 @@ function TeamFormModal({
                     </label>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 8 }}>
-                    <MultiPickList
-                        title={`Бренды (${brands.size})`}
-                        items={options.brands.map((b) => ({ key: b, label: b }))}
-                        selected={brands}
-                        onToggle={toggle(setBrands)}
-                        emptyHint="Брендов не найдено — нужен финотчёт WB"
-                    />
-                    <MultiPickList
-                        title={`Категории (${subjects.size})`}
-                        items={options.subjects.map((s) => ({ key: s, label: s }))}
-                        selected={subjects}
-                        onToggle={toggle(setSubjects)}
-                        emptyHint="Категорий не найдено — нужен финотчёт WB"
-                    />
+                {/* ─── Скоупы: бренд / категория / бренд × категория ─────────── */}
+                <div className="form-group" style={{ marginBottom: 16 }}>
+                    <label className="form-label">Скоупы ({scopeRows.length})</label>
+                    <datalist id="payroll-scope-brands">
+                        {options.brands.map((b) => <option key={b} value={b} />)}
+                    </datalist>
+                    <datalist id="payroll-scope-subjects">
+                        {options.subjects.map((s) => <option key={s} value={s} />)}
+                    </datalist>
+                    {scopeRows.length === 0 && (
+                        <div style={{ fontSize: 12.5, color: 'var(--color-warning)', marginBottom: 6 }}>
+                            ⚠ Без скоупов начислений не будет.
+                        </div>
+                    )}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 6 }}>
+                        {scopeRows.map((r) => {
+                            const brand = r.brand.trim();
+                            const subject = r.subject.trim();
+                            const preview = brand || subject
+                                ? scopeLabel({ brand: brand || null, subject: subject || null })
+                                : null;
+                            return (
+                                <div key={r.uid} style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                    <input
+                                        className="form-input" style={{ width: 200 }}
+                                        list="payroll-scope-brands" placeholder="бренд (опционально)"
+                                        value={r.brand}
+                                        onChange={(e) => setScopeRow(r.uid, { brand: e.target.value })}
+                                    />
+                                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>×</span>
+                                    <input
+                                        className="form-input" style={{ width: 220 }}
+                                        list="payroll-scope-subjects" placeholder="категория (опционально)"
+                                        value={r.subject}
+                                        onChange={(e) => setScopeRow(r.uid, { subject: e.target.value })}
+                                    />
+                                    {preview && (
+                                        <span className={scopeBadgeClass({ brand: brand || null, subject: subject || null })}>
+                                            {preview}
+                                        </span>
+                                    )}
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        title="Удалить скоуп"
+                                        onClick={() => setScopeRows((rows) => rows.filter((x) => x.uid !== r.uid))}
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+                            );
+                        })}
+                    </div>
+                    <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => setScopeRows((rows) => [...rows, { uid: scopeUidRef.current++, brand: '', subject: '' }])}
+                    >
+                        + Добавить скоуп
+                    </button>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
+                        Заполнены оба поля — композит «бренд × категория»: пересечение уходит этой команде,
+                        из общих скоупов других команд оно вычитается автоматически.
+                    </div>
+                </div>
+
+                {/* ─── Участники + границы участия ───────────────────────────── */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.2fr', gap: 16, marginBottom: 8 }}>
                     <MultiPickList
                         title={`Участники (${memberIds.size})`}
                         items={employees.map((e) => ({
@@ -274,13 +374,45 @@ function TeamFormModal({
                             label: e.is_active ? e.name : `${e.name} (неактивен)`,
                         }))}
                         selected={memberIds}
-                        onToggle={toggle(setMemberIds)}
+                        onToggle={toggleMember}
                         emptyHint="Сначала заведи сотрудников на соседнем табе"
                     />
+                    <div>
+                        <label className="form-label">Границы участия (опционально)</label>
+                        {memberIds.size === 0 ? (
+                            <div style={{ fontSize: 12.5, color: 'var(--color-text-dim)', padding: 6 }}>
+                                Отметь участников слева.
+                            </div>
+                        ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                {employees.filter((e) => memberIds.has(e.id)).map((e) => {
+                                    const b = memberBounds[e.id] ?? { from: '', to: '' };
+                                    return (
+                                        <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, flexWrap: 'wrap' }}>
+                                            <span style={{ minWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.name}</span>
+                                            <span style={{ color: 'var(--color-text-muted)' }}>с</span>
+                                            <input
+                                                type="month" className="form-input" style={{ width: 150 }}
+                                                value={b.from} onChange={(ev) => setBound(e.id, { from: ev.target.value })}
+                                            />
+                                            <span style={{ color: 'var(--color-text-muted)' }}>по</span>
+                                            <input
+                                                type="month" className="form-input" style={{ width: 150 }}
+                                                value={b.to} onChange={(ev) => setBound(e.id, { to: ev.target.value })}
+                                            />
+                                        </div>
+                                    );
+                                })}
+                                <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
+                                    Пусто — без границы; «по» — включительно.
+                                </div>
+                            </div>
+                        )}
+                    </div>
                 </div>
 
                 <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>
-                    База команды за неделю = «Чистая выплата» WB по выбранным брендам и категориям. Начисление делится поровну между участниками.
+                    База команды за неделю = «Чистая выплата» WB по скоупам. Начисление делится поровну между участниками месяца.
                 </div>
 
                 {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 10 }}>{error}</div>}

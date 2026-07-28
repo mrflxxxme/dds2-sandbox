@@ -1,8 +1,12 @@
 """
 Service: payroll_agency — консалтинговое «Агентство»: клиентские проекты.
 
+Формат оплаты ведётся ПЕРИОДАМИ (PayrollClientBillingPeriod): формат месяца M =
+период с max(valid_from) <= M; до первого периода fee = 0 + warning (кейс
+Брыссина: percent до июня, fixed с июля — прошлые месяцы не переписываются).
+
 Fee клиента за месяц (канон юзера 2026-07-28):
-- fixed        → fixed_amount;
+- fixed        → fixed_amount периода;
 - percent      → Σ по WB-неделям месяца (правило четверга): недельная база ×
                  team_rate тарифной лестницы (ставка «Команда», ступень как в
                  ведомости; база <= 0 → 0). База недели: внутренний кабинет
@@ -37,6 +41,7 @@ from sqlalchemy.orm import selectinload
 from backend.cache import cached
 from backend.models import Project, ProjectMember
 from backend.models.payroll import (
+    PayrollClientBillingPeriod,
     PayrollClientEntry,
     PayrollClientProject,
     PayrollTeam,
@@ -45,6 +50,8 @@ from backend.schemas.payroll import (
     AgencyClientWeek,
     AgencySheetClient,
     AgencySheetResponse,
+    ClientBillingPeriodIn,
+    ClientBillingPeriodOut,
     ClientEntryOut,
     ClientEntryUpsert,
     ClientProjectIn,
@@ -88,9 +95,11 @@ async def _get_client(
             )
             .options(
                 selectinload(PayrollClientProject.entries),
+                selectinload(PayrollClientProject.billing_periods),
                 selectinload(PayrollClientProject.team),
             )
-            # entry-upsert пишет мимо relationship — коллекции перечитываем
+            # entry-upsert / replace периодов пишут мимо relationship —
+            # коллекции перечитываем
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
@@ -99,22 +108,57 @@ async def _get_client(
     return client
 
 
+def resolve_billing(
+    periods: list[PayrollClientBillingPeriod], month: date
+) -> PayrollClientBillingPeriod | None:
+    """Формат оплаты месяца: период с max(valid_from) <= первое число месяца;
+    до первого периода — None (история не переписывается задним числом)."""
+    first = month.replace(day=1)
+    best: PayrollClientBillingPeriod | None = None
+    for period in periods:
+        if period.valid_from <= first and (
+            best is None or period.valid_from > best.valid_from
+        ):
+            best = period
+    return best
+
+
+def _billing_out(period: PayrollClientBillingPeriod) -> ClientBillingPeriodOut:
+    return ClientBillingPeriodOut(
+        month=period.valid_from.strftime("%Y-%m"),
+        billing_mode=period.billing_mode,
+        fixed_amount=period.fixed_amount,
+        fee_percent=period.fee_percent,
+    )
+
+
+def _validate_billing_period(period: ClientBillingPeriodIn) -> None:
+    """fixed-период обязан нести сумму; percent без linked_project_id допустим
+    (внешний кабинет, базы руками); profit_share без fee_percent — warning в
+    ведомости, не ошибка."""
+    if period.billing_mode == "fixed" and period.fixed_amount is None:
+        raise ValueError(
+            f"Период {period.month}: формат fixed требует fixed_amount"
+        )
+
+
 def _client_response(
     client: PayrollClientProject, linked_project_name: str | None = None
 ) -> ClientProjectResponse:
     team = client.team
     team_name = team.name if (team is not None and not team.is_deleted) else None
     entries = sorted(client.entries, key=lambda e: (e.kind, e.date_from))
+    periods = sorted(client.billing_periods, key=lambda p: p.valid_from)
+    current = resolve_billing(periods, utcnow().date())
     return ClientProjectResponse(
         id=client.id,
         name=client.name,
-        billing_mode=client.billing_mode,
         team_id=client.team_id,
         team_name=team_name,
         linked_project_id=client.linked_project_id,
         linked_project_name=linked_project_name,
-        fixed_amount=client.fixed_amount,
-        fee_percent=client.fee_percent,
+        billing_periods=[_billing_out(p) for p in periods],
+        current_billing=_billing_out(current) if current is not None else None,
         manager_share=client.manager_share,
         is_active=client.is_active,
         notes=client.notes,
@@ -192,6 +236,7 @@ async def list_clients(db: AsyncSession, project_id: int) -> ClientProjectListRe
                 )
                 .options(
                     selectinload(PayrollClientProject.entries),
+                    selectinload(PayrollClientProject.billing_periods),
                     selectinload(PayrollClientProject.team),
                 )
                 .execution_options(populate_existing=True)
@@ -218,18 +263,26 @@ async def create_client(
         await _validate_team(db, project_id, data.team_id)
     if data.linked_project_id is not None:
         await _validate_linked_project(db, user_id, data.linked_project_id)
+    for period in data.billing_periods or []:
+        _validate_billing_period(period)
     client = PayrollClientProject(
         project_id=project_id,
         name=data.name,
-        billing_mode=data.billing_mode,
         team_id=data.team_id,
         linked_project_id=data.linked_project_id,
-        fixed_amount=data.fixed_amount,
-        fee_percent=data.fee_percent,
         manager_share=data.manager_share,
         is_active=data.is_active,
         notes=data.notes,
     )
+    for period in data.billing_periods or []:
+        client.billing_periods.append(
+            PayrollClientBillingPeriod(
+                valid_from=_parse_month(period.month),
+                billing_mode=period.billing_mode,
+                fixed_amount=period.fixed_amount,
+                fee_percent=period.fee_percent,
+            )
+        )
     db.add(client)
     await db.flush()
     client_id = client.id
@@ -255,8 +308,6 @@ async def update_client(
 
     if data.name is not None:
         client.name = data.name
-    if data.billing_mode is not None:
-        client.billing_mode = data.billing_mode
     if data.clear_team:
         client.team_id = None
     elif data.team_id is not None:
@@ -267,10 +318,25 @@ async def update_client(
     elif data.linked_project_id is not None:
         await _validate_linked_project(db, user_id, data.linked_project_id)
         client.linked_project_id = data.linked_project_id
-    if data.fixed_amount is not None:
-        client.fixed_amount = data.fixed_amount
-    if data.fee_percent is not None:
-        client.fee_percent = data.fee_percent
+    if data.billing_periods is not None:
+        # None — не трогать; список (в т.ч. пустой) — полная замена истории
+        for period in data.billing_periods:
+            _validate_billing_period(period)
+        await db.execute(
+            delete(PayrollClientBillingPeriod).where(
+                PayrollClientBillingPeriod.client_id == client.id
+            )
+        )
+        for period in data.billing_periods:
+            db.add(
+                PayrollClientBillingPeriod(
+                    client_id=client.id,
+                    valid_from=_parse_month(period.month),
+                    billing_mode=period.billing_mode,
+                    fixed_amount=period.fixed_amount,
+                    fee_percent=period.fee_percent,
+                )
+            )
     if data.manager_share is not None:
         client.manager_share = data.manager_share
     if data.is_active is not None:
@@ -445,6 +511,7 @@ async def get_agency_sheet(db: AsyncSession, project_id: int, month: str) -> dic
                 )
                 .options(
                     selectinload(PayrollClientProject.entries),
+                    selectinload(PayrollClientProject.billing_periods),
                     selectinload(PayrollClientProject.team),
                 )
                 .execution_options(populate_existing=True)
@@ -473,11 +540,17 @@ async def get_agency_sheet(db: AsyncSession, project_id: int, month: str) -> dic
 
         week_rows: list[AgencyClientWeek] = []
         profit_amount: Decimal | None = None
-        if client.billing_mode == "fixed":
-            if client.fixed_amount is None:
+        # Формат оплаты — периодами: действующий в РАСЧЁТНОМ месяце (кейс
+        # Брыссина: percent до июня, fixed с июля; прошлое не переписывается).
+        billing = resolve_billing(list(client.billing_periods), month_start)
+        if billing is None:
+            warnings.append("Не задан формат оплаты на этот месяц")
+            fee_total = _money(ZERO)
+        elif billing.billing_mode == "fixed":
+            if billing.fixed_amount is None:
                 warnings.append("Не задана фикс-сумма")
-            fee_total = _money(client.fixed_amount or ZERO)
-        elif client.billing_mode == "percent":
+            fee_total = _money(billing.fixed_amount or ZERO)
+        elif billing.billing_mode == "percent":
             entries_by_week = {
                 e.date_from: e.amount
                 for e in client.entries
@@ -501,11 +574,11 @@ async def get_agency_sheet(db: AsyncSession, project_id: int, month: str) -> dic
                 fee_total = _money(ZERO)
             else:
                 profit_amount = entry.amount
-                if client.fee_percent is None:
+                if billing.fee_percent is None:
                     warnings.append("Не задан процент от прибыли")
                     fee_total = _money(ZERO)
                 else:
-                    fee_total = _money(entry.amount * client.fee_percent)
+                    fee_total = _money(entry.amount * billing.fee_percent)
 
         manager_amount = _money(fee_total * client.manager_share)
         agency_amount = _money(fee_total - manager_amount)
@@ -516,13 +589,13 @@ async def get_agency_sheet(db: AsyncSession, project_id: int, month: str) -> dic
             AgencySheetClient(
                 client_id=client.id,
                 name=client.name,
-                billing_mode=client.billing_mode,
+                billing_mode=billing.billing_mode if billing else None,
                 team_id=client.team_id if team_alive else None,
                 team_name=team_name,
                 manager_share=client.manager_share,
                 weeks=week_rows,
                 profit_amount=profit_amount,
-                fee_percent=client.fee_percent,
+                fee_percent=billing.fee_percent if billing else None,
                 fee_total=fee_total,
                 manager_amount=manager_amount,
                 agency_amount=agency_amount,

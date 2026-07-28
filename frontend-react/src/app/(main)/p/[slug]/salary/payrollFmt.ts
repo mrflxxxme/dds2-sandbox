@@ -1,6 +1,6 @@
 /** Shared formatting helpers for the Зарплата section. */
 import { formatNumber } from '@/lib/utils';
-import type { PayrollPayDayShare, PayrollScopeKind, PayrollTeamScope } from '@/types/api';
+import type { PayrollPayDayShare, PayrollTeamScope } from '@/types/api';
 
 // Numeric-поля бэка приходят строками — коэрсим перед formatNumber.
 // Дефолт 2 знака: суммы строк обязаны биться с «Итого» и фактами выписки
@@ -80,16 +80,17 @@ export const shiftMonth = (iso: string, n: number): string => {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 };
 
-export const SCOPE_KIND_LABEL: Record<PayrollScopeKind, string> = {
-    brand: 'Бренд',
-    subject: 'Категория',
+/** Лейбл скоупа: «Бренд: X» / «Категория: Y» / «X × Y» (композит-пересечение). */
+export const scopeLabel = (s: PayrollTeamScope): string => {
+    if (s.brand && s.subject) return `${s.brand} × ${s.subject}`;
+    if (s.brand) return `Бренд: ${s.brand}`;
+    return `Категория: ${s.subject ?? '—'}`;
 };
 
-export const scopeBadgeClass = (kind: PayrollScopeKind): string =>
-    kind === 'brand' ? 'badge badge-info' : 'badge badge-secondary';
-
-export const scopeLabel = (s: PayrollTeamScope): string =>
-    `${SCOPE_KIND_LABEL[s.kind]}: ${s.value}`;
+export const scopeBadgeClass = (s: PayrollTeamScope): string =>
+    s.brand && s.subject
+        ? 'badge badge-success'
+        : s.brand ? 'badge badge-info' : 'badge badge-secondary';
 
 /** График фикс-оклада → человекочитаемая подпись. */
 export const payScheduleLabel = (days: PayrollPayDayShare[] | null | undefined): string => {

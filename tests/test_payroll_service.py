@@ -20,6 +20,7 @@ from backend.schemas.payroll import (
     PayoutMarkIn,
     SalaryPeriodIn,
     TeamIn,
+    TeamMemberIn,
     TeamMembersReplace,
     TeamScopeIn,
     TeamScopesReplace,
@@ -230,10 +231,10 @@ async def test_sheet_team_accrual_equal_split(db_session, client, auth_headers, 
     team = await payroll_service.create_team(db_session, pid, TeamIn(name="Ковры"))
     await payroll_service.replace_team_scopes(
         db_session, pid, team.id,
-        TeamScopesReplace(scopes=[TeamScopeIn(kind="brand", value="BrandA")]),
+        TeamScopesReplace(scopes=[TeamScopeIn(brand="BrandA")]),
     )
     await payroll_service.replace_team_members(
-        db_session, pid, team.id, TeamMembersReplace(employee_ids=[e1.id, e2.id])
+        db_session, pid, team.id, TeamMembersReplace(members=[TeamMemberIn(employee_id=_x) for _x in [e1.id, e2.id]])
     )
 
     calls: list = []
@@ -279,10 +280,10 @@ async def test_sheet_negative_week_zero_rate(db_session, client, auth_headers, m
     team = await payroll_service.create_team(db_session, pid, TeamIn(name="Минус"))
     await payroll_service.replace_team_scopes(
         db_session, pid, team.id,
-        TeamScopesReplace(scopes=[TeamScopeIn(kind="subject", value="Ковры")]),
+        TeamScopesReplace(scopes=[TeamScopeIn(subject="Ковры")]),
     )
     await payroll_service.replace_team_members(
-        db_session, pid, team.id, TeamMembersReplace(employee_ids=[emp.id])
+        db_session, pid, team.id, TeamMembersReplace(members=[TeamMemberIn(employee_id=_x) for _x in [emp.id]])
     )
     monkeypatch.setattr(
         "backend.services.wb_bdr_service.get_wb_bdr",
@@ -421,10 +422,10 @@ async def test_team_softdelete_member_excluded_from_split(
     team = await payroll_service.create_team(db_session, pid, TeamIn(name="Т"))
     await payroll_service.replace_team_scopes(
         db_session, pid, team.id,
-        TeamScopesReplace(scopes=[TeamScopeIn(kind="brand", value="B")]),
+        TeamScopesReplace(scopes=[TeamScopeIn(brand="B")]),
     )
     await payroll_service.replace_team_members(
-        db_session, pid, team.id, TeamMembersReplace(employee_ids=[e1.id, e2.id])
+        db_session, pid, team.id, TeamMembersReplace(members=[TeamMemberIn(employee_id=_x) for _x in [e1.id, e2.id]])
     )
     await payroll_service.delete_employee(db_session, pid, e2.id)
 
@@ -583,7 +584,7 @@ async def test_opex_exclusion_scoped_by_accruals(db_session, client, auth_header
     )
     team = await payroll_service.create_team(db_session, pid, TeamIn(name="Т"))
     await payroll_service.replace_team_members(
-        db_session, pid, team.id, TeamMembersReplace(employee_ids=[pct.id])
+        db_session, pid, team.id, TeamMembersReplace(members=[TeamMemberIn(employee_id=_x) for _x in [pct.id]])
     )
     # Привязан, но без команд и без окладов — начислений нет вовсе
     await payroll_service.create_employee(
@@ -666,10 +667,10 @@ async def test_month_accrual_breakdown_managers_positions_and_sum(
     team = await payroll_service.create_team(db_session, pid, TeamIn(name="Ковры"))
     await payroll_service.replace_team_scopes(
         db_session, pid, team.id,
-        TeamScopesReplace(scopes=[TeamScopeIn(kind="brand", value="BrandA")]),
+        TeamScopesReplace(scopes=[TeamScopeIn(brand="BrandA")]),
     )
     await payroll_service.replace_team_members(
-        db_session, pid, team.id, TeamMembersReplace(employee_ids=[e1.id, e2.id])
+        db_session, pid, team.id, TeamMembersReplace(members=[TeamMemberIn(employee_id=_x) for _x in [e1.id, e2.id]])
     )
     monkeypatch.setattr(
         "backend.services.wb_bdr_service.get_wb_bdr", _fake_bdr(by_brand={"BrandA": 700000})
@@ -831,10 +832,10 @@ async def test_opiu_fot_children_managers_and_position(
     team = await payroll_service.create_team(db_session, pid, TeamIn(name="Ковры"))
     await payroll_service.replace_team_scopes(
         db_session, pid, team.id,
-        TeamScopesReplace(scopes=[TeamScopeIn(kind="brand", value="BrandA")]),
+        TeamScopesReplace(scopes=[TeamScopeIn(brand="BrandA")]),
     )
     await payroll_service.replace_team_members(
-        db_session, pid, team.id, TeamMembersReplace(employee_ids=[e1.id])
+        db_session, pid, team.id, TeamMembersReplace(members=[TeamMemberIn(employee_id=_x) for _x in [e1.id]])
     )
     monkeypatch.setattr(
         "backend.services.wb_bdr_service.get_wb_bdr", _fake_bdr(by_brand={"BrandA": 700000})

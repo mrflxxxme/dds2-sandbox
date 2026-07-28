@@ -9,6 +9,7 @@ import type {
     PayrollTeamUpdate,
     PayrollTeam,
     PayrollTeamListResponse,
+    PayrollTeamMemberIn,
     PayrollTeamScope,
     PayrollScopeOptions,
     PayrollTariffReplace,
@@ -66,8 +67,8 @@ export function addPayrollMethods(api: ApiClient) {
             return api.request<PayrollTeam>('PUT', `/api/v1/payroll/teams/${id}/scopes`, { scopes });
         },
 
-        replacePayrollTeamMembers(id: number, employee_ids: number[]) {
-            return api.request<PayrollTeam>('PUT', `/api/v1/payroll/teams/${id}/members`, { employee_ids });
+        replacePayrollTeamMembers(id: number, members: PayrollTeamMemberIn[]) {
+            return api.request<PayrollTeam>('PUT', `/api/v1/payroll/teams/${id}/members`, { members });
         },
 
         payrollScopeOptions() {
