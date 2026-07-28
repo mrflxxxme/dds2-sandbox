@@ -7,13 +7,31 @@ import {
 } from 'recharts';
 import { api } from '@/lib/api';
 import KpiCard from '@/components/KpiCard';
-import type { LoanDashboard } from '@/types/api';
-import { CHART_COLORS, entityLabel, fmtDate, money, periodLabel, ratePct } from './loanFmt';
+import type { LoanAccrualDaysResponse, LoanDashboard } from '@/types/api';
+import { CHART_COLORS, entityLabel, fmtDate, money, monthLabel, periodLabel, ratePct } from './loanFmt';
+import LoansLent from './LoansLent';
+
+/** Пресеты окна для подневного режима графика (бэк не даёт больше 400 дней). */
+const DAY_RANGES = [
+    { key: 30, label: '30 дней' },
+    { key: 90, label: '90 дней' },
+    { key: 180, label: '180 дней' },
+] as const;
+
+const isoDay = (d: Date): string => d.toISOString().slice(0, 10);
 
 export default function LoansDashboard({ nonce }: { nonce: number }) {
     const [data, setData] = useState<LoanDashboard | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    // Подневный срез того же начисления: месяцы отвечают «сколько стоило»,
+    // дни — «сколько стоит прямо сейчас». Грузим лениво, только по переключателю.
+    const [gran, setGran] = useState<'month' | 'day'>('month');
+    const [dayRange, setDayRange] = useState<number>(30);
+    const [dayCost, setDayCost] = useState<LoanAccrualDaysResponse | null>(null);
+    const [dayIncome, setDayIncome] = useState<LoanAccrualDaysResponse | null>(null);
+    const [dayLoading, setDayLoading] = useState(false);
+    const [dayError, setDayError] = useState('');
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -27,7 +45,31 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
         }
     }, []);
 
+    const loadDays = useCallback(async () => {
+        setDayLoading(true);
+        setDayError('');
+        try {
+            const to = new Date();
+            const from = new Date();
+            from.setDate(to.getDate() - (dayRange - 1));
+            const range = { date_from: isoDay(from), date_to: isoDay(to) };
+            // Стоимость дня и доход дня — один и тот же расчёт с разным направлением;
+            // считаем оба, чтобы показать чистую цену дня.
+            const [cost, income] = await Promise.all([
+                api.portfolioAccrualDays({ ...range, direction: 'INCOMING' }),
+                api.portfolioAccrualDays({ ...range, direction: 'OUTGOING' }),
+            ]);
+            setDayCost(cost);
+            setDayIncome(income);
+        } catch (e: unknown) {
+            setDayError(e instanceof Error ? e.message : 'Ошибка загрузки');
+        } finally {
+            setDayLoading(false);
+        }
+    }, [dayRange]);
+
     useEffect(() => { load(); }, [load, nonce]);
+    useEffect(() => { if (gran === 'day') loadDays(); }, [gran, loadDays, nonce]);
 
     if (loading) {
         return <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)' }}>Загрузка…</div>;
@@ -54,21 +96,33 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
         );
     }
 
-    // Точка = период начисления 25→25; ключ приходит датой выплаты (ISO),
-    // подписываем её как «25.08» — так же, как в реестре и на карточке.
+    // Точка = календарный месяц (YYYY-MM); текущий месяц помечен is_partial —
+    // он посчитан не до конца (только с 1-го числа по сегодня).
     const monthly = data.monthly.map((m) => ({
-        month: periodLabel(m.month),
+        month: `${monthLabel(m.month)}${m.is_partial ? ' *' : ''}`,
+        isPartial: m.is_partial,
         outstanding: Number(m.outstanding),
         interest: Number(m.interest),
+        fee: Number(m.fee),
+        cost: Number(m.cost),
         disbursed: Number(m.disbursed),
         repaid: Number(m.repaid),
     }));
+    const hasPartialMonth = monthly.some((m) => m.isPartial);
     const byEntity = data.by_entity.map((e) => ({
         name: entityLabel(e.entity_type),
         value: Number(e.outstanding),
         count: e.count,
     }));
-    // Проценты за текущий период 25→25 отдельно по ИП и физлицам
+    // Деление физлицо/ИП объясняет что-то только там, где заимодавцев много и
+    // сущность у них проставлена (реестр частных займов). Там, где кредиторы —
+    // пара банков и один ИП, оно вырождается в «ИП против прочерка»: показывать
+    // такую разбивку значит выдавать шум за структуру.
+    const knownEntities = data.by_entity.filter(
+        (e) => e.entity_type && (Number(e.outstanding) > 0 || Number(e.interest_due_period) > 0),
+    );
+    const showEntitySplit = knownEntities.length >= 2;
+    // Стоимость денег за календарный месяц (прогноз/факт) отдельно по ИП и физлицам
     const interestByEntity = data.by_entity
         .filter((e) => Number(e.interest_due_period) > 0 || Number(e.outstanding) > 0)
         .map((e) => ({
@@ -89,6 +143,18 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
         accrued: Number(t.accrued_interest),
     }));
 
+    // Подневный ряд: стоимость дня и — если мы кому-то дали денег — доход дня.
+    const incomeByDate = new Map((dayIncome?.rows ?? []).map((r) => [r.date, Number(r.interest)]));
+    const daily = (dayCost?.rows ?? []).map((r) => ({
+        day: periodLabel(r.date),
+        outstanding: Number(r.balance),
+        interest: Number(r.interest),
+        income: incomeByDate.get(r.date) ?? 0,
+    }));
+    const hasIncome = daily.some((d) => d.income > 0);
+    const lastDay = daily.length ? daily[daily.length - 1] : null;
+    const netDay = lastDay ? lastDay.interest - lastDay.income : 0;
+
     return (
         <div>
             {/* KPI row */}
@@ -96,21 +162,119 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
                 <KpiCard label="Тело в займах" value={`${money(k.total_outstanding)} ₽`} icon="💼" color="#0071e3" sub={`${k.active_count} активных · ${k.lenders_count} заёмщиков`} />
                 <KpiCard label="Средневзв. ставка" value={ratePct(k.weighted_avg_rate)} icon="📈" color="#5e5ce6" sub="годовых по активным" />
                 <KpiCard label="Проценты в месяц" value={`${money(k.monthly_interest)} ₽`} icon="🗓️" color="#ff9500" sub="текущая нагрузка" />
-                <KpiCard label="Начислено % (период)" value={`${money(k.accrued_interest)} ₽`} icon="⏳" color="#ff3b30" sub="к выплате за период" />
+                <KpiCard
+                    label={`Расходы на займы · ${monthLabel(k.accrual_month)}`}
+                    value={`${money(k.accrued_cost)} ₽`}
+                    icon="⏳"
+                    color="#ff3b30"
+                    sub={`% ${money(k.accrued_interest)} ₽ · комиссии ${money(k.accrued_fee)} ₽ · прогноз ${money(k.month_cost_projected)} ₽`}
+                />
+                <KpiCard
+                    label="Стоимость денег"
+                    value={ratePct(k.effective_rate)}
+                    icon="💹"
+                    color="#af52de"
+                    sub="во сколько реально обходятся деньги, годовых"
+                />
+                <KpiCard
+                    label="Долг по процентам"
+                    value={`${money(k.interest_debt)} ₽`}
+                    icon="🧾"
+                    color="#ff2d55"
+                    sub="начислено за всё время минус уплачено"
+                />
                 <KpiCard
                     label="Ближайший возврат"
                     value={fmtDate(k.next_maturity_date)}
                     icon="📅"
                     color="#34c759"
-                    sub={k.next_maturity_amount ? `${money(k.next_maturity_amount)} ₽` : '—'}
+                    sub={Number(k.next_maturity_amount) > 0 ? `${money(k.next_maturity_amount)} ₽` : '—'}
                 />
             </div>
 
             {/* Dynamics chart */}
             <div className="glass-card" style={{ marginBottom: 16 }}>
-                <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>Динамика тела и процентов по периодам</h3>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
+                    <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>
+                        Динамика тела и стоимости денег {gran === 'month' ? 'по месяцам' : 'по дням'}
+                    </h3>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        {gran === 'day' && DAY_RANGES.map((r) => (
+                            <button
+                                key={r.key}
+                                className={`btn btn-sm ${dayRange === r.key ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setDayRange(r.key)}
+                            >
+                                {r.label}
+                            </button>
+                        ))}
+                        <button
+                            className={`btn btn-sm ${gran === 'month' ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => setGran('month')}
+                        >
+                            По месяцам
+                        </button>
+                        <button
+                            className={`btn btn-sm ${gran === 'day' ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => setGran('day')}
+                        >
+                            По дням
+                        </button>
+                    </div>
+                </div>
+
+                {gran === 'day' ? (
+                    <>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>
+                            Сколько стоит один день портфеля: тело на дату и проценты с комиссиями за сутки.
+                            Тот же движок, что и в месячном своде, — сумма дней сходится с ним копейка в копейку.
+                        </div>
+                        {dayError && (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--color-danger)', fontSize: 13, marginBottom: 10 }}>
+                                <span>{dayError}</span>
+                                <button className="btn btn-secondary btn-sm" onClick={loadDays}>Повторить</button>
+                            </div>
+                        )}
+                        {dayLoading && !daily.length ? (
+                            <div style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-dim)' }}>Считаю по дням…</div>
+                        ) : !daily.length ? (
+                            <div style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-dim)' }}>
+                                За этот период начислений не было.
+                            </div>
+                        ) : (
+                            <>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 12 }}>
+                                    <DayCell label="День стоит" value={`${money(lastDay?.interest, 0)} ₽`} />
+                                    {hasIncome && <DayCell label="День приносит" value={`${money(lastDay?.income, 0)} ₽`} />}
+                                    {hasIncome && <DayCell label="Чистая цена дня" value={`${money(netDay, 0)} ₽`} strong />}
+                                    <DayCell label="Всего за период" value={`${money(dayCost?.total_interest, 0)} ₽`} />
+                                    <DayCell label="Среднее тело" value={`${money(dayCost?.avg_balance, 0)} ₽`} />
+                                    <DayCell label="Эффективная ставка" value={ratePct(dayCost?.effective_rate)} />
+                                </div>
+                                <ResponsiveContainer width="100%" height={300}>
+                                    <ComposedChart data={daily} margin={{ top: 8, right: 12, left: 8, bottom: 0 }}>
+                                        <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                                        <XAxis dataKey="day" tick={{ fontSize: 11 }} minTickGap={16} />
+                                        <YAxis yAxisId="left" tick={{ fontSize: 11 }} tickFormatter={(v) => money(v)} width={70} />
+                                        <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} tickFormatter={(v) => money(v)} width={60} />
+                                        <Tooltip formatter={(v: number, n) => [`${money(v, 2)} ₽`, n === 'outstanding' ? 'Остаток тела' : n === 'interest' ? 'Стоимость дня' : n === 'income' ? 'Доход дня' : n]} />
+                                        <Legend formatter={(v) => (v === 'outstanding' ? 'Остаток тела' : v === 'interest' ? 'Стоимость дня' : v === 'income' ? 'Доход дня' : v)} />
+                                        <Area yAxisId="left" type="monotone" dataKey="outstanding" fill="#0071e3" stroke="#0071e3" fillOpacity={0.15} strokeWidth={2} />
+                                        <Bar yAxisId="right" dataKey="interest" fill="#ff9500" barSize={daily.length > 60 ? 3 : 8} />
+                                        {hasIncome && (
+                                            <Line yAxisId="right" type="monotone" dataKey="income" stroke="#34c759" strokeWidth={2} dot={false} />
+                                        )}
+                                    </ComposedChart>
+                                </ResponsiveContainer>
+                            </>
+                        )}
+                    </>
+                ) : (
+                <>
                 <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>
-                    Период начисления — с 25-го по 25-е; подпись = дата выплаты.
+                    Считается по календарным месяцам, по дням — поэтому её можно складывать с ОПиУ. У ВКЛ период начисления — месяц,
+                    у частных займов — с 25-го по 25-е, у аннуитета свой график; в одну точку они не складываются.
+                    {hasPartialMonth && ' * текущий месяц — не до конца.'}
                 </div>
                 <ResponsiveContainer width="100%" height={300}>
                     <ComposedChart data={monthly} margin={{ top: 8, right: 12, left: 8, bottom: 0 }}>
@@ -118,20 +282,34 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
                         <XAxis dataKey="month" tick={{ fontSize: 11 }} />
                         <YAxis yAxisId="left" tick={{ fontSize: 11 }} tickFormatter={(v) => money(v)} width={70} />
                         <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} tickFormatter={(v) => money(v)} width={60} />
-                        <Tooltip formatter={(v: number, n) => [`${money(v)} ₽`, n === 'outstanding' ? 'Остаток тела' : n === 'interest' ? 'Проценты за период' : n]} />
-                        <Legend formatter={(v) => (v === 'outstanding' ? 'Остаток тела' : v === 'interest' ? 'Проценты за период' : v)} />
+                        <Tooltip formatter={(v: number, n) => [`${money(v)} ₽`, n === 'outstanding' ? 'Остаток тела' : n === 'interest' ? 'Проценты' : n === 'fee' ? 'Комиссии' : n]} />
+                        <Legend formatter={(v) => (v === 'outstanding' ? 'Остаток тела' : v === 'interest' ? 'Проценты' : v === 'fee' ? 'Комиссии' : v)} />
                         <Area yAxisId="left" type="monotone" dataKey="outstanding" fill="#0071e3" stroke="#0071e3" fillOpacity={0.15} strokeWidth={2} />
-                        <Bar yAxisId="right" dataKey="interest" fill="#ff9500" barSize={14} radius={[4, 4, 0, 0]} />
+                        <Bar yAxisId="right" dataKey="interest" stackId="cost" fill="#ff9500" barSize={14}>
+                            {monthly.map((m, i) => (
+                                <Cell key={i} fillOpacity={m.isPartial ? 0.45 : 1} />
+                            ))}
+                        </Bar>
+                        <Bar yAxisId="right" dataKey="fee" stackId="cost" fill="#5e5ce6" barSize={14} radius={[4, 4, 0, 0]}>
+                            {monthly.map((m, i) => (
+                                <Cell key={i} fillOpacity={m.isPartial ? 0.45 : 1} />
+                            ))}
+                        </Bar>
                     </ComposedChart>
                 </ResponsiveContainer>
+                </>
+                )}
             </div>
 
-            {/* Проценты за период — раздельно по ИП и физлицам */}
-            {interestByEntity.length > 0 && (
+            {/* Выдано — сколько должны нам (блока нет, если мы никому не давали) */}
+            <LoansLent nonce={nonce} />
+
+            {/* Стоимость денег за месяц — раздельно по ИП и физлицам */}
+            {showEntitySplit && interestByEntity.length > 0 && (
                 <div className="glass-card" style={{ marginBottom: 16 }}>
-                    <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>Проценты за период по сущности</h3>
+                    <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>Стоимость денег за месяц по сущности</h3>
                     <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>
-                        Период начисления — с 25-го по 25-е.
+                        Крупная цифра — прогноз за весь календарный месяц; «набежало» — факт с 1-го числа по сегодня.
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
                         {interestByEntity.map((e) => (
@@ -139,7 +317,7 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
                                 <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>{e.label}</div>
                                 <div style={{ fontSize: 22, fontWeight: 700 }}>{money(e.due)} ₽</div>
                                 <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
-                                    начислено {money(e.accrued)} ₽ · тело {money(e.outstanding)} ₽
+                                    набежало {money(e.accrued)} ₽ · тело {money(e.outstanding)} ₽
                                 </div>
                             </div>
                         ))}
@@ -149,7 +327,7 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
 
             {/* Two columns: by entity + by rate */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginBottom: 16 }}>
-                <div className="glass-card">
+                {showEntitySplit && <div className="glass-card">
                     <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 12px' }}>Структура: физлица / ИП</h3>
                     <ResponsiveContainer width="100%" height={240}>
                         <PieChart>
@@ -159,7 +337,7 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
                             <Tooltip formatter={(v: number) => `${money(v)} ₽`} />
                         </PieChart>
                     </ResponsiveContainer>
-                </div>
+                </div>}
                 <div className="glass-card">
                     <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 12px' }}>Остаток тела по ставкам</h3>
                     <ResponsiveContainer width="100%" height={240}>
@@ -187,6 +365,15 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
                     </BarChart>
                 </ResponsiveContainer>
             </div>
+        </div>
+    );
+}
+
+function DayCell({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
+    return (
+        <div>
+            <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{label}</div>
+            <div style={{ fontSize: strong ? 20 : 16, fontWeight: strong ? 700 : 600 }}>{value}</div>
         </div>
     );
 }

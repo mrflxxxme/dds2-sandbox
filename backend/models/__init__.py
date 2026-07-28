@@ -120,9 +120,15 @@ from backend.models.integrations import (
 )
 from backend.models.loan import (
     Loan,
+    LoanAccrualKind,
     LoanDirection,
+    LoanFee,
+    LoanFeeKind,
+    LoanKind,
     LoanPayment,
     LoanPaymentType,
+    LoanRatePeriod,
+    LoanScheduleEntry,
     LoanStatus,
 )
 
@@ -347,7 +353,13 @@ __all__ = [
     "IdentifierKind",
     "DocType",
     "Loan",
+    "LoanAccrualKind",
+    "LoanFee",
+    "LoanFeeKind",
+    "LoanKind",
     "LoanPayment",
+    "LoanRatePeriod",
+    "LoanScheduleEntry",
     "LoanDirection",
     "LoanStatus",
     "LoanPaymentType",

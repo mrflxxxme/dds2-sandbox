@@ -11,6 +11,7 @@ from decimal import Decimal
 
 import openpyxl
 import pytest
+from fastapi import HTTPException
 
 from backend.schemas.counterparty import CounterpartyCreate
 from backend.schemas.loan import LenderAccessCreate, LoanCreate, LoanExtend, LoanUpdate
@@ -43,6 +44,19 @@ async def _create_cp(db_session, project_id: int, name: str = "Кредитор"
         project_id=project_id,
     )
     return cp.id
+
+
+async def _member_user_id(db_session, project_id: int) -> int:
+    """id пользователя, от имени которого создан проект (для проверок доступа)."""
+    from sqlalchemy import select
+
+    from backend.models import ProjectMember
+
+    return (
+        await db_session.execute(
+            select(ProjectMember.user_id).where(ProjectMember.project_id == project_id).limit(1)
+        )
+    ).scalar_one()
 
 
 def _incoming(cp_id: int, contract: str, principal="1000000", rate="0.28") -> LoanCreate:
@@ -774,3 +788,892 @@ async def test_by_lender_historical_period(db_session, client, auth_headers):
     assert Decimal(str(row["interest_due_period"])) == Decimal("23671.23")
     # период давно закрыт → «начислено» равно «к выплате», без сдвига на день
     assert Decimal(str(row["accrued_interest"])) == Decimal("23671.23")
+
+
+# ─── Кредитная линия: выборки + плавающая ставка ─────────────────────────────
+
+
+def test_credit_line_matches_bank_statement():
+    """ВКЛ ВБ Банка: 6 траншей, смена ключевой внутри месяца — сверка с выпиской."""
+    from backend.services.loan_interest import RatePeriod, accrued_in_window
+
+    # Выборки по договору РЛ-21/26: лимит 101 млн выбран за месяц
+    tranches = [
+        (date(2026, 5, 25), 70_000_000), (date(2026, 6, 9), 12_000_000),
+        (date(2026, 6, 16), 6_000_000), (date(2026, 6, 19), 4_000_000),
+        (date(2026, 6, 23), 5_000_000), (date(2026, 6, 25), 4_000_000),
+    ]
+    pays = [loan_interest.PaymentLite("DISBURSEMENT", Decimal(a), d) for d, a in tranches]
+    # Ставка = ключевая ЦБ + 5 %: 14.5+5 до 21.06, с 22.06 ключевая упала до 14.25
+    rates = [
+        RatePeriod(date(2026, 5, 25), Decimal("0.195")),
+        RatePeriod(date(2026, 6, 22), Decimal("0.1925")),
+    ]
+
+    def accrue(a: date, b: date) -> Decimal:
+        return accrued_in_window(
+            principal=Decimal("0"), rate=None, start_date=date(2026, 5, 25),
+            payments=pays, win_start=a, win_end=b, rate_periods=rates,
+        )
+
+    # Факт из выписки ВБ Банка — до копейки
+    assert accrue(date(2026, 5, 25), date(2026, 5, 31)) == Decimal("224383.56")
+    assert accrue(date(2026, 5, 31), date(2026, 6, 30)) == Decimal("1348267.12")
+
+
+def test_credit_line_body_grows_on_drawdown():
+    """Тело линии растёт на выборках и падает на погашениях."""
+    from backend.services.loan_interest import accrued_in_window
+
+    pays = [
+        loan_interest.PaymentLite("DISBURSEMENT", Decimal("1000000"), date(2026, 1, 1)),
+        loan_interest.PaymentLite("DISBURSEMENT", Decimal("1000000"), date(2026, 1, 11)),
+        loan_interest.PaymentLite("PRINCIPAL_REPAY", Decimal("2000000"), date(2026, 1, 21)),
+    ]
+    kw = dict(principal=Decimal("0"), rate=Decimal("0.365"), start_date=date(2026, 1, 1), payments=pays)
+    # 10 дней по 1 млн + 10 дней по 2 млн = 30 млн·дней под 36.5 % → 1000 ₽/день на млн
+    assert accrued_in_window(**kw, win_start=date(2026, 1, 1), win_end=date(2026, 1, 21)) == Decimal("30000.00")
+    # после полного погашения начисление прекращается
+    assert accrued_in_window(**kw, win_start=date(2026, 1, 21), win_end=date(2026, 1, 31)) == Decimal("0.00")
+
+
+def test_rate_change_applies_from_its_own_day():
+    """День смены ставки считается уже по новой — иначе расхождение с банком."""
+    from backend.services.loan_interest import RatePeriod, accrued_in_window
+
+    kw = dict(
+        principal=Decimal("36500000"), rate=Decimal("0.10"),
+        start_date=date(2026, 3, 1), payments=[],
+        rate_periods=[RatePeriod(date(2026, 3, 3), Decimal("0.20"))],
+    )
+    # тело 36.5 млн: 10 % = 10 000 ₽/день, 20 % = 20 000 ₽/день
+    # дни 2 и 3 марта: 2-е по старой (10 000), 3-е уже по новой (20 000)
+    assert accrued_in_window(**kw, win_start=date(2026, 3, 1), win_end=date(2026, 3, 3)) == Decimal("30000.00")
+
+
+@pytest.mark.asyncio
+async def test_credit_line_service_end_to_end(db_session, client, auth_headers):
+    """Линия целиком: выборки, лимит, плавающая ставка, сальдо движений."""
+    from backend.models.loan import Loan
+    from backend.schemas.loan import CreditLineDraw, LoanRatePeriodIn
+    from backend.services.loan_service import draw_credit_line, get_credit_line, set_rate_period
+
+    project_id = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id, "ВБ Банк")
+    line = Loan(
+        project_id=project_id, counterparty_id=cp_id, direction="INCOMING",
+        principal=Decimal("0.01"), currency="RUB", contract_number="РЛ-21/26",
+        contract_date=date(2026, 5, 25), start_date=date(2026, 5, 25),
+        maturity_date=date(2027, 5, 25), status="ACTIVE",
+        loan_kind="CREDIT_LINE", accrual_kind="CALENDAR_MONTH",
+        credit_limit=Decimal("101000000"),
+    )
+    db_session.add(line)
+    await db_session.commit()
+    await db_session.refresh(line)
+
+    # Ставка = ключевая ЦБ + 5 %, ключевая упала с 22.06
+    for vf, rate, base in ((date(2026, 5, 25), "0.195", "0.145"), (date(2026, 6, 22), "0.1925", "0.1425")):
+        await set_rate_period(
+            db_session, loan_id=line.id, project_id=project_id,
+            data=LoanRatePeriodIn(valid_from=vf, rate=Decimal(rate), base_rate=Decimal(base), spread=Decimal("0.05")),
+        )
+    for when, amount in (
+        (date(2026, 5, 25), 70_000_000), (date(2026, 6, 9), 12_000_000),
+        (date(2026, 6, 16), 6_000_000), (date(2026, 6, 19), 4_000_000),
+        (date(2026, 6, 23), 5_000_000), (date(2026, 6, 25), 4_000_000),
+    ):
+        await draw_credit_line(
+            db_session, loan_id=line.id, project_id=project_id,
+            data=CreditLineDraw(amount=Decimal(amount), drawn_at=when),
+        )
+
+    cl = await get_credit_line(db_session, loan_id=line.id, project_id=project_id)
+    assert cl.drawn == Decimal("101000000")
+    assert cl.available == Decimal("0")
+    assert cl.utilization == Decimal("1.0000")
+    assert cl.current_rate == Decimal("0.1925")
+    assert len(cl.movements) == 6
+    assert cl.movements[-1].balance_after == Decimal("101000000")
+
+    # Лимит выбран целиком — следующая выборка отбивается
+    with pytest.raises(HTTPException) as exc:
+        await draw_credit_line(
+            db_session, loan_id=line.id, project_id=project_id,
+            data=CreditLineDraw(amount=Decimal("1"), drawn_at=date(2026, 7, 1)),
+        )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_credit_line_rejects_draw_on_term_loan(db_session, client, auth_headers):
+    """По обычному займу выборки запрещены — только по линии."""
+    from backend.schemas.loan import CreditLineDraw
+    from backend.services.loan_service import draw_credit_line, get_credit_line
+
+    project_id = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id)
+    svc = LoanService(db_session)
+    loan = await svc.create(data=_incoming(cp_id, "T-1"), project_id=project_id)
+
+    with pytest.raises(HTTPException) as exc:
+        await draw_credit_line(
+            db_session, loan_id=loan.id, project_id=project_id,
+            data=CreditLineDraw(amount=Decimal("1000"), drawn_at=date(2025, 2, 1)),
+        )
+    assert exc.value.status_code == 400
+    with pytest.raises(HTTPException):
+        await get_credit_line(db_session, loan_id=loan.id, project_id=project_id)
+
+
+# ─── График платежей (аннуитет Симпл Финанса) ────────────────────────────────
+
+# Приложение № 1 к договору E/2026/0087/01: 30 млн под 21 %, аннуитет
+# 3 021 911,33 ₽. Строка 1 — комиссия за выдачу 4,25 %, процентов за первые
+# 7 дней договор не берёт.
+SIMPLE_SCHEDULE = [
+    # seq, начало, конец, дата платежа, дней, тело, проценты, платёж, остаток
+    (1, date(2026, 3, 18), date(2026, 3, 25), date(2026, 3, 25), 7, "0", "1275000.00", "1275000.00", "30000000.00"),
+    (2, date(2026, 3, 26), date(2026, 4, 27), date(2026, 4, 27), 33, "2452322.29", "569589.04", "3021911.33", "27547677.71"),
+    (3, date(2026, 4, 28), date(2026, 5, 25), date(2026, 5, 25), 28, "2578129.56", "443781.77", "3021911.33", "24969548.15"),
+    (4, date(2026, 5, 26), date(2026, 6, 25), date(2026, 6, 25), 31, "2576564.05", "445347.28", "3021911.33", "22392984.10"),
+    (5, date(2026, 6, 26), date(2026, 7, 27), date(2026, 7, 27), 32, "2609635.02", "412276.31", "3021911.33", "19783349.08"),
+]
+
+
+def _simple_rows(limit: int | None = None):
+    from backend.schemas.loan import LoanScheduleRowIn
+
+    rows = []
+    for seq, ps, pe, due, days, principal, interest, total, balance in SIMPLE_SCHEDULE[:limit]:
+        rows.append(
+            LoanScheduleRowIn(
+                seq=seq, period_start=ps, period_end=pe, due_date=due, days=days,
+                principal_due=Decimal(principal), interest_due=Decimal(interest),
+                payment_total=Decimal(total), balance_after=Decimal(balance),
+                is_fee=(seq == 1),
+            )
+        )
+    return rows
+
+
+def test_simple_finance_schedule_matches_contract_formula():
+    """Проценты каждой строки = остаток × 21 % × дни / 365 — сверка с приложением № 1."""
+    balance = Decimal("30000000.00")
+    for seq, _ps, _pe, _due, days, principal, interest, total, after in SIMPLE_SCHEDULE:
+        if seq == 1:
+            # Первые 7 дней процентов нет — за них взята комиссия за выдачу 4,25 %
+            assert Decimal(interest) == (Decimal("30000000") * Decimal("0.0425")).quantize(Decimal("0.01"))
+        else:
+            calc = (balance * Decimal("0.21") * Decimal(days) / Decimal("365")).quantize(Decimal("0.01"))
+            assert abs(calc - Decimal(interest)) <= Decimal("0.02"), f"строка {seq}"
+            assert Decimal(principal) + Decimal(interest) == Decimal(total)
+        balance = Decimal(after)
+
+
+def test_schedule_interest_splits_into_calendar_months():
+    """Строка графика раскладывается по календарным месяцам пропорционально дням."""
+    from backend.services.loan_interest import ScheduleRowLite, schedule_interest_in_window
+
+    rows = [
+        ScheduleRowLite(date(2026, 3, 18), date(2026, 3, 25), date(2026, 3, 25), 7,
+                        Decimal("1275000.00"), is_fee=True),
+        ScheduleRowLite(date(2026, 3, 26), date(2026, 4, 27), date(2026, 4, 27), 33,
+                        Decimal("569589.04")),
+    ]
+    # Март: строка-комиссия не в счёт, от второй строки — дни 26…31 = 6 из 33
+    march = schedule_interest_in_window(rows, win_start=date(2026, 2, 28), win_end=date(2026, 3, 31))
+    assert march == (Decimal("569589.04") * 6 / 33).quantize(Decimal("0.01"))
+    # Апрель — оставшиеся 27 дней; вместе дают ровно сумму строки
+    april = schedule_interest_in_window(rows, win_start=date(2026, 3, 31), win_end=date(2026, 4, 30))
+    assert march + april == Decimal("569589.04")
+
+
+def test_debt_plan_rows_do_not_replace_accrual():
+    """
+    План погашения долга — не график начисления.
+
+    Строки «когда и сколько платить в счёт накопленных процентов» обязаны быть
+    невидимы для движка начисления: иначе пять строк по 2,59 млн подменили бы
+    собой проценты за весь срок займа и обнулили бы долг, который они гасят.
+    """
+    from backend.services.loan_interest import ScheduleRowLite, schedule_interest_in_window
+
+    plan = [
+        ScheduleRowLite(None, None, date(2026, 8, 25), None,
+                        Decimal("2586613.56"), is_debt_plan=True),
+        ScheduleRowLite(None, None, date(2026, 9, 25), None,
+                        Decimal("2586613.56"), is_debt_plan=True),
+    ]
+    assert schedule_interest_in_window(
+        plan, win_start=date(2026, 7, 31), win_end=date(2026, 8, 31)
+    ) == Decimal("0")
+
+
+def test_one_off_fee_amortizes_without_losing_kopecks():
+    """Разовая комиссия размазывается по сроку и в сумме даёт ровно себя."""
+    from backend.services.loan_interest import FeeLite, fee_in_window
+
+    fee = FeeLite(
+        amount=Decimal("252500.00"), charged_at=date(2026, 5, 25), amortize=True,
+        amortize_from=date(2026, 5, 25), amortize_to=date(2027, 5, 25),
+    )
+    total = Decimal("0")
+    cur = date(2026, 5, 1)
+    for _ in range(14):
+        nxt = loan_interest.add_months(cur, 1)
+        total += fee_in_window(
+            fee,
+            win_start=date.fromordinal(cur.toordinal() - 1),
+            win_end=date.fromordinal(nxt.toordinal() - 1),
+        )
+        cur = nxt
+    assert total == Decimal("252500.00")
+    # 366 дней срока → в мае живут 7 дней (25…31)
+    may = fee_in_window(fee, win_start=date(2026, 4, 30), win_end=date(2026, 5, 31))
+    assert may == (Decimal("252500.00") * 7 / 366).quantize(Decimal("0.01"))
+    # Без амортизации — вся сумма падает в день уплаты
+    lump = FeeLite(amount=Decimal("252500.00"), charged_at=date(2026, 5, 25), amortize=False)
+    assert fee_in_window(lump, win_start=date(2026, 4, 30), win_end=date(2026, 5, 31)) == Decimal("252500.00")
+    assert fee_in_window(lump, win_start=date(2026, 5, 31), win_end=date(2026, 6, 30)) == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_schedule_reconciles_plan_with_fact(db_session, client, auth_headers):
+    """График + фактические платежи: PAID / OVERDUE, ближайший платёж, отклонения."""
+    from backend.models.loan import LoanPayment
+    from backend.schemas.loan import LoanScheduleReplace
+    from backend.services import loan_schedule
+
+    project_id = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id, "СимплФинанс")
+    svc = LoanService(db_session)
+    loan = await svc.create(
+        data=LoanCreate(
+            counterparty_id=cp_id, direction="INCOMING", principal=Decimal("30000000"),
+            currency="RUB", rate=Decimal("0.21"), contract_number="E/2026/0087/01",
+            contract_date=date(2026, 3, 18), start_date=date(2026, 3, 18),
+            maturity_date=date(2027, 2, 25),
+        ),
+        project_id=project_id,
+    )
+    await loan_schedule.replace_schedule(
+        db_session, loan_id=loan.id, project_id=project_id,
+        data=LoanScheduleReplace(rows=_simple_rows()),
+    )
+
+    # Факт из выписок: комиссия, два аннуитета (второй с опозданием на день + пени)
+    for kind, amount, when in (
+        ("COMMISSION", "1275000.00", date(2026, 3, 25)),
+        ("PRINCIPAL_REPAY", "2452322.29", date(2026, 4, 24)),
+        ("INTEREST_PAY", "569589.04", date(2026, 4, 24)),
+        ("PRINCIPAL_REPAY", "2578129.56", date(2026, 5, 26)),
+        ("INTEREST_PAY", "443781.77", date(2026, 5, 26)),
+        ("PENALTY", "1483.31", date(2026, 5, 26)),
+    ):
+        db_session.add(LoanPayment(
+            loan_id=loan.id, payment_type=kind, amount=Decimal(amount),
+            currency="RUB", paid_at=when,
+        ))
+    await db_session.commit()
+
+    res = await loan_schedule.get_schedule(
+        db_session, loan_id=loan.id, project_id=project_id, as_of=date(2026, 7, 1)
+    )
+    by_seq = {r.seq: r for r in res.rows}
+    assert by_seq[1].state == "PAID"
+    assert by_seq[1].fee_paid == Decimal("1275000.00")
+    # Заплатили раньше срока — отрицательное опоздание, план закрыт
+    assert by_seq[2].state == "PAID" and by_seq[2].days_late == -3
+    # Пени сверх плана видны как переплата строки
+    assert by_seq[3].state == "PAID" and by_seq[3].delta == Decimal("1483.31")
+    assert by_seq[3].days_late == 1
+    # Платёж 25.06 не сделан — строка просрочена, а 27.07 ждёт оплаты
+    assert by_seq[4].state == "OVERDUE"
+    assert by_seq[5].state == "DUE"
+    assert res.next_due_date == date(2026, 7, 27)
+    assert res.overdue_count == 1
+    assert res.overdue_amount == Decimal("3021911.33")
+    assert res.total_payment == Decimal("13362645.32")  # 1 275 000 + 4 × 3 021 911,33
+    # «Итого процентов» повторяет договор: там комиссия за выдачу тоже напечатана
+    # в колонке процентов (1 870 994,40 + 1 275 000).
+    assert res.total_interest == Decimal("3145994.40")
+    # А стоимость денег строку-комиссию не берёт — она приходит через LoanFee,
+    # иначе расход задвоится (комиссии по этому займу ещё не заведены → 0).
+    assert res.total_cost == Decimal("1870994.40")
+
+
+@pytest.mark.asyncio
+async def test_month_cost_uses_schedule_and_amortized_fee(db_session, client, auth_headers):
+    """Стоимость денег по месяцам: проценты из графика + доля разовой комиссии."""
+    from backend.schemas.loan import LoanFeeIn, LoanScheduleReplace
+    from backend.services import loan_schedule
+
+    project_id = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id, "СимплФинанс")
+    svc = LoanService(db_session)
+    loan = await svc.create(
+        data=LoanCreate(
+            counterparty_id=cp_id, direction="INCOMING", principal=Decimal("30000000"),
+            currency="RUB", rate=Decimal("0.21"), contract_number="E/2026/0087/02",
+            contract_date=date(2026, 3, 18), start_date=date(2026, 3, 18),
+            maturity_date=date(2027, 2, 25),
+        ),
+        project_id=project_id,
+    )
+    await loan_schedule.replace_schedule(
+        db_session, loan_id=loan.id, project_id=project_id,
+        data=LoanScheduleReplace(rows=_simple_rows()),
+    )
+    await loan_schedule.add_fee(
+        db_session, loan_id=loan.id, project_id=project_id,
+        data=LoanFeeIn(
+            fee_kind="ORIGINATION", amount=Decimal("1275000.00"),
+            charged_at=date(2026, 3, 25), amortize=True,
+        ),
+    )
+
+    months = await loan_analytics.accrual_by_month(
+        db_session, project_id, date(2026, 6, 30), months=4
+    )
+    by_month = {m["month"]: m for m in months["items"]}
+    # Март: 6 дней из строки 2 (26…31.03), простая ставка дала бы 13 дней
+    assert Decimal(by_month["2026-03"]["interest"]) == (Decimal("569589.04") * 6 / 33).quantize(Decimal("0.01"))
+    # Комиссия НЕ падает целиком в март: она куплена на весь срок
+    assert Decimal(by_month["2026-03"]["fee"]) < Decimal("150000")
+    assert Decimal(by_month["2026-04"]["fee"]) > Decimal("0")
+    # Полная стоимость месяца = проценты + комиссия
+    for m in months["items"]:
+        assert Decimal(m["total"]) == Decimal(m["interest"]) + Decimal(m["fee"])
+
+
+# ─── Займ между своими проектами (зеркало) ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_mirror_creates_opposite_side_and_syncs(db_session, client, auth_headers):
+    """Займ учредителя: у ООО долг, у ИП актив; движения зеркалятся один раз."""
+    from backend.models.loan import LoanPayment
+    from backend.schemas.loan import LoanMirrorCreate
+    from backend.services import loan_mirror
+
+    pv_project = await _create_project(client, auth_headers)
+    ip_project = await _create_project(client, auth_headers)
+    uid = await _member_user_id(db_session, pv_project)
+    cp_id = await _create_cp(db_session, pv_project, "ИП Вяткин")
+    svc = LoanService(db_session)
+    loan = await svc.create(
+        data=LoanCreate(
+            counterparty_id=cp_id, direction="INCOMING", principal=Decimal("0"),
+            currency="RUB", rate=Decimal("0.27"), contract_number="б/н от 04.03.2025",
+            contract_date=date(2025, 3, 4), start_date=date(2025, 3, 4),
+            maturity_date=None, entity_type="IP",
+        ),
+        project_id=pv_project,
+    )
+    for kind, amount, when in (
+        ("DISBURSEMENT", "1000000", date(2025, 3, 5)),
+        ("DISBURSEMENT", "500000", date(2025, 4, 1)),
+        ("PRINCIPAL_REPAY", "300000", date(2025, 6, 1)),
+    ):
+        db_session.add(LoanPayment(
+            loan_id=loan.id, payment_type=kind, amount=Decimal(amount),
+            currency="RUB", paid_at=when,
+        ))
+    await db_session.commit()
+
+    chain = await loan_mirror.create_mirror(
+        db_session, loan_id=loan.id, project_id=pv_project, user_id=uid,
+        data=LoanMirrorCreate(
+            target_project_id=ip_project,
+            counterparty_name="ООО «Плюс Вайб»", counterparty_inn=_inn(),
+        ),
+    )
+    assert len(chain.sides) == 2
+    debt = next(s for s in chain.sides if s.project_id == pv_project)
+    asset = next(s for s in chain.sides if s.project_id == ip_project)
+    # Направление переворачивается: полученный займ у одного — выданный у другого
+    assert debt.direction == "INCOMING" and asset.direction == "OUTGOING"
+    # Тело и начисления совпадают: договор один
+    assert debt.outstanding == asset.outstanding == Decimal("1200000.00")
+    assert debt.accrued_total == asset.accrued_total
+    assert chain.in_sync is True
+    assert chain.maturity_date is None  # до востребования
+
+    # Повторная синхронизация ничего не дублирует
+    again = await loan_mirror.sync_mirror(db_session, loan_id=loan.id, project_id=pv_project)
+    assert again.outstanding == Decimal("1200000.00")
+    assert len(again.movements) == 3
+
+
+@pytest.mark.asyncio
+async def test_mirror_syncs_payment_added_on_either_side(db_session, client, auth_headers):
+    """Платёж, заведённый со стороны ИП, доезжает до книги ООО — и наоборот."""
+    from backend.models.loan import Loan, LoanPayment
+    from backend.schemas.loan import LoanMirrorCreate
+    from backend.services import loan_mirror
+    from sqlalchemy import select
+
+    pv_project = await _create_project(client, auth_headers)
+    ip_project = await _create_project(client, auth_headers)
+    uid = await _member_user_id(db_session, pv_project)
+    cp_id = await _create_cp(db_session, pv_project, "ИП Вяткин")
+    svc = LoanService(db_session)
+    loan = await svc.create(
+        data=LoanCreate(
+            counterparty_id=cp_id, direction="INCOMING", principal=Decimal("0"),
+            currency="RUB", rate=Decimal("0.2"), contract_number="MIR-2",
+            contract_date=date(2025, 3, 4), start_date=date(2025, 3, 4),
+        ),
+        project_id=pv_project,
+    )
+    db_session.add(LoanPayment(
+        loan_id=loan.id, payment_type="DISBURSEMENT", amount=Decimal("2000000"),
+        currency="RUB", paid_at=date(2025, 3, 5),
+    ))
+    await db_session.commit()
+    await loan_mirror.create_mirror(
+        db_session, loan_id=loan.id, project_id=pv_project, user_id=uid,
+        data=LoanMirrorCreate(target_project_id=ip_project, counterparty_name="ООО", counterparty_inn=_inn()),
+    )
+    mirror_id = (
+        await db_session.execute(select(Loan.mirror_loan_id).where(Loan.id == loan.id))
+    ).scalar_one()
+
+    # Возврат завели в книге ИП — он обязан появиться и у ООО
+    db_session.add(LoanPayment(
+        loan_id=mirror_id, payment_type="PRINCIPAL_REPAY", amount=Decimal("700000"),
+        currency="RUB", paid_at=date(2025, 5, 1),
+    ))
+    await db_session.commit()
+    chain = await loan_mirror.get_chain(db_session, loan_id=loan.id, project_id=pv_project)
+    assert chain.in_sync is False  # расхождение видно до синхронизации
+    chain = await loan_mirror.sync_mirror(db_session, loan_id=loan.id, project_id=pv_project)
+    assert chain.in_sync is True
+    assert chain.outstanding == Decimal("1300000.00")
+    assert all(s.outstanding == Decimal("1300000.00") for s in chain.sides)
+
+
+@pytest.mark.asyncio
+async def test_mirror_rejects_same_project_and_double_link(db_session, client, auth_headers):
+    """Вторая сторона — только в другом проекте и только одна."""
+    from backend.schemas.loan import LoanMirrorCreate
+    from backend.services import loan_mirror
+
+    project_id = await _create_project(client, auth_headers)
+    other = await _create_project(client, auth_headers)
+    uid = await _member_user_id(db_session, project_id)
+    cp_id = await _create_cp(db_session, project_id)
+    svc = LoanService(db_session)
+    loan = await svc.create(data=_incoming(cp_id, "MIR-3"), project_id=project_id)
+
+    with pytest.raises(HTTPException) as exc:
+        await loan_mirror.create_mirror(
+            db_session, loan_id=loan.id, project_id=project_id, user_id=uid,
+            data=LoanMirrorCreate(target_project_id=project_id, counterparty_name="X", counterparty_inn=_inn()),
+        )
+    assert exc.value.status_code == 400
+
+    await loan_mirror.create_mirror(
+        db_session, loan_id=loan.id, project_id=project_id, user_id=uid,
+        data=LoanMirrorCreate(target_project_id=other, counterparty_name="X", counterparty_inn=_inn()),
+    )
+    with pytest.raises(HTTPException) as exc:
+        await loan_mirror.create_mirror(
+            db_session, loan_id=loan.id, project_id=project_id, user_id=uid,
+            data=LoanMirrorCreate(target_project_id=other, counterparty_name="Y", counterparty_inn=_inn()),
+        )
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_mirror_isolated_from_foreign_project(db_session, client, auth_headers):
+    """Чужой проект не видит цепочку — 404, а не чужие деньги."""
+    from backend.services import loan_mirror
+
+    project_id = await _create_project(client, auth_headers)
+    stranger = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id)
+    svc = LoanService(db_session)
+    loan = await svc.create(data=_incoming(cp_id, "MIR-4"), project_id=project_id)
+
+    with pytest.raises(HTTPException) as exc:
+        await loan_mirror.get_chain(db_session, loan_id=loan.id, project_id=stranger)
+    assert exc.value.status_code == 404
+    empty = await loan_mirror.list_chains(db_session, project_id=stranger)
+    assert empty.items == []
+
+
+@pytest.mark.asyncio
+async def test_mirror_rejects_foreign_target_project(db_session, client, auth_headers):
+    """
+    Целевой проект приходит телом запроса — членство в нём проверяется отдельно.
+
+    `get_current_project` ручается только за ТЕКУЩИЙ проект. Без явной проверки
+    участник одного проекта мог бы создать займ и контрагента в любом чужом,
+    зная только его id.
+    """
+    from backend.schemas.loan import LoanMirrorCreate
+    from backend.services import loan_mirror
+
+    project_id = await _create_project(client, auth_headers)
+    other = await _create_project(client, auth_headers)
+    uid = await _member_user_id(db_session, project_id)
+    cp_id = await _create_cp(db_session, project_id)
+    svc = LoanService(db_session)
+    loan = await svc.create(data=_incoming(cp_id, "MIR-FOREIGN"), project_id=project_id)
+
+    # Чужой пользователь (не участник целевого проекта) — отказ
+    with pytest.raises(HTTPException) as exc:
+        await loan_mirror.create_mirror(
+            db_session, loan_id=loan.id, project_id=project_id, user_id=uid + 10_000_000,
+            data=LoanMirrorCreate(target_project_id=other, counterparty_name="X", counterparty_inn=_inn()),
+        )
+    assert exc.value.status_code == 403
+
+    # Несуществующий проект — тот же отказ, без утечки факта существования
+    with pytest.raises(HTTPException) as exc:
+        await loan_mirror.create_mirror(
+            db_session, loan_id=loan.id, project_id=project_id, user_id=uid,
+            data=LoanMirrorCreate(target_project_id=99_000_000, counterparty_name="X", counterparty_inn=_inn()),
+        )
+    assert exc.value.status_code == 403
+
+
+def test_vyatkin_loan_matches_accounting_card():
+    """
+    Займ учредителя: движок сходится с бухгалтерией «Плюс Вайб» до копеек.
+
+    Ставка 2 % до 31.10.2025 и 27 % с 01.11.2025. Контроль — фактические выплаты
+    процентов (210 682,08 за 04.03–30.09.2025) и сальдо карточки 67.03.
+    """
+    from backend.services.loan_interest import RatePeriod, accrued_in_window
+
+    moves = [
+        (date(2025, 3, 5), "830000"), (date(2025, 3, 18), "303000"),
+        (date(2025, 3, 25), "28000"), (date(2025, 3, 26), "40000"),
+        (date(2025, 4, 7), "35000"), (date(2025, 4, 7), "550000"),
+        (date(2025, 4, 8), "1100000"), (date(2025, 4, 8), "1900000"),
+        (date(2025, 4, 9), "935000"), (date(2025, 4, 9), "3205000"),
+        (date(2025, 4, 16), "13000"), (date(2025, 4, 28), "2527000"),
+        (date(2025, 5, 7), "22000"), (date(2025, 5, 16), "1100000"),
+        (date(2025, 5, 16), "2000000"), (date(2025, 5, 21), "2600000"),
+        (date(2025, 5, 30), "125000"), (date(2025, 6, 4), "600000"),
+        (date(2025, 6, 5), "2638000"), (date(2025, 6, 19), "600000"),
+        (date(2025, 6, 27), "2140000"), (date(2025, 6, 27), "1040000"),
+        (date(2025, 7, 17), "710000"), (date(2025, 8, 7), "100000"),
+        (date(2025, 8, 21), "4890000"), (date(2025, 8, 27), "500000"),
+        (date(2025, 8, 27), "643000"), (date(2025, 8, 29), "170000"),
+        (date(2025, 8, 29), "600000"), (date(2025, 9, 8), "70000"),
+        (date(2025, 9, 9), "2100000"), (date(2025, 9, 9), "280000"),
+        (date(2025, 9, 9), "140000"), (date(2025, 9, 10), "1200000"),
+        (date(2025, 9, 10), "700000"), (date(2025, 9, 11), "82000"),
+        (date(2025, 9, 11), "35000"), (date(2025, 9, 12), "85000"),
+        (date(2025, 9, 15), "3600000"), (date(2025, 9, 16), "200000"),
+        (date(2025, 9, 16), "930000"), (date(2025, 9, 19), "540000"),
+        (date(2025, 9, 19), "3000000"), (date(2025, 9, 19), "3000000"),
+        (date(2025, 9, 22), "28000"), (date(2025, 9, 23), "70000"),
+        (date(2025, 9, 25), "3150000"), (date(2025, 9, 29), "80000"),
+        (date(2025, 9, 30), "95000"),
+    ]
+    pays = [loan_interest.PaymentLite("DISBURSEMENT", Decimal(a), d) for d, a in moves]
+    pays += [
+        loan_interest.PaymentLite("PRINCIPAL_REPAY", Decimal("1000000"), date(2025, 7, 1)),
+        loan_interest.PaymentLite("PRINCIPAL_REPAY", Decimal("2750000"), date(2025, 8, 5)),
+    ]
+    rates = [
+        RatePeriod(date(2025, 3, 4), Decimal("0.02")),
+        RatePeriod(date(2025, 11, 1), Decimal("0.27")),
+    ]
+    accrued = accrued_in_window(
+        principal=Decimal("0"), rate=Decimal("0.27"), start_date=date(2025, 3, 4),
+        payments=pays, win_start=date(2025, 3, 3), win_end=date(2025, 9, 30),
+        rate_periods=rates,
+    )
+    # Ровно столько «Плюс Вайб» и заплатил 23.10.2025 за период 04.03 — 30.09.2025
+    assert accrued == Decimal("210682.08")
+
+
+@pytest.mark.asyncio
+async def test_forecast_uses_schedule_for_annuity(db_session, client, auth_headers):
+    """
+    У займа с графиком прогноз идёт по графику, а не «тело одним куском в конце».
+
+    Аннуитет гасится каждый месяц; модель bullet рисовала 22,4 млн в феврале
+    вместо двенадцати платежей — на графике это выглядело обрывом, которого нет.
+    """
+    from backend.schemas.loan import LoanScheduleReplace
+    from backend.services import loan_schedule
+
+    project_id = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id, "СимплФинанс")
+    svc = LoanService(db_session)
+    loan = await svc.create(
+        data=LoanCreate(
+            counterparty_id=cp_id, direction="INCOMING", principal=Decimal("30000000"),
+            currency="RUB", rate=Decimal("0.21"), contract_number="E/2026/0087/F",
+            contract_date=date(2026, 3, 18), start_date=date(2026, 3, 18),
+            maturity_date=date(2027, 2, 25),
+        ),
+        project_id=project_id,
+    )
+    await loan_schedule.replace_schedule(
+        db_session, loan_id=loan.id, project_id=project_id,
+        data=LoanScheduleReplace(rows=_simple_rows()),
+    )
+
+    res = await loan_analytics.forecast.__wrapped__(
+        db_session, project_id, date(2026, 5, 1), horizon_months=12
+    )
+    by_month = {m["month"]: m for m in res["months"]}
+    # Строки 3 и 4 графика: тело гасится помесячно, а не копится к сроку
+    assert Decimal(by_month["2026-05"]["principal_due"]) == Decimal("2578129.56")
+    assert Decimal(by_month["2026-06"]["principal_due"]) == Decimal("2576564.05")
+    assert Decimal(by_month["2026-05"]["interest"]) == Decimal("443781.77")
+    # Ни в одном месяце не всплывает остаток тела целиком
+    assert all(Decimal(m["principal_due"]) < Decimal("4000000") for m in res["months"])
+    # События идут парами «проценты + тело» на каждую дату платежа
+    may = [e for e in res["upcoming"] if e["date"] == "2026-05-25"]
+    assert {e["kind"] for e in may} == {"INTEREST", "MATURITY"}
+
+
+@pytest.mark.asyncio
+async def test_forecast_shows_debt_plan_payments(db_session, client, auth_headers):
+    """
+    План погашения долга обязан быть В ПРОГНОЗЕ выплат.
+
+    Для начисления строки плана невидимы — но это будущие ПЛАТЕЖИ, и без них
+    экран «Прогноз» показывает run-rate по ставке (0,7 млн) вместо суммы, о
+    которой договорились (2,59 млн), а в «Ближайших событиях» займа нет вовсе.
+    После последнего платежа плана прогноз обязан вернуться к run-rate: тело
+    никуда не делось и продолжает капать.
+    """
+    from backend.schemas.loan import LoanScheduleReplace, LoanScheduleRowIn
+    from backend.services import loan_schedule
+
+    project_id = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id, "Вяткин")
+    svc = LoanService(db_session)
+    loan = await svc.create(
+        data=LoanCreate(
+            counterparty_id=cp_id, direction="INCOMING", principal=Decimal("31095100"),
+            currency="RUB", rate=Decimal("0.27"), contract_number="б/н план",
+            contract_date=date(2025, 3, 4), start_date=date(2025, 3, 4),
+        ),
+        project_id=project_id,
+    )
+    rows = [
+        LoanScheduleRowIn(
+            seq=i + 1, due_date=date(2026, 8 + i, 25),
+            principal_due=Decimal("0"), interest_due=Decimal("2586613.56"),
+            payment_total=Decimal("2586613.56"), is_debt_plan=True,
+        )
+        for i in range(5)
+    ]
+    await loan_schedule.replace_schedule(
+        db_session, loan_id=loan.id, project_id=project_id,
+        data=LoanScheduleReplace(rows=rows),
+    )
+
+    res = await loan_analytics.forecast.__wrapped__(
+        db_session, project_id, date(2026, 7, 28), horizon_months=12
+    )
+    by_month = {m["month"]: m for m in res["months"]}
+    # Месяцы плана — сумма договорённости, а не run-rate по ставке
+    assert Decimal(by_month["2026-08"]["interest"]) == Decimal("2586613.56")
+    assert Decimal(by_month["2026-12"]["interest"]) == Decimal("2586613.56")
+    # Тело план не гасит
+    assert Decimal(by_month["2026-08"]["principal_due"]) == Decimal("0")
+    # После плана — снова run-rate по ставке, а не ноль
+    assert Decimal("0") < Decimal(by_month["2027-01"]["interest"]) < Decimal("1000000")
+    # Каждый платёж плана виден в «Ближайших событиях»
+    plan_events = [
+        e for e in res["upcoming"]
+        if e["kind"] == "INTEREST" and e["amount"] == "2586613.56"
+    ]
+    assert len(plan_events) == 5
+    assert plan_events[0]["date"] == "2026-08-25"
+
+
+@pytest.mark.asyncio
+async def test_forecast_keeps_accruing_on_overdue_loan(db_session, client, auth_headers):
+    """
+    Срок вышел, а деньги не вернули — проценты обязаны идти дальше.
+
+    Прогноз обрезал начисление датой возврата, и займ, который не продлили и не
+    погасили, выпадал из него ЦЕЛИКОМ: ни процентов в месяцах, ни строки в
+    событиях. Между тем движок по факту продолжает начислять — прогноз обещал
+    ноль там, где ОПиУ потом показывал расход.
+    """
+    project_id = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id, "Просрочка")
+    svc = LoanService(db_session)
+    await svc.create(
+        data=LoanCreate(
+            counterparty_id=cp_id, direction="INCOMING", principal=Decimal("4000000"),
+            currency="RUB", rate=Decimal("0.26"), contract_number="62-01 просрочен",
+            contract_date=date(2026, 1, 26), start_date=date(2026, 1, 26),
+            maturity_date=date(2026, 7, 26),  # срок ВЫШЕЛ, тело висит
+        ),
+        project_id=project_id,
+    )
+
+    res = await loan_analytics.forecast.__wrapped__(
+        db_session, project_id, date(2026, 7, 28), horizon_months=6
+    )
+    by_month = {m["month"]: m for m in res["months"]}
+    # 4 млн под 26 % — это ~86,7 тыс. в месяц, и они никуда не делись
+    assert Decimal(by_month["2026-08"]["interest"]) > Decimal("80000")
+    assert Decimal(by_month["2026-09"]["interest"]) > Decimal("80000")
+
+
+def test_body_days_counts_overdue_body_but_not_closed_loan():
+    """
+    Среднее тело: просроченный займ в знаменателе, закрытый — нет.
+
+    Знаменатель эффективной ставки обрезался датой возврата у ВСЕХ займов. У
+    просроченного проценты при этом капали — числитель рос, знаменатель стоял,
+    и «стоимость денег» задиралась на ровном месте. У закрытого обрезка нужна:
+    если строк возврата нет, дату закрытия взять неоткуда.
+    """
+    from types import SimpleNamespace
+
+    from backend.services.loan_analytics import _body_days
+
+    kw = dict(
+        start_date=date(2026, 1, 26), maturity_date=date(2026, 7, 26),
+        principal=Decimal("4000000"),
+    )
+    overdue = SimpleNamespace(status="ACTIVE", **kw)
+    closed = SimpleNamespace(status="CLOSED", **kw)
+    # Окно (26.07, 28.07] — два дня уже ПОСЛЕ срока
+    assert _body_days(overdue, [], date(2026, 7, 26), date(2026, 7, 28)) == Decimal("8000000")
+    assert _body_days(closed, [], date(2026, 7, 26), date(2026, 7, 28)) == Decimal("0")
+
+
+def test_principal_only_schedule_keeps_engine_interest():
+    """
+    График ТОЛЬКО тела (кредитная линия) не должен обнулять проценты.
+
+    У аннуитета в графике обе части, у линии — лишь возврат траншей: проценты
+    там платят помесячно по факту выборки. Правило «есть график → проценты из
+    него» стоило бы линии 1,6 млн ₽ в месяц и в стоимости деньг, и в ОПиУ.
+    """
+    from backend.services.loan_analytics import _schedule_has_interest
+    from backend.services.loan_interest import ScheduleRowLite
+
+    body_only = [
+        ScheduleRowLite(date(2026, 5, 25), date(2026, 11, 21), date(2026, 11, 21), 180,
+                        Decimal("0"), principal_due=Decimal("70000000")),
+    ]
+    annuity = [
+        ScheduleRowLite(date(2026, 3, 26), date(2026, 4, 27), date(2026, 4, 27), 33,
+                        Decimal("569589.04"), principal_due=Decimal("2452322.29")),
+    ]
+    fee_only = [
+        ScheduleRowLite(date(2026, 3, 18), date(2026, 3, 25), date(2026, 3, 25), 7,
+                        Decimal("1275000"), principal_due=Decimal("0"), is_fee=True),
+    ]
+    assert _schedule_has_interest(body_only) is False
+    assert _schedule_has_interest(annuity) is True
+    # Строка-комиссия процентами не считается — иначе движок бы «увидел» проценты
+    assert _schedule_has_interest(fee_only) is False
+    assert _schedule_has_interest(None) is False
+
+
+@pytest.mark.asyncio
+async def test_daily_accrual_sums_to_period(db_session, client, auth_headers):
+    """
+    Подневная расшифровка обязана сходиться со сводом — считает та же функция.
+
+    Отдельно проверяем, что тело показано ДО движения дня: деньги начинают
+    работать со следующего дня, и именно на этом ловились расхождения с банком.
+    """
+    from backend.models.loan import LoanPayment
+    from backend.services import loan_daily
+
+    project_id = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id, "Банк")
+    svc = LoanService(db_session)
+    loan = await svc.create(
+        data=LoanCreate(
+            counterparty_id=cp_id, direction="INCOMING", principal=Decimal("0"),
+            currency="RUB", rate=Decimal("0.365"), contract_number="DAY-1",
+            contract_date=date(2026, 1, 1), start_date=date(2026, 1, 1),
+        ),
+        project_id=project_id,
+    )
+    db_session.add_all([
+        LoanPayment(loan_id=loan.id, payment_type="DISBURSEMENT", amount=Decimal("1000000"),
+                    currency="RUB", paid_at=date(2026, 1, 1)),
+        LoanPayment(loan_id=loan.id, payment_type="DISBURSEMENT", amount=Decimal("1000000"),
+                    currency="RUB", paid_at=date(2026, 1, 11)),
+    ])
+    await db_session.commit()
+
+    res = await loan_daily.daily_accrual(
+        db_session, loan_id=loan.id, project_id=project_id,
+        date_from=date(2026, 1, 1), date_to=date(2026, 1, 20),
+    )
+    # 36.5 % на млн — ровно 1000 ₽ в день
+    by_date = {r.date: r for r in res.rows}
+    assert by_date[date(2026, 1, 2)].interest == Decimal("1000.00")
+    assert by_date[date(2026, 1, 2)].balance == Decimal("1000000")
+    # День второй выборки: тело ещё старое, деньги заработают завтра
+    assert by_date[date(2026, 1, 11)].balance == Decimal("1000000")
+    assert by_date[date(2026, 1, 11)].movement == Decimal("1000000")
+    assert by_date[date(2026, 1, 12)].interest == Decimal("2000.00")
+
+    # Сумма дней == начисление за то же окно одним вызовом движка
+    window = loan_interest.accrued_in_window(
+        principal=Decimal("0"), rate=Decimal("0.365"), start_date=date(2026, 1, 1),
+        payments=[
+            loan_interest.PaymentLite("DISBURSEMENT", Decimal("1000000"), date(2026, 1, 1)),
+            loan_interest.PaymentLite("DISBURSEMENT", Decimal("1000000"), date(2026, 1, 11)),
+        ],
+        win_start=date(2025, 12, 31), win_end=date(2026, 1, 20),
+    )
+    assert res.total_interest == window
+
+
+@pytest.mark.asyncio
+async def test_interest_income_counted_for_outgoing(db_session, client, auth_headers):
+    """
+    Выданный займ даёт процентный ДОХОД — иначе ОПиУ показывает только расход.
+
+    Учредитель, занявший под 26 % и передавший деньги своему ООО под 27 %, платит
+    не 26 %, а разницу; без дохода его отчёт врёт на всю сумму полученного.
+    """
+    from backend.models.loan import LoanPayment
+    from backend.services.loan_analytics import cost_by_month_keys, income_by_month_keys
+
+    project_id = await _create_project(client, auth_headers)
+    borrower = await _create_cp(db_session, project_id, "Наше ООО")
+    lender = await _create_cp(db_session, project_id, "Частник")
+    svc = LoanService(db_session)
+
+    given = await svc.create(
+        data=LoanCreate(
+            counterparty_id=borrower, direction="OUTGOING", principal=Decimal("1000000"),
+            currency="RUB", rate=Decimal("0.365"), contract_number="OUT-1",
+            contract_date=date(2026, 1, 1), start_date=date(2026, 1, 1),
+        ),
+        project_id=project_id,
+    )
+    taken = await svc.create(
+        data=LoanCreate(
+            counterparty_id=lender, direction="INCOMING", principal=Decimal("1000000"),
+            currency="RUB", rate=Decimal("0.365"), contract_number="IN-1",
+            contract_date=date(2026, 1, 1), start_date=date(2026, 1, 1),
+        ),
+        project_id=project_id,
+    )
+    assert given.id != taken.id
+    await db_session.commit()
+
+    income = await income_by_month_keys.__wrapped__(db_session, project_id, ["2026-02"])
+    cost = await cost_by_month_keys.__wrapped__(db_session, project_id, ["2026-02"])
+    # 36.5 % на млн = 1000 ₽/день × 28 дней февраля
+    assert Decimal(income["2026-02"]) == Decimal("28000.00")
+    # Расход считается по INCOMING и выданный займ туда не попадает
+    assert Decimal(cost["2026-02"]["interest"]) == Decimal("28000.00")

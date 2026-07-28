@@ -262,12 +262,27 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
     const isGrouped = groupBy !== 'sku' && groupBy !== 'abc';
 
     const getVariantTotal = useCallback((row: UnifiedStockRow): number => {
-        // «В пути до получателей» НЕ входит в Итого (товар уже уехал к покупателям).
-        // Учитываем склады WB + возвраты (вернутся и снова станут доступны).
+        // «Итого» — КАПИТАЛ в товаре: «в пути до получателей» входит (до выкупа
+        // товар наш, невыкуп вернётся), брак входит (наш товар по себестоимости).
+        // Для скорости продаж есть отдельный getSellableTotal без этих слагаемых.
+        const wbAll = (row.total_wb || 0) + (row.wb_in_way_to_client || 0) + (row.wb_in_way_from_client || 0);
+        if (variant === 1) return wbAll;
+        const ownSide = (row.total_own || 0) + (row.in_transit || 0) + (row.total_defect || 0)
+            + (row.transfer_transit || 0);
+        if (variant === 2) return ownSide + wbAll;
+        return ownSide + wbAll
+             + (row.factory_qty || 0) + (row.vehicle_forming_qty || 0) + (row.vehicle_transit_qty || 0);
+    }, [variant]);
+
+    // Продаваемый остаток — для «запаса дней»: без брака и без товара, уже
+    // уехавшего к покупателям (будущие заказы они не покрывают). Перемещения
+    // в пути входят: доедут до склада и снова станут продаваемым остатком.
+    const getSellableTotal = useCallback((row: UnifiedStockRow): number => {
         const wbAll = (row.total_wb || 0) + (row.wb_in_way_from_client || 0);
         if (variant === 1) return wbAll;
-        if (variant === 2) return (row.total_own || 0) + wbAll + (row.in_transit || 0);
-        return (row.total_own || 0) + wbAll + (row.in_transit || 0)
+        const ownSide = (row.total_own || 0) + (row.in_transit || 0) + (row.transfer_transit || 0);
+        if (variant === 2) return ownSide + wbAll;
+        return ownSide + wbAll
              + (row.factory_qty || 0) + (row.vehicle_forming_qty || 0) + (row.vehicle_transit_qty || 0);
     }, [variant]);
 
@@ -338,8 +353,8 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         const trend = trendPeriod === 7 ? row.trend_7 : trendPeriod === 14 ? row.trend_14 : row.trend_30;
         const daily = trend?.avg_daily_qty || 0;
         if (daily <= 0) return Infinity;
-        return getVariantTotal(row) / daily;
-    }, [trendPeriod, getVariantTotal]);
+        return getSellableTotal(row) / daily;
+    }, [trendPeriod, getSellableTotal]);
 
     // Dates of the active trend window — taken from the first row (backend
     // returns the same window on every row, so row 0 is canonical). Used to
@@ -408,7 +423,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
     const rowsForTable = useMemo(() => {
         return filtered.map((r) => {
             const t = getTrendData(r);
-            const vt = getVariantTotal(r);
+            const sellable = getSellableTotal(r);
             const daily = t?.avg_daily_qty || 0;
             const rev = t?.revenue || 0;
             // Свободный остаток каждого ФФ — тоже вычисляемая величина, поэтому
@@ -424,11 +439,11 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 _sortTrend: daily,
                 _sortRevenue: rev,
                 _sortMargin: rev > 0 ? ((t?.profit || 0) / rev) * 100 : -1,
-                _sortStockDays: daily > 0 ? vt / daily : Number.MAX_SAFE_INTEGER,
+                _sortStockDays: daily > 0 ? sellable / daily : Number.MAX_SAFE_INTEGER,
                 _sortOwnFree: (r.total_own || 0) - (r.reserved || 0),
             };
         });
-    }, [filtered, getTrendData, getVariantTotal, ownWarehouses]);
+    }, [filtered, getTrendData, getSellableTotal, ownWarehouses]);
 
     // «Новинки» KPI — aggregates SKUs flagged as novelties by the backend
     // (no sales recorded in the last 60 days). Counts ALL current and incoming
@@ -544,6 +559,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         let factoryMoney = 0, vehicleFormingMoney = 0, vehicleTransitMoney = 0;
         let variantTotal = 0, variantMoney = 0;
         let reservedTotal = 0, reservedMoney = 0;
+        let transferTransit = 0, transferTransitMoney = 0;
         let trendDailySum = 0, bdrRevenueSum = 0, bdrProfitSum = 0, defectSum = 0, defectMoney = 0;
         for (const row of filtered) {
             let multiplier = 0;
@@ -565,20 +581,25 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             wbToClient += row.wb_in_way_to_client || 0;
             wbFromClient += row.wb_in_way_from_client || 0;
             inTransit += row.in_transit || 0;
+            transferTransit += row.transfer_transit || 0;
             total += row.total || 0;
             factoryTotal += row.factory_qty || 0;
             vehicleFormingTotal += row.vehicle_forming_qty || 0;
             vehicleTransitTotal += row.vehicle_transit_qty || 0;
             variantTotal += getVariantTotal(row);
             if (mode !== 'qty') {
-                // «В пути до получателей» исключён из Итого (см. getVariantTotal)
-                const wbAll = (row.total_wb || 0) + (row.wb_in_way_from_client || 0);
+                // «Итого» — капитал: «в пути до получателей» и брак входят
+                // (зеркало getVariantTotal)
+                const wbAll = (row.total_wb || 0) + (row.wb_in_way_to_client || 0) + (row.wb_in_way_from_client || 0);
+                const ownSide = (row.total_own || 0) + (row.in_transit || 0) + (row.total_defect || 0)
+                    + (row.transfer_transit || 0);
                 ownMoney += (row.total_own || 0) * multiplier;
                 reservedMoney += (row.reserved || 0) * multiplier;
                 wbMoney += (row.total_wb || 0) * multiplier;
                 wbToClientMoney += (row.wb_in_way_to_client || 0) * multiplier;
                 wbFromClientMoney += (row.wb_in_way_from_client || 0) * multiplier;
                 transitMoney += (row.in_transit || 0) * multiplier;
+                transferTransitMoney += (row.transfer_transit || 0) * multiplier;
                 totalMoney += (row.total || 0) * multiplier;
                 factoryMoney += (row.factory_qty || 0) * factoryMultiplier;
                 vehicleFormingMoney += (row.vehicle_forming_qty || 0) * multiplier;
@@ -588,9 +609,9 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 if (variant === 1) {
                     rowVariantMoney = wbAll * multiplier;
                 } else if (variant === 2) {
-                    rowVariantMoney = ((row.total_own || 0) + wbAll + (row.in_transit || 0)) * multiplier;
+                    rowVariantMoney = (ownSide + wbAll) * multiplier;
                 } else {
-                    rowVariantMoney = ((row.total_own || 0) + wbAll + (row.in_transit || 0)
+                    rowVariantMoney = (ownSide + wbAll
                         + (row.vehicle_forming_qty || 0) + (row.vehicle_transit_qty || 0)) * multiplier
                         + (row.factory_qty || 0) * factoryMultiplier;
                 }
@@ -602,6 +623,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             wbToClient, wbFromClient, wbToClientMoney, wbFromClientMoney,
             ownMoney, wbMoney, transitMoney, totalMoney,
             reservedTotal, reservedMoney,
+            transferTransit, transferTransitMoney,
             factoryTotal, vehicleFormingTotal, vehicleTransitTotal,
             factoryMoney, vehicleFormingMoney, vehicleTransitMoney,
             variantTotal, variantMoney,
@@ -791,7 +813,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         c.push({
             key: 'stock_days',
             label: 'Запас дн',
-            headerTitle: 'На сколько дней хватит остатка при текущем темпе заказов (Итого ÷ тренд шт/д)',
+            headerTitle: 'На сколько дней хватит остатка при текущем темпе заказов (продаваемый остаток ÷ тренд шт/д; брак и товар в пути к получателям не считаются)',
             align: 'right',
             sortable: true,
             sortingFn: 'basic',
@@ -799,7 +821,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             render: (_: unknown, row: UnifiedStockRow) => {
                 const daily = getTrendData(row).avg_daily_qty;
                 if (daily <= 0) return DASH;
-                const days = getVariantTotal(row) / daily;
+                const days = getSellableTotal(row) / daily;
                 const color = days < 14 ? 'var(--color-danger)' : days < 30 ? 'var(--color-warning)' : 'var(--color-text)';
                 return <span style={{ color, fontWeight: 600 }}>{formatNumber(days, 0)}</span>;
             },
@@ -811,8 +833,8 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             headerTitle: variant === 1
                 ? 'Всё у WB: на складах + в пути до получателей + возвраты'
                 : variant === 2
-                    ? 'Наши склады + всё у WB + наши отгрузки в пути'
-                    : 'Наши склады + всё у WB + наши отгрузки + на фабрике + в машинах',
+                    ? 'Капитал: наши склады + брак + всё у WB (вкл. в пути до получателей) + наши отгрузки в пути'
+                    : 'Капитал: наши склады + брак + всё у WB + наши отгрузки + на фабрике + в машинах',
             align: 'right',
             sortable: true,
             getValue: (row: UnifiedStockRow) => getSortVal(getVariantTotal(row), row),
@@ -1005,6 +1027,19 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             render: (_: unknown, row: UnifiedStockRow) => fmtVal(row.in_transit || 0, row),
         });
 
+        // Перемещения между нашими складами (TR-*): отправлено, склад ещё не принял
+        if (showOwn) {
+            c.push({
+                key: 'transfer_transit',
+                label: 'Перемещения',
+                headerTitle: 'Внутренние перемещения (TR-*): отправлено с нашего склада, склад-получатель ещё не принял',
+                align: 'right',
+                sortable: true,
+                getValue: (row: UnifiedStockRow) => getSortVal(row.transfer_transit || 0, row),
+                render: (_: unknown, row: UnifiedStockRow) => fmtVal(row.transfer_transit || 0, row),
+            });
+        }
+
         // Supply chain columns (only for variant 3)
         if (showFactory) {
             c.push({
@@ -1069,7 +1104,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 ? { headerWrap: true, ...col, headerStyle: { width: '92px', ...(col.headerStyle || {}) } }
                 : col
         );
-    }, [ownWarehouses, wbWarehouses, expanded, expandedReserved, mode, fmtVal, getSortVal, isGrouped, groupBy, getTrendData, getVariantTotal, showOwn, showFactory, showVehicles]);
+    }, [ownWarehouses, wbWarehouses, expanded, expandedReserved, mode, fmtVal, getSortVal, isGrouped, groupBy, getTrendData, getVariantTotal, getSellableTotal, showOwn, showFactory, showVehicles]);
 
     // Helper: factory cell content (always ≈ in cost mode, using cost_factory_unit)
     const fmtFactoryCell = useCallback((fq: number, row: UnifiedStockRow): React.ReactNode => {
@@ -1160,6 +1195,9 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(row.wb_in_way_to_client || 0, cost, row)}</td>
                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(row.wb_in_way_from_client || 0, cost, row)}</td>
                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(row.in_transit || 0, cost, row)}</td>
+                {showOwn && (
+                    <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(row.transfer_transit || 0, cost, row)}</td>
+                )}
                 {showFactory && (
                     <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtFactoryCell(row.factory_qty || 0, row)}</td>
                 )}
@@ -1195,6 +1233,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                             <th title="Заказы едут от склада WB к покупателям. Невыкупленное вернётся на склад WB" style={{ textAlign: 'right' }}>В пути до получателей</th>
                             <th title="Возвраты от покупателей — едут обратно на склад WB" style={{ textAlign: 'right' }}>Возвраты на склад WB</th>
                             <th title="Наши отгрузки на WB: заявка отгружена со склада, WB ещё не принял поставку" style={{ textAlign: 'right' }}>В пути</th>
+                            {showOwn && <th title="Внутренние перемещения (TR-*): отправлено, склад-получатель ещё не принял" style={{ textAlign: 'right' }}>Перемещения</th>}
                             {showFactory && <th title="Заказано у фабрики и ещё не распределено по машинам (заказ не закрыт)" style={{ textAlign: 'right' }}>На фабрике</th>}
                             {showVehicles && <th title="Распределено в машину, машина ещё формируется — не выехала с фабрики" style={{ textAlign: 'right' }}>Маш. (форм.)</th>}
                             {showVehicles && <th title="Машина едет на склад: отгружена с фабрики / таможня / отправлена на склад" style={{ textAlign: 'right' }}>Маш. (в пути)</th>}
@@ -1242,6 +1281,11 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                             <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                 {mode === 'qty' ? formatNumber(totals.inTransit, 0) : formatNumber(totals.transitMoney) + '\u00A0\u20BD'}
                             </td>
+                            {showOwn && (
+                                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                    {mode === 'qty' ? formatNumber(totals.transferTransit, 0) : formatNumber(totals.transferTransitMoney) + '\u00A0\u20BD'}
+                                </td>
+                            )}
                             {showFactory && (
                                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                     {mode === 'qty' ? formatNumber(totals.factoryTotal, 0) : formatNumber(totals.factoryMoney) + '\u00A0\u20BD'}
@@ -1266,7 +1310,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                             const groupTrend = getTrendData(group as UnifiedStockRow);
                             const groupVariantTotal = getVariantTotal(group as UnifiedStockRow);
                             const groupMargin = groupTrend.revenue > 0 ? (groupTrend.profit / groupTrend.revenue) * 100 : 0;
-                            const groupStockDays = groupTrend.avg_daily_qty > 0 ? groupVariantTotal / groupTrend.avg_daily_qty : 0;
+                            const groupStockDays = groupTrend.avg_daily_qty > 0 ? getSellableTotal(group as UnifiedStockRow) / groupTrend.avg_daily_qty : 0;
                             const groupStockColor = groupStockDays > 0
                                 ? groupStockDays < 14 ? 'var(--color-danger)' : groupStockDays < 30 ? 'var(--color-warning)' : 'var(--color-text)'
                                 : 'var(--color-text-muted)';
@@ -1335,6 +1379,9 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(group.wb_in_way_to_client || 0, cost, group as UnifiedStockRow)}</td>
                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(group.wb_in_way_from_client || 0, cost, group as UnifiedStockRow)}</td>
                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(group.in_transit || 0, cost, group as UnifiedStockRow)}</td>
+                                        {showOwn && (
+                                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(group.transfer_transit || 0, cost, group as UnifiedStockRow)}</td>
+                                        )}
                                         {showFactory && (
                                             <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtFactoryCell(group.factory_qty || 0, group as UnifiedStockRow)}</td>
                                         )}
@@ -1416,6 +1463,9 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(child.wb_in_way_to_client || 0, childCost, child as UnifiedStockRow)}</td>
                                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(child.wb_in_way_from_client || 0, childCost, child as UnifiedStockRow)}</td>
                                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(child.in_transit || 0, childCost, child as UnifiedStockRow)}</td>
+                                        {showOwn && (
+                                            <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtGroupVal(child.transfer_transit || 0, childCost, child as UnifiedStockRow)}</td>
+                                        )}
                                                         {showFactory && (
                                                             <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtFactoryCell(child.factory_qty || 0, child as UnifiedStockRow)}</td>
                                                         )}
@@ -1459,6 +1509,9 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                         {totals.wbToClient > 0 && <span title="Заказы едут от склада WB к покупателям" style={{ fontSize: 14, fontWeight: 500 }}>До получателей: {formatNumber(totals.wbToClient)}</span>}
                         {totals.wbFromClient > 0 && <span title="Возвраты от покупателей — едут обратно на склад WB" style={{ fontSize: 14, fontWeight: 500 }}>Возвраты на WB: {formatNumber(totals.wbFromClient)}</span>}
                         {totals.inTransit > 0 && <span title="Наши отгрузки на WB: отгружено, WB ещё не принял" style={{ fontSize: 14, fontWeight: 500 }}>В пути: {formatNumber(totals.inTransit)}</span>}
+                        {variant >= 2 && totals.transferTransit > 0 && (
+                            <span title="Внутренние перемещения (TR-*): отправлено, склад-получатель ещё не принял" style={{ fontSize: 14, fontWeight: 500 }}>Перемещения: {formatNumber(totals.transferTransit)}</span>
+                        )}
                         {variant === 3 && totals.factoryTotal > 0 && (
                             <span style={{ fontSize: 14, fontWeight: 500 }}>На фабрике: {formatNumber(totals.factoryTotal)}</span>
                         )}
@@ -1474,6 +1527,9 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                         {totals.wbToClientMoney > 0 && <span style={{ fontSize: 14, fontWeight: 500 }}>До получателей: {formatNumber(totals.wbToClientMoney)} {'\u20BD'}</span>}
                         {totals.wbFromClientMoney > 0 && <span style={{ fontSize: 14, fontWeight: 500 }}>Возвраты на WB: {formatNumber(totals.wbFromClientMoney)} {'\u20BD'}</span>}
                         {totals.transitMoney > 0 && <span style={{ fontSize: 14, fontWeight: 500 }}>В пути: {formatNumber(totals.transitMoney)} {'\u20BD'}</span>}
+                        {variant >= 2 && totals.transferTransitMoney > 0 && (
+                            <span title="Внутренние перемещения (TR-*): отправлено, склад-получатель ещё не принял" style={{ fontSize: 14, fontWeight: 500 }}>Перемещения: {formatNumber(totals.transferTransitMoney)} {'\u20BD'}</span>
+                        )}
                         {variant === 3 && totals.factoryMoney > 0 && (
                             <span style={{ fontSize: 14, fontWeight: 500 }}>На фабрике: {formatNumber(totals.factoryMoney)} {'\u20BD'}</span>
                         )}
@@ -1910,6 +1966,11 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                             <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                 {mode === 'qty' ? formatNumber(totals.inTransit, 0) : formatNumber(totals.transitMoney) + '\u00A0\u20BD'}
                             </td>
+                            {showOwn && (
+                                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                    {mode === 'qty' ? formatNumber(totals.transferTransit, 0) : formatNumber(totals.transferTransitMoney) + '\u00A0\u20BD'}
+                                </td>
+                            )}
                             {showFactory && (
                                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                     {mode === 'qty' ? formatNumber(totals.factoryTotal, 0) : formatNumber(totals.factoryMoney) + '\u00A0\u20BD'}

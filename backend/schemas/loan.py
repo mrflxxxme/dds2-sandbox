@@ -11,8 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ALLOWED_DIRECTIONS = ["INCOMING", "OUTGOING", "AFFILIATED"]
 ALLOWED_STATUSES = ["ACTIVE", "CLOSED", "DEFAULTED"]
-ALLOWED_PAYMENT_TYPES = ["DISBURSEMENT", "PRINCIPAL_REPAY", "INTEREST_PAY", "PENALTY"]
+ALLOWED_PAYMENT_TYPES = ["DISBURSEMENT", "PRINCIPAL_REPAY", "INTEREST_PAY", "PENALTY", "COMMISSION"]
 ALLOWED_ENTITY_TYPES = ["PHYSICAL", "IP"]
+ALLOWED_FEE_KINDS = ["ORIGINATION", "LIMIT_SETUP", "OTHER"]
 
 # ─── Loan ─────────────────────────────────────────────────────────────────────
 
@@ -20,7 +21,10 @@ ALLOWED_ENTITY_TYPES = ["PHYSICAL", "IP"]
 class LoanBase(BaseModel):
     counterparty_id: int
     direction: str = Field(default="INCOMING")
-    principal: Decimal = Field(..., gt=0)
+    # Ноль допустим: у револьверных займов (кредитная линия, займ учредителя)
+    # тело задают движения — выборки и возвраты, — а `principal` символический.
+    # Запрет на ноль заставлял заводить фиктивный рубль, чтобы пройти валидацию.
+    principal: Decimal = Field(..., ge=0)
     currency: str = Field(default="RUB", max_length=3)
     rate: Decimal | None = Field(None, ge=0, le=1)
     contract_number: str = Field(..., min_length=1, max_length=100)
@@ -68,7 +72,8 @@ class LoanUpdate(BaseModel):
     """All fields optional for PATCH."""
 
     direction: str | None = None
-    principal: Decimal | None = Field(None, gt=0)
+    # Симметрично LoanBase: у револьверных займов тело задают движения.
+    principal: Decimal | None = Field(None, ge=0)
     currency: str | None = Field(None, max_length=3)
     rate: Decimal | None = Field(None, ge=0, le=1)
     contract_number: str | None = Field(None, min_length=1, max_length=100)
@@ -140,6 +145,10 @@ class LoanResponse(LoanBase):
     days_to_maturity: int | None = None  # до возврата (может быть отрицательным = просрочка)
     next_interest_date: date | None = None  # ближайшая дата выплаты %
     has_extension: bool = False  # есть ли продление (этот займ — предшественник)
+    # Вторая сторона того же договора в другом проекте (займ между своими юрлицами)
+    mirror_loan_id: int | None = None
+    mirror_project_id: int | None = None
+    mirror_project_name: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -307,9 +316,20 @@ class LoanKpis(BaseModel):
     active_count: int = 0
     total_outstanding: Decimal = Decimal("0")  # активное тело (INCOMING)
     weighted_avg_rate: Decimal | None = None
-    accrued_interest: Decimal = Decimal("0")  # начисленные неоплаченные %
+    # Дашборд отвечает на вопрос «сколько стоят деньги», поэтому считает по
+    # КАЛЕНДАРНОМУ месяцу: периоды выплат у продуктов разные (25→25, месяц+5-е,
+    # аннуитет) и в один итог не складываются.
+    accrued_interest: Decimal = Decimal("0")  # проценты с 1-го числа по сегодня
+    accrued_fee: Decimal = Decimal("0")  # комиссии за тот же отрезок
+    accrued_cost: Decimal = Decimal("0")  # проценты + комиссии (стоимость денег)
+    month_cost_projected: Decimal = Decimal("0")  # прогноз до конца месяца
+    effective_rate: Decimal | None = None  # во сколько обошлись деньги, годовых
+    accrual_month: str | None = None  # YYYY-MM — какой месяц считаем
     monthly_interest: Decimal = Decimal("0")  # run-rate %/мес по активным
     interest_paid_total: Decimal = Decimal("0")
+    # Начислено за ВСЁ время минус уплачено: сколько процентов реально висит.
+    # У банков почти ноль (платят по графику), у займа учредителя копится годами.
+    interest_debt: Decimal = Decimal("0")
     lenders_count: int = 0
     next_maturity_date: date | None = None
     next_maturity_amount: Decimal = Decimal("0")
@@ -319,8 +339,10 @@ class LoanEntitySplit(BaseModel):
     entity_type: str | None = None  # PHYSICAL / IP / None
     count: int = 0
     outstanding: Decimal = Decimal("0")
-    accrued_interest: Decimal = Decimal("0")  # начислено в текущем периоде 25→25
-    interest_due_period: Decimal = Decimal("0")  # к выплате за весь период
+    # На «Заёмщиках» это период выплат (25→25), на дашборде — календарный месяц:
+    # экраны отвечают на разные вопросы («кому платить» vs «сколько стоят деньги»).
+    accrued_interest: Decimal = Decimal("0")  # начислено на сегодня
+    interest_due_period: Decimal = Decimal("0")  # за весь период / месяц
 
 
 class LoanRateBucket(BaseModel):
@@ -330,11 +352,14 @@ class LoanRateBucket(BaseModel):
 
 
 class LoanMonthlyPoint(BaseModel):
-    month: str  # YYYY-MM
-    disbursed: Decimal = Decimal("0")  # выдано тело
+    month: str  # YYYY-MM — КАЛЕНДАРНЫЙ месяц
+    disbursed: Decimal = Decimal("0")  # выдано тело (вкл. выборки по линии)
     repaid: Decimal = Decimal("0")  # возвращено тело
     outstanding: Decimal = Decimal("0")  # остаток тела на конец месяца
     interest: Decimal = Decimal("0")  # начислено % за месяц
+    fee: Decimal = Decimal("0")  # комиссии за месяц (резерв лимита + разовые)
+    cost: Decimal = Decimal("0")  # проценты + комиссии
+    is_partial: bool = False  # текущий месяц: посчитан не до конца
 
 
 class LoanTopLender(BaseModel):
@@ -368,6 +393,8 @@ class LoanLenderRollup(BaseModel):
     weighted_avg_rate: Decimal | None = None
     accrued_interest: Decimal = Decimal("0")
     interest_paid: Decimal = Decimal("0")
+    # Начислено за всё время минус уплачено — «сколько процентов должны этому».
+    interest_debt: Decimal = Decimal("0")
     monthly_interest: Decimal = Decimal("0")
     next_interest_date: date | None = None
     next_maturity_date: date | None = None
@@ -385,6 +412,7 @@ class LoanByLenderResponse(BaseModel):
     total_outstanding: Decimal = Decimal("0")
     total_accrued: Decimal = Decimal("0")
     total_due_period: Decimal = Decimal("0")
+    total_interest_debt: Decimal = Decimal("0")
     by_entity: list[LoanEntitySplit] = Field(default_factory=list)
     accrual_period_start: date | None = None
     accrual_period_end: date | None = None
@@ -452,6 +480,356 @@ class LoanImportResult(BaseModel):
     skipped_rows: int = 0
     lenders: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class LoanAccrualMonth(BaseModel):
+    """Начислено за КАЛЕНДАРНЫЙ месяц — строка для ОПиУ."""
+
+    month: str  # YYYY-MM
+    interest: Decimal = Decimal("0")
+    fee: Decimal = Decimal("0")  # комиссии (за резерв лимита и т. п.)
+    total: Decimal = Decimal("0")
+    ip: Decimal = Decimal("0")
+    physical: Decimal = Decimal("0")
+    avg_body: Decimal = Decimal("0")  # средний остаток тела за месяц (по дням)
+    effective_rate: Decimal | None = None  # во сколько реально обошлись деньги, годовых
+    days: int = 0
+
+
+class LoanAccrualMonthsResponse(BaseModel):
+    items: list[LoanAccrualMonth] = Field(default_factory=list)
+    total_interest: Decimal = Decimal("0")
+    total_fee: Decimal = Decimal("0")
+    # Средняя стоимость денег за весь показанный отрезок, годовых
+    effective_rate: Decimal | None = None
+
+
+# ─── Разовые комиссии ────────────────────────────────────────────────────────
+
+
+class LoanFeeIn(BaseModel):
+    """
+    Разовая комиссия по займу.
+
+    `amortize` — размазывать ли расход по сроку договора. По умолчанию да:
+    комиссия за выдачу и за лимит — плата за доступ к деньгам на весь срок.
+    Касса от этого не меняется, меняется только «сколько стоят деньги».
+    """
+
+    fee_kind: str = "OTHER"
+    amount: Decimal = Field(..., gt=0)
+    charged_at: date
+    amortize: bool = True
+    amortize_from: date | None = None
+    amortize_to: date | None = None
+    payment_id: int | None = None
+    note: str | None = Field(None, max_length=200)
+
+    @field_validator("fee_kind")
+    @classmethod
+    def _kind(cls, v: str) -> str:
+        if v not in ALLOWED_FEE_KINDS:
+            raise ValueError(f"fee_kind must be one of {ALLOWED_FEE_KINDS}")
+        return v
+
+
+class LoanFeeResponse(LoanFeeIn):
+    id: int
+    loan_id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class LoanFeeListResponse(BaseModel):
+    items: list[LoanFeeResponse] = Field(default_factory=list)
+    total: Decimal = Decimal("0")
+
+
+# ─── Кредитная линия (ВКЛ) ───────────────────────────────────────────────────
+
+
+class LoanRatePeriodIn(BaseModel):
+    """Ставка, действующая с даты. Для плавающих: ключевая ЦБ + надбавка."""
+
+    valid_from: date
+    rate: Decimal = Field(..., ge=0, le=1)  # итоговая годовая доля: 0.195
+    base_rate: Decimal | None = Field(None, ge=0, le=1)  # ключевая ЦБ
+    spread: Decimal | None = Field(None, ge=0, le=1)  # надбавка банка
+    note: str | None = Field(None, max_length=200)
+
+
+class LoanRatePeriodResponse(LoanRatePeriodIn):
+    id: int
+    loan_id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CreditLineDraw(BaseModel):
+    """Выборка транша по кредитной линии — увеличивает тело долга."""
+
+    amount: Decimal = Field(..., gt=0)
+    drawn_at: date
+    note: str | None = Field(None, max_length=200)
+
+
+class CreditLineMovement(BaseModel):
+    """Движение по линии: выборка или погашение."""
+
+    payment_id: int
+    kind: str  # DISBURSEMENT (выборка) / PRINCIPAL_REPAY (погашение)
+    amount: Decimal
+    happened_at: date
+    balance_after: Decimal  # тело линии после движения
+
+
+class CreditLineDetail(BaseModel):
+    """Состояние кредитной линии: лимит, выборка, свободный остаток, движения."""
+
+    loan_id: int
+    contract_number: str
+    counterparty_name: str | None = None
+    credit_limit: Decimal | None = None
+    drawn: Decimal = Decimal("0")  # выбрано тело сейчас
+    available: Decimal | None = None  # лимит − выбрано (None, если лимита нет)
+    utilization: Decimal | None = None  # доля выборки лимита, 0..1
+    current_rate: Decimal | None = None  # ставка на сегодня
+    accrual_kind: str = "PERIOD_25"
+    accrual_period_start: date | None = None
+    accrual_period_end: date | None = None
+    accrued_interest: Decimal = Decimal("0")  # набежало в текущем периоде
+    interest_due_period: Decimal = Decimal("0")  # за весь период
+    interest_paid: Decimal = Decimal("0")
+    # Комиссия за НЕиспользованный лимит: банк берёт плату за резерв
+    unused_limit_rate: Decimal | None = None
+    unused_fee_accrued: Decimal = Decimal("0")  # набежало на сегодня
+    unused_fee_period: Decimal = Decimal("0")  # за весь период
+    commission_paid: Decimal = Decimal("0")  # уплачено комиссий всего (касса)
+    # Разовые комиссии (за установление лимита): всего по договору и доля,
+    # приходящаяся на текущий период при амортизации на срок.
+    one_off_fee_total: Decimal = Decimal("0")
+    one_off_fee_period: Decimal = Decimal("0")
+    total_cost_period: Decimal = Decimal("0")  # проценты + все комиссии за период
+    payment_due_date: date | None = None  # когда платить за этот период
+    status: str = "ACTIVE"
+    maturity_date: date | None = None
+    movements: list[CreditLineMovement] = Field(default_factory=list)
+    rate_periods: list[LoanRatePeriodResponse] = Field(default_factory=list)
+    fees: list[LoanFeeResponse] = Field(default_factory=list)
+
+
+class CreditLineListResponse(BaseModel):
+    """Все кредитные линии проекта со сводкой."""
+
+    items: list[CreditLineDetail] = Field(default_factory=list)
+    total_limit: Decimal = Decimal("0")
+    total_drawn: Decimal = Decimal("0")
+    total_available: Decimal = Decimal("0")
+    total_due_period: Decimal = Decimal("0")  # только проценты
+    total_fee_period: Decimal = Decimal("0")  # комиссии за период (резерв + разовые)
+    total_cost_period: Decimal = Decimal("0")  # полная стоимость периода
+
+
+# ─── График платежей (аннуитет) ──────────────────────────────────────────────
+
+
+class LoanScheduleRowIn(BaseModel):
+    """Строка планового графика — как её выдал кредитор."""
+
+    seq: int = Field(..., ge=1)
+    period_start: date | None = None
+    period_end: date | None = None
+    due_date: date
+    days: int | None = Field(None, ge=0)
+    principal_due: Decimal = Field(Decimal("0"), ge=0)
+    interest_due: Decimal = Field(Decimal("0"), ge=0)
+    payment_total: Decimal = Field(Decimal("0"), ge=0)
+    balance_after: Decimal | None = Field(None, ge=0)
+    # Строка-комиссия: в графике напечатана в колонке процентов, но в стоимость
+    # денег заходит через `LoanFee` (амортизацией), а не как проценты периода.
+    is_fee: bool = False
+    # Строка ПЛАНА ПОГАШЕНИЯ накопленного долга, а не графика кредитора: говорит,
+    # когда и сколько платить в счёт уже начисленных процентов. Для движка
+    # начисления невидима — проценты продолжают капать по ставке займа.
+    is_debt_plan: bool = False
+    note: str | None = Field(None, max_length=200)
+
+
+class LoanScheduleReplace(BaseModel):
+    """Полная замена графика: график приходит из договора целиком."""
+
+    rows: list[LoanScheduleRowIn] = Field(default_factory=list, max_length=600)
+
+
+class LoanScheduleRow(LoanScheduleRowIn):
+    """Строка графика вместе с фактом: заплатили / сколько / когда."""
+
+    id: int
+    principal_paid: Decimal = Decimal("0")
+    interest_paid: Decimal = Decimal("0")
+    fee_paid: Decimal = Decimal("0")  # комиссии и пени, севшие на эту дату
+    paid_total: Decimal = Decimal("0")
+    paid_at: date | None = None  # дата последнего платежа по строке
+    delta: Decimal = Decimal("0")  # факт − план (минус = недоплата)
+    days_late: int | None = None  # + опоздание, − заплатили раньше срока
+    # PAID / PARTIAL / OVERDUE / DUE (ближайший) / UPCOMING
+    state: str = "UPCOMING"
+
+
+class LoanScheduleResponse(BaseModel):
+    """График платежей со сверкой план/факт."""
+
+    loan_id: int
+    contract_number: str | None = None
+    rows: list[LoanScheduleRow] = Field(default_factory=list)
+    total_principal: Decimal = Decimal("0")
+    total_interest: Decimal = Decimal("0")
+    total_payment: Decimal = Decimal("0")
+    paid_principal: Decimal = Decimal("0")
+    paid_interest: Decimal = Decimal("0")
+    paid_total: Decimal = Decimal("0")
+    left_principal: Decimal = Decimal("0")  # тело по графику, ещё не погашенное
+    left_interest: Decimal = Decimal("0")
+    left_total: Decimal = Decimal("0")
+    next_due_date: date | None = None
+    next_due_amount: Decimal = Decimal("0")
+    overdue_count: int = 0
+    overdue_amount: Decimal = Decimal("0")
+    # Полная стоимость: план процентов + разовые комиссии
+    total_fees: Decimal = Decimal("0")
+    total_cost: Decimal = Decimal("0")
+
+
+# ─── Займ между своими проектами (зеркало) ───────────────────────────────────
+
+
+class LoanMirrorCreate(BaseModel):
+    """
+    Завести вторую сторону договора в другом проекте.
+
+    Направление переворачивается само: полученный займ у одного — выданный у
+    другого. Контрагент второй стороны — это мы сами в её книге.
+    """
+
+    target_project_id: int
+    counterparty_id: int | None = None  # кем мы числимся в чужой книге
+    counterparty_name: str | None = Field(None, max_length=500)  # если создавать
+    counterparty_inn: str | None = Field(None, max_length=12)
+
+
+class LoanMirrorSide(BaseModel):
+    """Одна сторона договора: чья книга, что в ней числится."""
+
+    loan_id: int
+    project_id: int
+    project_name: str | None = None
+    project_slug: str | None = None
+    counterparty_name: str | None = None
+    direction: str  # INCOMING (долг) / OUTGOING (актив)
+    status: str = "ACTIVE"
+    outstanding: Decimal = Decimal("0")
+    accrued_interest: Decimal = Decimal("0")  # начислено за календарный месяц
+    accrued_total: Decimal = Decimal("0")  # начислено за всё время
+    interest_paid: Decimal = Decimal("0")
+    interest_debt: Decimal = Decimal("0")  # начислено всего − уплачено
+    current_rate: Decimal | None = None
+
+
+class LoanChainMovement(BaseModel):
+    """Движение по договору: выдача тела, возврат, выплата процентов."""
+
+    happened_at: date
+    kind: str  # DISBURSEMENT / PRINCIPAL_REPAY / INTEREST_PAY / PENALTY / COMMISSION
+    amount: Decimal
+    balance_after: Decimal | None = None  # тело после движения (для тела)
+
+
+class LoanChain(BaseModel):
+    """Договор целиком: обе книги, движения и итог."""
+
+    contract_number: str
+    contract_date: date | None = None
+    start_date: date | None = None
+    maturity_date: date | None = None  # пусто = до востребования
+    sides: list[LoanMirrorSide] = Field(default_factory=list)
+    total_disbursed: Decimal = Decimal("0")
+    total_repaid: Decimal = Decimal("0")
+    outstanding: Decimal = Decimal("0")
+    accrued_total: Decimal = Decimal("0")
+    interest_paid: Decimal = Decimal("0")
+    interest_debt: Decimal = Decimal("0")
+    total_debt: Decimal = Decimal("0")  # тело + долг по процентам
+    rate_periods: list[LoanRatePeriodResponse] = Field(default_factory=list)
+    movements: list[LoanChainMovement] = Field(default_factory=list)
+    # Начисление по календарным месяцам — та же база, что и в ОПиУ
+    monthly: list[LoanAccrualMonth] = Field(default_factory=list)
+    in_sync: bool = True  # движения обеих сторон совпадают
+    sync_note: str | None = None
+
+
+class LoanChainListResponse(BaseModel):
+    items: list[LoanChain] = Field(default_factory=list)
+    total_outstanding: Decimal = Decimal("0")
+    total_interest_debt: Decimal = Decimal("0")
+
+
+# ─── Выданные займы (мы кредитор) ────────────────────────────────────────────
+
+
+class LoanLentItem(BaseModel):
+    """Кому мы дали денег и сколько он должен."""
+
+    counterparty_id: int
+    name: str
+    loan_id: int
+    contract_number: str
+    rate: Decimal | None = None
+    outstanding: Decimal = Decimal("0")  # тело, которое нам должны
+    accrued_total: Decimal = Decimal("0")  # начислено процентов за всё время
+    interest_received: Decimal = Decimal("0")
+    interest_due: Decimal = Decimal("0")  # начислено минус получено
+    total_due: Decimal = Decimal("0")  # тело + проценты
+    accrued_month: Decimal = Decimal("0")  # начислено в текущем месяце
+    mirror_project_name: str | None = None  # если вторая сторона у нас же
+
+
+class LoanLentResponse(BaseModel):
+    """Сводка по выданным займам: сколько нам должны и сколько это приносит."""
+
+    items: list[LoanLentItem] = Field(default_factory=list)
+    total_outstanding: Decimal = Decimal("0")
+    total_accrued: Decimal = Decimal("0")
+    total_received: Decimal = Decimal("0")
+    total_interest_due: Decimal = Decimal("0")
+    total_due: Decimal = Decimal("0")
+    month_income: Decimal = Decimal("0")  # доход за текущий календарный месяц
+
+
+# ─── Начисление по дням ──────────────────────────────────────────────────────
+
+
+class LoanAccrualDay(BaseModel):
+    """Один день начисления: тело на утро, ставка дня, проценты за сутки."""
+
+    date: date
+    balance: Decimal = Decimal("0")  # тело, на которое капало в этот день
+    rate: Decimal | None = None  # ставка, действовавшая в этот день
+    interest: Decimal = Decimal("0")
+    cumulative: Decimal = Decimal("0")  # нарастающим итогом за период
+    movement: Decimal | None = None  # движение тела в этот день (+выборка/−возврат)
+
+
+class LoanAccrualDaysResponse(BaseModel):
+    loan_id: int
+    contract_number: str | None = None
+    date_from: date
+    date_to: date
+    rows: list[LoanAccrualDay] = Field(default_factory=list)
+    total_interest: Decimal = Decimal("0")
+    avg_balance: Decimal = Decimal("0")
+    effective_rate: Decimal | None = None
+    # Проценты взяты из графика (аннуитет), а не из формулы «тело × ставка × дни»
+    from_schedule: bool = False
 
 
 # ─── Зависшие займы (срок вышел, решения нет) ────────────────────────────────

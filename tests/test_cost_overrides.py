@@ -181,3 +181,47 @@ class TestGetCostOverrides:
         nm_ids = {o["nm_id"] for o in result["overrides"]}
         assert 8001 in nm_ids
         assert 8002 not in nm_ids
+
+
+class TestOverrideBeatsEngineInUnifiedStock:
+    @pytest.mark.asyncio
+    async def test_manual_override_wins_over_engine_price(self, db_session: AsyncSession, project):
+        """Ручная цена (WbCostOverride) ПОБЕЖДАЕТ цену движка по закупкам
+        (канон юзера 2026-07-28): раньше цена движка молча затеняла живые
+        override'ы у SKU, где заведены партии."""
+        from datetime import date
+        from decimal import Decimal
+
+        from backend.models import CostOrder, CostOrderItem, Nomenclature, VehicleStatus
+        from backend.models.integrations import WbWarehouseStock
+        from backend.services.warehouse_stock_engine import get_unified_stock_summary
+
+        pid = project.id
+        art = f"OVR-WIN-{pid}"
+        bc = f"BC-OVR-WIN-{pid}"
+        nm = 900000 + pid
+        db_session.add(Nomenclature(project_id=pid, barcode=bc, article_seller=art, article_wb=nm))
+        # партия 10 шт по 200 ₽ — цена движка была бы 200
+        db_session.add(
+            CostOrder(
+                order_no=f"OVR-{pid}", project_id=pid, country="CHINA",
+                status=VehicleStatus.DELIVERED, actual_arrival_date=date(2025, 1, 1),
+                rate_cny=Decimal("1"), rate_eur=Decimal("1"), rate_usd=Decimal("1"),
+                delivery_cost_cny=Decimal("0"), delivery_cost_usd=Decimal("0"),
+            )
+        )
+        db_session.add(
+            CostOrderItem(
+                project_id=pid, order_no=f"OVR-{pid}", barcode=bc, subject="Ковры",
+                article_seller=art, qty=10, price_cny=Decimal("0"),
+                volume_m3=Decimal("0"), duty_rub=Decimal("0"), total_rub=Decimal("200.00"),
+            )
+        )
+        # ручная цена 155 ₽ + остаток на WB, чтобы строка попала в сводку
+        db_session.add(WbWarehouseStock(project_id=pid, nm_id=nm, warehouse_name="Коледино", quantity=5, quantity_full=5))
+        await db_session.commit()
+        await set_cost_override(db_session, pid, nm, Decimal("155.00"))
+
+        rows = await get_unified_stock_summary(db_session, pid, group_by="sku")
+        row = next(r for r in rows if r["barcode"] == bc)
+        assert row["avg_cost"] == 155.0  # не 200 (движок)

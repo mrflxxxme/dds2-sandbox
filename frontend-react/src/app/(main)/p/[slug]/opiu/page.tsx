@@ -97,8 +97,16 @@ export default function OpiuPage() {
     // Dynamic children (e.g. opex-by-type) carry an explicit parent_key from the
     // backend; static groups still use the GROUP_CHILDREN map.
     const isRowHidden = (row: OpiuRow): boolean => {
-        if (row.parent_key && collapsed.has(row.parent_key)) {
-            return true;
+        // Идём по ВСЕЙ цепочке родителей: «Проценты по займам» сами вложены в
+        // «Операционные расходы», и проверка только прямого родителя оставляла бы
+        // внуков висеть на экране при свёрнутой группе.
+        const byKey = new Map((data?.rows as OpiuRow[] | undefined)?.map((r) => [r.key, r]) ?? []);
+        let parent = row.parent_key;
+        const seen = new Set<string>();
+        while (parent && !seen.has(parent)) {
+            if (collapsed.has(parent)) return true;
+            seen.add(parent);
+            parent = byKey.get(parent)?.parent_key ?? null;
         }
         for (const [parent, children] of Object.entries(GROUP_CHILDREN)) {
             if (children.includes(row.key) && collapsed.has(parent)) {

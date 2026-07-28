@@ -291,6 +291,296 @@ class TestSendTransfer:
             await send_transfer(db_session, project.id, transfer.id)
 
 
+class TestTransferInUnifiedTotal:
+    @pytest.mark.asyncio
+    async def test_in_transit_transfer_counts_into_unified_total(
+        self, db_session, project, fulfillment_wh, external_wh, barcode
+    ):
+        """Отправленное перемещение — наш товар в пути между нашими складами:
+        обязано попасть в «Итого»-капитал единых остатков отдельным полем
+        transfer_transit (кейс TR-21: 9 234 шт висели невидимыми 12 дней)."""
+        from backend.services.warehouse_stock_engine import get_unified_stock_summary
+
+        await _stock_warehouse(db_session, project, fulfillment_wh, barcode, 100)
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": fulfillment_wh.id,
+                "to_warehouse_id": external_wh.id,
+                "items": [{"barcode": barcode, "quantity": 40}],
+            },
+        )
+        await send_transfer(db_session, project.id, transfer.id)
+
+        rows = await get_unified_stock_summary(db_session, project.id, group_by="sku")
+        row = next(r for r in rows if r["barcode"] == barcode)
+        assert row["total_own"] == 60  # осталось на источнике
+        assert row["transfer_transit"] == 40  # едет между нашими складами
+        assert row["total"] == 100  # капитал не потерял ни штуки
+
+    @pytest.mark.asyncio
+    async def test_transfer_only_sku_still_visible(
+        self, db_session, project, fulfillment_wh, external_wh, barcode
+    ):
+        """SKU, ПОЛНОСТЬЮ уехавший в перемещение (на источнике 0), не должен
+        пропасть из сводки — раньше own-цикл скипал строки без quantity/defect."""
+        from backend.services.warehouse_stock_engine import get_unified_stock_summary
+
+        await _stock_warehouse(db_session, project, fulfillment_wh, barcode, 40)
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": fulfillment_wh.id,
+                "to_warehouse_id": external_wh.id,
+                "items": [{"barcode": barcode, "quantity": 40}],
+            },
+        )
+        await send_transfer(db_session, project.id, transfer.id)
+
+        rows = await get_unified_stock_summary(db_session, project.id, group_by="sku")
+        row = next((r for r in rows if r["barcode"] == barcode), None)
+        assert row is not None
+        assert row["total_own"] == 0
+        assert row["transfer_transit"] == 40
+        assert row["total"] == 40
+
+    @pytest.mark.asyncio
+    async def test_completed_transfer_leaves_transit(
+        self, db_session, project, fulfillment_wh, external_wh, barcode
+    ):
+        from backend.services.warehouse_stock_engine import get_unified_stock_summary
+
+        await _stock_warehouse(db_session, project, fulfillment_wh, barcode, 100)
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": fulfillment_wh.id,
+                "to_warehouse_id": external_wh.id,
+                "items": [{"barcode": barcode, "quantity": 40}],
+            },
+        )
+        await send_transfer(db_session, project.id, transfer.id)
+        await complete_transfer(db_session, project.id, transfer.id)
+
+        rows = await get_unified_stock_summary(db_session, project.id, group_by="sku")
+        row = next(r for r in rows if r["barcode"] == barcode)
+        assert row["transfer_transit"] == 0
+        assert row["total_own"] == 100  # 60 на источнике + 40 принято на назначении
+        assert row["total"] == 100
+
+
+class TestReceiveTransferFact:
+    """Приём перемещения ПО ФАКТУ связанной ФФ-приёмки (кейс PVB-0000121 → TR-21):
+    порционный TRANSFER_IN по фактам, расхождение не приходуется, transfer
+    закрывается только когда факт покрыл весь план."""
+
+    async def _sent_transfer(self, db_session, project, fulfillment_wh, external_wh, barcode, qty=40):
+        await _stock_warehouse(db_session, project, fulfillment_wh, barcode, 100)
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": fulfillment_wh.id,
+                "to_warehouse_id": external_wh.id,
+                "items": [{"barcode": barcode, "quantity": qty}],
+            },
+        )
+        return await send_transfer(db_session, project.id, transfer.id)
+
+    async def _dest_stock(self, db_session, project, wh, barcode):
+        from backend.models.warehouse import WarehouseStock
+
+        res = await db_session.execute(
+            select(WarehouseStock).where(
+                WarehouseStock.project_id == project.id,
+                WarehouseStock.warehouse_id == wh.id,
+                WarehouseStock.barcode == barcode,
+            )
+        )
+        return res.scalar_one_or_none()
+
+    @pytest.mark.asyncio
+    async def test_partial_fact_keeps_in_transit(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        from backend.services.warehouse_outbound import receive_transfer_fact
+
+        transfer = await self._sent_transfer(db_session, project, fulfillment_wh, external_wh, barcode)
+        result = await receive_transfer_fact(
+            db_session, project.id, transfer.id, {barcode: 30}, note="PVB-1"
+        )
+        assert result["received_good"] == 30
+        assert result["completed"] is False
+
+        stock = await self._dest_stock(db_session, project, external_wh, barcode)
+        assert stock.quantity == 30
+        assert stock.in_transit == 10  # 40 ехало − 30 принято
+
+    @pytest.mark.asyncio
+    async def test_full_fact_completes_transfer(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        from backend.services.warehouse_outbound import receive_transfer_fact
+
+        transfer = await self._sent_transfer(db_session, project, fulfillment_wh, external_wh, barcode)
+        result = await receive_transfer_fact(
+            db_session, project.id, transfer.id, {barcode: 40}, note="PVB-1"
+        )
+        assert result["completed"] is True
+        await db_session.refresh(transfer)
+        assert transfer.status == TransferStatus.COMPLETED
+        stock = await self._dest_stock(db_session, project, external_wh, barcode)
+        assert stock.quantity == 40
+        assert stock.in_transit == 0
+
+    @pytest.mark.asyncio
+    async def test_portions_accumulate_and_close(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        """Две порции (две PVB): вторая доводит до плана и закрывает transfer."""
+        from backend.services.warehouse_outbound import receive_transfer_fact
+
+        transfer = await self._sent_transfer(db_session, project, fulfillment_wh, external_wh, barcode)
+        r1 = await receive_transfer_fact(db_session, project.id, transfer.id, {barcode: 25}, note="PVB-1")
+        assert r1["completed"] is False
+        r2 = await receive_transfer_fact(db_session, project.id, transfer.id, {barcode: 15}, note="PVB-2")
+        assert r2["completed"] is True
+        stock = await self._dest_stock(db_session, project, external_wh, barcode)
+        assert stock.quantity == 40
+        assert stock.in_transit == 0
+
+    @pytest.mark.asyncio
+    async def test_excess_fact_clamped_to_plan(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        """ФФ принял больше плана перемещения — сверх плана не приходуем
+        (излишек — предмет сверки зеркала, не транзита)."""
+        from backend.services.warehouse_outbound import receive_transfer_fact
+
+        transfer = await self._sent_transfer(db_session, project, fulfillment_wh, external_wh, barcode)
+        result = await receive_transfer_fact(db_session, project.id, transfer.id, {barcode: 55}, note="PVB-1")
+        assert result["received_good"] == 40
+        assert result["completed"] is True
+        stock = await self._dest_stock(db_session, project, external_wh, barcode)
+        assert stock.quantity == 40
+        assert stock.in_transit == 0
+
+    @pytest.mark.asyncio
+    async def test_defect_transfer_receives_into_defect(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        """Перемещение БРАКА (is_defect=True): весь факт приходуется браком."""
+        from backend.services.warehouse_defect import mark_defect
+        from backend.services.warehouse_outbound import receive_transfer_fact
+
+        await _stock_warehouse(db_session, project, fulfillment_wh, barcode, 100)
+        await mark_defect(db_session, project.id, fulfillment_wh.id, {"barcode": barcode, "quantity": 40})
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": fulfillment_wh.id,
+                "to_warehouse_id": external_wh.id,
+                "items": [{"barcode": barcode, "quantity": 40}],
+                "is_defect": True,
+            },
+        )
+        await send_transfer(db_session, project.id, transfer.id)
+        result = await receive_transfer_fact(db_session, project.id, transfer.id, {barcode: 40}, note="PVB-D")
+        assert result["received_defect"] == 40
+        assert result["received_good"] == 0
+        assert result["completed"] is True
+        stock = await self._dest_stock(db_session, project, external_wh, barcode)
+        assert stock.defect_quantity == 40
+        assert stock.defect_in_transit == 0
+
+    @pytest.mark.asyncio
+    async def test_marker_set_atomically_with_receive(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        """transfer_fact_applied_at ставится той же транзакцией, что и движения."""
+        from backend.models.fulfillment import FulfillmentRequest
+        from backend.services.warehouse_outbound import receive_transfer_fact
+
+        transfer = await self._sent_transfer(db_session, project, fulfillment_wh, external_wh, barcode)
+        req = FulfillmentRequest(
+            project_id=project.id, warehouse_id=external_wh.id, provider="migfull",
+            external_id=f"pvb-atomic-{project.id}", kind="inbound", stock_transfer_id=transfer.id,
+            is_completed=True,
+        )
+        db_session.add(req)
+        await db_session.commit()
+
+        result = await receive_transfer_fact(
+            db_session, project.id, transfer.id, {barcode: 30},
+            note="PVB-A", mark_ff_request_applied=req.id,
+        )
+        assert result["applied_marker"] is True
+        await db_session.refresh(req)
+        assert req.transfer_fact_applied_at is not None
+
+    @pytest.mark.asyncio
+    async def test_marker_not_set_on_zero_receive(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        """Ни один ШК факта не совпал с составом → маркер НЕ ставится (повтор
+        следующим синком), нестыкующиеся ШК возвращаются в unmatched."""
+        from backend.models.fulfillment import FulfillmentRequest
+        from backend.services.warehouse_outbound import receive_transfer_fact
+
+        transfer = await self._sent_transfer(db_session, project, fulfillment_wh, external_wh, barcode)
+        req = FulfillmentRequest(
+            project_id=project.id, warehouse_id=external_wh.id, provider="migfull",
+            external_id=f"pvb-zero-{project.id}", kind="inbound", stock_transfer_id=transfer.id,
+            is_completed=True,
+        )
+        db_session.add(req)
+        await db_session.commit()
+
+        result = await receive_transfer_fact(
+            db_session, project.id, transfer.id, {"чужой-шк": 30},
+            note="PVB-Z", mark_ff_request_applied=req.id,
+        )
+        assert result["applied_marker"] is False
+        assert result["received_good"] == 0
+        assert result["unmatched"] == ["чужой-шк"]
+        await db_session.refresh(req)
+        assert req.transfer_fact_applied_at is None
+
+    @pytest.mark.asyncio
+    async def test_duplicate_plan_rows_not_doubled(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        """Две строки TR с одним ШК: факт применяется к СВЁРНУТОМУ плану, а не
+        к каждой строке (иначе «приём по факту» превращался в «приём по плану»)."""
+        from backend.services.warehouse_outbound import receive_transfer_fact
+
+        await _stock_warehouse(db_session, project, fulfillment_wh, barcode, 100)
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": fulfillment_wh.id,
+                "to_warehouse_id": external_wh.id,
+                "items": [
+                    {"barcode": barcode, "quantity": 20},
+                    {"barcode": barcode, "quantity": 20},
+                ],
+            },
+        )
+        await send_transfer(db_session, project.id, transfer.id)
+        result = await receive_transfer_fact(db_session, project.id, transfer.id, {barcode: 30}, note="PVB-DUP")
+        assert result["received_good"] == 30  # не 60
+        assert result["completed"] is False
+        stock = await self._dest_stock(db_session, project, external_wh, barcode)
+        assert stock.quantity == 30
+        assert stock.in_transit == 10
+
+    @pytest.mark.asyncio
+    async def test_defect_fact_lands_in_defect(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        """Часть факта — брак: приходуется в defect_quantity, транзит снимается."""
+        from backend.services.warehouse_outbound import receive_transfer_fact
+
+        transfer = await self._sent_transfer(db_session, project, fulfillment_wh, external_wh, barcode)
+        result = await receive_transfer_fact(
+            db_session, project.id, transfer.id, {barcode: 30}, defect_by_barcode={barcode: 10}, note="PVB-1"
+        )
+        assert result["received_good"] == 30
+        assert result["received_defect"] == 10
+        assert result["completed"] is True
+        stock = await self._dest_stock(db_session, project, external_wh, barcode)
+        assert stock.quantity == 30
+        assert stock.defect_quantity == 10
+        assert stock.in_transit == 0
+
+
 class TestCompleteTransfer:
     @pytest.mark.asyncio
     async def test_complete_transfer(self, db_session, project, fulfillment_wh, external_wh, barcode):

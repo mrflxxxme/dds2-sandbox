@@ -83,6 +83,21 @@ class TestGroupedReserved:
 
         assert groups[0]["total"] == 30
 
+    async def test_defect_sums_across_group(self):
+        """Брак входит в «Итого»-капитал → группа обязана его суммировать,
+        а не терять (раньше total_defect в _accumulate отсутствовал)."""
+        r1 = _row(1, "Бренд", total_own=10, reserved=0)
+        r1["total_defect"] = 4
+        r1["total"] = 14
+        r2 = _row(2, "Бренд", total_own=20, reserved=0)
+        r2["total_defect"] = 6
+        r2["total"] = 26
+
+        groups = await _group_unified(None, 1, [r1, r2], "brand")
+
+        assert groups[0]["total_defect"] == 10
+        assert groups[0]["total"] == 40
+
     async def test_details_merge_by_request_across_skus(self):
         """Одна заявка обычно держит несколько SKU одной группы. В раскрытой
         ячейке номер заявки обязан встретиться ОДИН раз с суммарным количеством,
