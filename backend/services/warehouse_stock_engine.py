@@ -1676,17 +1676,20 @@ async def get_unified_stock_summary(
 
     cost_map: dict[int, float] = {}
     for nom_id, info in nom_map.items():
-        # Priority 1: per-unit cost by article_seller (case-insensitive) — legacy
+        # Priority 1: WbCostOverride — РУЧНАЯ цена по nm_id ПОБЕЖДАЕТ движок
+        # (канон юзера 2026-07-28): override ставится сознательно, чаще всего
+        # там, где закупки не заведены/кривые; раньше цена движка молча затеняла
+        # 67 из 133 живых override'ов (±1M на остатке) без какой-либо индикации.
+        nm_id = info.get("article_wb")
+        if nm_id and nm_id in cost_overrides and cost_overrides[nm_id] > 0:
+            cost_map[nom_id] = cost_overrides[nm_id]
+            continue
+        # Priority 2: per-unit cost by article_seller (case-insensitive) — legacy
         # weighted average or, for fifo/moving_avg, the engine's as-of unit cost.
         article = info.get("article_seller")
         article_key = article.lower() if article else ""
         if article_key and article_key in avg_costs_by_article:
             cost_map[nom_id] = avg_costs_by_article[article_key]
-            continue
-        # Priority 2: WbCostOverride manual override by nm_id
-        nm_id = info.get("article_wb")
-        if nm_id and nm_id in cost_overrides and cost_overrides[nm_id] > 0:
-            cost_map[nom_id] = cost_overrides[nm_id]
 
     # Priority 3: WarehouseStock.cost_price (manual per-warehouse)
     for row in own_rows:
