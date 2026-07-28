@@ -4714,3 +4714,51 @@ async def test_list_stocks_logistics_no_phantom_row_without_stock(db_session, pr
     data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
     assert bc not in {r["barcode"] for r in data["rows"]}  # без клампа была бы строка diff=+50
     assert data["totals"]["ff_logistics"] == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Авто-приём перемещения по факту связанной ФФ-приёмки (PVB-* ← TR-*)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCollectTransferFactCandidates:
+    async def _mk_req(self, db_session, project, warehouse, *, ext, transfer_id=None,
+                      completed=True, applied=False, kind="inbound", local_archived=False):
+        from backend.utils.time import utcnow
+
+        req = FulfillmentRequest(
+            project_id=project.id,
+            warehouse_id=warehouse.id,
+            provider="migfull",
+            external_id=ext,
+            kind=kind,
+            number=ext,
+            is_completed=completed,
+            local_archived=local_archived,
+            stock_transfer_id=transfer_id,
+            transfer_fact_applied_at=utcnow() if applied else None,
+        )
+        db_session.add(req)
+        await db_session.commit()
+        return req
+
+    @pytest.mark.asyncio
+    async def test_collects_only_unapplied_completed_linked(self, db_session, project, warehouse):
+        from backend.models.warehouse import StockTransfer
+        from backend.services.fulfillment_service import _collect_transfer_fact_candidates
+
+        tr = StockTransfer(
+            project_id=project.id, from_warehouse_id=warehouse.id,
+            to_warehouse_id=warehouse.id, number=f"TR-T-{project.id}", status="IN_TRANSIT",
+        )
+        db_session.add(tr)
+        await db_session.commit()
+
+        target = await self._mk_req(db_session, project, warehouse, ext="pvb-1", transfer_id=tr.id)
+        await self._mk_req(db_session, project, warehouse, ext="pvb-2", transfer_id=tr.id, applied=True)
+        await self._mk_req(db_session, project, warehouse, ext="pvb-3", transfer_id=tr.id, completed=False)
+        await self._mk_req(db_session, project, warehouse, ext="pvb-4", transfer_id=None)
+        await self._mk_req(db_session, project, warehouse, ext="pvb-5", transfer_id=tr.id, local_archived=True)
+
+        rows = await _collect_transfer_fact_candidates(db_session, project.id, warehouse.id, "migfull")
+        assert [(r[0], r[1], r[2]) for r in rows] == [(target.id, tr.id, "pvb-1")]

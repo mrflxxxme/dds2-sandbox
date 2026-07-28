@@ -855,6 +855,11 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     req_by_receipt = {r.inbound_receipt_id: r for r in inbound_reqs if r.inbound_receipt_id is not None}
     inbound_accept_ids = await _collect_inbound_accept_candidates(db, project_id, inbound_reqs)
 
+    # Кандидаты на авто-приём ПЕРЕМЕЩЕНИЙ (kind=inbound + stock_transfer_id):
+    # провайдер завершил приёмку нашего TR → принять перемещение ПО ФАКТУ.
+    # Сам приём — после commit, ниже.
+    transfer_fact_reqs = await _collect_transfer_fact_candidates(db, project_id, warehouse_id, provider)
+
     synced_at = utcnow()
     key = await db.get(IntegrationKey, key_id)
     if key:
@@ -946,6 +951,67 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
                 assemblies_shipped += 1
             except Exception as e:  # — best-effort, синк уже зафиксирован
                 logger.warning("FF auto-ship: сборка %s пропущена (%s)", asm_id, e)
+
+    # Авто-приём ПЕРЕМЕЩЕНИЙ по факту завершённой ФФ-приёмки — после commit
+    # синка, каждое своей сессией (receive_transfer_fact лочит и коммитит сам).
+    # Пока только migfull (кейс натали: PVB-* ← TR-*): у него факт по баркодам
+    # добывается из живых lines приёмки. Прочие провайдеры — пропуск с логом.
+    transfers_received = 0
+    if transfer_fact_reqs:
+        if provider == "migfull":
+            from backend.database import AsyncSessionLocal
+            from backend.services.warehouse_outbound import receive_transfer_fact
+
+            fact_client = MigfullClient(tenant_guid, token, project_id=project_id)
+            # Cap HTTP на цикл (2 запроса lines + live-добор карточек на заявку):
+            # залп кандидатов не должен жечь rate limit провайдера, хвост доберёт
+            # следующий синк — зеркально detail_calls у skladbot-приёмок.
+            for req_id, tr_id, ext_id, ff_number in transfer_fact_reqs[:_ENRICH_DETAIL_CAP]:
+                try:
+                    facts = await _migfull_transfer_fact_by_barcode(
+                        fact_client, project_id, warehouse_id, ext_id
+                    )
+                    if facts is None:
+                        logger.warning(
+                            "FF transfer-fact: заявка %s отложена — факт migfull недоступен", req_id
+                        )
+                        continue
+                    accepted, defects, fully_resolved = facts
+                    if not accepted and not defects:
+                        logger.warning(
+                            "FF transfer-fact: заявка %s — ни одного опознанного ШК, отложена", req_id
+                        )
+                        continue
+                    async with AsyncSessionLocal() as tdb:
+                        # Маркер идемпотентности ставится ВНУТРИ receive, той же
+                        # транзакцией, что и движения (нет окна на задвоение), и
+                        # только при полном резолве ШК: частичный факт (транзиентный
+                        # 429 live-добора) должен повториться следующим синком.
+                        res = await receive_transfer_fact(
+                            tdb,
+                            project_id,
+                            tr_id,
+                            accepted,
+                            defect_by_barcode=defects,
+                            note=ff_number or ext_id,
+                            mark_ff_request_applied=req_id if fully_resolved else None,
+                        )
+                    if res.get("unmatched"):
+                        logger.warning(
+                            "FF transfer-fact: заявка %s — ШК вне состава TR: %s",
+                            req_id,
+                            ", ".join(res["unmatched"][:10]),
+                        )
+                    if res["applied_marker"]:
+                        transfers_received += 1
+                except Exception as e:  # — best-effort, синк уже зафиксирован
+                    logger.warning("FF transfer-fact: заявка %s пропущена (%s)", req_id, e)
+        else:
+            logger.info(
+                "FF transfer-fact: %d заявок с перемещением у провайдера %s — авто-приём пока только migfull",
+                len(transfer_fact_reqs),
+                provider,
+            )
 
     if assemblies_marked_ready:
         await invalidate_cache("reports:assembly_flow")
@@ -4250,6 +4316,107 @@ async def _migfull_guid_barcodes(
         if guid and effective:
             out[guid] = (effective, int(units or 1))
     return out
+
+
+async def _collect_transfer_fact_candidates(
+    db: AsyncSession, project_id: int, warehouse_id: int, provider: str
+) -> list[tuple[int, int, str, str | None]]:
+    """[(ff_request_id, stock_transfer_id, external_id, number)] — завершённые
+    провайдером приёмки, связанные с перемещением, факт которых ещё не применён.
+
+    transfer_fact_applied_at — маркер идемпотентности: is_completed у провайдера
+    остаётся True навсегда, без маркера каждый синк применял бы факт повторно.
+    """
+    from backend.models.warehouse import StockTransfer, TransferStatus
+
+    res = await db.execute(
+        select(
+            FulfillmentRequest.id,
+            FulfillmentRequest.stock_transfer_id,
+            FulfillmentRequest.external_id,
+            FulfillmentRequest.number,
+        )
+        # Только живые IN_TRANSIT перемещения: закрытый руками / удалённый TR
+        # дал бы ValueError в receive_transfer_fact на каждом синке (маркер не
+        # встаёт) и вечно жёг HTTP к провайдеру.
+        .join(StockTransfer, StockTransfer.id == FulfillmentRequest.stock_transfer_id)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.provider == provider,
+            FulfillmentRequest.kind == FfRequestKind.INBOUND.value,
+            FulfillmentRequest.is_completed == True,  # noqa: E712
+            FulfillmentRequest.local_archived == False,  # noqa: E712
+            FulfillmentRequest.transfer_fact_applied_at.is_(None),
+            StockTransfer.project_id == project_id,
+            StockTransfer.status == TransferStatus.IN_TRANSIT,
+            StockTransfer.is_deleted == False,  # noqa: E712
+        )
+        .limit(_MIRROR_SELECT_LIMIT)
+    )
+    return [tuple(r) for r in res.all()]
+
+
+async def _migfull_transfer_fact_by_barcode(
+    client: "MigfullClient",
+    project_id: int,
+    warehouse_id: int,
+    external_id: str,
+) -> tuple[dict[str, int], dict[str, int], bool] | None:
+    """Факт завершённой migfull-приёмки по баркодам РОССЫПИ: ({bc: принято годным},
+    {bc: принято браком}, fully_resolved) — кормит авто-приём связанного
+    перемещения (receive_transfer_fact). Та же механика, что деталка приёмки:
+    живые lines incoming+received, guid→ШК из зеркала остатков + ручные overrides
+    + live-добор карточкой, короб сводится к россыпи (× units_per_box).
+    fully_resolved=False — часть guid'ов осталась без ШК (например, транзиентный
+    429 на live-доборе): факт ЧАСТИЧНЫЙ, вызывающий не должен ставить маркер
+    идемпотентности, иначе недобор зафиксируется навсегда. None — факт недоступен
+    целиком (HTTP-сбой): приём откладывается до следующего синка, план не книжим.
+    DB-сессии короткие и закрываются ДО/ПОСЛЕ HTTP — транзакцию через внешние
+    вызовы не держим.
+    """
+    from backend.database import AsyncSessionLocal
+
+    try:
+        incoming = await client.fetch_submission_lines(external_id, "incoming")
+        received = await client.fetch_submission_lines(external_id, "received")
+    except Exception as e:
+        logger.warning("migfull transfer-fact: lines недоступны для %s (%s)", external_id, e)
+        return None
+    products = _migfull_products_from_lines(incoming, received, fact_field="accepted_qty")
+    line_guids = {p["guid"] for p in products}
+    async with AsyncSessionLocal() as s:
+        guid_barcodes = await _migfull_guid_barcodes(s, project_id, warehouse_id, line_guids)
+        guid_overrides = await _load_guid_barcode_overrides(s, project_id, warehouse_id)
+    name_by_guid = {p["guid"]: p.get("name") for p in products}
+    for g, ob in guid_overrides.items():
+        if g in line_guids:
+            guid_barcodes[g] = _migfull_box_pack(ob, name_by_guid.get(g)) or (ob, 1)
+    try:
+        await _migfull_resolve_detail_barcodes(client, line_guids, guid_barcodes)
+    except Exception:  # live-добор best-effort: неопознанные ШК просто выпадут
+        logger.warning("migfull transfer-fact: live-добор ШК не удался для %s", external_id, exc_info=True)
+
+    accepted: dict[str, int] = {}
+    defects: dict[str, int] = {}
+    unresolved = 0
+    for p in products:
+        barcode, units = guid_barcodes.get(p["guid"], (None, 1))
+        if not barcode:
+            if int(p.get("accepted_qty") or 0) or int(p.get("defect_qty") or 0):
+                unresolved += 1
+            continue
+        good = int(p.get("accepted_qty") or 0) * units
+        bad = int(p.get("defect_qty") or 0) * units
+        if good:
+            accepted[barcode] = accepted.get(barcode, 0) + good
+        if bad:
+            defects[barcode] = defects.get(barcode, 0) + bad
+    if unresolved:
+        logger.warning(
+            "migfull transfer-fact: %d позиций приёмки %s без ШК — факт частичный", unresolved, external_id
+        )
+    return accepted, defects, unresolved == 0
 
 
 async def _resolve_noms(db: AsyncSession, project_id: int, barcodes: set[str]) -> dict[str, tuple[int, str | None]]:

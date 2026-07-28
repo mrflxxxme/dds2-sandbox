@@ -46,13 +46,14 @@
 - **`StockMovement`** — append-only, не удалять, не редактировать. `WarehouseStock` = `SUM(StockMovement.quantity)`.
 - `_resolve_barcode()` в `warehouse_stock_engine.py` — резолвит баркод → `Nomenclature` (raises `ValueError` если не найден); все items резолвятся через баркод.
 - `_next_number()` там же — генерирует автономер (IN-1, OUT-2, TR-3).
-- `in_transit` — информационное поле, обновляется при send/complete transfer.
+- `in_transit` — НЕ только информационное: с 2026-07-28 кормит `transfer_transit` в «Единых остатках» (входит в «Итого»-капитал; SKU целиком уехавший в TR виден). Обновляется при send/complete/receive_transfer_fact.
 - `cost_price` — ручной ввод на `WarehouseStock`.
 
 ### Статусные переходы
 - **Приёмка:** DRAFT → EXPECTED → ACCEPTED; cancel из любого статуса → CANCELLED (cancel из ACCEPTED откатывает сток).
 - **Отгрузка:** DRAFT → SHIPPED → DELIVERED; cancel из SHIPPED → CANCELLED (возвращает сток). Отгрузка **только с FULFILLMENT** складов.
-- **Перемещение:** DRAFT → IN_TRANSIT → COMPLETED. На source `qty -= delta` (TRANSFER_OUT), на target `qty += delta` (TRANSFER_IN); `in_transit` на target растёт при send, падает при complete. Cancel (`DELETE /transfers/{id}`) — только из DRAFT, soft-delete; мутации статуса берут row-lock (`_get_transfer_locked`, FOR UPDATE) против гонки send/cancel. UI: создание всегда сразу делает send (черновик не остаётся); приём/отправка/удаление — вкладка «Перемещения» на странице склада; `GET /transfers?warehouse_id=` фильтрует source OR destination.
+- **Перемещение:** DRAFT → IN_TRANSIT → COMPLETED. На source `qty -= delta` (TRANSFER_OUT), на target `qty += delta` (TRANSFER_IN); `in_transit` на target растёт при send, падает при complete/receive-факте. Cancel (`DELETE /transfers/{id}`) — только из DRAFT, soft-delete; мутации статуса берут row-lock (`_get_transfer_locked`, FOR UPDATE) против гонки send/cancel. UI: создание всегда сразу делает send (черновик не остаётся); приём/отправка/удаление — вкладка «Перемещения» на странице склада; `GET /transfers?warehouse_id=` фильтрует source OR destination.
+- **Порционный приём по факту (`receive_transfer_fact`, 2026-07-28):** авто-приём по завершённой связанной ФФ-приёмке (см. DOMAIN_FULFILLMENT). TRANSFER_IN на факт (годное+брак), дубли строк плана схлопываются по номенклатуре, сверх плана не приходуем; «уже принято» выводится из движений (идемпотентность), transfer → COMPLETED только при полном покрытии; при завершении наследует кратность коробов и сбрасывает `reports:balance/assembly_link_anomalies/warehouse_need`; опциональный `mark_ff_request_applied` ставит маркер заявки атомарно с движениями.
 
 ### Accept / Cancel / Update приёмки
 - **Accept (DRAFT|EXPECTED → ACCEPTED):** если `actual_qty <= 0` и `expected_qty > 0` — автозаполнение `actual_qty = expected_qty`. Для каждого item с `actual_qty > 0` — `_update_stock(+actual_qty, INBOUND)`. **Если `receipt.is_defect`** (возвраты WB с ПВЗ) — сток идёт в брак: `_update_stock(delta=0, defect_delta=+actual_qty, DEFECT_RECEIVE)` (симметрия с Cancel; idempotency-guard проверяет DEFECT_RECEIVE, а не INBOUND). `status = ACCEPTED`, `actual_date = today`.

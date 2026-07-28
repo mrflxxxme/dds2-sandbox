@@ -1763,6 +1763,7 @@ async def get_unified_stock_summary(
                 "wb_in_way_to_client": 0,
                 "wb_in_way_from_client": 0,
                 "total_defect": 0,
+                "transfer_transit": 0,
                 "total": 0,
                 "factory_qty": 0,
                 "vehicle_forming_qty": 0,
@@ -1791,9 +1792,13 @@ async def get_unified_stock_summary(
             }
         return unified[nom_id]
 
-    # Own warehouse stock
+    # Own warehouse stock. in_transit/defect_in_transit — отправленные, но ещё
+    # не принятые перемещения между нашими складами (send_transfer кредитует их
+    # на склад-назначение): это наш товар в пути, без него SKU, целиком уехавший
+    # в TR, пропадал из сводки (кейс TR-21: 9 234 шт невидимы 12 дней).
     for row in own_rows:
-        if row.quantity <= 0 and row.defect_quantity <= 0:
+        transit = int(row.in_transit or 0) + int(row.defect_in_transit or 0)
+        if row.quantity <= 0 and row.defect_quantity <= 0 and transit <= 0:
             continue
         entry = _ensure(row.nomenclature_id)
         wh_name = wh_name_map.get(row.warehouse_id, str(row.warehouse_id))
@@ -1802,6 +1807,8 @@ async def get_unified_stock_summary(
             entry["total_own"] += row.quantity
         if row.defect_quantity > 0:
             entry["total_defect"] += row.defect_quantity
+        if transit > 0:
+            entry["transfer_transit"] += transit
 
     # WB stock. «В пути…» — отдельные поля-колонки, не разбивка по складам;
     # total_wb = только физически на складах WB («Всего находится на складах»).
@@ -1869,6 +1876,7 @@ async def get_unified_stock_summary(
             + entry["wb_in_way_from_client"]
             + entry["in_transit"]
             + entry["total_defect"]
+            + entry["transfer_transit"]
         )
 
     # Narrowed forecast fallback — only runs in forecast mode. Estimates
@@ -1950,6 +1958,7 @@ async def _group_unified(
             "reserved_details": [],
             "total": 0,
             "total_defect": 0,
+            "transfer_transit": 0,
             "factory_qty": 0,
             "vehicle_forming_qty": 0,
             "vehicle_transit_qty": 0,
@@ -1985,6 +1994,7 @@ async def _group_unified(
             "reserved",
             "total",
             "total_defect",
+            "transfer_transit",
             "factory_qty",
             "vehicle_forming_qty",
             "vehicle_transit_qty",

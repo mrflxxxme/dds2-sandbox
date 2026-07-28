@@ -7602,6 +7602,37 @@ export interface LoanAccrualDaysResponse {
   from_schedule: boolean;
 }
 
+/** Один получатель наших денег: сколько должен тела и процентов. */
+export interface LoanLentItem {
+  counterparty_id: number;
+  name: string;
+  loan_id: number;
+  contract_number: string;
+  rate: number | null;
+  outstanding: number;
+  /** Начислено процентов за всё время. */
+  accrued_total: number;
+  interest_received: number;
+  /** Начислено минус получено — долг по процентам. */
+  interest_due: number;
+  /** Тело + долг по процентам. */
+  total_due: number;
+  accrued_month: number;
+  /** Заполнено, если вторая сторона займа — наш же проект. */
+  mirror_project_name: string | null;
+}
+
+export interface LoanLentResponse {
+  items: LoanLentItem[];
+  total_outstanding: number;
+  total_accrued: number;
+  total_received: number;
+  total_interest_due: number;
+  total_due: number;
+  /** Доход за текущий календарный месяц. */
+  month_income: number;
+}
+
 /** Состояние строки графика: оплачена / частично / просрочена / ближайшая. */
 export type LoanScheduleState = 'PAID' | 'PARTIAL' | 'OVERDUE' | 'DUE' | 'UPCOMING';
 

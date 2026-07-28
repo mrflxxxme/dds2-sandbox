@@ -5,7 +5,7 @@ Warehouse outbound — shipments and stock transfers.
 import logging
 from datetime import date
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -15,6 +15,7 @@ from backend.models.warehouse import (
     OutboundShipment,
     OutboundShipmentItem,
     OutboundStatus,
+    StockMovement,
     StockTransfer,
     StockTransferItem,
     TransferStatus,
@@ -492,3 +493,194 @@ async def complete_transfer(db: AsyncSession, project_id: int, transfer_id: int)
         await invalidate_cache("reports:warehouse_need")
     await db.refresh(transfer, ["items"])
     return transfer
+
+
+async def receive_transfer_fact(
+    db: AsyncSession,
+    project_id: int,
+    transfer_id: int,
+    accepted_by_barcode: dict[str, int],
+    *,
+    defect_by_barcode: dict[str, int] | None = None,
+    note: str | None = None,
+    mark_ff_request_applied: int | None = None,
+) -> dict:
+    """Порционный приём перемещения ПО ФАКТУ (авто-приём по связанной ФФ-приёмке).
+
+    ФФ принимает наш TR своими приёмками (возможно, порциями — кейс
+    PVB-0000121 → TR-21) и отчитывается фактами. Здесь: TRANSFER_IN на факт
+    (годное + брак отдельно), транзит уменьшается на принятое, сверх плана
+    не приходуем (излишек — предмет сверки зеркала, не транзита). Transfer
+    закрывается ТОЛЬКО когда суммарный факт покрыл весь план; недобор остаётся
+    видимым транзитом до следующих порций или ручного закрытия. Идемпотентно:
+    «уже принятое» выводится из движений TRANSFER_IN/DEFECT_TRANSFER_IN этого
+    transfer на складе-назначении, повторный вызов доберёт максимум остаток.
+
+    mark_ff_request_applied — id ФФ-заявки: если что-то принято (или план
+    покрыт), её transfer_fact_applied_at ставится В ТОЙ ЖЕ транзакции, что и
+    движения. Иначе между «приход закоммичен» и «маркер закоммичен» было бы
+    окно, в котором падение процесса заставило бы следующий синк применить
+    тот же факт повторно (частичный факт добрал бы фантомный остаток).
+    """
+    defect_by_barcode = defect_by_barcode or {}
+    transfer = await _get_transfer_locked(db, project_id, transfer_id)
+    if not transfer:
+        raise ValueError("Transfer not found")
+    if transfer.status != TransferStatus.IN_TRANSIT:
+        raise ValueError(f"Cannot receive facts in status {transfer.status}")
+
+    is_defect = transfer.is_defect
+
+    # Уже принято по этому transfer на складе-назначении (порционные приёмы).
+    received_res = await db.execute(
+        select(
+            StockMovement.nomenclature_id,
+            func.coalesce(func.sum(StockMovement.quantity + StockMovement.defect_delta), 0),
+        )
+        .where(
+            StockMovement.project_id == project_id,
+            StockMovement.warehouse_id == transfer.to_warehouse_id,
+            StockMovement.reference_type == "TRANSFER",
+            StockMovement.reference_id == transfer.id,
+            StockMovement.movement_type.in_(
+                [MovementType.TRANSFER_IN.value, MovementType.DEFECT_TRANSFER_IN.value]
+            ),
+        )
+        .group_by(StockMovement.nomenclature_id)
+    )
+    received_map: dict[int, int] = {row[0]: int(row[1] or 0) for row in received_res.all()}
+
+    # План по номенклатуре: дубли строк одного ШК схлопываем ДО цикла — иначе
+    # каждая строка получила бы полный факт и «приём по факту» превратился бы
+    # в «приём по плану» (create_transfer дубли не запрещает).
+    plan_map: dict[int, tuple[str, int]] = {}
+    for item in transfer.items:
+        bc, qty = plan_map.get(item.nomenclature_id, (item.barcode, 0))
+        plan_map[item.nomenclature_id] = (bc, qty + item.quantity)
+    plan_barcodes = {bc for bc, _ in plan_map.values()}
+    # ШК факта, которых нет в составе перемещения, — сигнал кривой связки или
+    # чужого товара в приёмке; вызывающий логирует, при пустом приёме не ставит маркер.
+    unmatched = sorted((set(accepted_by_barcode) | set(defect_by_barcode)) - plan_barcodes)
+
+    received_good = 0
+    received_defect = 0
+    remaining_total = 0
+    for nomenclature_id, (barcode, plan_qty) in plan_map.items():
+        already = received_map.get(nomenclature_id, 0)
+        remaining = max(plan_qty - already, 0)
+        fact_good = max(int(accepted_by_barcode.get(barcode, 0)), 0)
+        fact_defect = max(int(defect_by_barcode.get(barcode, 0)), 0)
+        take_good = min(fact_good, remaining)
+        take_defect = min(fact_defect, remaining - take_good)
+
+        # Перемещение брака: весь факт приходуется браком же.
+        if is_defect:
+            take_defect, take_good = take_good + take_defect, 0
+
+        if take_good > 0:
+            await _update_stock(
+                db,
+                project_id=project_id,
+                warehouse_id=transfer.to_warehouse_id,
+                nomenclature_id=nomenclature_id,
+                barcode=barcode,
+                delta=take_good,
+                movement_type=MovementType.TRANSFER_IN,
+                reference_type="TRANSFER",
+                reference_id=transfer.id,
+                comment=note,
+            )
+        if take_defect > 0:
+            await _update_stock(
+                db,
+                project_id=project_id,
+                warehouse_id=transfer.to_warehouse_id,
+                nomenclature_id=nomenclature_id,
+                barcode=barcode,
+                delta=0,
+                defect_delta=take_defect,
+                movement_type=MovementType.DEFECT_TRANSFER_IN,
+                reference_type="TRANSFER",
+                reference_id=transfer.id,
+                comment=note,
+            )
+
+        taken = take_good + take_defect
+        if taken > 0:
+            result = await db.execute(
+                select(WarehouseStock).where(
+                    WarehouseStock.project_id == project_id,
+                    WarehouseStock.warehouse_id == transfer.to_warehouse_id,
+                    WarehouseStock.nomenclature_id == nomenclature_id,
+                )
+            )
+            target_stock = result.scalar_one_or_none()
+            if target_stock:
+                if is_defect:
+                    target_stock.defect_in_transit = max(0, target_stock.defect_in_transit - taken)
+                else:
+                    target_stock.in_transit = max(0, target_stock.in_transit - taken)
+                target_stock.updated_at = utcnow()
+
+        received_good += take_good
+        received_defect += take_defect
+        remaining_total += remaining - taken
+
+    completed = remaining_total == 0
+    if completed:
+        transfer.status = TransferStatus.COMPLETED
+    if note:
+        stamp = f"{note}: принято {received_good} годн."
+        if received_defect:
+            stamp += f" + {received_defect} брак"
+        if remaining_total:
+            stamp += f", в пути осталось {remaining_total}"
+        transfer.comment = f"{transfer.comment}\n{stamp}" if transfer.comment else stamp
+
+    # Полное покрытие = фактическое завершение перемещения: наследуем ручную
+    # кратность коробов на склад-получатель, как ручной complete_transfer —
+    # авто-приём для migfull-складов ЗАМЕНЯЕТ ручное закрытие, без наследования
+    # SKU без кратности выпадал бы из отгрузки в предбронь (грабля TR-20).
+    inherited = 0
+    if completed and not is_defect:
+        try:
+            from backend.services import box_multiplicity_service
+
+            inherited = await box_multiplicity_service.inherit_on_transfer(
+                db,
+                project_id,
+                transfer.from_warehouse_id,
+                transfer.to_warehouse_id,
+                [bc for bc, _ in plan_map.values()],
+                transfer.number,
+            )
+        except Exception:
+            logger.warning("transfer box-qty inherit failed for %s", transfer.number, exc_info=True)
+
+    marker_set = False
+    if mark_ff_request_applied is not None and (received_good + received_defect > 0 or completed):
+        from backend.models.fulfillment import FulfillmentRequest
+
+        req_row = await db.get(FulfillmentRequest, mark_ff_request_applied)
+        if req_row is not None and req_row.project_id == project_id:
+            req_row.transfer_fact_applied_at = utcnow()
+            marker_set = True
+
+    await db.commit()
+    # Сток изменился — сбрасываем отчётные кэши (iron rule 7): расхождение
+    # остатков и потребность обязаны увидеть приход сразу, а не через TTL.
+    if received_good or received_defect:
+        await invalidate_cache("reports:balance")
+        await invalidate_cache("reports:assembly_link_anomalies")
+        await invalidate_cache("reports:warehouse_need")
+    elif inherited:
+        await invalidate_cache("reports:warehouse_need")
+    await db.refresh(transfer, ["items"])
+    return {
+        "received_good": received_good,
+        "received_defect": received_defect,
+        "remaining_total": remaining_total,
+        "completed": completed,
+        "unmatched": unmatched,
+        "applied_marker": marker_set,
+    }
