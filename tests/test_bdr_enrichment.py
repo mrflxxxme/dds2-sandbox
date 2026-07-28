@@ -14,7 +14,54 @@ from backend.services.bdr_enrichment import (
     apply_tax_article,
     compute_abc,
     enrich_article,
+    finalize_net_payout,
 )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tests: finalize_net_payout (разнос некатегорийных удержаний по категориям)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFinalizeNetPayout:
+    def test_credits_distributed_to_total_payout(self):
+        """Σ net_payout сводится к summary.to_pay (кредиты котла разнесены)."""
+        # 2 категории по 1000 выручки, net_payout=900 каждая (реклама вычтена);
+        # котёл без категории net_payout=-400 (кредиты). Факт. выплата = 1400.
+        articles = [
+            {"sa_name": "A", "realization": 1000, "to_pay": 1000, "net_payout": 900},
+            {"sa_name": "B", "realization": 1000, "to_pay": 1000, "net_payout": 900},
+            {"sa_name": "", "realization": 0, "to_pay": -400, "net_payout": -400},
+        ]
+        summary = {"to_pay": 1400}
+        finalize_net_payout(articles, summary)
+        assert summary["net_payout"] == 1400.0
+        # residual = (900+900) - 1400 = 400, разносится поровну по выручке → -200
+        assert articles[0]["net_payout"] == 700.0
+        assert articles[1]["net_payout"] == 700.0
+        assert articles[2]["net_payout"] == 0.0  # котёл обнулён
+        assert round(sum(a["net_payout"] for a in articles), 2) == 1400.0
+
+    def test_zero_revenue_fallback_to_to_pay(self):
+        """Без выручки вес берётся по модулю выплаты."""
+        articles = [
+            {"sa_name": "A", "realization": 0, "to_pay": 300, "net_payout": 300},
+            {"sa_name": "B", "realization": 0, "to_pay": 100, "net_payout": 100},
+        ]
+        summary = {"to_pay": 300}
+        finalize_net_payout(articles, summary)
+        assert summary["net_payout"] == 300.0
+        # residual=100, вес 300:100 → A -75, B -25
+        assert articles[0]["net_payout"] == 225.0
+        assert articles[1]["net_payout"] == 75.0
+
+    def test_no_residual_unchanged(self):
+        """Если Σ уже равна to_pay — строки не меняются."""
+        articles = [{"sa_name": "A", "realization": 1000, "to_pay": 1000, "net_payout": 1000}]
+        summary = {"to_pay": 1000}
+        finalize_net_payout(articles, summary)
+        assert articles[0]["net_payout"] == 1000.0
+        assert summary["net_payout"] == 1000.0
 
 
 class TestApplyTax:
