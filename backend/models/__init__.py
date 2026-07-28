@@ -140,6 +140,7 @@ from backend.models.order_city import (
 # Payroll (зарплата: сотрудники, команды, тарифная лестница)
 from backend.models.payroll import (
     PayrollClientBillingMode,
+    PayrollClientBillingPeriod,
     PayrollClientEntry,
     PayrollClientEntryKind,
     PayrollClientProject,
@@ -381,6 +382,7 @@ __all__ = [
     "LoanPaymentType",
     # Payroll
     "PayrollClientBillingMode",
+    "PayrollClientBillingPeriod",
     "PayrollClientEntry",
     "PayrollClientEntryKind",
     "PayrollClientProject",

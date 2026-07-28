@@ -117,14 +117,21 @@ class EmployeeListResponse(BaseModel):
 
 
 class TeamScopeIn(BaseModel):
-    kind: str
-    value: str = Field(..., min_length=1, max_length=300)
+    """
+    Скоуп: бренд, категория или пересечение (бренд × категория).
 
-    @field_validator("kind")
+    Композит (оба поля) вытесняет одноимённые brand-only/subject-only скоупы
+    других команд: их база считается за вычетом закреплённых композитов.
+    """
+
+    brand: str | None = Field(None, min_length=1, max_length=300)
+    subject: str | None = Field(None, min_length=1, max_length=300)
+
+    @field_validator("subject")
     @classmethod
-    def validate_kind(cls, v: str) -> str:
-        if v not in ALLOWED_SCOPE_KINDS:
-            raise ValueError(f"kind must be one of: {ALLOWED_SCOPE_KINDS}")
+    def validate_at_least_one(cls, v: str | None, info) -> str | None:
+        if v is None and info.data.get("brand") is None:
+            raise ValueError("scope requires brand and/or subject")
         return v
 
 
@@ -142,13 +149,41 @@ class TeamScopesReplace(BaseModel):
     scopes: list[TeamScopeIn]
 
 
+class TeamMemberIn(BaseModel):
+    """Участие в команде с границами по месяцам (None = без границы)."""
+
+    employee_id: int
+    from_month: str | None = None  # 'YYYY-MM'
+    to_month: str | None = None  # 'YYYY-MM' включительно
+
+    @field_validator("from_month", "to_month")
+    @classmethod
+    def validate_months(cls, v: str | None) -> str | None:
+        if v is not None:
+            try:
+                datetime.strptime(v, "%Y-%m")
+            except ValueError as exc:
+                raise ValueError("month must be 'YYYY-MM'") from exc
+        return v
+
+
 class TeamMembersReplace(BaseModel):
-    employee_ids: list[int]
+    members: list[TeamMemberIn]
+
+    @field_validator("members")
+    @classmethod
+    def validate_unique(cls, v: list[TeamMemberIn]) -> list[TeamMemberIn]:
+        ids = [m.employee_id for m in v]
+        if len(ids) != len(set(ids)):
+            raise ValueError("employee_ids must be unique")
+        return v
 
 
 class TeamMemberOut(BaseModel):
     employee_id: int
     name: str
+    from_month: str | None = None
+    to_month: str | None = None
 
 
 class TeamResponse(BaseModel):
@@ -295,18 +330,22 @@ ALLOWED_BILLING_MODES = ["fixed", "percent", "profit_share"]
 ALLOWED_ENTRY_KINDS = ["week_base", "month_profit"]
 
 
-class ClientProjectIn(BaseModel):
-    """Клиент агентства. Сплит: manager_share команде, остаток агентству."""
+class ClientBillingPeriodIn(BaseModel):
+    """Период формата оплаты: с месяца month действует billing_mode с параметрами."""
 
-    name: str = Field(..., min_length=1, max_length=200)
+    month: str  # 'YYYY-MM'
     billing_mode: str
-    team_id: int | None = None
-    linked_project_id: int | None = None  # кабинет клиента в системе (percent)
-    fixed_amount: Decimal | None = Field(None, ge=0)
+    fixed_amount: Decimal | None = Field(None, ge=0)  # для fixed
     fee_percent: Decimal | None = Field(None, ge=0, le=1)  # доля от ЧП (profit_share)
-    manager_share: Decimal = Field(Decimal("0.45"), ge=0, le=1)
-    is_active: bool = True
-    notes: str | None = None
+
+    @field_validator("month")
+    @classmethod
+    def validate_month(cls, v: str) -> str:
+        try:
+            datetime.strptime(v, "%Y-%m")
+        except ValueError as exc:
+            raise ValueError("month must be 'YYYY-MM'") from exc
+        return v
 
     @field_validator("billing_mode")
     @classmethod
@@ -316,25 +355,56 @@ class ClientProjectIn(BaseModel):
         return v
 
 
+class ClientBillingPeriodOut(BaseModel):
+    month: str
+    billing_mode: str
+    fixed_amount: Decimal | None
+    fee_percent: Decimal | None
+
+
+def _validate_billing_periods(
+    v: list[ClientBillingPeriodIn] | None,
+) -> list[ClientBillingPeriodIn] | None:
+    if v:
+        months = [p.month for p in v]
+        if len(months) != len(set(months)):
+            raise ValueError("billing_periods months must be unique")
+    return v
+
+
+class ClientProjectIn(BaseModel):
+    """
+    Клиент агентства. Сплит: manager_share команде, остаток агентству.
+
+    Формат оплаты — историей периодов: формат месяца M = период с
+    max(month) <= M; до первого периода начисления нет («у Брыссина раньше
+    был процент, с июля оклад» — два периода).
+    """
+
+    name: str = Field(..., min_length=1, max_length=200)
+    team_id: int | None = None
+    linked_project_id: int | None = None  # кабинет клиента в системе (percent)
+    billing_periods: list[ClientBillingPeriodIn] | None = None
+    manager_share: Decimal = Field(Decimal("0.45"), ge=0, le=1)
+    is_active: bool = True
+    notes: str | None = None
+
+    validate_billing = field_validator("billing_periods")(_validate_billing_periods)
+
+
 class ClientProjectUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=200)
-    billing_mode: str | None = None
     team_id: int | None = None
     clear_team: bool = False
     linked_project_id: int | None = None
     clear_linked_project: bool = False
-    fixed_amount: Decimal | None = Field(None, ge=0)
-    fee_percent: Decimal | None = Field(None, ge=0, le=1)
+    # None — не трогать; список (в т.ч. пустой) — полная замена истории.
+    billing_periods: list[ClientBillingPeriodIn] | None = None
     manager_share: Decimal | None = Field(None, ge=0, le=1)
     is_active: bool | None = None
     notes: str | None = None
 
-    @field_validator("billing_mode")
-    @classmethod
-    def validate_mode(cls, v: str | None) -> str | None:
-        if v is not None and v not in ALLOWED_BILLING_MODES:
-            raise ValueError(f"billing_mode must be one of: {ALLOWED_BILLING_MODES}")
-        return v
+    validate_billing = field_validator("billing_periods")(_validate_billing_periods)
 
 
 class ClientEntryOut(BaseModel):
@@ -346,13 +416,13 @@ class ClientEntryOut(BaseModel):
 class ClientProjectResponse(BaseModel):
     id: int
     name: str
-    billing_mode: str
     team_id: int | None
     team_name: str | None = None
     linked_project_id: int | None
     linked_project_name: str | None = None
-    fixed_amount: Decimal | None
-    fee_percent: Decimal | None
+    billing_periods: list[ClientBillingPeriodOut] = []
+    # Формат, действующий в текущем месяце (для карточки; None — нет периода).
+    current_billing: ClientBillingPeriodOut | None = None
     manager_share: Decimal
     is_active: bool
     notes: str | None
@@ -406,7 +476,8 @@ class AgencyClientWeek(BaseModel):
 class AgencySheetClient(BaseModel):
     client_id: int
     name: str
-    billing_mode: str
+    # Формат оплаты, действовавший В РАСЧЁТНОМ месяце (None — период не задан).
+    billing_mode: str | None
     team_id: int | None
     team_name: str | None
     manager_share: Decimal

@@ -126,13 +126,21 @@ class PayrollTeam(Base, TimestampMixin, SoftDeleteMixin):
 
 
 class PayrollTeamMember(Base):
-    """Участник команды. Доли всегда равные, поэтому поля доли нет."""
+    """
+    Участник команды. Доли всегда равные, поэтому поля доли нет.
+
+    Членство ограничено месяцами: valid_from/valid_to (первое число, NULL =
+    без границы). Начисление месяца M получают только участники с
+    valid_from <= M <= valid_to.
+    """
 
     __tablename__ = "payroll_team_member"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     team_id: Mapped[int] = mapped_column(Integer, ForeignKey("payroll_team.id"), nullable=False)
     employee_id: Mapped[int] = mapped_column(Integer, ForeignKey("payroll_employee.id"), nullable=False)
+    valid_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     team: Mapped["PayrollTeam"] = relationship(back_populates="members")
     employee: Mapped["PayrollEmployee"] = relationship()
@@ -145,20 +153,33 @@ class PayrollTeamMember(Base):
 
 
 class PayrollTeamScope(Base):
-    """Бренд или категория, выплата по которым идёт в базу начисления команды."""
+    """
+    Скоуп команды: бренд, категория или их пересечение (бренд × категория).
+
+    brand_value / subject_value — значения как в wb_finance_rows; заполнено
+    хотя бы одно. Композитный скоуп (оба поля) ВЫТЕСНЯЕТ общий: строки
+    (бренд, категория), закреплённые композитом за какой-либо командой,
+    вычитаются из базы команд с одноимённым brand-only/subject-only скоупом
+    («Мария получает за коврики в ванную ну-ну, остальные — всё кроме них»).
+    """
 
     __tablename__ = "payroll_team_scope"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     team_id: Mapped[int] = mapped_column(Integer, ForeignKey("payroll_team.id"), nullable=False)
-    kind: Mapped[str] = mapped_column(String(10), nullable=False)  # PayrollScopeKind
-    # Значение как в wb_finance_rows: brand_name либо subject_name.
-    value: Mapped[str] = mapped_column(String(300), nullable=False)
+    brand_value: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    subject_value: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
     team: Mapped["PayrollTeam"] = relationship(back_populates="scopes")
 
     __table_args__ = (
-        UniqueConstraint("team_id", "kind", "value", name="uq_payroll_team_scope"),
+        UniqueConstraint(
+            "team_id",
+            "brand_value",
+            "subject_value",
+            name="uq_payroll_team_scope",
+            postgresql_nulls_not_distinct=True,
+        ),
         Index("ix_payroll_team_scope_team_id", "team_id"),
     )
 
@@ -174,6 +195,9 @@ class PayrollClientProject(Base, TimestampMixin, SoftDeleteMixin):
     linked_project_id — кабинет клиента, если он заведён проектом в этой же
     системе (percent-режим считается автоматически от его недельной «Чистой
     выплаты»); NULL — внешний клиент, недельные базы вводятся руками.
+    Формат оплаты ведётся ПЕРИОДАМИ (billing_periods): формат месяца M =
+    период с max(valid_from) <= M, до первого периода начисления нет —
+    «у Брыссина раньше был процент, с июля оклад».
     """
 
     __tablename__ = "payroll_client_project"
@@ -181,11 +205,8 @@ class PayrollClientProject(Base, TimestampMixin, SoftDeleteMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
-    billing_mode: Mapped[str] = mapped_column(String(20), nullable=False)  # PayrollClientBillingMode
     team_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("payroll_team.id"), nullable=True)
     linked_project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
-    fixed_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)  # для fixed
-    fee_percent: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)  # для profit_share
     manager_share: Mapped[Decimal] = mapped_column(
         Numeric(6, 4), nullable=False, default=Decimal("0.45"), server_default="0.45"
     )
@@ -196,10 +217,40 @@ class PayrollClientProject(Base, TimestampMixin, SoftDeleteMixin):
     entries: Mapped[list["PayrollClientEntry"]] = relationship(
         back_populates="client", cascade="all, delete-orphan"
     )
+    billing_periods: Mapped[list["PayrollClientBillingPeriod"]] = relationship(
+        back_populates="client",
+        cascade="all, delete-orphan",
+        order_by="PayrollClientBillingPeriod.valid_from",
+    )
 
     __table_args__ = (
         Index("ix_payroll_client_project_project_id", "project_id"),
         Index("ix_payroll_client_project_team_id", "team_id"),
+    )
+
+
+class PayrollClientBillingPeriod(Base, TimestampMixin):
+    """
+    Период формата оплаты клиента: с месяца valid_from действует billing_mode
+    со своими параметрами (fixed_amount для fixed, fee_percent для profit_share).
+    """
+
+    __tablename__ = "payroll_client_billing_period"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("payroll_client_project.id"), nullable=False
+    )
+    valid_from: Mapped[date] = mapped_column(Date, nullable=False)
+    billing_mode: Mapped[str] = mapped_column(String(20), nullable=False)  # PayrollClientBillingMode
+    fixed_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    fee_percent: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+
+    client: Mapped["PayrollClientProject"] = relationship(back_populates="billing_periods")
+
+    __table_args__ = (
+        UniqueConstraint("client_id", "valid_from", name="uq_payroll_client_billing_period"),
+        Index("ix_payroll_client_billing_period_client_id", "client_id"),
     )
 
 
