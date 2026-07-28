@@ -7398,6 +7398,8 @@ export interface LoanKpis {
   accrual_month: string | null;
   monthly_interest: number;
   interest_paid_total: number;
+  /** Начислено за всё время минус уплачено — сколько процентов реально висит. */
+  interest_debt: number;
   lenders_count: number;
   next_maturity_date: string | null;
   next_maturity_amount: number;
@@ -7457,6 +7459,8 @@ export interface LoanLenderRollup {
   weighted_avg_rate: number | null;
   accrued_interest: number;
   interest_paid: number;
+  /** Начислено за всё время минус уплачено. */
+  interest_debt: number;
   monthly_interest: number;
   next_interest_date: string | null;
   next_maturity_date: string | null;
@@ -7473,6 +7477,7 @@ export interface LoanByLenderResponse {
   total_outstanding: number;
   total_accrued: number;
   total_due_period: number;
+  total_interest_debt: number;
   by_entity: LoanEntitySplit[];
   accrual_period_start: string | null;
   accrual_period_end: string | null;

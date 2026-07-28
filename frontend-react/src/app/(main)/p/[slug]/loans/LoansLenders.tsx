@@ -155,6 +155,15 @@ export default function LoansLenders({ nonce, onChanged }: { nonce: number; onCh
                 </div>
             ),
         },
+        {
+            key: 'interest_debt', label: 'Долг по %', align: 'right' as const,
+            getValue: (r: LoanLenderRollup) => Number(r.interest_debt),
+            render: (_v: unknown, r: LoanLenderRollup) => (
+                <span style={Number(r.interest_debt) > 0 ? { color: 'var(--color-warning)', fontWeight: 600 } : undefined}>
+                    {money(r.interest_debt)} ₽
+                </span>
+            ),
+        },
         { key: 'monthly_interest', label: '%/мес', align: 'right' as const, getValue: (r: LoanLenderRollup) => Number(r.monthly_interest), render: (_v: unknown, r: LoanLenderRollup) => `${money(r.monthly_interest)} ₽` },
         { key: 'active_count', label: 'Займов', align: 'right' as const, getValue: (r: LoanLenderRollup) => r.active_count, render: (_v: unknown, r: LoanLenderRollup) => `${r.active_count} / ${r.total_count}` },
         { key: 'next_interest_date', label: 'След. %', render: (_v: unknown, r: LoanLenderRollup) => fmtDate(r.next_interest_date) },

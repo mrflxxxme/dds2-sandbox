@@ -217,6 +217,7 @@ class ScheduleRowLite:
     due_date: date
     days: int | None
     interest_due: Decimal
+    principal_due: Decimal = ZERO
     is_fee: bool = False
 
 

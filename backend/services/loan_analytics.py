@@ -218,6 +218,24 @@ def loan_cost_in_window(
     return interest, fee
 
 
+def _lifetime_interest(bundle: LoanBundle, loan: Loan, as_of: date) -> Decimal:
+    """
+    Проценты, начисленные за ВСЮ жизнь займа до `as_of`.
+
+    Левая граница — день ДО выдачи: начисление идёт за дни после неё, иначе
+    первый день займа теряется. Комиссии сюда не входят — «долг по процентам»
+    отвечает на вопрос «сколько процентов мы не заплатили», а комиссии живут
+    своей кассой.
+    """
+    interest, _fee = loan_cost_in_window(
+        bundle,
+        loan,
+        win_start=date.fromordinal(loan.start_date.toordinal() - 1),
+        win_end=as_of,
+    )
+    return interest
+
+
 def _schedule_period(
     schedule: list[loan_interest.ScheduleRowLite], as_of: date
 ) -> tuple[date, date] | None:
@@ -347,6 +365,9 @@ async def dashboard(db: AsyncSession, project_id: int, as_of: date) -> dict:
         )
         kpis.accrued_interest += mtd_interest
         kpis.accrued_fee += mtd_fee
+        kpis.interest_debt += max(
+            ZERO, _lifetime_interest(bundle, loan, as_of) - calc.interest_paid
+        )
         kpis.month_cost_projected += full_interest + full_fee
         body_days_mtd += _body_days(
             loan, _lites(pay_by_loan.get(loan.id, [])), mtd_start, mtd_end
@@ -557,6 +578,7 @@ async def by_lender(
                 "accrued": ZERO,
                 "due": ZERO,
                 "paid": ZERO,
+                "debt": ZERO,
                 "monthly": ZERO,
                 "next_int": None,
                 "next_mat": None,
@@ -568,6 +590,7 @@ async def by_lender(
         )
         a["total"] += 1
         a["paid"] += calc.interest_paid
+        a["debt"] += max(ZERO, _lifetime_interest(bundle, loan, as_of) - calc.interest_paid)
         a["accrued"] += calc.accrued_interest
         a["due"] += calc.interest_due_period
         if loan.entity_type and not a["entity"]:
@@ -593,6 +616,7 @@ async def by_lender(
     total_out = ZERO
     total_accr = ZERO
     total_due = ZERO
+    total_debt = ZERO
     ent_agg: dict[str | None, LoanEntitySplit] = {}
     for cp_id, a in agg.items():
         name, inn = cp_map.get(cp_id, (f"#{cp_id}", None))
@@ -600,6 +624,7 @@ async def by_lender(
         total_out += a["out"]
         total_accr += a["accrued"]
         total_due += a["due"]
+        total_debt += a["debt"]
         es = ent_agg.setdefault(a["entity"], LoanEntitySplit(entity_type=a["entity"]))
         es.count += a["active"]
         es.outstanding += a["out"]
@@ -618,6 +643,7 @@ async def by_lender(
                 weighted_avg_rate=wrate,
                 accrued_interest=a["accrued"],
                 interest_paid=a["paid"],
+                interest_debt=a["debt"],
                 monthly_interest=a["monthly"],
                 next_interest_date=a["next_int"],
                 next_maturity_date=a["next_mat"],
@@ -636,6 +662,7 @@ async def by_lender(
         total_outstanding=total_out,
         total_accrued=total_accr,
         total_due_period=total_due,
+        total_interest_debt=total_debt,
         by_entity=sorted(ent_agg.values(), key=lambda x: x.outstanding, reverse=True),
         accrual_period_start=p_start,
         accrual_period_end=p_end,
@@ -677,6 +704,33 @@ async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_month
         if remaining <= ZERO:
             continue
         name = cp_map.get(loan.counterparty_id, (f"#{loan.counterparty_id}", None))[0]
+
+        # У займа с графиком прогноз берётся из графика, а не из run-rate: аннуитет
+        # гасится КАЖДЫЙ месяц, и модель «проценты по 1/12 + тело одним куском в
+        # конце» рисует несуществующий обрыв (Симпл Финанс: 22,4 млн в феврале
+        # вместо двенадцати платежей по 3 021 911,33).
+        schedule = bundle.schedule.get(loan.id)
+        if schedule:
+            for row in schedule:
+                if row.due_date < as_of:
+                    continue
+                mk = row.due_date.strftime("%Y-%m")
+                principal_due = Decimal(str(row.principal_due or 0))
+                interest_due = Decimal(str(row.interest_due or 0))
+                month_principal[mk] += principal_due
+                month_interest[mk] += interest_due
+                base = dict(
+                    date=row.due_date,
+                    loan_id=loan.id,
+                    counterparty_id=loan.counterparty_id,
+                    counterparty_name=name,
+                    contract_number=loan.contract_number,
+                )
+                if interest_due > ZERO:
+                    upcoming.append(LoanForecastEvent(**base, kind="INTEREST", amount=interest_due))
+                if principal_due > ZERO:
+                    upcoming.append(LoanForecastEvent(**base, kind="MATURITY", amount=principal_due))
+            continue
 
         # monthly run-rate forward (1/12) — same basis as monthly_interest KPI and
         # the «Ближайшие события» amounts below, so chart and events agree.

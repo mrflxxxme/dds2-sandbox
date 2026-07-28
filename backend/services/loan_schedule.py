@@ -72,6 +72,7 @@ def rows_lite(rows: list[LoanScheduleEntry]) -> list[loan_interest.ScheduleRowLi
             due_date=r.due_date,
             days=r.days,
             interest_due=Decimal(str(r.interest_due or 0)),
+            principal_due=Decimal(str(r.principal_due or 0)),
             is_fee=bool(r.is_fee),
         )
         for r in rows

@@ -123,6 +123,13 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
                     sub="во сколько реально обходятся деньги, годовых"
                 />
                 <KpiCard
+                    label="Долг по процентам"
+                    value={`${money(k.interest_debt)} ₽`}
+                    icon="🧾"
+                    color="#ff2d55"
+                    sub="начислено за всё время минус уплачено"
+                />
+                <KpiCard
                     label="Ближайший возврат"
                     value={fmtDate(k.next_maturity_date)}
                     icon="📅"

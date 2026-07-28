@@ -1371,3 +1371,46 @@ def test_vyatkin_loan_matches_accounting_card():
     )
     # Ровно столько «Плюс Вайб» и заплатил 23.10.2025 за период 04.03 — 30.09.2025
     assert accrued == Decimal("210682.08")
+
+
+@pytest.mark.asyncio
+async def test_forecast_uses_schedule_for_annuity(db_session, client, auth_headers):
+    """
+    У займа с графиком прогноз идёт по графику, а не «тело одним куском в конце».
+
+    Аннуитет гасится каждый месяц; модель bullet рисовала 22,4 млн в феврале
+    вместо двенадцати платежей — на графике это выглядело обрывом, которого нет.
+    """
+    from backend.schemas.loan import LoanScheduleReplace
+    from backend.services import loan_schedule
+
+    project_id = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id, "СимплФинанс")
+    svc = LoanService(db_session)
+    loan = await svc.create(
+        data=LoanCreate(
+            counterparty_id=cp_id, direction="INCOMING", principal=Decimal("30000000"),
+            currency="RUB", rate=Decimal("0.21"), contract_number="E/2026/0087/F",
+            contract_date=date(2026, 3, 18), start_date=date(2026, 3, 18),
+            maturity_date=date(2027, 2, 25),
+        ),
+        project_id=project_id,
+    )
+    await loan_schedule.replace_schedule(
+        db_session, loan_id=loan.id, project_id=project_id,
+        data=LoanScheduleReplace(rows=_simple_rows()),
+    )
+
+    res = await loan_analytics.forecast.__wrapped__(
+        db_session, project_id, date(2026, 5, 1), horizon_months=12
+    )
+    by_month = {m["month"]: m for m in res["months"]}
+    # Строки 3 и 4 графика: тело гасится помесячно, а не копится к сроку
+    assert Decimal(by_month["2026-05"]["principal_due"]) == Decimal("2578129.56")
+    assert Decimal(by_month["2026-06"]["principal_due"]) == Decimal("2576564.05")
+    assert Decimal(by_month["2026-05"]["interest"]) == Decimal("443781.77")
+    # Ни в одном месяце не всплывает остаток тела целиком
+    assert all(Decimal(m["principal_due"]) < Decimal("4000000") for m in res["months"])
+    # События идут парами «проценты + тело» на каждую дату платежа
+    may = [e for e in res["upcoming"] if e["date"] == "2026-05-25"]
+    assert {e["kind"] for e in may} == {"INTEREST", "MATURITY"}

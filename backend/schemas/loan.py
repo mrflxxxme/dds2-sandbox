@@ -327,6 +327,9 @@ class LoanKpis(BaseModel):
     accrual_month: str | None = None  # YYYY-MM — какой месяц считаем
     monthly_interest: Decimal = Decimal("0")  # run-rate %/мес по активным
     interest_paid_total: Decimal = Decimal("0")
+    # Начислено за ВСЁ время минус уплачено: сколько процентов реально висит.
+    # У банков почти ноль (платят по графику), у займа учредителя копится годами.
+    interest_debt: Decimal = Decimal("0")
     lenders_count: int = 0
     next_maturity_date: date | None = None
     next_maturity_amount: Decimal = Decimal("0")
@@ -390,6 +393,8 @@ class LoanLenderRollup(BaseModel):
     weighted_avg_rate: Decimal | None = None
     accrued_interest: Decimal = Decimal("0")
     interest_paid: Decimal = Decimal("0")
+    # Начислено за всё время минус уплачено — «сколько процентов должны этому».
+    interest_debt: Decimal = Decimal("0")
     monthly_interest: Decimal = Decimal("0")
     next_interest_date: date | None = None
     next_maturity_date: date | None = None
@@ -407,6 +412,7 @@ class LoanByLenderResponse(BaseModel):
     total_outstanding: Decimal = Decimal("0")
     total_accrued: Decimal = Decimal("0")
     total_due_period: Decimal = Decimal("0")
+    total_interest_debt: Decimal = Decimal("0")
     by_entity: list[LoanEntitySplit] = Field(default_factory=list)
     accrual_period_start: date | None = None
     accrual_period_end: date | None = None
