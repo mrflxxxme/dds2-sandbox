@@ -4756,9 +4756,15 @@ class TestCollectTransferFactCandidates:
 
         target = await self._mk_req(db_session, project, warehouse, ext="pvb-1", transfer_id=tr.id)
         await self._mk_req(db_session, project, warehouse, ext="pvb-2", transfer_id=tr.id, applied=True)
-        await self._mk_req(db_session, project, warehouse, ext="pvb-3", transfer_id=tr.id, completed=False)
+        # НЕзавершённая («В обработке») — тоже кандидат: порционный приём по
+        # фактам до закрытия (канон юзера 2026-07-28); финальный маркер по ней
+        # вызывающий не ставит (is_completed=False в 5-м элементе кортежа).
+        processing = await self._mk_req(db_session, project, warehouse, ext="pvb-3", transfer_id=tr.id, completed=False)
         await self._mk_req(db_session, project, warehouse, ext="pvb-4", transfer_id=None)
         await self._mk_req(db_session, project, warehouse, ext="pvb-5", transfer_id=tr.id, local_archived=True)
 
         rows = await _collect_transfer_fact_candidates(db_session, project.id, warehouse.id, "migfull")
-        assert [(r[0], r[1], r[2]) for r in rows] == [(target.id, tr.id, "pvb-1")]
+        assert {(r[0], r[2], r[4]) for r in rows} == {
+            (target.id, "pvb-1", True),
+            (processing.id, "pvb-3", False),
+        }

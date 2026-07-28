@@ -966,7 +966,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             # Cap HTTP на цикл (2 запроса lines + live-добор карточек на заявку):
             # залп кандидатов не должен жечь rate limit провайдера, хвост доберёт
             # следующий синк — зеркально detail_calls у skladbot-приёмок.
-            for req_id, tr_id, ext_id, ff_number in transfer_fact_reqs[:_ENRICH_DETAIL_CAP]:
+            for req_id, tr_id, ext_id, ff_number, req_completed in transfer_fact_reqs[:_ENRICH_DETAIL_CAP]:
                 try:
                     facts = await _migfull_transfer_fact_by_barcode(
                         fact_client, project_id, warehouse_id, ext_id
@@ -983,10 +983,12 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
                         )
                         continue
                     async with AsyncSessionLocal() as tdb:
-                        # Маркер идемпотентности ставится ВНУТРИ receive, той же
-                        # транзакцией, что и движения (нет окна на задвоение), и
-                        # только при полном резолве ШК: частичный факт (транзиентный
-                        # 429 live-добора) должен повториться следующим синком.
+                        # Финальный маркер — ТОЛЬКО когда провайдер закрыл заявку
+                        # (req_completed) И факт опознан целиком: до закрытия
+                        # (stage «В обработке») принимаем порционно каждым синком —
+                        # receive добирает дельту факта идемпотентно по движениям.
+                        # Маркер ставится ВНУТРИ receive, той же транзакцией, что
+                        # и движения (нет окна на задвоение).
                         res = await receive_transfer_fact(
                             tdb,
                             project_id,
@@ -994,7 +996,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
                             accepted,
                             defect_by_barcode=defects,
                             note=ff_number or ext_id,
-                            mark_ff_request_applied=req_id if fully_resolved else None,
+                            mark_ff_request_applied=req_id if (req_completed and fully_resolved) else None,
                         )
                     if res.get("unmatched"):
                         logger.warning(
@@ -1002,7 +1004,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
                             req_id,
                             ", ".join(res["unmatched"][:10]),
                         )
-                    if res["applied_marker"]:
+                    if res["applied_marker"] or res["received_good"] + res["received_defect"] > 0:
                         transfers_received += 1
                 except Exception as e:  # — best-effort, синк уже зафиксирован
                     logger.warning("FF transfer-fact: заявка %s пропущена (%s)", req_id, e)
@@ -4320,12 +4322,16 @@ async def _migfull_guid_barcodes(
 
 async def _collect_transfer_fact_candidates(
     db: AsyncSession, project_id: int, warehouse_id: int, provider: str
-) -> list[tuple[int, int, str, str | None]]:
-    """[(ff_request_id, stock_transfer_id, external_id, number)] — завершённые
-    провайдером приёмки, связанные с перемещением, факт которых ещё не применён.
+) -> list[tuple[int, int, str, str | None, bool]]:
+    """[(ff_request_id, stock_transfer_id, external_id, number, is_completed)] —
+    приёмки, связанные с перемещением, факт которых ещё не применён финально.
 
-    transfer_fact_applied_at — маркер идемпотентности: is_completed у провайдера
-    остаётся True навсегда, без маркера каждый синк применял бы факт повторно.
+    Берём и НЕзавершённые (stage «В обработке»): migfull кладёт товар на сток
+    ДО закрытия заявки (канон юзера 2026-07-28, кейс PVB-121/TR-21 — натали
+    держит заявку в processing днями, а расхождение растёт). Порционный
+    receive_transfer_fact добирает дельту факта каждым синком идемпотентно;
+    transfer_fact_applied_at (финальный маркер) вызывающий ставит ТОЛЬКО при
+    is_completed — до этого заявка остаётся кандидатом.
     """
     from backend.models.warehouse import StockTransfer, TransferStatus
 
@@ -4335,17 +4341,22 @@ async def _collect_transfer_fact_candidates(
             FulfillmentRequest.stock_transfer_id,
             FulfillmentRequest.external_id,
             FulfillmentRequest.number,
+            FulfillmentRequest.is_completed,
         )
         # Только живые IN_TRANSIT перемещения: закрытый руками / удалённый TR
         # дал бы ValueError в receive_transfer_fact на каждом синке (маркер не
-        # встаёт) и вечно жёг HTTP к провайдеру.
+        # встаёт) и вечно жёг HTTP к провайдеру. Отменённые заявки (archived
+        # без is_completed) не принимаем — их факт не финален и не растёт.
         .join(StockTransfer, StockTransfer.id == FulfillmentRequest.stock_transfer_id)
         .where(
             FulfillmentRequest.project_id == project_id,
             FulfillmentRequest.warehouse_id == warehouse_id,
             FulfillmentRequest.provider == provider,
             FulfillmentRequest.kind == FfRequestKind.INBOUND.value,
-            FulfillmentRequest.is_completed == True,  # noqa: E712
+            or_(
+                FulfillmentRequest.archived == False,  # noqa: E712
+                FulfillmentRequest.is_completed == True,  # noqa: E712
+            ),
             FulfillmentRequest.local_archived == False,  # noqa: E712
             FulfillmentRequest.transfer_fact_applied_at.is_(None),
             StockTransfer.project_id == project_id,
