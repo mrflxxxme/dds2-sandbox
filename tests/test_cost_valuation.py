@@ -22,6 +22,7 @@ from backend.services.cost.valuation import (
     _Batch,
     _SkuRaw,
     _walk,
+    _walk_auto_opening,
     compute_project_valuation,
     slice_window,
 )
@@ -198,6 +199,118 @@ class TestShortfall:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 5. Auto-opening — shortfall covered at the FIRST batch cost, not the average
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestAutoOpening:
+    """Sales exceed recorded batches and past purchases cannot be entered:
+    the shortfall is covered by a synthetic opening layer priced at the FIRST
+    known batch cost, so late sales consume the late batches instead of the
+    early deficit eating them."""
+
+    def _run(self):
+        b1 = _Batch("B1", date(2025, 2, 1), 60, Decimal("100"), True)
+        b2 = _Batch("B2", date(2025, 4, 1), 60, Decimal("300"), True)
+        raw = _SkuRaw(
+            sales=[
+                (date(2025, 1, 10), 40),  # before the first batch
+                (date(2025, 3, 10), 50),
+                (date(2025, 5, 10), 60),
+            ]
+        )
+        # 150 sold vs 120 received → shortfall 30; lifetime avg = 200
+        return _walk_auto_opening([b1, b2], raw, Decimal("200"), Decimal("200"))
+
+    def test_shortfall_covered_at_first_batch_cost(self):
+        res = self._run()
+        assert res["auto_opening"] == {"qty": 30, "unit_cost": Decimal("100")}
+        # January (sales before the first batch): 30 opening @100 + 10 of B1 @100
+        assert res["monthly"]["2025-01"]["cogs_fifo"] == Decimal("4000")
+        # May is fully B2 @300 — the late batch feeds the late sale; without the
+        # opening layer 30 of those units would burn at seed=200
+        assert res["monthly"]["2025-05"]["cogs_fifo"] == Decimal("18000")
+        assert res["is_estimated"] is True
+
+    def test_eff_now_falls_back_to_first_cost_when_sold_out(self):
+        res = self._run()
+        assert res["on_hand_qty"] == 0
+        # queue is empty → price the (unrecorded) remaining stock at the first
+        # known cost, not the lifetime average
+        assert res["eff_now"]["fifo"] == Decimal("100")
+
+    def test_no_shortfall_bit_for_bit_unchanged(self):
+        b1, r1, avg = _build_golden()
+        b2, r2, _ = _build_golden()
+        assert _walk(b1, r1, avg, avg) == _walk_auto_opening(b2, r2, avg, avg)
+
+    def test_no_batches_keeps_seed_path(self):
+        raw = _SkuRaw(sales=[(date(2025, 1, 10), 5)])
+        res = _walk_auto_opening([], raw, Decimal("0"), Decimal("77"))
+        assert "auto_opening" not in res
+        assert res["monthly"]["2025-01"]["cogs_fifo"] == Decimal("385")
+        assert res["is_estimated"] is True
+
+    def test_no_false_arrival_warning(self):
+        """Синтетический слой не должен зажигать «партии без даты прихода» у
+        SKU, где все реальные даты заполнены."""
+        res = self._run()
+        assert res["warnings"] == []
+
+    def test_reports_real_shortfall_in_oversold_units(self):
+        res = self._run()
+        assert res["oversold_units"] == 30  # реальный дефицит, не ноль 2-го прохода
+
+    def test_lifetime_contour_and_on_hand_parity_with_walk(self):
+        """Авто-опенинг смещает ТОЛЬКО fifo/moving-контуры: on_hand_qty,
+        помесячные sold/returned и cogs_avg обязаны совпасть с plain _walk."""
+        def fixtures():
+            b1 = _Batch("B1", date(2025, 2, 1), 60, Decimal("100"), True)
+            b2 = _Batch("B2", date(2025, 4, 1), 60, Decimal("300"), True)
+            raw = _SkuRaw(
+                sales=[(date(2025, 1, 10), 40), (date(2025, 3, 10), 50), (date(2025, 5, 10), 60)],
+                returns=[(date(2025, 6, 10), 10)],
+            )
+            return [b1, b2], raw
+
+        b_a, r_a = fixtures()
+        b_b, r_b = fixtures()
+        plain = _walk(b_a, r_a, Decimal("200"), Decimal("200"))
+        auto = _walk_auto_opening(b_b, r_b, Decimal("200"), Decimal("200"))
+        assert auto["on_hand_qty"] == plain["on_hand_qty"]
+        for mk, m in plain["monthly"].items():
+            am = auto["monthly"][mk]
+            assert am["sold"] == m["sold"]
+            assert am["returned"] == m["returned"]
+            assert am["cogs_avg"] == m["cogs_avg"]
+
+    def test_tail_deficit_keeps_seed_path(self):
+        """Все продажи ПОСЛЕ первой партии → дефицит значит «не заведена свежая
+        закупка», а не историческую дыру: авто-опенинг не срабатывает."""
+        b1 = _Batch("B1", date(2025, 2, 1), 60, Decimal("100"), True)
+        raw = _SkuRaw(sales=[(date(2025, 3, 10), 90)])
+        res = _walk_auto_opening([b1], raw, Decimal("100"), Decimal("100"))
+        assert "auto_opening" not in res
+        assert res["oversold_units"] == 30
+        assert res["is_estimated"] is True
+
+    def test_zero_cost_first_batch_skipped_for_price(self):
+        """Нулевая партия (незаполненный опенинг, total_rub=0) не должна стать
+        ценой всего дефицита — берётся самая ранняя ПЛАТНАЯ партия."""
+        b0 = _Batch("B0", date(2025, 2, 1), 10, Decimal("0"), True)
+        b1 = _Batch("B1", date(2025, 4, 1), 10, Decimal("300"), True)
+        raw = _SkuRaw(sales=[(date(2025, 1, 10), 25)])
+        res = _walk_auto_opening([b0, b1], raw, Decimal("150"), Decimal("150"))
+        assert res["auto_opening"] == {"qty": 5, "unit_cost": Decimal("300")}
+
+    def test_all_zero_cost_batches_no_auto_opening(self):
+        b0 = _Batch("B0", date(2025, 2, 1), 10, Decimal("0"), True)
+        raw = _SkuRaw(sales=[(date(2025, 1, 10), 25)])
+        res = _walk_auto_opening([b0], raw, Decimal("0"), Decimal("50"))
+        assert "auto_opening" not in res
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # DB-backed scenarios — real rows in the test session
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -316,6 +429,32 @@ class TestComputeProjectValuationDB:
             Decimal("250.00") * Decimal(m["qty"]) for m in row["monthly"].values()
         )
         assert _approx(row["cogs"], str(expected))
+
+    @pytest.mark.asyncio
+    async def test_auto_opening_first_cost_db(self, db_session, project):
+        """Sales before/beyond recorded purchases → COGS at the first batch
+        cost, eff_now falls back to it, and the warning explains the inferred
+        opening instead of demanding unavailable purchase data."""
+        pid = project.id
+        art = f"ART-AO-{pid}"
+        bc = f"BC-AO-{pid}"
+        await _seed_batch_order(
+            db_session, pid, order_no=f"AO-A-{pid}", article=art, barcode=bc,
+            qty=10, total_rub="100.00", arrival=date(2025, 2, 1),
+        )
+        # 8 sold in January (before the first purchase) + 10 in March → 18 > 10
+        await _seed_sale(db_session, pid, rrd_id=pid * 2000 + 1, article=art, d=date(2025, 1, 10), qty=8)
+        await _seed_sale(db_session, pid, rrd_id=pid * 2000 + 2, article=art, d=date(2025, 3, 10), qty=10)
+        await db_session.commit()
+
+        val = await compute_project_valuation(db_session, pid, skus={art})
+        v = val[art.lower()]
+        assert v["auto_opening"] == {"qty": 8, "unit_cost": Decimal("100.00")}
+        assert v["monthly"]["2025-01"]["cogs_fifo"] == Decimal("800.00")
+        assert v["eff_now"]["fifo"] == Decimal("100.00")
+        assert any("Авто-опенинг" in w for w in v["warnings"])
+        # the old "заведите приходы" advice is replaced by the auto-opening note
+        assert not any("Заведите приходы" in w for w in v["warnings"])
 
     @pytest.mark.asyncio
     async def test_fifo_vs_lifetime_differ_per_window(self, db_session, project):

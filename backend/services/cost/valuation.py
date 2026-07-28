@@ -286,6 +286,7 @@ def _walk(batches: list[_Batch], raw: _SkuRaw, global_avg: Decimal, seed: Decima
     mv_cost = ZERO
     warnings: list[str] = []
     is_estimated = False
+    oversold = 0  # sale units consumed at seed after every batch ran out
 
     avg_unit = global_avg if global_avg > 0 else seed
     if any(not b.arrival_known for b in batches):
@@ -329,6 +330,7 @@ def _walk(batches: list[_Batch], raw: _SkuRaw, global_avg: Decimal, seed: Decima
             if need > 0:  # oversold beyond all recorded batches — value at seed
                 bk["cogs_fifo"] += Decimal(need) * seed
                 is_estimated = True
+                oversold += need
         else:  # return
             give = int(payload)
             bk["returned"] += give
@@ -394,8 +396,61 @@ def _walk(batches: list[_Batch], raw: _SkuRaw, global_avg: Decimal, seed: Decima
         },
         "eff_now": {"fifo": eff_fifo, "moving_avg": mv_cost or seed, "lifetime_avg": avg_unit},
         "is_estimated": is_estimated,
+        "oversold_units": oversold,
         "warnings": warnings,
     }
+
+
+AUTO_OPENING_ORDER_NO = "AUTO-OPENING"
+
+
+def _walk_auto_opening(
+    batches: list[_Batch], raw: _SkuRaw, global_avg: Decimal, seed: Decimal
+) -> dict:
+    """_walk, but sales exceeding all recorded batches are covered by a
+    synthetic opening layer priced at the FIRST known batch cost.
+
+    Without it the early uncovered sales consume the real (often later and
+    differently priced) batches, pushing the tail of RECENT sales onto the
+    flat seed price and leaving the queue empty — so both monthly COGS
+    attribution and the current-stock price degrade to the lifetime average.
+    The opening layer absorbs exactly the shortfall at the front of the queue:
+    early sales cost the first known price, late sales consume the real layers
+    they physically came from. Used when past purchases cannot be entered
+    retroactively; the result stays flagged ``is_estimated``.
+    """
+    walked = _walk(batches, raw, global_avg, seed)
+    shortfall = walked["oversold_units"]
+    if not shortfall or not batches:
+        return walked
+    # Zero-priced layers (unfilled opening rows, total_rub=0 items) must not
+    # become the price of the whole shortfall — pick the earliest PRICED batch.
+    first = min(
+        (b for b in batches if b.unit_cost > 0),
+        key=lambda b: (b.avail_date, b.order_no),
+        default=None,
+    )
+    if first is None:
+        return walked
+    # Only a HISTORICAL gap qualifies: sales started before the first recorded
+    # batch (those purchases can no longer be entered). A deficit that appears
+    # with all sales after the first batch means a FRESH purchase is missing —
+    # keep the seed path so the «заведите приходы» warning stays actionable.
+    earliest_sale = min((d for d, _ in raw.sales), default=None)
+    if earliest_sale is None or earliest_sale >= first.avail_date:
+        return walked
+    # arrival_known=True: the layer's date is intentional, it must not trigger
+    # the «партии без даты прихода» warning for SKUs with clean arrival dates.
+    synth = _Batch(AUTO_OPENING_ORDER_NO, date.min, shortfall, first.unit_cost, True)
+    walked = _walk([synth, *batches], raw, global_avg, seed)
+    walked["is_estimated"] = True
+    walked["oversold_units"] = shortfall  # real deficit, not the pass-2 zero
+    walked["auto_opening"] = {"qty": shortfall, "unit_cost": first.unit_cost}
+    if walked["on_hand_qty"] == 0:
+        # Sold out per the ledger, yet physical stock may exist (its purchases
+        # were never recorded) — price it at the first known cost too.
+        walked["eff_now"]["fifo"] = first.unit_cost
+    return walked
 
 
 # ── public API ───────────────────────────────────────────────────────────────
@@ -445,7 +500,7 @@ async def compute_project_valuation(
         # degrade to the lifetime basis and don't fabricate FIFO "distortion".
         # The manual override only applies when there are no batches at all.
         seed = global_avg if global_avg > 0 else (m.get("override") or ZERO)
-        walked = _walk(batches, raw, global_avg, seed)
+        walked = _walk_auto_opening(batches, raw, global_avg, seed)
         sold = sum(b["sold"] for b in walked["monthly"].values()) - sum(
             b["returned"] for b in walked["monthly"].values()
         )
@@ -461,7 +516,13 @@ async def compute_project_valuation(
                 "total_sold": sold,
             }
         )
-        if walked["is_estimated"] and sold > recv_qty:
+        if "auto_opening" in walked:
+            ao = walked["auto_opening"]
+            walked["warnings"].append(
+                f"Авто-опенинг: {ao['qty']} шт продано сверх заведённых закупок — "
+                f"оценены по цене первой партии ({ao['unit_cost']} ₽/шт)"
+            )
+        elif walked["is_estimated"] and sold > recv_qty:
             walked["warnings"].append(
                 f"Заведено приходов {recv_qty} шт при {sold} проданных — {sold - recv_qty} шт "
                 "оценены по средней (нет данных о закупке). Заведите приходы или опенинг-баланс."
