@@ -342,7 +342,8 @@ export default function FunnelPage() {
         } else if (groupBy === 'brand' || groupBy === 'subject' || groupBy === 'tag' || groupBy === 'imt') {
             const colName = groupBy === 'brand' ? 'Бренд' : groupBy === 'tag' ? 'Ярлык' : groupBy === 'imt' ? 'Склейка' : 'Категория';
             rows = sortStockRows(groupData
-                .filter(r => !(filterTag && groupBy === 'tag' && r.tag !== filterTag))
+                // '__none__' → бэк уже вернул только группу «Без ярлыка»; по имени не фильтруем
+                .filter(r => !(filterTag && filterTag !== '__none__' && groupBy === 'tag' && r.tag !== filterTag))
                 .filter(r => !(filterImt && groupBy === 'imt' && r.imt_group !== filterImt)))
                 .map(r => {
                     const label = groupBy === 'brand' ? (r.brand || '—') : groupBy === 'tag' ? (r.tag || '—') : groupBy === 'imt' ? (r.imt_group || '—') : (r.subject || '—');
@@ -449,6 +450,7 @@ export default function FunnelPage() {
                     <select value={filterTag} onChange={e => setFilterTag(e.target.value)}
                         style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }}>
                         <option value="">Все ярлыки</option>
+                        <option value="__none__">Без ярлыка</option>
                         {tagOptions.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
                     </select>
                     <select value={filterImt} onChange={e => setFilterImt(e.target.value)}
@@ -756,7 +758,7 @@ export default function FunnelPage() {
                                             </td></tr>
                                         )}
                                         {groupBy !== 'size' && sortStockRows(groupData.filter(r => {
-                                            if (filterTag && groupBy === 'tag' && r.tag !== filterTag) return false;
+                                            if (filterTag && filterTag !== '__none__' && groupBy === 'tag' && r.tag !== filterTag) return false;
                                             if (filterImt && groupBy === 'imt' && r.imt_group !== filterImt) return false;
                                             return true;
                                         })).map((r, i) => {

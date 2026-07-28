@@ -11,7 +11,11 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.services.funnel.queries import get_funnel_aggregated, resolve_filter_nm_ids
+from backend.services.funnel.queries import (
+    NO_TAG_SENTINEL,
+    get_funnel_aggregated,
+    resolve_filter_nm_ids,
+)
 from backend.utils.time import utcnow
 
 TAX_INFO = {"usn_rate": 6, "nds_rate": 0, "tax_regime": "usn_income", "cost_as_expense": False}
@@ -71,6 +75,45 @@ class TestResolveFilterNmIds:
     async def test_unknown_tag_gives_empty_set(self, db_session, project):
         result = await resolve_filter_nm_ids(db_session, project.id, tag=f"nope-{_uid()}")
         assert result == set()
+
+    @pytest.mark.asyncio
+    async def test_no_tag_sentinel_returns_only_untagged(self, db_session, project):
+        """`tag='__none__'` → товары БЕЗ ярлыка (есть в nomenclature, нет в tag_map)."""
+        tagged_nm, untagged_nm = 911030, 911031
+        for nm in (tagged_nm, untagged_nm):
+            await db_session.execute(
+                text(
+                    "INSERT INTO nomenclature (project_id, barcode, article_wb, updated_at) "
+                    "VALUES (:pid, :bc, :nm, NOW())"
+                ),
+                {"pid": project.id, "bc": f"NT-{_uid()}", "nm": nm},
+            )
+        await db_session.commit()
+        await _make_tag(db_session, project.id, f"tag-{_uid()}", [tagged_nm])
+
+        result = await resolve_filter_nm_ids(db_session, project.id, tag=NO_TAG_SENTINEL)
+
+        assert result is not None
+        assert untagged_nm in result
+        assert tagged_nm not in result
+
+    @pytest.mark.asyncio
+    async def test_no_tag_sentinel_project_isolation(self, db_session, project, other_project):
+        """Товар без ярлыка из чужого проекта не попадает в выборку."""
+        alien_nm = 911032
+        await db_session.execute(
+            text(
+                "INSERT INTO nomenclature (project_id, barcode, article_wb, updated_at) "
+                "VALUES (:pid, :bc, :nm, NOW())"
+            ),
+            {"pid": other_project.id, "bc": f"NT-{_uid()}", "nm": alien_nm},
+        )
+        await db_session.commit()
+
+        result = await resolve_filter_nm_ids(db_session, project.id, tag=NO_TAG_SENTINEL)
+
+        assert result is not None
+        assert alien_nm not in result
 
     @pytest.mark.asyncio
     async def test_tag_project_isolation(self, db_session, project, other_project):
