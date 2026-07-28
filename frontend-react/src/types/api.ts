@@ -7648,6 +7648,8 @@ export interface LoanScheduleRowIn {
   balance_after?: number | null;
   /** Строка-комиссия: напечатана в колонке процентов, но это не проценты. */
   is_fee: boolean;
+  /** Строка плана погашения накопленного долга, а не графика кредитора. */
+  is_debt_plan: boolean;
   note?: string | null;
 }
 

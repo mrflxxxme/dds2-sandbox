@@ -32,6 +32,7 @@ import type {
     LenderAccessListResponse,
     LoanImportResult,
     LoanAccrualDaysResponse,
+    LoanLentResponse,
     LoanChain,
     LoanMirrorCreate,
 } from '@/types/api';
@@ -118,6 +119,25 @@ export function addLoanMethods(api: ApiClient) {
             return api.request<LoanAccrualDaysResponse>(
                 'GET', `/api/v1/loans/${loanId}/accrual-days${qs ? `?${qs}` : ''}`
             );
+        },
+        /** Начисление по дням по всему портфелю: сколько стоит (или приносит) день. */
+        portfolioAccrualDays(params?: {
+            date_from?: string;
+            date_to?: string;
+            direction?: LoanDirection;
+        }) {
+            const q = new URLSearchParams();
+            if (params?.date_from) q.set('date_from', params.date_from);
+            if (params?.date_to) q.set('date_to', params.date_to);
+            if (params?.direction) q.set('direction', params.direction);
+            const qs = q.toString();
+            return api.request<LoanAccrualDaysResponse>(
+                'GET', `/api/v1/loans/accrual-days${qs ? `?${qs}` : ''}`
+            );
+        },
+        /** Выданные займы: сколько нам должны и сколько это приносит. */
+        loansLent() {
+            return api.request<LoanLentResponse>('GET', '/api/v1/loans/lent');
         },
         loanFees(loanId: number) {
             return api.request<LoanFeeListResponse>('GET', `/api/v1/loans/${loanId}/fees`);
