@@ -4717,6 +4717,46 @@ async def test_list_stocks_logistics_no_phantom_row_without_stock(db_session, pr
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Недоступное к отгрузке у ФФ (вычет из зеркала FBS)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_ff_unavailable_skladbot_defect_is_not_subtracted(db_session, project, warehouse):
+    """У skladbot брак лежит ОТДЕЛЬНОЙ корзиной — вычитать его из годного нельзя.
+
+    `amount` (→ qty_good) и `repair_amount` (→ qty_defect) дизъюнктны: на проде
+    27.07.2026 у 64 строк из 115 брак БОЛЬШЕ годного, что при вложенной корзине
+    невозможно. Прод-кейс 160х230_вишня (склад Газпром, ШК 2044388467336):
+    годного 8, брака 14 — вычет схлопывал зеркало FBS в 0, и позиция уезжала
+    к WB нулём при живом остатке.
+    """
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-DEFECT")
+    row = await _make_ff_stock_row(db_session, project, warehouse, bc, nom.id, qty_good=8)
+    row.qty_defect = 14
+    await db_session.commit()
+
+    out = await fulfillment_service.ff_unavailable_by_nomenclature(db_session, project.id, [warehouse.id])
+    assert out == {}
+
+
+@pytest.mark.asyncio
+async def test_ff_unavailable_migfull_uses_provider_available(db_session, project, warehouse):
+    """У migfull `qty_good` = stock_actual (весь физический), свободное — qty_nominal."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-MIGFULL")
+    row = await _make_ff_stock_row(db_session, project, warehouse, bc, nom.id, qty_good=478)
+    row.provider = "migfull"
+    row.qty_nominal = 12
+    row.qty_defect = 0
+    await db_session.commit()
+
+    out = await fulfillment_service.ff_unavailable_by_nomenclature(db_session, project.id, [warehouse.id])
+    assert out == {warehouse.id: {nom.id: 466}}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Авто-приём перемещения по факту связанной ФФ-приёмки (PVB-* ← TR-*)
 # ═══════════════════════════════════════════════════════════════════════════════
 

@@ -577,11 +577,12 @@ class TestMirrorNetOfDefect:
     """В WB уходит обещание отгрузить — значит зеркало ФФ обязано быть тем, что
     реально можно взять и отправить.
 
-    Из него вычитается всё недоступное (битое, собранное под чужую отгрузку, идущее
+    Из него вычитается всё недоступное (собранное под чужую отгрузку, идущее
     в приёмке), КРОМЕ собранного под наши активные заявки: его убирает `reserved`,
     и вычесть здесь значило бы вычесть дважды.
 
-    Отдельно закреплено, что недоступное ≠ брак: колонка «Брак» показывает только
+    Отдельно закреплено, что недоступное ≠ брак: брак skladbot из зеркала НЕ
+    вычитается (`qty_good` его уже не содержит), а колонка «Брак» показывает
     измеренную провайдером цифру (см. `test_migfull_locked_is_not_defect_in_column`).
     """
 
@@ -609,8 +610,13 @@ class TestMirrorNetOfDefect:
         assert stock_service._row_defect(5, {}, {}, {5: 12}) == 12
 
     @pytest.mark.asyncio
-    async def test_skladbot_defect_leaves_mirror(self, db_session, project, fbs_env):
-        """skladbot отдаёт брак отдельным полем — вычитаем ровно его."""
+    async def test_skladbot_defect_does_not_cut_mirror(self, db_session, project, fbs_env):
+        """Брак skladbot лежит ОТДЕЛЬНО от годного — из зеркала его не вычитаем.
+
+        `amount` (→`qty_good`) и `repair_amount` (→`qty_defect`) дизъюнктны; вычет
+        был двойным и резал живой остаток. Показываем брак колонкой, остаток не
+        трогаем.
+        """
         wh, fbs_wh = fbs_env
         fbs_wh.stock_source = FbsStockSource.FF_MIRROR.value
         nom = await _mk_nom(db_session, project.id, chrt_id=901)
@@ -619,9 +625,30 @@ class TestMirrorNetOfDefect:
         await db_session.commit()
 
         row = await _row_for(db_session, project.id, fbs_wh, nom)
-        assert row["qty_ff_mirror"] == 70
-        assert row["qty_source"] == 70
+        assert row["qty_ff_mirror"] == 100
+        assert row["qty_source"] == 100
         assert row["defect"] == 30
+
+    @pytest.mark.asyncio
+    async def test_skladbot_defect_over_good_does_not_zero_position(self, db_session, project, fbs_env):
+        """Прод-кейс 160х230_вишня (склад Газпром 28.07.2026): годного 8, брака 14.
+
+        Брак БОЛЬШЕ годного — прямое доказательство, что корзины дизъюнктны. Со
+        старым вычетом зеркало схлопывалось в 0, `min_of_both` давал 0, и позиция
+        уезжала к WB нулём при живых 8 у ФФ и 5 в наших книгах.
+        """
+        wh, fbs_wh = fbs_env
+        fbs_wh.stock_source = FbsStockSource.MIN_OF_BOTH.value
+        nom = await _mk_nom(db_session, project.id, chrt_id=902)
+        await _mk_stock(db_session, project.id, wh, nom, 5)
+        await _mk_mirror(db_session, project.id, wh, nom, 8, qty_defect=14)
+        await db_session.commit()
+
+        row = await _row_for(db_session, project.id, fbs_wh, nom)
+        assert row["qty_ff_mirror"] == 8
+        assert row["qty_source"] == 5  # min(наш учёт 5, зеркало 8)
+        assert row["qty_available"] == 5
+        assert row["defect"] == 14
 
     @pytest.mark.asyncio
     async def test_migfull_uses_provider_own_available(self, db_session, project, fbs_env):

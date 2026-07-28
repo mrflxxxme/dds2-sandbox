@@ -127,7 +127,7 @@ upsert-ятся синком. `WbFbsStockOverride` тоже без SoftDelete н
    значение 0 → «россыпью нет ничего».
 
 1. **Физический источник** — по `WbFbsWarehouse.stock_source`:
-   `ledger` → `WarehouseStock.quantity`; `ff_mirror` → `max(0, qty_good × units_per_box − брак ФФ)`
+   `ledger` → `WarehouseStock.quantity`; `ff_mirror` → `max(0, qty_good × units_per_box − недоступное у ФФ)`
    (коробá провайдера приводятся к россыпи, как в `fulfillment_service.list_stocks`);
    `min_of_both` (дефолт) → минимум из двух. Зеркала нет (склад без интеграции) — фолбэк на ledger,
    иначе склады, которые ведутся только документами, обнулились бы.
@@ -135,8 +135,11 @@ upsert-ятся синком. `WbFbsStockOverride` тоже без SoftDelete н
    всё, что у ФФ лежит, но взять нельзя, таким обещанием быть не может. Наш ledger приходит годным
    сам (`quantity`; `defect_quantity` и `in_transit` не прибавляются), из зеркала ФФ недоступное
    вычитает `_net_mirror` поверх единой точки домена ФФ —
-   `fulfillment_service.ff_unavailable_by_nomenclature`: битое (`qty_defect` у skladbot),
-   собранное под чужую отгрузку и идущее в приёмке (`stock_locked` у migfull).
+   `fulfillment_service.ff_unavailable_by_nomenclature`: собранное под чужую отгрузку и идущее
+   в приёмке (`stock_locked` у migfull). **Брак в этот вычет НЕ входит** — у skladbot `qty_good`
+   (`amount`) уже без брака (`repair_amount` — отдельная корзина, на проде у 64 строк из 115 он
+   БОЛЬШЕ годного). Вычет был двойным и резал живой остаток: 491 штука срезана, 25 позиций
+   схлопнуты в ноль (кейс 160х230_вишня — годного 8, брака 14 → зеркало 0). Исправлено 28.07.2026.
    **Собранное под НАШИ активные заявки в вычет не входит** — его убирает `reserved` (шаг 2),
    и вычесть здесь значило бы вычесть дважды и ложно снять позицию с продажи.
 
