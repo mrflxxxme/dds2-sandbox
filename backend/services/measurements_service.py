@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.cost import Nomenclature
 from backend.models.integrations import WbFunnelDaily
+from backend.models.wb_finance import WbFinanceRow
 from backend.models.wb_measurements import WbMeasurementPenalty, WbWarehouseMeasurement
 
 
@@ -462,4 +463,130 @@ def build_measurement_digest_text(day_from: date, day_to: date, data: dict) -> s
         if extra > 0:
             lines.append(f"   … и ещё {extra}")
 
+    return "\n".join(lines)
+
+
+# ─── Штрафы за габариты (из финотчёта) — блок сводки + переисточник UI ────────
+
+# WB в финотчёте: «Занижение фактических габаритов упаковки товара» и «Сторно. …».
+# Источник ИСТИНЫ по деньгам (совпадает с кабинетом), в отличие от analytics-API,
+# который отдаёт габаритные удержания с задержкой в несколько дней.
+_DIM_PENALTY_LIKE = "%абарит%"
+_DIGEST_MAX_PENALTY_ARTS = 15  # артикулов на категорию в блоке сводки
+
+
+def _fmt_money0(v: Decimal | float | None) -> str:
+    """Рубли без копеек с пробелом-разделителем: 29869.80 → «29 870»."""
+    return f"{float(v or 0):,.0f}".replace(",", " ")
+
+
+async def _volume_compare_map(
+    db: AsyncSession, project_id: int, nm_ids: set[int]
+) -> dict[int, dict]:
+    """nm_id → {card, meas, dev} — объём карточки vs последний замер и отклонение %."""
+    if not nm_ids:
+        return {}
+    card = await _card_volume_map(db, project_id, nm_ids)
+    rows = (
+        await db.execute(
+            select(WbWarehouseMeasurement.nm_id, WbWarehouseMeasurement.volume)
+            .where(
+                WbWarehouseMeasurement.project_id == project_id,
+                WbWarehouseMeasurement.nm_id.in_(nm_ids),
+                WbWarehouseMeasurement.volume.isnot(None),
+            )
+            .order_by(WbWarehouseMeasurement.measured_at.desc().nullslast())
+        )
+    ).all()
+    meas: dict[int, Decimal] = {}
+    for nm, vol in rows:
+        if nm not in meas:  # первый по desc = последний замер
+            meas[nm] = Decimal(vol)
+    out: dict[int, dict] = {}
+    for nm in nm_ids:
+        cv, mv = card.get(nm), meas.get(nm)
+        dev = (mv - cv) / cv * 100 if (cv and cv > 0 and mv is not None) else None
+        out[nm] = {"card": cv, "meas": mv, "dev": dev}
+    return out
+
+
+async def finance_penalties_digest_data(db: AsyncSession, project_id: int, day: date) -> dict:
+    """Штрафы за занижение габаритов за день (rr_dt) из финотчёта, по категориям→артикулам.
+
+    Суммы — из `wb_finance_rows` (нетто с учётом сторно). Каждый артикул обогащён
+    сравнением литража (объём карточки vs последний замер).
+    """
+    rows = (
+        await db.execute(
+            select(
+                WbFinanceRow.nm_id,
+                WbFinanceRow.subject_name,
+                WbFinanceRow.brand_name,
+                func.coalesce(func.sum(WbFinanceRow.penalty), 0),
+            )
+            .where(
+                WbFinanceRow.project_id == project_id,
+                WbFinanceRow.rr_dt == day,
+                WbFinanceRow.bonus_type_name.ilike(_DIM_PENALTY_LIKE),
+            )
+            .group_by(WbFinanceRow.nm_id, WbFinanceRow.subject_name, WbFinanceRow.brand_name)
+        )
+    ).all()
+
+    arts = [(nm, subj, brand, Decimal(pen)) for nm, subj, brand, pen in rows if Decimal(pen) != 0]
+    total = sum((p for *_rest, p in arts), Decimal(0))
+    vmap = await _volume_compare_map(db, project_id, {nm for nm, *_r in arts if nm})
+
+    by_subject: dict[str, list[dict]] = {}
+    for nm, subj, _brand, pen in arts:
+        by_subject.setdefault(subj or "Без категории", []).append(
+            {"nm_id": nm, "penalty": pen, "vol": vmap.get(nm, {})}
+        )
+    subjects = []
+    for subj, items in by_subject.items():
+        items.sort(key=lambda x: x["penalty"], reverse=True)
+        subjects.append({"subject": subj, "total": sum((i["penalty"] for i in items), Decimal(0)), "items": items})
+    subjects.sort(key=lambda s: s["total"], reverse=True)
+    return {"total": total, "count": len(arts), "subjects": subjects}
+
+
+def _vol_compare_str(vol: dict) -> str:
+    """«замер X л / карт Y л (+Z%)» или «нет замера/карточки»."""
+    meas, card, dev = vol.get("meas"), vol.get("card"), vol.get("dev")
+    if meas is None and card is None:
+        return "нет замера/карточки"
+    if dev is None:
+        return f"замер {_fmt_l(meas)} л / карт {_fmt_l(card)} л"
+    return f"замер {_fmt_l(meas)} л / карт {_fmt_l(card)} л ({dev:+.0f}%)"
+
+
+def build_penalties_digest_text(day: date, data: dict) -> str | None:
+    """HTML-блок «ПРОВЕРЬТЕ ГАБАРИТЫ» — штрафы за габариты за день по категориям.
+
+    Таблица артикулов — моноширинным `<pre>` (в Telegram нет настоящих таблиц).
+    None, если штрафов за день нет.
+    """
+    subjects = data.get("subjects") or []
+    if not subjects:
+        return None
+    e = html.escape
+    cnt = int(data.get("count") or 0)
+    az = _ru_plural(cnt, "артикул", "артикула", "артикулов")
+
+    lines = [
+        "⚠️ <b>ПРОВЕРЬТЕ ГАБАРИТЫ</b>",
+        f"Штрафы за занижение габаритов за {day:%d.%m}: "
+        f"<b>{_fmt_money0(data.get('total'))} ₽</b> · {cnt} {az}",
+    ]
+    for s in subjects:
+        lines.append("")
+        lines.append(f"<b>{e(str(s['subject']))}</b> — {_fmt_money0(s['total'])} ₽")
+        tbl = []
+        for it in s["items"][:_DIGEST_MAX_PENALTY_ARTS]:
+            row = f"{it['nm_id']}  {_fmt_money0(it['penalty']):>7} ₽  {_vol_compare_str(it['vol'])}"
+            tbl.append(e(row))
+        lines.append("<pre>" + "\n".join(tbl) + "</pre>")
+        extra = len(s["items"]) - _DIGEST_MAX_PENALTY_ARTS
+        if extra > 0:
+            lines.append(f"   … и ещё {extra}")
     return "\n".join(lines)
