@@ -245,10 +245,89 @@ async def _seed_line_fee(db: AsyncSession, project_id: int) -> None:
     print(f"Комиссия за лимит по {LINE_CONTRACT}: 252 500 ₽, размазана на срок линии")
 
 
+async def _seed_line_repayment_schedule(db: AsyncSession, project_id: int) -> None:
+    """
+    График возврата тела по ВКЛ: каждый транш гасится через 180 дней.
+
+    Срок самой линии — 12 мес., но выборка даётся на 180 дней, поэтому весь
+    выбранный 101 млн возвращается ноябрём–декабрём 2026, а не в мае 2027.
+    Проценты в график НЕ кладём: по линии их платят помесячно 5-го числа, и
+    график без процентов движок трактует как «график только тела».
+    """
+    from datetime import timedelta
+
+    line = (
+        await db.execute(
+            select(Loan).where(
+                Loan.project_id == project_id,
+                Loan.contract_number == LINE_CONTRACT,
+                Loan.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+    if line is None:
+        print(f"Линия {LINE_CONTRACT} не найдена — график возврата пропускаю")
+        return
+    existing = (
+        await db.execute(
+            select(LoanScheduleEntry).where(LoanScheduleEntry.loan_id == line.id).limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        print(f"График возврата по {LINE_CONTRACT} уже заведён — пропускаю")
+        return
+
+    tranches = list(
+        (
+            await db.execute(
+                select(LoanPayment)
+                .where(LoanPayment.loan_id == line.id, LoanPayment.payment_type == "DISBURSEMENT")
+                .order_by(LoanPayment.paid_at, LoanPayment.id)
+                .limit(500)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not tranches:
+        print(f"У линии {LINE_CONTRACT} нет выборок — график строить не из чего")
+        return
+
+    balance = sum((Decimal(str(t.amount or 0)) for t in tranches), Decimal("0"))
+    last_due = None
+    for seq, t in enumerate(tranches, start=1):
+        due = t.paid_at + timedelta(days=180)
+        amount = Decimal(str(t.amount or 0))
+        balance -= amount
+        last_due = due
+        db.add(
+            LoanScheduleEntry(
+                loan_id=line.id,
+                seq=seq,
+                period_start=t.paid_at,
+                period_end=due,
+                due_date=due,
+                days=180,
+                principal_due=amount,
+                interest_due=Decimal("0"),
+                payment_total=amount,
+                balance_after=balance,
+                note=f"возврат транша от {t.paid_at:%d.%m.%Y}, 180 дней",
+            )
+        )
+    # Срок займа = когда последний транш должен вернуться: «ближайший возврат» и
+    # «зависшие» обязаны смотреть на реальную дату, а не на срок доступности лимита.
+    if last_due is not None and line.maturity_date != last_due:
+        print(f"  срок линии: {line.maturity_date} -> {last_due} (последний транш + 180 дн)")
+        line.maturity_date = last_due
+    print(f"График возврата по {LINE_CONTRACT}: {len(tranches)} траншей по 180 дней")
+
+
 async def seed(project_id: int, *, commit: bool) -> None:
     async with AsyncSessionLocal() as db:
         await _seed_simple(db, project_id)
         await _seed_line_fee(db, project_id)
+        await _seed_line_repayment_schedule(db, project_id)
         if not commit:
             await db.rollback()
             print("\nСУХОЙ ПРОГОН — ничего не записано. Повторите с --commit.")

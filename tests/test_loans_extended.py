@@ -1414,3 +1414,33 @@ async def test_forecast_uses_schedule_for_annuity(db_session, client, auth_heade
     # События идут парами «проценты + тело» на каждую дату платежа
     may = [e for e in res["upcoming"] if e["date"] == "2026-05-25"]
     assert {e["kind"] for e in may} == {"INTEREST", "MATURITY"}
+
+
+def test_principal_only_schedule_keeps_engine_interest():
+    """
+    График ТОЛЬКО тела (кредитная линия) не должен обнулять проценты.
+
+    У аннуитета в графике обе части, у линии — лишь возврат траншей: проценты
+    там платят помесячно по факту выборки. Правило «есть график → проценты из
+    него» стоило бы линии 1,6 млн ₽ в месяц и в стоимости деньг, и в ОПиУ.
+    """
+    from backend.services.loan_analytics import _schedule_has_interest
+    from backend.services.loan_interest import ScheduleRowLite
+
+    body_only = [
+        ScheduleRowLite(date(2026, 5, 25), date(2026, 11, 21), date(2026, 11, 21), 180,
+                        Decimal("0"), principal_due=Decimal("70000000")),
+    ]
+    annuity = [
+        ScheduleRowLite(date(2026, 3, 26), date(2026, 4, 27), date(2026, 4, 27), 33,
+                        Decimal("569589.04"), principal_due=Decimal("2452322.29")),
+    ]
+    fee_only = [
+        ScheduleRowLite(date(2026, 3, 18), date(2026, 3, 25), date(2026, 3, 25), 7,
+                        Decimal("1275000"), principal_due=Decimal("0"), is_fee=True),
+    ]
+    assert _schedule_has_interest(body_only) is False
+    assert _schedule_has_interest(annuity) is True
+    # Строка-комиссия процентами не считается — иначе движок бы «увидел» проценты
+    assert _schedule_has_interest(fee_only) is False
+    assert _schedule_has_interest(None) is False

@@ -171,6 +171,18 @@ def month_window(year: int, month: int, as_of: date | None = None) -> tuple[date
     return win_start, win_end
 
 
+def _schedule_has_interest(schedule: list[loan_interest.ScheduleRowLite] | None) -> bool:
+    """
+    Несёт ли график проценты, или в нём только тело.
+
+    У аннуитета в графике обе части, у кредитной линии — только возврат тела:
+    проценты там платят помесячно по факту выборки, и в графике их нет. Считать
+    «график есть → проценты берём из него» нельзя: у линии это обнулило бы
+    1,6 млн ₽ в месяц и в стоимости денег, и в ОПиУ.
+    """
+    return any(r.interest_due and not r.is_fee for r in (schedule or []))
+
+
 def loan_cost_in_window(
     bundle: LoanBundle, loan: Loan, *, win_start: date, win_end: date
 ) -> tuple[Decimal, Decimal]:
@@ -186,7 +198,7 @@ def loan_cost_in_window(
         return ZERO, ZERO
     lites = _lites(bundle.payments.get(loan.id, []))
     sched = bundle.schedule.get(loan.id)
-    if sched:
+    if sched and _schedule_has_interest(sched):
         interest = loan_interest.schedule_interest_in_window(
             sched, win_start=win_start, win_end=win_end
         )
@@ -710,6 +722,7 @@ async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_month
         # конце» рисует несуществующий обрыв (Симпл Финанс: 22,4 млн в феврале
         # вместо двенадцати платежей по 3 021 911,33).
         schedule = bundle.schedule.get(loan.id)
+        sched_interest = _schedule_has_interest(schedule)
         if schedule:
             for row in schedule:
                 if row.due_date < as_of:
@@ -718,7 +731,8 @@ async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_month
                 principal_due = Decimal(str(row.principal_due or 0))
                 interest_due = Decimal(str(row.interest_due or 0))
                 month_principal[mk] += principal_due
-                month_interest[mk] += interest_due
+                if sched_interest:
+                    month_interest[mk] += interest_due
                 base = dict(
                     date=row.due_date,
                     loan_id=loan.id,
@@ -726,10 +740,36 @@ async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_month
                     counterparty_name=name,
                     contract_number=loan.contract_number,
                 )
-                if interest_due > ZERO:
+                if sched_interest and interest_due > ZERO:
                     upcoming.append(LoanForecastEvent(**base, kind="INTEREST", amount=interest_due))
                 if principal_due > ZERO:
                     upcoming.append(LoanForecastEvent(**base, kind="MATURITY", amount=principal_due))
+            if sched_interest:
+                continue
+            # График только по телу (кредитная линия): проценты считаем на
+            # УБЫВАЮЩЕМ теле. Run-rate держал бы полную ставку и после 21.11,
+            # когда транш на 70 млн уже вернулся, — декабрь завышался на ~1 млн.
+            rate = calc.effective_rate or ZERO
+            if rate > ZERO:
+                due_by_day: dict[date, Decimal] = defaultdict(lambda: ZERO)
+                for row in schedule:
+                    due_by_day[row.due_date] += Decimal(str(row.principal_due or 0))
+                bal = remaining
+                cur_m = date(as_of.year, as_of.month, 1)
+                for _ in range(horizon_months):
+                    nxt_m = add_months(cur_m, 1)
+                    body_days = ZERO
+                    day = max(cur_m, as_of)
+                    while day < nxt_m:
+                        bal -= due_by_day.get(day, ZERO)
+                        if bal > ZERO:
+                            body_days += bal
+                        day = date.fromordinal(day.toordinal() + 1)
+                    if body_days > ZERO:
+                        month_interest[cur_m.strftime("%Y-%m")] += (
+                            body_days * rate / loan_interest.DAYS_PER_YEAR
+                        )
+                    cur_m = nxt_m
             continue
 
         # monthly run-rate forward (1/12) — same basis as monthly_interest KPI and
@@ -744,8 +784,8 @@ async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_month
                     month_interest[cur_m.strftime("%Y-%m")] += calc.monthly_interest
                 cur_m = nxt_m
 
-        # principal due at maturity
-        if loan.maturity_date is not None and loan.maturity_date >= as_of:
+        # principal due at maturity — только если график тела не задан
+        if not schedule and loan.maturity_date is not None and loan.maturity_date >= as_of:
             month_principal[loan.maturity_date.strftime("%Y-%m")] += remaining
             upcoming.append(
                 LoanForecastEvent(
