@@ -262,8 +262,20 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
     const isGrouped = groupBy !== 'sku' && groupBy !== 'abc';
 
     const getVariantTotal = useCallback((row: UnifiedStockRow): number => {
-        // «В пути до получателей» НЕ входит в Итого (товар уже уехал к покупателям).
-        // Учитываем склады WB + возвраты (вернутся и снова станут доступны).
+        // «Итого» — КАПИТАЛ в товаре: «в пути до получателей» входит (до выкупа
+        // товар наш, невыкуп вернётся), брак входит (наш товар по себестоимости).
+        // Для скорости продаж есть отдельный getSellableTotal без этих слагаемых.
+        const wbAll = (row.total_wb || 0) + (row.wb_in_way_to_client || 0) + (row.wb_in_way_from_client || 0);
+        if (variant === 1) return wbAll;
+        const ownSide = (row.total_own || 0) + (row.in_transit || 0) + (row.total_defect || 0);
+        if (variant === 2) return ownSide + wbAll;
+        return ownSide + wbAll
+             + (row.factory_qty || 0) + (row.vehicle_forming_qty || 0) + (row.vehicle_transit_qty || 0);
+    }, [variant]);
+
+    // Продаваемый остаток — для «запаса дней»: без брака и без товара, уже
+    // уехавшего к покупателям (будущие заказы они не покрывают).
+    const getSellableTotal = useCallback((row: UnifiedStockRow): number => {
         const wbAll = (row.total_wb || 0) + (row.wb_in_way_from_client || 0);
         if (variant === 1) return wbAll;
         if (variant === 2) return (row.total_own || 0) + wbAll + (row.in_transit || 0);
@@ -338,8 +350,8 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         const trend = trendPeriod === 7 ? row.trend_7 : trendPeriod === 14 ? row.trend_14 : row.trend_30;
         const daily = trend?.avg_daily_qty || 0;
         if (daily <= 0) return Infinity;
-        return getVariantTotal(row) / daily;
-    }, [trendPeriod, getVariantTotal]);
+        return getSellableTotal(row) / daily;
+    }, [trendPeriod, getSellableTotal]);
 
     // Dates of the active trend window — taken from the first row (backend
     // returns the same window on every row, so row 0 is canonical). Used to
@@ -408,7 +420,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
     const rowsForTable = useMemo(() => {
         return filtered.map((r) => {
             const t = getTrendData(r);
-            const vt = getVariantTotal(r);
+            const sellable = getSellableTotal(r);
             const daily = t?.avg_daily_qty || 0;
             const rev = t?.revenue || 0;
             // Свободный остаток каждого ФФ — тоже вычисляемая величина, поэтому
@@ -424,11 +436,11 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 _sortTrend: daily,
                 _sortRevenue: rev,
                 _sortMargin: rev > 0 ? ((t?.profit || 0) / rev) * 100 : -1,
-                _sortStockDays: daily > 0 ? vt / daily : Number.MAX_SAFE_INTEGER,
+                _sortStockDays: daily > 0 ? sellable / daily : Number.MAX_SAFE_INTEGER,
                 _sortOwnFree: (r.total_own || 0) - (r.reserved || 0),
             };
         });
-    }, [filtered, getTrendData, getVariantTotal, ownWarehouses]);
+    }, [filtered, getTrendData, getSellableTotal, ownWarehouses]);
 
     // «Новинки» KPI — aggregates SKUs flagged as novelties by the backend
     // (no sales recorded in the last 60 days). Counts ALL current and incoming
@@ -571,8 +583,10 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             vehicleTransitTotal += row.vehicle_transit_qty || 0;
             variantTotal += getVariantTotal(row);
             if (mode !== 'qty') {
-                // «В пути до получателей» исключён из Итого (см. getVariantTotal)
-                const wbAll = (row.total_wb || 0) + (row.wb_in_way_from_client || 0);
+                // «Итого» — капитал: «в пути до получателей» и брак входят
+                // (зеркало getVariantTotal)
+                const wbAll = (row.total_wb || 0) + (row.wb_in_way_to_client || 0) + (row.wb_in_way_from_client || 0);
+                const ownSide = (row.total_own || 0) + (row.in_transit || 0) + (row.total_defect || 0);
                 ownMoney += (row.total_own || 0) * multiplier;
                 reservedMoney += (row.reserved || 0) * multiplier;
                 wbMoney += (row.total_wb || 0) * multiplier;
@@ -588,9 +602,9 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 if (variant === 1) {
                     rowVariantMoney = wbAll * multiplier;
                 } else if (variant === 2) {
-                    rowVariantMoney = ((row.total_own || 0) + wbAll + (row.in_transit || 0)) * multiplier;
+                    rowVariantMoney = (ownSide + wbAll) * multiplier;
                 } else {
-                    rowVariantMoney = ((row.total_own || 0) + wbAll + (row.in_transit || 0)
+                    rowVariantMoney = (ownSide + wbAll
                         + (row.vehicle_forming_qty || 0) + (row.vehicle_transit_qty || 0)) * multiplier
                         + (row.factory_qty || 0) * factoryMultiplier;
                 }
@@ -791,7 +805,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         c.push({
             key: 'stock_days',
             label: 'Запас дн',
-            headerTitle: 'На сколько дней хватит остатка при текущем темпе заказов (Итого ÷ тренд шт/д)',
+            headerTitle: 'На сколько дней хватит остатка при текущем темпе заказов (продаваемый остаток ÷ тренд шт/д; брак и товар в пути к получателям не считаются)',
             align: 'right',
             sortable: true,
             sortingFn: 'basic',
@@ -799,7 +813,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             render: (_: unknown, row: UnifiedStockRow) => {
                 const daily = getTrendData(row).avg_daily_qty;
                 if (daily <= 0) return DASH;
-                const days = getVariantTotal(row) / daily;
+                const days = getSellableTotal(row) / daily;
                 const color = days < 14 ? 'var(--color-danger)' : days < 30 ? 'var(--color-warning)' : 'var(--color-text)';
                 return <span style={{ color, fontWeight: 600 }}>{formatNumber(days, 0)}</span>;
             },
@@ -811,8 +825,8 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             headerTitle: variant === 1
                 ? 'Всё у WB: на складах + в пути до получателей + возвраты'
                 : variant === 2
-                    ? 'Наши склады + всё у WB + наши отгрузки в пути'
-                    : 'Наши склады + всё у WB + наши отгрузки + на фабрике + в машинах',
+                    ? 'Капитал: наши склады + брак + всё у WB (вкл. в пути до получателей) + наши отгрузки в пути'
+                    : 'Капитал: наши склады + брак + всё у WB + наши отгрузки + на фабрике + в машинах',
             align: 'right',
             sortable: true,
             getValue: (row: UnifiedStockRow) => getSortVal(getVariantTotal(row), row),
@@ -1069,7 +1083,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 ? { headerWrap: true, ...col, headerStyle: { width: '92px', ...(col.headerStyle || {}) } }
                 : col
         );
-    }, [ownWarehouses, wbWarehouses, expanded, expandedReserved, mode, fmtVal, getSortVal, isGrouped, groupBy, getTrendData, getVariantTotal, showOwn, showFactory, showVehicles]);
+    }, [ownWarehouses, wbWarehouses, expanded, expandedReserved, mode, fmtVal, getSortVal, isGrouped, groupBy, getTrendData, getVariantTotal, getSellableTotal, showOwn, showFactory, showVehicles]);
 
     // Helper: factory cell content (always ≈ in cost mode, using cost_factory_unit)
     const fmtFactoryCell = useCallback((fq: number, row: UnifiedStockRow): React.ReactNode => {

@@ -203,9 +203,9 @@ class TestUnifiedStockFromRemains:
         assert row["total_wb"] == 1249
         assert row["wb_in_way_to_client"] == 307
         assert row["wb_in_way_from_client"] == 49
-        # «В пути до получателей» (307) НЕ в «Итого»: товар уехал к покупателям.
-        # Итого = склады WB (1249) + возвраты (49); own/in_transit тут 0.
-        assert row["total"] == 1298
+        # «Итого» — капитал: склады WB (1249) + возвраты (49) + «в пути до
+        # получателей» (307) — до выкупа товар всё ещё наш; own/in_transit тут 0.
+        assert row["total"] == 1605
         assert row["wb_stocks"]["Коледино"] == 700
         # Псевдо-склады НЕ в разбивке по складам — только отдельными полями
         assert "В пути до получателей" not in row["wb_stocks"]
@@ -259,8 +259,8 @@ class TestUnifiedStockFromRemains:
         assert row["total_wb"] == 5  # quantity (доступно), не quantity_full
         assert row["wb_in_way_to_client"] == 2
         assert row["wb_in_way_from_client"] == 1
-        # Итого = склады (5) + возвраты (1); «в пути до получателей» (2) исключён
-        assert row["total"] == 6
+        # Итого-капитал = склады (5) + возвраты (1) + в пути до получателей (2)
+        assert row["total"] == 8
 
     async def test_remains_of_other_project_do_not_leak(
         self, _clean_remains, db_session, project, other_project

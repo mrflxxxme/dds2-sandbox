@@ -1856,17 +1856,19 @@ async def get_unified_stock_summary(
         entry = _ensure(nom_id)
         entry["vehicle_transit_qty"] = qty
 
-    # Compute totals. «В пути до получателей» (wb_in_way_to_client) НЕ входит в
-    # «Итого»: этот товар уже уехал к покупателям (по сути продан) — считать его
-    # доступным остатком для дозаказа неверно. Он остаётся отдельной колонкой.
-    # «Возвраты на склад WB» (wb_in_way_from_client) — входят: вернутся и снова
-    # станут доступны. Supply chain — отдельные колонки.
+    # Compute totals. «Итого» — КАПИТАЛ в товаре (канон 2026-07-28):
+    # «В пути до получателей» входит — до выкупа товар всё ещё наш (невыкуп
+    # вернётся); брак входит — это наш товар по себестоимости, пусть и с другой
+    # ликвидностью. Для скорости продаж / «запаса дней» фронт считает отдельный
+    # sellable-срез без этих двух слагаемых. Supply chain — отдельные колонки.
     for entry in unified.values():
         entry["total"] = (
             entry["total_own"]
             + entry["total_wb"]
+            + entry["wb_in_way_to_client"]
             + entry["wb_in_way_from_client"]
             + entry["in_transit"]
+            + entry["total_defect"]
         )
 
     # Narrowed forecast fallback — only runs in forecast mode. Estimates
@@ -1947,6 +1949,7 @@ async def _group_unified(
             "reserved_by_warehouse": {},
             "reserved_details": [],
             "total": 0,
+            "total_defect": 0,
             "factory_qty": 0,
             "vehicle_forming_qty": 0,
             "vehicle_transit_qty": 0,
@@ -1981,6 +1984,7 @@ async def _group_unified(
             "in_transit",
             "reserved",
             "total",
+            "total_defect",
             "factory_qty",
             "vehicle_forming_qty",
             "vehicle_transit_qty",
