@@ -31,6 +31,7 @@ import type {
     LenderAccessInfo,
     LenderAccessListResponse,
     LoanImportResult,
+    LoanAccrualDaysResponse,
     LoanChain,
     LoanMirrorCreate,
 } from '@/types/api';
@@ -108,6 +109,15 @@ export function addLoanMethods(api: ApiClient) {
         },
         replaceLoanSchedule(loanId: number, data: LoanScheduleReplace) {
             return api.request<LoanScheduleResponse>('PUT', `/api/v1/loans/${loanId}/schedule`, data);
+        },
+        loanAccrualDays(loanId: number, dateFrom?: string, dateTo?: string) {
+            const q = new URLSearchParams();
+            if (dateFrom) q.set('date_from', dateFrom);
+            if (dateTo) q.set('date_to', dateTo);
+            const qs = q.toString();
+            return api.request<LoanAccrualDaysResponse>(
+                'GET', `/api/v1/loans/${loanId}/accrual-days${qs ? `?${qs}` : ''}`
+            );
         },
         loanFees(loanId: number) {
             return api.request<LoanFeeListResponse>('GET', `/api/v1/loans/${loanId}/fees`);

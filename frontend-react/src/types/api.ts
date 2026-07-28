@@ -1384,6 +1384,8 @@ export interface UnifiedStockRow {
   /** WB: «В пути возвраты на склад WB» — отдельная колонка, не входит в total_wb */
   wb_in_way_from_client: number;
   total_defect: number;
+  /** Перемещения между нашими складами: отправлено, но ещё не принято (TR-*) */
+  transfer_transit: number;
   total: number;
   factory_qty: number;
   vehicle_forming_qty: number;
@@ -7574,6 +7576,30 @@ export interface LoanFee extends LoanFeeIn {
 export interface LoanFeeListResponse {
   items: LoanFee[];
   total: number;
+}
+
+/** Один день начисления: тело на утро, ставка дня, проценты за сутки. */
+export interface LoanAccrualDay {
+  date: string;
+  balance: number;
+  rate: number | null;
+  interest: number;
+  cumulative: number;
+  /** Движение тела в этот день: + выборка, − возврат. */
+  movement: number | null;
+}
+
+export interface LoanAccrualDaysResponse {
+  loan_id: number;
+  contract_number: string | null;
+  date_from: string;
+  date_to: string;
+  rows: LoanAccrualDay[];
+  total_interest: number;
+  avg_balance: number;
+  effective_rate: number | null;
+  /** Проценты взяты из графика (аннуитет), а не из формулы. */
+  from_schedule: boolean;
 }
 
 /** Состояние строки графика: оплачена / частично / просрочена / ближайшая. */

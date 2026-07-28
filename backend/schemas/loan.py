@@ -769,6 +769,65 @@ class LoanChainListResponse(BaseModel):
     total_interest_debt: Decimal = Decimal("0")
 
 
+# ─── Выданные займы (мы кредитор) ────────────────────────────────────────────
+
+
+class LoanLentItem(BaseModel):
+    """Кому мы дали денег и сколько он должен."""
+
+    counterparty_id: int
+    name: str
+    loan_id: int
+    contract_number: str
+    rate: Decimal | None = None
+    outstanding: Decimal = Decimal("0")  # тело, которое нам должны
+    accrued_total: Decimal = Decimal("0")  # начислено процентов за всё время
+    interest_received: Decimal = Decimal("0")
+    interest_due: Decimal = Decimal("0")  # начислено минус получено
+    total_due: Decimal = Decimal("0")  # тело + проценты
+    accrued_month: Decimal = Decimal("0")  # начислено в текущем месяце
+    mirror_project_name: str | None = None  # если вторая сторона у нас же
+
+
+class LoanLentResponse(BaseModel):
+    """Сводка по выданным займам: сколько нам должны и сколько это приносит."""
+
+    items: list[LoanLentItem] = Field(default_factory=list)
+    total_outstanding: Decimal = Decimal("0")
+    total_accrued: Decimal = Decimal("0")
+    total_received: Decimal = Decimal("0")
+    total_interest_due: Decimal = Decimal("0")
+    total_due: Decimal = Decimal("0")
+    month_income: Decimal = Decimal("0")  # доход за текущий календарный месяц
+
+
+# ─── Начисление по дням ──────────────────────────────────────────────────────
+
+
+class LoanAccrualDay(BaseModel):
+    """Один день начисления: тело на утро, ставка дня, проценты за сутки."""
+
+    date: date
+    balance: Decimal = Decimal("0")  # тело, на которое капало в этот день
+    rate: Decimal | None = None  # ставка, действовавшая в этот день
+    interest: Decimal = Decimal("0")
+    cumulative: Decimal = Decimal("0")  # нарастающим итогом за период
+    movement: Decimal | None = None  # движение тела в этот день (+выборка/−возврат)
+
+
+class LoanAccrualDaysResponse(BaseModel):
+    loan_id: int
+    contract_number: str | None = None
+    date_from: date
+    date_to: date
+    rows: list[LoanAccrualDay] = Field(default_factory=list)
+    total_interest: Decimal = Decimal("0")
+    avg_balance: Decimal = Decimal("0")
+    effective_rate: Decimal | None = None
+    # Проценты взяты из графика (аннуитет), а не из формулы «тело × ставка × дни»
+    from_schedule: bool = False
+
+
 # ─── Зависшие займы (срок вышел, решения нет) ────────────────────────────────
 
 

@@ -18,6 +18,7 @@ from backend.schemas.loan import (
     CreditLineDetail,
     CreditLineDraw,
     CreditLineListResponse,
+    LoanAccrualDaysResponse,
     LoanAccrualMonthsResponse,
     LenderAccessCreate,
     LenderDetail,
@@ -36,6 +37,7 @@ from backend.schemas.loan import (
     LoanFilter,
     LoanForecastResponse,
     LoanImportResult,
+    LoanLentResponse,
     LoanListResponse,
     LoanMirrorCreate,
     LoanPaymentMatch,
@@ -51,6 +53,7 @@ from backend.schemas.loan import (
 from backend.services import (
     lender_access_service,
     loan_analytics,
+    loan_daily,
     loan_import,
     loan_mirror,
     loan_schedule,
@@ -205,6 +208,33 @@ async def accrual_months(
     аннуитет) сводятся в один месячный P&L без искажений.
     """
     return await loan_analytics.accrual_by_month(db, project.id, utcnow().date(), months)
+
+
+@router.get("/accrual-days", response_model=LoanAccrualDaysResponse)
+async def portfolio_accrual_days(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    direction: str = Query("INCOMING", pattern="^(INCOMING|OUTGOING)$"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Начисление по дням по всему портфелю: сколько стоит день.
+
+    `direction=OUTGOING` — сколько день приносит по выданным займам.
+    """
+    return await loan_daily.portfolio_daily(
+        db, project_id=project.id, date_from=date_from, date_to=date_to, direction=direction
+    )
+
+
+@router.get("/lent", response_model=LoanLentResponse)
+async def loans_lent(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Выданные займы: сколько нам должны тела и процентов, и сколько это приносит."""
+    return await loan_analytics.lent_summary(db, project.id, utcnow().date())
 
 
 @router.get("/credit-lines", response_model=CreditLineListResponse)
@@ -443,6 +473,25 @@ async def loan_mirror_sync(
 ):
     """Досинхронизировать стороны: недостающие движения и ставки едут на обе."""
     return await loan_mirror.sync_mirror(db, loan_id=loan_id, project_id=project.id)
+
+
+@router.get("/{loan_id}/accrual-days", response_model=LoanAccrualDaysResponse)
+async def loan_accrual_days(
+    loan_id: int,
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Подневная расшифровка начисления: тело, ставка дня и проценты за сутки.
+
+    Своды показывают итог, а спорить с банком можно только по дням — так и
+    находились расхождения в день смены ставки и в день выборки транша.
+    """
+    return await loan_daily.daily_accrual(
+        db, loan_id=loan_id, project_id=project.id, date_from=date_from, date_to=date_to
+    )
 
 
 # ─── График платежей и разовые комиссии ──────────────────────────────────────

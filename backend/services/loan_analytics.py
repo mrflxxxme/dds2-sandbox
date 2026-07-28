@@ -51,14 +51,22 @@ class LoanBundle:
     fees: dict[int, list[loan_interest.FeeLite]] = field(default_factory=dict)
 
 
-async def _load(db: AsyncSession, project_id: int) -> LoanBundle:
-    """Load INCOMING loans + payments + cp names + portal-access cp ids + rates/schedule/fees."""
+async def _load(
+    db: AsyncSession, project_id: int, direction: str = "INCOMING"
+) -> LoanBundle:
+    """
+    Снимок займов проекта: платежи, имена контрагентов, ставки, графики, комиссии.
+
+    `direction` по умолчанию INCOMING — «наш долг», как во всех экранах реестра.
+    OUTGOING — деньги, выданные нами: у них своя арифметика (это не расход, а
+    доход), поэтому смешивать их в одном своде нельзя.
+    """
     loan_rows = await db.execute(
         select(Loan)
         .where(
             Loan.project_id == project_id,
             Loan.is_deleted == False,  # noqa: E712
-            Loan.direction == "INCOMING",
+            Loan.direction == direction,
         )
         .order_by(Loan.id)
         .limit(SCAN_LIMIT)
@@ -895,6 +903,117 @@ async def cost_by_month_keys(db: AsyncSession, project_id: int, month_keys: list
             "interest": str(interest.quantize(Decimal("0.01"))),
             "fee": str(fee.quantize(Decimal("0.01"))),
         }
+    return out
+
+
+
+@cached(prefix="loan_lent", ttl=300)
+async def lent_summary(db: AsyncSession, project_id: int, as_of: date) -> dict:
+    """
+    Выданные займы: сколько нам должны тела и процентов.
+
+    Зеркало свода по заёмщикам для направления OUTGOING. Учредитель, передавший
+    часть привлечённых денег своему ООО, должен видеть не только свой долг, но и
+    встречное требование — иначе половина картины отсутствует.
+    """
+    from backend.models.auth import Project
+    from backend.schemas.loan import LoanLentItem, LoanLentResponse
+
+    bundle = await _load(db, project_id, direction="OUTGOING")
+    if not bundle.loans:
+        return LoanLentResponse().model_dump(mode="json")
+
+    mirror_ids = [loan.mirror_loan_id for loan in bundle.loans if loan.mirror_loan_id]
+    mirror_names: dict[int, str | None] = {}
+    if mirror_ids:
+        rows = await db.execute(
+            select(Loan.id, Project.name)
+            .join(Project, Project.id == Loan.project_id)
+            .where(Loan.id.in_(mirror_ids), Loan.is_deleted == False)  # noqa: E712
+        )
+        mirror_names = {r.id: r.name for r in rows.all()}
+
+    mtd_start, mtd_end = month_window(as_of.year, as_of.month, as_of)
+    items: list[LoanLentItem] = []
+    for loan in bundle.loans:
+        payments = bundle.payments.get(loan.id, [])
+        drawn = sum(
+            (Decimal(str(p.amount or 0)) for p in payments if p.payment_type == "DISBURSEMENT"), ZERO
+        )
+        repaid = sum(
+            (Decimal(str(p.amount or 0)) for p in payments if p.payment_type == "PRINCIPAL_REPAY"),
+            ZERO,
+        )
+        received = sum(
+            (Decimal(str(p.amount or 0)) for p in payments if p.payment_type == "INTEREST_PAY"), ZERO
+        )
+        outstanding = (
+            ZERO
+            if loan.status == "CLOSED"
+            else max(ZERO, Decimal(str(loan.principal)) + drawn - repaid)
+        )
+        accrued = _lifetime_interest(bundle, loan, as_of)
+        mtd, _fee = loan_cost_in_window(bundle, loan, win_start=mtd_start, win_end=mtd_end)
+        rate = Decimal(str(loan.rate)) if loan.rate is not None else None
+        for rp in sorted(bundle.rates.get(loan.id, []), key=lambda x: x.valid_from):
+            if rp.valid_from <= as_of:
+                rate = rp.rate
+        items.append(
+            LoanLentItem(
+                counterparty_id=loan.counterparty_id,
+                name=bundle.cp_map.get(loan.counterparty_id, (f"#{loan.counterparty_id}", None))[0],
+                loan_id=loan.id,
+                contract_number=loan.contract_number,
+                rate=rate,
+                outstanding=outstanding,
+                accrued_total=accrued,
+                interest_received=received,
+                interest_due=max(ZERO, accrued - received),
+                total_due=outstanding + max(ZERO, accrued - received),
+                accrued_month=mtd,
+                mirror_project_name=mirror_names.get(loan.mirror_loan_id or 0),
+            )
+        )
+    items.sort(key=lambda x: x.total_due, reverse=True)
+    result = LoanLentResponse(
+        items=items,
+        total_outstanding=sum((i.outstanding for i in items), ZERO),
+        total_accrued=sum((i.accrued_total for i in items), ZERO),
+        total_received=sum((i.interest_received for i in items), ZERO),
+        total_interest_due=sum((i.interest_due for i in items), ZERO),
+        total_due=sum((i.total_due for i in items), ZERO),
+        month_income=sum((i.accrued_month for i in items), ZERO),
+    )
+    return result.model_dump(mode="json")
+
+
+@cached(prefix="loan_income_months", ttl=300)
+async def income_by_month_keys(db: AsyncSession, project_id: int, month_keys: list[str]) -> dict:
+    """
+    Процентный ДОХОД по выданным займам, по календарным месяцам.
+
+    Зеркало `cost_by_month_keys` для направления OUTGOING. Учредитель, занявший
+    деньги под 26 % и передавший их своему ООО под 27 %, платит не 26 % — он
+    платит разницу. Без этой половины его ОПиУ показывает только расход и врёт
+    на всю сумму дохода.
+    """
+    bundle = await _load(db, project_id, direction="OUTGOING")
+    as_of = loan_service._today()
+    out: dict[str, str] = {}
+    for key in month_keys:
+        try:
+            year, month = int(key[:4]), int(key[5:7])
+        except (ValueError, IndexError):
+            continue
+        win_start, win_end = month_window(year, month, as_of)
+        total = ZERO
+        if win_end > win_start:
+            for loan in bundle.loans:
+                interest, _fee = loan_cost_in_window(
+                    bundle, loan, win_start=win_start, win_end=win_end
+                )
+                total += interest
+        out[key] = str(total.quantize(Decimal("0.01")))
     return out
 
 

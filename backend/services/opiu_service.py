@@ -252,9 +252,19 @@ async def get_opiu(
     if not brand and not article and months_sorted:
         from backend.services.loan_analytics import cost_by_month_keys
 
+        from backend.services.loan_analytics import income_by_month_keys
+
         raw = await cost_by_month_keys(db, project_id, months_sorted)
+        # Проценты по ВЫДАННЫМ займам — доход, он гасит часть расхода. Учредитель,
+        # занявший под 26 % и передавший деньги своему ООО под 27 %, платит не 26 %,
+        # а разницу; без этой половины его ОПиУ показывает только расход.
+        raw_income = await income_by_month_keys(db, project_id, months_sorted)
         loan_cost = {
-            mk: {"interest": float(v.get("interest", 0)), "fee": float(v.get("fee", 0))}
+            mk: {
+                "interest": float(v.get("interest", 0)),
+                "fee": float(v.get("fee", 0)),
+                "income": float(raw_income.get(mk, 0)),
+            }
             for mk, v in raw.items()
         }
 
@@ -382,10 +392,14 @@ def _build_pnl_result(
     loan_cost = loan_cost or {}
     loan_int_m = {mk: float(loan_cost.get(mk, {}).get("interest", 0.0)) for mk in months_sorted}
     loan_fee_m = {mk: float(loan_cost.get(mk, {}).get("fee", 0.0)) for mk in months_sorted}
-    loan_m = {mk: loan_int_m[mk] + loan_fee_m[mk] for mk in months_sorted}
+    # Доход по выданным займам гасит расход: строка «Проценты по займам» — НЕТТО,
+    # то есть реальная цена денег для этого юрлица.
+    loan_inc_m = {mk: float(loan_cost.get(mk, {}).get("income", 0.0)) for mk in months_sorted}
+    loan_m = {mk: loan_int_m[mk] + loan_fee_m[mk] - loan_inc_m[mk] for mk in months_sorted}
     loan_int_t = sum(loan_int_m.values())
     loan_fee_t = sum(loan_fee_m.values())
-    loan_t = loan_int_t + loan_fee_t
+    loan_inc_t = sum(loan_inc_m.values())
+    loan_t = loan_int_t + loan_fee_t - loan_inc_t
 
     ops_m = {mk: sum(c[3][mk] for c in opex_child_defs) + loan_m[mk] for mk in months_sorted}
     ops_t = sum(c[0] for c in opex_child_defs) + loan_t
@@ -441,10 +455,11 @@ def _build_pnl_result(
         _r(child_key, label, 1, False, child_m, child_t, real_m, real_t, parent_key="operating_expenses")
         for child_t, child_key, label, child_m in opex_child_defs
     ]
-    if loan_t:
-        # Комиссии раскрываем отдельной строкой только когда они есть: у частных
-        # займов их нет вовсе, и пустая строка «Комиссии» лишь путала бы.
+    if loan_t or loan_inc_t:
+        # Комиссии и доход раскрываем отдельными строками только когда они есть:
+        # у частных займов комиссий нет, а доход — только у того, кто сам выдавал.
         has_fee = bool(loan_fee_t)
+        has_income = bool(loan_inc_t)
         opex_child_rows.append(
             _r(
                 "opex_loan_interest",
@@ -455,17 +470,26 @@ def _build_pnl_result(
                 loan_t,
                 real_m,
                 real_t,
-                expandable=has_fee,
+                expandable=has_fee or has_income,
                 parent_key="operating_expenses",
             )
         )
+        if has_fee or has_income:
+            opex_child_rows.append(
+                _r("loan_interest", "Проценты уплаченные", 2, False, loan_int_m, loan_int_t,
+                   real_m, real_t, parent_key="opex_loan_interest")
+            )
         if has_fee:
-            opex_child_rows += [
-                _r("loan_interest", "Проценты", 2, False, loan_int_m, loan_int_t,
-                   real_m, real_t, parent_key="opex_loan_interest"),
+            opex_child_rows.append(
                 _r("loan_fees", "Комиссии банков", 2, False, loan_fee_m, loan_fee_t,
-                   real_m, real_t, parent_key="opex_loan_interest"),
-            ]
+                   real_m, real_t, parent_key="opex_loan_interest")
+            )
+        if has_income:
+            neg_m = {mk: -loan_inc_m[mk] for mk in months_sorted}
+            opex_child_rows.append(
+                _r("loan_interest_income", "Проценты полученные", 2, False,
+                   neg_m, -loan_inc_t, real_m, real_t, parent_key="opex_loan_interest")
+            )
 
     rows = [
         _r("realization", "Реализация", 0, True, real_m, real_t),

@@ -156,6 +156,15 @@ export default function LoansLenders({ nonce, onChanged }: { nonce: number; onCh
             ),
         },
         {
+            key: '_total_debt', label: 'Итого долг', align: 'right' as const,
+            getValue: (r: LoanLenderRollup) => Number(r.outstanding) + Number(r.interest_debt),
+            render: (_v: unknown, r: LoanLenderRollup) => (
+                <span style={{ fontWeight: 700 }}>
+                    {money(Number(r.outstanding) + Number(r.interest_debt))} ₽
+                </span>
+            ),
+        },
+        {
             key: 'interest_debt', label: 'Долг по %', align: 'right' as const,
             getValue: (r: LoanLenderRollup) => Number(r.interest_debt),
             render: (_v: unknown, r: LoanLenderRollup) => (

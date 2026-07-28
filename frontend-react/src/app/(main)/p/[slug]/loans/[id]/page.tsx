@@ -9,6 +9,7 @@ import LoanFormModal from '../LoanFormModal';
 import ExtendModal from '../ExtendModal';
 import LoanSchedule from '../LoanSchedule';
 import LoanMirrorBlock from '../LoanMirrorBlock';
+import LoanAccrualDays from '../LoanAccrualDays';
 
 const PAY_LABEL: Record<LoanPaymentType, string> = {
     DISBURSEMENT: 'Выдача',
@@ -136,6 +137,8 @@ export default function LoanDetailPage() {
             <div style={{ marginTop: 16 }}>
                 <LoanSchedule loanId={id} />
             </div>
+
+            <LoanAccrualDays loanId={id} nonce={reloadKey} />
 
             <LoanMirrorBlock loanId={id} nonce={reloadKey} />
 
