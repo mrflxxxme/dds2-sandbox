@@ -141,6 +141,7 @@ from backend.models.order_city import (
 from backend.models.payroll import (
     PayrollEmployee,
     PayrollPayoutMark,
+    PayrollSalaryPeriod,
     PayrollScopeKind,
     PayrollTariffStep,
     PayrollTeam,
@@ -377,6 +378,7 @@ __all__ = [
     # Payroll
     "PayrollEmployee",
     "PayrollPayoutMark",
+    "PayrollSalaryPeriod",
     "PayrollScopeKind",
     "PayrollTariffStep",
     "PayrollTeam",

@@ -19,15 +19,47 @@ class PayDayShare(BaseModel):
     share: Decimal = Field(..., gt=0, le=1)
 
 
+class SalaryPeriodIn(BaseModel):
+    """Период оклада: с месяца month действует amount (история изменений)."""
+
+    month: str  # 'YYYY-MM'
+    amount: Decimal = Field(..., ge=0)
+
+    @field_validator("month")
+    @classmethod
+    def validate_month(cls, v: str) -> str:
+        try:
+            datetime.strptime(v, "%Y-%m")
+        except ValueError as exc:
+            raise ValueError("month must be 'YYYY-MM'") from exc
+        return v
+
+
+class SalaryPeriodOut(BaseModel):
+    month: str
+    amount: Decimal
+
+
 class EmployeeIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     position: str | None = Field(None, max_length=100)
     counterparty_id: int | None = None
-    fixed_salary: Decimal | None = Field(None, ge=0)
+    # История фикс-окладов; оклад месяца = период с max(month) <= месяц,
+    # до первого периода — 0.
+    salary_periods: list[SalaryPeriodIn] | None = None
     # None — дефолт 50/50 на 10-е и 25-е; сумма долей должна быть равна 1.
     fixed_pay_days: list[PayDayShare] | None = None
     is_active: bool = True
     notes: str | None = None
+
+    @field_validator("salary_periods")
+    @classmethod
+    def validate_periods(cls, v: list[SalaryPeriodIn] | None) -> list[SalaryPeriodIn] | None:
+        if v:
+            months = [p.month for p in v]
+            if len(months) != len(set(months)):
+                raise ValueError("salary_periods months must be unique")
+        return v
 
     @field_validator("fixed_pay_days")
     @classmethod
@@ -50,13 +82,14 @@ class EmployeeUpdate(BaseModel):
     clear_position: bool = False
     counterparty_id: int | None = None
     clear_counterparty: bool = False
-    fixed_salary: Decimal | None = Field(None, ge=0)
-    clear_fixed_salary: bool = False
+    # None — не трогать; список (в т.ч. пустой) — полная замена истории.
+    salary_periods: list[SalaryPeriodIn] | None = None
     fixed_pay_days: list[PayDayShare] | None = None
     is_active: bool | None = None
     notes: str | None = None
 
     validate_shares = field_validator("fixed_pay_days")(EmployeeIn.validate_shares.__func__)  # type: ignore[arg-type]
+    validate_periods = field_validator("salary_periods")(EmployeeIn.validate_periods.__func__)  # type: ignore[arg-type]
 
 
 class EmployeeResponse(BaseModel):
@@ -67,7 +100,9 @@ class EmployeeResponse(BaseModel):
     position: str | None
     counterparty_id: int | None
     counterparty_name: str | None = None
-    fixed_salary: Decimal | None
+    salary_periods: list[SalaryPeriodOut] = []
+    # Оклад, действующий в текущем месяце (для таблицы; None — нет периода).
+    current_salary: Decimal | None = None
     fixed_pay_days: list[PayDayShare] | None
     is_active: bool
     notes: str | None

@@ -58,15 +58,40 @@ class PayrollEmployee(Base, TimestampMixin, SoftDeleteMixin):
     # от должности.
     position: Mapped[str | None] = mapped_column(String(100), nullable=True)
     counterparty_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=True)
-    # Месячный фикс-оклад (бухгалтер, логист). None — сотрудник только на проценте.
-    fixed_salary: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     # График выплат фикса: [{"day": 10, "share": 0.5}, {"day": 25, "share": 0.5}].
     # None — дефолт 50/50 на 10-е и 25-е. Логист: [{"day": 15, "share": 1}].
     fixed_pay_days: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    salary_periods: Mapped[list["PayrollSalaryPeriod"]] = relationship(
+        back_populates="employee", cascade="all, delete-orphan", order_by="PayrollSalaryPeriod.valid_from"
+    )
+
     __table_args__ = (Index("ix_payroll_employee_project_id", "project_id"),)
+
+
+class PayrollSalaryPeriod(Base, TimestampMixin):
+    """
+    Период фикс-оклада: с месяца valid_from (первое число) действует amount.
+
+    Оклад месяца M = период с максимальным valid_from <= M; до первого периода
+    начисления нет (история: «у бух была 50к, с июля стала 80к» — два периода).
+    """
+
+    __tablename__ = "payroll_salary_period"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    employee_id: Mapped[int] = mapped_column(Integer, ForeignKey("payroll_employee.id"), nullable=False)
+    valid_from: Mapped[date] = mapped_column(Date, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+
+    employee: Mapped["PayrollEmployee"] = relationship(back_populates="salary_periods")
+
+    __table_args__ = (
+        UniqueConstraint("employee_id", "valid_from", name="uq_payroll_salary_period"),
+        Index("ix_payroll_salary_period_employee_id", "employee_id"),
+    )
 
 
 class PayrollTeam(Base, TimestampMixin, SoftDeleteMixin):
