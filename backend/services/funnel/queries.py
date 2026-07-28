@@ -26,6 +26,11 @@ from backend.services.tariff_service import get_avg_buyout_map, get_tariff_map
 
 logger = logging.getLogger("dds.funnel")
 
+# Спец-значение фильтра по ярлыку: «товары без единого ярлыка».
+# Совпадает с value опции на фронте (funnel/page.tsx). Реальный ярлык так
+# называться не может (имена не начинаются со служебных подчёркиваний).
+NO_TAG_SENTINEL = "__none__"
+
 
 def _compute_metrics_legacy(
     orders_sum: float,
@@ -1175,6 +1180,8 @@ async def resolve_filter_nm_ids(
     не подошло (запросы вернут пустой результат). imt — имя алиаса или "#<imt_id>".
     Несколько фильтров комбинируются по AND (пересечение). Цвет парсится из
     артикула (`Nomenclature.article_seller`, см. `article_parser.parse_color`).
+    `tag == NO_TAG_SENTINEL` — товары БЕЗ единого ярлыка (все nm без записи в
+    product_tag_map по проекту).
     """
     if not tag and not imt and not color:
         return None
@@ -1182,7 +1189,23 @@ async def resolve_filter_nm_ids(
     from backend.models.refs import ImtAlias, ProductTag, ProductTagMap
 
     result: set[int] | None = None
-    if tag:
+    if tag == NO_TAG_SENTINEL:
+        tagged = (
+            select(ProductTagMap.nm_id)
+            .join(ProductTag, ProductTag.id == ProductTagMap.tag_id)
+            .where(ProductTagMap.project_id == pid, ProductTag.is_deleted.is_(False))
+        )
+        rows = await db.execute(
+            select(Nomenclature.article_wb)
+            .where(
+                Nomenclature.project_id == pid,
+                Nomenclature.article_wb.isnot(None),
+                Nomenclature.article_wb.notin_(tagged),
+            )
+            .limit(50000)
+        )
+        result = {r[0] for r in rows}
+    elif tag:
         rows = await db.execute(
             select(ProductTagMap.nm_id)
             .join(ProductTag, ProductTag.id == ProductTagMap.tag_id)
