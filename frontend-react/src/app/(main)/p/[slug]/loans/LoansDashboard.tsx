@@ -72,6 +72,14 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
         value: Number(e.outstanding),
         count: e.count,
     }));
+    // Деление физлицо/ИП объясняет что-то только там, где заимодавцев много и
+    // сущность у них проставлена (реестр частных займов). Там, где кредиторы —
+    // пара банков и один ИП, оно вырождается в «ИП против прочерка»: показывать
+    // такую разбивку значит выдавать шум за структуру.
+    const knownEntities = data.by_entity.filter(
+        (e) => e.entity_type && (Number(e.outstanding) > 0 || Number(e.interest_due_period) > 0),
+    );
+    const showEntitySplit = knownEntities.length >= 2;
     // Стоимость денег за календарный месяц (прогноз/факт) отдельно по ИП и физлицам
     const interestByEntity = data.by_entity
         .filter((e) => Number(e.interest_due_period) > 0 || Number(e.outstanding) > 0)
@@ -155,7 +163,7 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
             </div>
 
             {/* Стоимость денег за месяц — раздельно по ИП и физлицам */}
-            {interestByEntity.length > 0 && (
+            {showEntitySplit && interestByEntity.length > 0 && (
                 <div className="glass-card" style={{ marginBottom: 16 }}>
                     <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>Стоимость денег за месяц по сущности</h3>
                     <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>
@@ -177,7 +185,7 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
 
             {/* Two columns: by entity + by rate */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginBottom: 16 }}>
-                <div className="glass-card">
+                {showEntitySplit && <div className="glass-card">
                     <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 12px' }}>Структура: физлица / ИП</h3>
                     <ResponsiveContainer width="100%" height={240}>
                         <PieChart>
@@ -187,7 +195,7 @@ export default function LoansDashboard({ nonce }: { nonce: number }) {
                             <Tooltip formatter={(v: number) => `${money(v)} ₽`} />
                         </PieChart>
                     </ResponsiveContainer>
-                </div>
+                </div>}
                 <div className="glass-card">
                     <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 12px' }}>Остаток тела по ставкам</h3>
                     <ResponsiveContainer width="100%" height={240}>

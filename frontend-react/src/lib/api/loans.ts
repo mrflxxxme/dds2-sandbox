@@ -32,7 +32,6 @@ import type {
     LenderAccessListResponse,
     LoanImportResult,
     LoanChain,
-    LoanChainListResponse,
     LoanMirrorCreate,
 } from '@/types/api';
 
@@ -161,9 +160,6 @@ export function addLoanMethods(api: ApiClient) {
         },
 
         // ─── Займы между своими проектами (зеркало) ────────────────────────────
-        loanChains() {
-            return api.request<LoanChainListResponse>('GET', '/api/v1/loans/chains');
-        },
         loanChain(loanId: number) {
             return api.request<LoanChain>('GET', `/api/v1/loans/${loanId}/chain`);
         },

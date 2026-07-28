@@ -8,6 +8,7 @@ import { money, ratePct, fmtDate, STATUS_LABEL, STATUS_BADGE, entityLabel } from
 import LoanFormModal from '../LoanFormModal';
 import ExtendModal from '../ExtendModal';
 import LoanSchedule from '../LoanSchedule';
+import LoanMirrorBlock from '../LoanMirrorBlock';
 
 const PAY_LABEL: Record<LoanPaymentType, string> = {
     DISBURSEMENT: 'Выдача',
@@ -28,6 +29,8 @@ export default function LoanDetailPage() {
     const [error, setError] = useState('');
     const [editing, setEditing] = useState(false);
     const [extending, setExtending] = useState(false);
+    // Растёт после правок займа — по нему перечитываются вложенные блоки.
+    const [reloadKey, setReloadKey] = useState(0);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -134,6 +137,8 @@ export default function LoanDetailPage() {
                 <LoanSchedule loanId={id} />
             </div>
 
+            <LoanMirrorBlock loanId={id} nonce={reloadKey} />
+
             {d.notes && (
                 <div className="glass-card" style={{ marginTop: 16 }}>
                     <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 6px' }}>Заметки</h3>
@@ -142,7 +147,7 @@ export default function LoanDetailPage() {
             )}
 
             {editing && (
-                <LoanFormModal mode="edit" loan={d} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); }} />
+                <LoanFormModal mode="edit" loan={d} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); setReloadKey((n) => n + 1); }} />
             )}
             {extending && (
                 <ExtendModal loan={d} onClose={() => setExtending(false)} onExtended={(newId) => { setExtending(false); router.push(`/p/${slug}/loans/${newId}`); }} />
