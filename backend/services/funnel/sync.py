@@ -234,7 +234,7 @@ async def run_funnel_sync(
             for nm_id, fd in funnel_data.items():
                 ad = day_ads.get(nm_id, {})
                 # cost_map for string keys is lowercased (load_avg_costs); WB vendor_code may differ in case
-                vc = (fd.get("vendor_code") or "").lower()
+                vc = (fd.get("vendor_code") or "").strip().lower()
                 unit_cost: float | None = cost_map.get(nm_id) or (cost_map.get(vc) if vc else None)
 
                 row = {

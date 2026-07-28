@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy import func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.services.bdr_loaders import SKU_TRIM_CHARS
 from backend.cache import cached
 from backend.models.cost import CostOpeningBalance, CostOrder, Nomenclature
 from backend.services.cost.valuation import (
@@ -193,7 +194,7 @@ def _v_to_sku_dict(v: dict) -> dict:
 async def _resolve_sku_for_barcode(db: AsyncSession, pid: int, barcode: str) -> str | None:
     """lower(article_seller) for a project barcode, or None if unknown."""
     row = await db.execute(
-        select(sa_func.lower(Nomenclature.article_seller))
+        select(sa_func.lower(sa_func.btrim(Nomenclature.article_seller, SKU_TRIM_CHARS)))
         .where(
             Nomenclature.project_id == pid,
             Nomenclature.barcode == barcode,

@@ -264,7 +264,7 @@ async def _load_margin_pct(
     overrides = await load_cost_overrides(db, project_id)
     cost_map: dict[int, float] = {}
     for nom_id, article in nom_to_article.items():
-        key = (article or "").lower()
+        key = (article or "").strip().lower()
         if key and key in avg_costs:
             cost_map[nom_id] = avg_costs[key]
             continue

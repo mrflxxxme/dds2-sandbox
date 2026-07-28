@@ -667,6 +667,17 @@ def _compute_tax_and_profit(
     return tax, total_profit
 
 
+def _per_unit(total: Decimal, qty_raw: int) -> float:
+    """Цена/прибыль за штуку периода. При нулевых/отрицательных нетто-штуках
+    (одни возвраты или чистые расходы — хранение/реклама без продаж) НЕ делим
+    на «1»: иначе весь период-расход становился «прибылью за штуку», а страница
+    остатков умножала его на весь сток (прод 28.07: 15 строк давали −8.7M из
+    −12.1M KPI «Прибыль» — 72% минуса фейковые)."""
+    if qty_raw <= 0:
+        return 0.0
+    return float(round(total / qty_raw, 2))
+
+
 async def _compute_period_metrics(
     db: AsyncSession,
     project_id: int,
@@ -729,7 +740,6 @@ async def _compute_period_metrics(
             continue
         days = max(int(row.days_count or 0), 1)
         sale_qty_raw = int(row.sale_qty or 0)
-        sale_qty = max(sale_qty_raw, 1)
         realization = Decimal(str(row.realization or 0))
         sales_amount = Decimal(str(row.sales_amount or 0))
         ppvz_net = Decimal(str(row.ppvz_net or 0))
@@ -768,11 +778,10 @@ async def _compute_period_metrics(
             "realization": realization,
             "total_profit": total_profit,
             "sale_qty_raw": sale_qty_raw,
-            "sale_qty": sale_qty,
             "orders_qty": orders_by_nom.get(nom_id, 0),
             "days_count": days,
-            "avg_price": float(round(realization / sale_qty, 2)),
-            "avg_profit": float(round(total_profit / sale_qty, 2)),
+            "avg_price": _per_unit(realization, sale_qty_raw),
+            "avg_profit": _per_unit(total_profit, sale_qty_raw),
         }
 
     # Items ordered in the window but with no finance rows yet (cold-start:
@@ -786,7 +795,6 @@ async def _compute_period_metrics(
             "realization": Decimal("0"),
             "total_profit": Decimal("0"),
             "sale_qty_raw": 0,
-            "sale_qty": 1,
             "orders_qty": orders_qty,
             "days_count": 1,
             "avg_price": 0.0,
@@ -1687,7 +1695,7 @@ async def get_unified_stock_summary(
         # Priority 2: per-unit cost by article_seller (case-insensitive) — legacy
         # weighted average or, for fifo/moving_avg, the engine's as-of unit cost.
         article = info.get("article_seller")
-        article_key = article.lower() if article else ""
+        article_key = article.strip().lower() if article else ""
         if article_key and article_key in avg_costs_by_article:
             cost_map[nom_id] = avg_costs_by_article[article_key]
 

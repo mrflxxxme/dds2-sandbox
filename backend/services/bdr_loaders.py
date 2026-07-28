@@ -14,6 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.models import CostOrderItem, WbCostOverride, WbFunnelDaily
 from backend.models.enums import VehicleStatus
 
+# Набор символов трима SKU-ключей: пробел + \t\n\r + NBSP. ОБЯЗАН совпадать
+# с python-стороной (.strip() режет их все): btrim по умолчанию режет ТОЛЬКО
+# пробел, а в данных есть артикулы с хвостовым \r\n (STYL_*), которые до трима
+# матчились «мусор-к-мусору» — рассинхрон наборов ломает им себестоимость.
+SKU_TRIM_CHARS = " \t\n\r\u00a0"
+
 logger = logging.getLogger("dds.bdr_loaders")
 
 D = Decimal
@@ -161,7 +167,9 @@ async def load_avg_costs(db: AsyncSession, pid: int) -> dict[str, float]:
         or_(CostOrder.status.is_(None), CostOrder.status != VehicleStatus.FORMING),
     )
 
-    article_lower = func.lower(CostOrderItem.article_seller).label("article_seller_lower")
+    # btrim симметрично ключам движка оценки (valuation.py): артикулы WB и
+    # закупок встречаются с хвостовым пробелом — без трима цена сиротела.
+    article_lower = func.lower(func.btrim(CostOrderItem.article_seller, SKU_TRIM_CHARS)).label("article_seller_lower")
     result = await db.execute(
         select(article_lower, weighted_avg.label("avg_cost"))
         .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
@@ -171,7 +179,7 @@ async def load_avg_costs(db: AsyncSession, pid: int) -> dict[str, float]:
     costs = {r.article_seller_lower: float(r.avg_cost or 0) for r in result if r.article_seller_lower}
 
     # Alias: reach the same cost by the WB article (via barcode → nomenclature).
-    wb_article_lower = func.lower(Nomenclature.article_seller).label("wb_article_lower")
+    wb_article_lower = func.lower(func.btrim(Nomenclature.article_seller, SKU_TRIM_CHARS)).label("wb_article_lower")
     alias_result = await db.execute(
         select(wb_article_lower, weighted_avg.label("avg_cost"))
         .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)

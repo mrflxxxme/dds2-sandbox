@@ -45,6 +45,7 @@ from backend.models.cost import CostOpeningBalance, CostOrder, CostOrderItem, No
 from backend.models.enums import VehicleStatus
 from backend.models.integrations import WbCostOverride
 from backend.models.wb_finance import WbFinanceRow
+from backend.services.bdr_loaders import SKU_TRIM_CHARS
 
 logger = logging.getLogger("dds.cost_valuation")
 
@@ -105,9 +106,14 @@ async def _load_batches(db: AsyncSession, pid: int) -> dict[str, list[_Batch]]:
     WB articles already agree the COALESCE is a no-op, so matched SKUs are
     unchanged bit-for-bit. avail_date = actual_arrival_date → ship_date →
     created_at (arrival_known False on the latter two)."""
-    sku_expr = sa_func.coalesce(
-        sa_func.lower(Nomenclature.article_seller),
-        sa_func.lower(CostOrderItem.article_seller),
+    # btrim: WB-карточки и закупки встречаются с хвостовым пробелом в артикуле
+    # («elka_240х220… » — 4 500 шт партий висели несвязанными). Ключ всегда
+    # lower(btrim(...)) — симметрично _load_sales/_load_meta и load_avg_costs.
+    sku_expr = sa_func.lower(
+        sa_func.btrim(
+            sa_func.coalesce(Nomenclature.article_seller, CostOrderItem.article_seller),
+            SKU_TRIM_CHARS,
+        )
     ).label("sku")
     rows = await db.execute(
         select(
@@ -162,7 +168,7 @@ async def _load_sales(db: AsyncSession, pid: int, sales_from: date | None = None
     """
     rows = await db.execute(
         select(
-            sa_func.lower(WbFinanceRow.sa_name).label("sku"),
+            sa_func.lower(sa_func.btrim(WbFinanceRow.sa_name, SKU_TRIM_CHARS)).label("sku"),
             sa_func.coalesce(WbFinanceRow.sale_dt, WbFinanceRow.rr_dt, WbFinanceRow.date_from).label("d"),
             WbFinanceRow.doc_type_name,
             WbFinanceRow.quantity,
@@ -195,7 +201,7 @@ async def _load_meta(db: AsyncSession, pid: int) -> dict[str, dict]:
     WbCostOverride. Keyed by lower(article_seller)."""
     rows = await db.execute(
         select(
-            sa_func.lower(Nomenclature.article_seller).label("sku"),
+            sa_func.lower(sa_func.btrim(Nomenclature.article_seller, SKU_TRIM_CHARS)).label("sku"),
             Nomenclature.barcode,
             Nomenclature.article_wb,
             Nomenclature.brand,
@@ -482,7 +488,7 @@ async def compute_project_valuation(
 
     keys = set(batches_by_sku) | set(sales_by_sku) | set(opening)
     if skus is not None:
-        keys &= {s.lower() for s in skus}
+        keys &= {s.strip().lower() for s in skus}
 
     result: dict[str, dict] = {}
     for sku in keys:

@@ -201,7 +201,7 @@ async def get_opiu(
         sa_name = row.sa_name or ""
         nm_id = row.nm_id or 0
         qty = int(row.total_qty or 0)
-        sku = sa_name.lower() if sa_name else ""
+        sku = sa_name.strip().lower() if sa_name else ""
         m_engine = win.get(sku, {}).get("monthly", {}).get(mk) if method != DEFAULT_METHOD else None
         if m_engine is not None:
             # Engine per-unit cost for this month × the window's net units (qty).

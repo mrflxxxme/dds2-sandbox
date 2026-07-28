@@ -457,6 +457,72 @@ class TestComputeProjectValuationDB:
         assert not any("Заведите приходы" in w for w in v["warnings"])
 
     @pytest.mark.asyncio
+    async def test_trailing_space_sale_matches_clean_batch(self, db_session, project):
+        """WB отдаёт sa_name с хвостовым пробелом, закупка заведена чистым
+        артикулом → ключи обязаны сойтись (кейс elka_240х220: 4 500 шт партий
+        висели несвязанными, ~6M выручки без COGS)."""
+        pid = project.id
+        art = f"ART-TRIM-{pid}"
+        bc = f"BC-TRIM-{pid}"
+        await _seed_batch_order(
+            db_session, pid, order_no=f"TRIM-{pid}", article=art, barcode=bc,
+            qty=10, total_rub="100.00", arrival=date(2025, 1, 1),
+        )
+        # продажа с ХВОСТОВЫМ ПРОБЕЛОМ в артикуле
+        await _seed_sale(db_session, pid, rrd_id=pid * 3000 + 1, article=art + " ", d=date(2025, 2, 10), qty=4)
+        await db_session.commit()
+
+        val = await compute_project_valuation(db_session, pid, skus={art})
+        v = val[art.lower()]
+        assert v["monthly"]["2025-02"]["cogs_fifo"] == Decimal("400.00")
+        assert v["on_hand_qty"] == 6
+        assert v["is_estimated"] is False
+
+    @pytest.mark.asyncio
+    async def test_crlf_article_matches_and_avg_costs_key_trimmed(self, db_session, project):
+        """Артикулы с хвостовым \\r\\n (класс STYL_*): btrim обязан резать тот же
+        набор символов, что python .strip(), иначе SQL-ключ сохраняет \\r\\n, а
+        lookup его срезает → 15 живых артикулов теряли себестоимость."""
+        from backend.services.bdr_loaders import load_avg_costs
+
+        pid = project.id
+        art = f"ART-CRLF-{pid}\r\n"
+        bc = f"BC-CRLF-{pid}"
+        await _seed_batch_order(
+            db_session, pid, order_no=f"CRLF-{pid}", article=art, barcode=bc,
+            qty=10, total_rub="300.00", arrival=date(2025, 1, 1),
+        )
+        await _seed_sale(db_session, pid, rrd_id=pid * 3000 + 3, article=art, d=date(2025, 2, 10), qty=2)
+        await db_session.commit()
+
+        clean = art.strip().lower()
+        val = await compute_project_valuation(db_session, pid, skus={clean})
+        assert val[clean]["monthly"]["2025-02"]["cogs_fifo"] == Decimal("600.00")
+
+        costs = await load_avg_costs(db_session, pid)
+        assert clean in costs  # ключ карты тримлен тем же набором
+        assert art.lower() not in costs
+
+    @pytest.mark.asyncio
+    async def test_spaced_on_both_sides_still_matches(self, db_session, project):
+        """Регресс для 14 живых артикулов: пробел и в закупке, и в продаже —
+        после трима обеих сторон матчинг обязан сохраниться."""
+        pid = project.id
+        art = f"ART-SP2-{pid} "  # пробел в закупке И карточке
+        bc = f"BC-SP2-{pid}"
+        await _seed_batch_order(
+            db_session, pid, order_no=f"SP2-{pid}", article=art, barcode=bc,
+            qty=10, total_rub="200.00", arrival=date(2025, 1, 1),
+        )
+        await _seed_sale(db_session, pid, rrd_id=pid * 3000 + 2, article=art, d=date(2025, 2, 10), qty=5)
+        await db_session.commit()
+
+        val = await compute_project_valuation(db_session, pid, skus={art.strip()})
+        v = val[art.strip().lower()]
+        assert v["monthly"]["2025-02"]["cogs_fifo"] == Decimal("1000.00")
+        assert v["on_hand_qty"] == 5
+
+    @pytest.mark.asyncio
     async def test_fifo_vs_lifetime_differ_per_window(self, db_session, project):
         """FIFO window COGS draws from the oldest layer first, so it differs
         from the flat lifetime average when batches have distinct costs."""

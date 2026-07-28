@@ -126,3 +126,29 @@ def test_regime_progression():
     assert profit_dr > profit_simple, f"DR ({profit_dr}) should beat simple ({profit_simple})"
     # cost_as_expense=True ещё больше уменьшает налог → ещё выше прибыль
     assert profit_dr_cost > profit_dr, f"DR+cost ({profit_dr_cost}) should beat DR ({profit_dr})"
+
+
+class TestPerUnit:
+    """_per_unit: период-расход без продаж не должен становиться «прибылью за
+    штуку» (кламп max(qty,1) давал −8.7M фейка в KPI «Прибыль» на проде 28.07)."""
+
+    def test_zero_qty_gives_zero(self):
+        from decimal import Decimal
+
+        from backend.services.warehouse_stock_engine import _per_unit
+
+        assert _per_unit(Decimal("-3994.83"), 0) == 0.0
+
+    def test_negative_qty_gives_zero(self):
+        from decimal import Decimal
+
+        from backend.services.warehouse_stock_engine import _per_unit
+
+        assert _per_unit(Decimal("500.00"), -3) == 0.0
+
+    def test_positive_qty_divides(self):
+        from decimal import Decimal
+
+        from backend.services.warehouse_stock_engine import _per_unit
+
+        assert _per_unit(Decimal("100.00"), 4) == 25.0
