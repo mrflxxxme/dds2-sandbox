@@ -13,6 +13,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -546,19 +547,21 @@ def _monthly_timeline(bundle: LoanBundle, as_of: date) -> list:
     out: list[LoanMonthlyPoint] = []
     running = ZERO
     current = as_of.strftime("%Y-%m")
-    for m in keys:
-        running += disbursed[m] - repaid[m]
-        cost = interest[m] + fees[m]
+    # Отдельное имя под ключ месяца: выше `m` — это date из цикла по месяцам,
+    # и переиспользование имени под строковый ключ ломает вывод типов.
+    for mk in keys:
+        running += disbursed[mk] - repaid[mk]
+        cost = interest[mk] + fees[mk]
         out.append(
             LoanMonthlyPoint(
-                month=m,
-                disbursed=disbursed[m].quantize(Decimal("0.01")),
-                repaid=repaid[m].quantize(Decimal("0.01")),
+                month=mk,
+                disbursed=disbursed[mk].quantize(Decimal("0.01")),
+                repaid=repaid[mk].quantize(Decimal("0.01")),
                 outstanding=running.quantize(Decimal("0.01")),
-                interest=interest[m].quantize(Decimal("0.01")),
-                fee=fees[m].quantize(Decimal("0.01")),
+                interest=interest[mk].quantize(Decimal("0.01")),
+                fee=fees[mk].quantize(Decimal("0.01")),
                 cost=cost.quantize(Decimal("0.01")),
-                is_partial=m == current,
+                is_partial=mk == current,
             )
         )
     # последние 24 месяца — читаемый график
@@ -754,7 +757,9 @@ async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_month
                 month_principal[mk] += principal_due
                 if pays_interest:
                     month_interest[mk] += interest_due
-                base = dict(
+                # Аннотация обязательна: без неё mypy выводит dict[str, object]
+                # и `**base` не раскладывается по типизированным полям события.
+                base: dict[str, Any] = dict(
                     date=row.due_date,
                     loan_id=loan.id,
                     counterparty_id=loan.counterparty_id,

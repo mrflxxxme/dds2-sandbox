@@ -30,6 +30,24 @@ MAX_DAYS = 400
 BODY_KINDS = ("DISBURSEMENT", "PRINCIPAL_REPAY")
 
 
+
+def _body_movement(moves: list[LoanPayment]) -> Decimal | None:
+    """
+    Движение тела за день: + выборка, − возврат. None — движений не было.
+
+    Отдельной функцией, а не `sum(...) if moves else None` по месту: у пустого
+    `sum` тип уезжает в `Decimal | Literal[0]`, и поле схемы (`Decimal | None`)
+    его не принимает.
+    """
+    if not moves:
+        return None
+    total = ZERO
+    for p in moves:
+        amount = Decimal(str(p.amount or 0))
+        total += amount if p.payment_type == "DISBURSEMENT" else -amount
+    return total
+
+
 async def daily_accrual(
     db: AsyncSession,
     *,
@@ -169,16 +187,7 @@ async def daily_accrual(
                 rate=rate_on(day),
                 interest=interest,
                 cumulative=cumulative,
-                movement=sum(
-                    (
-                        Decimal(str(p.amount or 0))
-                        if p.payment_type == "DISBURSEMENT"
-                        else -Decimal(str(p.amount or 0))
-                    )
-                    for p in moves
-                )
-                if moves
-                else None,
+                movement=_body_movement(moves),
             )
         )
         day += timedelta(days=1)

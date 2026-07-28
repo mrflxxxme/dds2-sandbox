@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from typing import TypedDict
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -131,9 +132,28 @@ async def _schedule_rows(db: AsyncSession, loan_id: int) -> list[LoanScheduleEnt
     )
 
 
+class _RowFact(TypedDict):
+    """
+    Факт по строке графика: сколько по ней реально заплатили и когда.
+
+    Именно TypedDict, а не `dict[str, Decimal | date | None]`: с объединением
+    mypy видит в `f["principal"]` любой из трёх типов и запрещает складывать
+    суммы — «Unsupported operand types for + (Decimal and date)».
+    """
+
+    principal: Decimal
+    interest: Decimal
+    fee: Decimal
+    last: date | None
+
+
+def _empty_fact() -> _RowFact:
+    return {"principal": ZERO, "interest": ZERO, "fee": ZERO, "last": None}
+
+
 def _match_payments(
     rows: list[LoanScheduleEntry], payments: list[LoanPayment]
-) -> dict[int, dict[str, Decimal | date | None]]:
+) -> dict[int, _RowFact]:
     """
     Разложить фактические платежи по строкам графика — по ближайшей дате.
 
@@ -141,15 +161,7 @@ def _match_payments(
     позже, и с разных счетов, а суммы аннуитета одинаковые. Ближайшая плановая
     дата — единственный устойчивый признак.
     """
-    facts: dict[int, dict] = {
-        r.id: {
-            "principal": ZERO,
-            "interest": ZERO,
-            "fee": ZERO,
-            "last": None,
-        }
-        for r in rows
-    }
+    facts: dict[int, _RowFact] = {r.id: _empty_fact() for r in rows}
     if not rows:
         return facts
     for pay in payments:
@@ -189,7 +201,7 @@ def _build_response(
     next_due_amount = ZERO
 
     for row in rows:
-        f = facts.get(row.id, {"principal": ZERO, "interest": ZERO, "fee": ZERO, "last": None})
+        f = facts.get(row.id) or _empty_fact()
         plan = Decimal(str(row.payment_total or 0))
         paid_total = f["principal"] + f["interest"] + f["fee"]
         last: date | None = f["last"]
