@@ -287,6 +287,16 @@ class LoanScheduleEntry(Base, TimestampMixin):
     is_fee: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # Строка — ПЛАН ПОГАШЕНИЯ накопленного долга, а не график начисления кредитора.
+    # Разница принципиальная: обычный график ОТМЕНЯЕТ формулу — движок берёт
+    # проценты из него (у аннуитета банк считает своё округление). План погашения
+    # так вести нельзя: проценты по займу продолжают капать по ставке, а строки
+    # лишь говорят, когда и сколько платить в счёт уже начисленного. Без этого
+    # флага пять строк «по 2,59 млн 25-го числа» подменили бы собой всё начисление
+    # займа и обнулили бы долг, который они гасят.
+    is_debt_plan: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     note: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     loan: Mapped["Loan"] = relationship(back_populates="schedule", foreign_keys=[loan_id])

@@ -219,6 +219,10 @@ class ScheduleRowLite:
     interest_due: Decimal
     principal_due: Decimal = ZERO
     is_fee: bool = False
+    # Строка плана погашения накопленного долга: говорит, КОГДА платить, а не
+    # сколько начислено. Для начисления невидима — проценты по ней капают
+    # формулой по ставке займа.
+    is_debt_plan: bool = False
 
 
 def schedule_interest_in_window(
@@ -233,11 +237,12 @@ def schedule_interest_in_window(
 
     Внутри строки проценты линейны по дням (тело и ставка постоянны), поэтому
     делим сумму строки пропорционально дням, попавшим в окно. Строки-комиссии
-    пропускаем — они учитываются как `LoanFee`, иначе расход задвоится.
+    пропускаем — они учитываются как `LoanFee`, иначе расход задвоится. Строки
+    плана погашения — тоже: они гасят уже начисленное, а не начисляют.
     """
     total = ZERO
     for row in rows or []:
-        if row.is_fee or not row.interest_due:
+        if row.is_fee or row.is_debt_plan or not row.interest_due:
             continue
         start = row.period_start or row.due_date
         end = row.period_end or row.due_date

@@ -74,6 +74,7 @@ def rows_lite(rows: list[LoanScheduleEntry]) -> list[loan_interest.ScheduleRowLi
             interest_due=Decimal(str(r.interest_due or 0)),
             principal_due=Decimal(str(r.principal_due or 0)),
             is_fee=bool(r.is_fee),
+            is_debt_plan=bool(r.is_debt_plan),
         )
         for r in rows
     ]
@@ -229,6 +230,7 @@ def _build_response(
                 payment_total=plan,
                 balance_after=Decimal(str(row.balance_after)) if row.balance_after is not None else None,
                 is_fee=bool(row.is_fee),
+                is_debt_plan=bool(row.is_debt_plan),
                 note=row.note,
                 principal_paid=f["principal"],
                 interest_paid=f["interest"],
@@ -332,6 +334,7 @@ async def replace_schedule(
                 payment_total=r.payment_total,
                 balance_after=r.balance_after,
                 is_fee=r.is_fee,
+                is_debt_plan=r.is_debt_plan,
                 note=r.note,
             )
         )

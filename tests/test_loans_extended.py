@@ -989,6 +989,27 @@ def test_schedule_interest_splits_into_calendar_months():
     assert march + april == Decimal("569589.04")
 
 
+def test_debt_plan_rows_do_not_replace_accrual():
+    """
+    План погашения долга — не график начисления.
+
+    Строки «когда и сколько платить в счёт накопленных процентов» обязаны быть
+    невидимы для движка начисления: иначе пять строк по 2,59 млн подменили бы
+    собой проценты за весь срок займа и обнулили бы долг, который они гасят.
+    """
+    from backend.services.loan_interest import ScheduleRowLite, schedule_interest_in_window
+
+    plan = [
+        ScheduleRowLite(None, None, date(2026, 8, 25), None,
+                        Decimal("2586613.56"), is_debt_plan=True),
+        ScheduleRowLite(None, None, date(2026, 9, 25), None,
+                        Decimal("2586613.56"), is_debt_plan=True),
+    ]
+    assert schedule_interest_in_window(
+        plan, win_start=date(2026, 7, 31), win_end=date(2026, 8, 31)
+    ) == Decimal("0")
+
+
 def test_one_off_fee_amortizes_without_losing_kopecks():
     """Разовая комиссия размазывается по сроку и в сумме даёт ровно себя."""
     from backend.services.loan_interest import FeeLite, fee_in_window
@@ -1414,6 +1435,120 @@ async def test_forecast_uses_schedule_for_annuity(db_session, client, auth_heade
     # События идут парами «проценты + тело» на каждую дату платежа
     may = [e for e in res["upcoming"] if e["date"] == "2026-05-25"]
     assert {e["kind"] for e in may} == {"INTEREST", "MATURITY"}
+
+
+@pytest.mark.asyncio
+async def test_forecast_shows_debt_plan_payments(db_session, client, auth_headers):
+    """
+    План погашения долга обязан быть В ПРОГНОЗЕ выплат.
+
+    Для начисления строки плана невидимы — но это будущие ПЛАТЕЖИ, и без них
+    экран «Прогноз» показывает run-rate по ставке (0,7 млн) вместо суммы, о
+    которой договорились (2,59 млн), а в «Ближайших событиях» займа нет вовсе.
+    После последнего платежа плана прогноз обязан вернуться к run-rate: тело
+    никуда не делось и продолжает капать.
+    """
+    from backend.schemas.loan import LoanScheduleReplace, LoanScheduleRowIn
+    from backend.services import loan_schedule
+
+    project_id = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id, "Вяткин")
+    svc = LoanService(db_session)
+    loan = await svc.create(
+        data=LoanCreate(
+            counterparty_id=cp_id, direction="INCOMING", principal=Decimal("31095100"),
+            currency="RUB", rate=Decimal("0.27"), contract_number="б/н план",
+            contract_date=date(2025, 3, 4), start_date=date(2025, 3, 4),
+        ),
+        project_id=project_id,
+    )
+    rows = [
+        LoanScheduleRowIn(
+            seq=i + 1, due_date=date(2026, 8 + i, 25),
+            principal_due=Decimal("0"), interest_due=Decimal("2586613.56"),
+            payment_total=Decimal("2586613.56"), is_debt_plan=True,
+        )
+        for i in range(5)
+    ]
+    await loan_schedule.replace_schedule(
+        db_session, loan_id=loan.id, project_id=project_id,
+        data=LoanScheduleReplace(rows=rows),
+    )
+
+    res = await loan_analytics.forecast.__wrapped__(
+        db_session, project_id, date(2026, 7, 28), horizon_months=12
+    )
+    by_month = {m["month"]: m for m in res["months"]}
+    # Месяцы плана — сумма договорённости, а не run-rate по ставке
+    assert Decimal(by_month["2026-08"]["interest"]) == Decimal("2586613.56")
+    assert Decimal(by_month["2026-12"]["interest"]) == Decimal("2586613.56")
+    # Тело план не гасит
+    assert Decimal(by_month["2026-08"]["principal_due"]) == Decimal("0")
+    # После плана — снова run-rate по ставке, а не ноль
+    assert Decimal("0") < Decimal(by_month["2027-01"]["interest"]) < Decimal("1000000")
+    # Каждый платёж плана виден в «Ближайших событиях»
+    plan_events = [
+        e for e in res["upcoming"]
+        if e["kind"] == "INTEREST" and e["amount"] == "2586613.56"
+    ]
+    assert len(plan_events) == 5
+    assert plan_events[0]["date"] == "2026-08-25"
+
+
+@pytest.mark.asyncio
+async def test_forecast_keeps_accruing_on_overdue_loan(db_session, client, auth_headers):
+    """
+    Срок вышел, а деньги не вернули — проценты обязаны идти дальше.
+
+    Прогноз обрезал начисление датой возврата, и займ, который не продлили и не
+    погасили, выпадал из него ЦЕЛИКОМ: ни процентов в месяцах, ни строки в
+    событиях. Между тем движок по факту продолжает начислять — прогноз обещал
+    ноль там, где ОПиУ потом показывал расход.
+    """
+    project_id = await _create_project(client, auth_headers)
+    cp_id = await _create_cp(db_session, project_id, "Просрочка")
+    svc = LoanService(db_session)
+    await svc.create(
+        data=LoanCreate(
+            counterparty_id=cp_id, direction="INCOMING", principal=Decimal("4000000"),
+            currency="RUB", rate=Decimal("0.26"), contract_number="62-01 просрочен",
+            contract_date=date(2026, 1, 26), start_date=date(2026, 1, 26),
+            maturity_date=date(2026, 7, 26),  # срок ВЫШЕЛ, тело висит
+        ),
+        project_id=project_id,
+    )
+
+    res = await loan_analytics.forecast.__wrapped__(
+        db_session, project_id, date(2026, 7, 28), horizon_months=6
+    )
+    by_month = {m["month"]: m for m in res["months"]}
+    # 4 млн под 26 % — это ~86,7 тыс. в месяц, и они никуда не делись
+    assert Decimal(by_month["2026-08"]["interest"]) > Decimal("80000")
+    assert Decimal(by_month["2026-09"]["interest"]) > Decimal("80000")
+
+
+def test_body_days_counts_overdue_body_but_not_closed_loan():
+    """
+    Среднее тело: просроченный займ в знаменателе, закрытый — нет.
+
+    Знаменатель эффективной ставки обрезался датой возврата у ВСЕХ займов. У
+    просроченного проценты при этом капали — числитель рос, знаменатель стоял,
+    и «стоимость денег» задиралась на ровном месте. У закрытого обрезка нужна:
+    если строк возврата нет, дату закрытия взять неоткуда.
+    """
+    from types import SimpleNamespace
+
+    from backend.services.loan_analytics import _body_days
+
+    kw = dict(
+        start_date=date(2026, 1, 26), maturity_date=date(2026, 7, 26),
+        principal=Decimal("4000000"),
+    )
+    overdue = SimpleNamespace(status="ACTIVE", **kw)
+    closed = SimpleNamespace(status="CLOSED", **kw)
+    # Окно (26.07, 28.07] — два дня уже ПОСЛЕ срока
+    assert _body_days(overdue, [], date(2026, 7, 26), date(2026, 7, 28)) == Decimal("8000000")
+    assert _body_days(closed, [], date(2026, 7, 26), date(2026, 7, 28)) == Decimal("0")
 
 
 def test_principal_only_schedule_keeps_engine_interest():

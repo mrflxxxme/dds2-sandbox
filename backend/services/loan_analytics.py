@@ -187,8 +187,13 @@ def _schedule_has_interest(schedule: list[loan_interest.ScheduleRowLite] | None)
     проценты там платят помесячно по факту выборки, и в графике их нет. Считать
     «график есть → проценты берём из него» нельзя: у линии это обнулило бы
     1,6 млн ₽ в месяц и в стоимости денег, и в ОПиУ.
+
+    План погашения накопленного долга (`is_debt_plan`) графиком начисления тоже
+    не считается — он гасит уже начисленное, а не начисляет.
     """
-    return any(r.interest_due and not r.is_fee for r in (schedule or []))
+    return any(
+        r.interest_due and not r.is_fee and not r.is_debt_plan for r in (schedule or [])
+    )
 
 
 def loan_cost_in_window(
@@ -731,6 +736,13 @@ async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_month
         # вместо двенадцати платежей по 3 021 911,33).
         schedule = bundle.schedule.get(loan.id)
         sched_interest = _schedule_has_interest(schedule)
+        # План погашения накопленного долга для НАЧИСЛЕНИЯ невидим, но в прогноз
+        # ВЫПЛАТ обязан попасть: иначе экран показывает run-rate по ставке вместо
+        # суммы, о которой договорились, а сам займ пропадает из «Ближайших
+        # событий». В месяцы плана run-rate не добавляем — задвоило бы платёж.
+        plan_months = {
+            r.due_date.strftime("%Y-%m") for r in (schedule or []) if r.is_debt_plan
+        }
         if schedule:
             for row in schedule:
                 if row.due_date < as_of:
@@ -738,8 +750,9 @@ async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_month
                 mk = row.due_date.strftime("%Y-%m")
                 principal_due = Decimal(str(row.principal_due or 0))
                 interest_due = Decimal(str(row.interest_due or 0))
+                pays_interest = sched_interest or row.is_debt_plan
                 month_principal[mk] += principal_due
-                if sched_interest:
+                if pays_interest:
                     month_interest[mk] += interest_due
                 base = dict(
                     date=row.due_date,
@@ -748,7 +761,7 @@ async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_month
                     counterparty_name=name,
                     contract_number=loan.contract_number,
                 )
-                if sched_interest and interest_due > ZERO:
+                if pays_interest and interest_due > ZERO:
                     upcoming.append(LoanForecastEvent(**base, kind="INTEREST", amount=interest_due))
                 if principal_due > ZERO:
                     upcoming.append(LoanForecastEvent(**base, kind="MATURITY", amount=principal_due))
@@ -773,7 +786,10 @@ async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_month
                         if bal > ZERO:
                             body_days += bal
                         day = date.fromordinal(day.toordinal() + 1)
-                    if body_days > ZERO:
+                    # Месяцы плана погашения уже дали свою сумму выше; run-rate
+                    # поверх плана задвоил бы выплату. После последнего платежа
+                    # плана он снова нужен: тело никуда не делось и капает.
+                    if body_days > ZERO and cur_m.strftime("%Y-%m") not in plan_months:
                         month_interest[cur_m.strftime("%Y-%m")] += (
                             body_days * rate / loan_interest.DAYS_PER_YEAR
                         )
@@ -786,7 +802,17 @@ async def forecast(db: AsyncSession, project_id: int, as_of: date, horizon_month
             cur_m = date(as_of.year, as_of.month, 1)
             for _ in range(horizon_months):
                 nxt_m = add_months(cur_m, 1)
-                active_to = min(nxt_m, loan.maturity_date) if loan.maturity_date else nxt_m
+                # Срок обрывает начисление, только если он ВПЕРЕДИ: вернут тело —
+                # проценты кончатся. Если срок уже прошёл, а заём жив и тело не
+                # погашено, деньги остались у нас и продолжают стоить: обрезка
+                # выкидывала такой займ из прогноза целиком — ни процентов по
+                # месяцам, ни строки в событиях, хотя ОПиУ потом покажет расход.
+                overdue = loan.maturity_date is not None and loan.maturity_date < as_of
+                active_to = (
+                    min(nxt_m, loan.maturity_date)
+                    if loan.maturity_date and not overdue
+                    else nxt_m
+                )
                 active_from = max(cur_m, loan.start_date)
                 if active_to > active_from and active_to > as_of:
                     month_interest[cur_m.strftime("%Y-%m")] += calc.monthly_interest
@@ -854,7 +880,11 @@ def _body_days(
         elif p.payment_type == "PRINCIPAL_REPAY":
             moves.append((p.paid_at, -p.amount))
     lo = max(win_start, date.fromordinal(loan.start_date.toordinal() - 1))
-    if loan.maturity_date is not None:
+    # Обрезаем по сроку только ЗАКРЫТЫЙ займ: у него может не быть строк возврата,
+    # и дату, когда тело ушло, взять больше неоткуда. У живого просроченного тело
+    # реально на руках и проценты по нему капают — выкинув его из знаменателя,
+    # мы бы задрали эффективную ставку на ровном месте.
+    if loan.maturity_date is not None and loan.status != "ACTIVE":
         win_end = min(win_end, loan.maturity_date)
     if win_end <= lo:
         return ZERO

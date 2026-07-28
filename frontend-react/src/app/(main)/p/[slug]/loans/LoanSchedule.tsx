@@ -51,6 +51,9 @@ export default function LoanSchedule({ loanId }: { loanId: number }) {
                     {r.is_fee && (
                         <div style={{ fontSize: 11, color: 'var(--color-text-dim)', fontWeight: 400 }}>комиссия за выдачу</div>
                     )}
+                    {r.is_debt_plan && (
+                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)', fontWeight: 400 }}>план погашения</div>
+                    )}
                 </span>
             ),
         },
@@ -151,9 +154,20 @@ export default function LoanSchedule({ loanId }: { loanId: number }) {
         );
     }
 
+    // Экран один, но смыслов два: график кредитора (что мы обязаны по договору)
+    // и план погашения накопленного долга (о чём договорились сами).
+    const allDebtPlan = data.rows.every((r) => r.is_debt_plan);
+
     return (
         <div>
-            <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 12px' }}>График платежей</h3>
+            <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>
+                {allDebtPlan ? 'План погашения долга' : 'График платежей'}
+            </h3>
+            <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>
+                {allDebtPlan
+                    ? 'Договорённость о том, когда и сколько платить в счёт уже начисленных процентов. Проценты по займу продолжают капать по ставке — план их гасит, а не заменяет.'
+                    : 'Плановые даты и суммы из договора; рядом — факт платежей и отклонение.'}
+            </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
                 <Metric label="Всего к возврату" value={`${money(data.total_payment)} ₽`} />
                 <Metric label="Оплачено" value={`${money(data.paid_total)} ₽`} accent="var(--color-success)" />

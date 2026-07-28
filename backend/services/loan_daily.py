@@ -101,7 +101,9 @@ async def daily_accrual(
             .all()
         )
     )
-    has_schedule_interest = any(r.interest_due and not r.is_fee for r in schedule)
+    has_schedule_interest = any(
+        r.interest_due and not r.is_fee and not r.is_debt_plan for r in schedule
+    )
 
     lites = [
         loan_interest.PaymentLite(p.payment_type, Decimal(str(p.amount or 0)), p.paid_at)
