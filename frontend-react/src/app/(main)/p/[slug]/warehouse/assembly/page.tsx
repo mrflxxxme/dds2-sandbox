@@ -475,8 +475,9 @@ export default function AssemblyListPage() {
     // Filters
     const [warehouseId, setWarehouseId] = useState<number | ''>('');
     const [statusFilter, setStatusFilter] = useState('');
-    // Вид списка: по умолчанию «Активные» — скрываем уже принятые ВБ / закрытые /
-    // отменённые сборки (чище список). «Архив» — только они; «Все» — без фильтра.
+    // Вид списка: по умолчанию «Активные» — скрываем уже принятые ВБ / возвращённые
+    // на склад / закрытые / отменённые сборки (чище список). «Архив» — только они;
+    // «Все» — без фильтра. Явный статус в фильтре имеет приоритет над видом.
     const [view, setView] = useState<'active' | 'archived' | 'all'>('active');
     const [dateFrom, setDateFrom] = useState('');
     const [dateTo, setDateTo] = useState('');
@@ -1404,7 +1405,7 @@ export default function AssemblyListPage() {
                             className="form-input"
                             value={view}
                             onChange={e => { setView(e.target.value as 'active' | 'archived' | 'all'); }}
-                            title="Принятые ВБ, закрытые и отменённые сборки уходят в архив"
+                            title="Принятые ВБ, возвраты на склад, закрытые и отменённые сборки уходят в архив"
                         >
                             <option value="active">Активные</option>
                             <option value="archived">Архив</option>

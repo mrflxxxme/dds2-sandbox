@@ -860,11 +860,16 @@ async def list_source_vehicles(
 
 
 # Статусы, при которых сборка авто-уходит в «Архив» основного списка заявок:
-# «Принято ВБ» (DELIVERED) / «Закрыта» (CLOSED) / «Отменена» (CANCELLED) — в
-# активном списке они не нужны (зеркало _AUTO_ARCHIVE_STATUSES FF-портала + CLOSED).
+# «Принято ВБ» (DELIVERED) / «Возврат на склад» (RETURNED) / «Закрыта» (CLOSED) /
+# «Отменена» (CANCELLED) — в активном списке они не нужны (зеркало
+# _AUTO_ARCHIVE_STATUSES FF-портала + CLOSED/RETURNED).
 # Переход в DELIVERED ставится автоматически при приёмке WB (fbo_supply/sync.py).
+# RETURNED НЕтерминален (из него возможна переотгрузка через reopen_for_reship),
+# но текущая отгрузка уже отработала — в активной работе такая заявка не нужна;
+# найти её можно явным фильтром статуса «Возврат на склад» или видом «Архив»/«Все».
 _LIST_ARCHIVED_STATUSES = (
     AssemblyStatus.DELIVERED.value,
+    AssemblyStatus.RETURNED.value,
     AssemblyStatus.CLOSED.value,
     AssemblyStatus.CANCELLED.value,
 )
@@ -897,7 +902,7 @@ async def list_assembly_requests(
     с привязанной; None — без фильтра. Привязка живёт в
     FulfillmentRequest.assembly_request_id (project-scoped).
 
-    view: "active" — скрыть авто-архивные терминальные статусы (Принято ВБ /
+    view: "active" — скрыть авто-архивные статусы (Принято ВБ / Возврат на склад /
     Закрыта / Отменена); "archived" — только их; "all"/None — без фильтра.
     Явный `status` имеет приоритет над `view` (выбор конкретного статуса
     показывает его независимо от вида).
