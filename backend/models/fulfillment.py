@@ -172,6 +172,10 @@ class FulfillmentRequest(Base):
     # документа», а расхождение остатков на стыке TR ↔ приёмка провайдера
     # приходилось разбирать руками (разбор wh2/TR-20 15.07, TR-29 24.07).
     stock_transfer_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("stock_transfers.id"))
+    # Когда авто-приём применил ФАКТ этой приёмки к связанному перемещению
+    # (receive_transfer_fact). is_completed у провайдера остаётся True навсегда —
+    # без маркера каждый синк применял бы факт повторно.
+    transfer_fact_applied_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     __table_args__ = (
         UniqueConstraint("project_id", "provider", "external_id", name="uq_ff_request_external"),

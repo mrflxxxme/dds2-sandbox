@@ -1,7 +1,15 @@
 /** Loans API methods */
 import { ApiClient } from './client';
 import type {
+    CreditLineDetail,
+    CreditLineDraw,
+    CreditLineListResponse,
     LenderDetail,
+    LoanFeeIn,
+    LoanFeeListResponse,
+    LoanRatePeriodIn,
+    LoanScheduleReplace,
+    LoanScheduleResponse,
     LoanStuckResponse,
     LoanDetail,
     LoanListResponse,
@@ -23,6 +31,10 @@ import type {
     LenderAccessInfo,
     LenderAccessListResponse,
     LoanImportResult,
+    LoanAccrualDaysResponse,
+    LoanLentResponse,
+    LoanChain,
+    LoanMirrorCreate,
 } from '@/types/api';
 
 export function addLoanMethods(api: ApiClient) {
@@ -80,6 +92,63 @@ export function addLoanMethods(api: ApiClient) {
         repayLoan(id: number, data: LoanRepay) {
             return api.request<Loan>('POST', `/api/v1/loans/${id}/repay`, data);
         },
+        creditLines() {
+            return api.request<CreditLineListResponse>('GET', '/api/v1/loans/credit-lines');
+        },
+        creditLine(loanId: number) {
+            return api.request<CreditLineDetail>('GET', `/api/v1/loans/${loanId}/credit-line`);
+        },
+        drawCreditLine(loanId: number, data: CreditLineDraw) {
+            return api.request<CreditLineDetail>('POST', `/api/v1/loans/${loanId}/credit-line/draw`, data);
+        },
+        addRatePeriod(loanId: number, data: LoanRatePeriodIn) {
+            return api.request<CreditLineDetail>('POST', `/api/v1/loans/${loanId}/rate-periods`, data);
+        },
+        // ─── График платежей и разовые комиссии ───────────────────────────────
+        loanSchedule(loanId: number) {
+            return api.request<LoanScheduleResponse>('GET', `/api/v1/loans/${loanId}/schedule`);
+        },
+        replaceLoanSchedule(loanId: number, data: LoanScheduleReplace) {
+            return api.request<LoanScheduleResponse>('PUT', `/api/v1/loans/${loanId}/schedule`, data);
+        },
+        loanAccrualDays(loanId: number, dateFrom?: string, dateTo?: string) {
+            const q = new URLSearchParams();
+            if (dateFrom) q.set('date_from', dateFrom);
+            if (dateTo) q.set('date_to', dateTo);
+            const qs = q.toString();
+            return api.request<LoanAccrualDaysResponse>(
+                'GET', `/api/v1/loans/${loanId}/accrual-days${qs ? `?${qs}` : ''}`
+            );
+        },
+        /** Начисление по дням по всему портфелю: сколько стоит (или приносит) день. */
+        portfolioAccrualDays(params?: {
+            date_from?: string;
+            date_to?: string;
+            direction?: LoanDirection;
+        }) {
+            const q = new URLSearchParams();
+            if (params?.date_from) q.set('date_from', params.date_from);
+            if (params?.date_to) q.set('date_to', params.date_to);
+            if (params?.direction) q.set('direction', params.direction);
+            const qs = q.toString();
+            return api.request<LoanAccrualDaysResponse>(
+                'GET', `/api/v1/loans/accrual-days${qs ? `?${qs}` : ''}`
+            );
+        },
+        /** Выданные займы: сколько нам должны и сколько это приносит. */
+        loansLent() {
+            return api.request<LoanLentResponse>('GET', '/api/v1/loans/lent');
+        },
+        loanFees(loanId: number) {
+            return api.request<LoanFeeListResponse>('GET', `/api/v1/loans/${loanId}/fees`);
+        },
+        addLoanFee(loanId: number, data: LoanFeeIn) {
+            return api.request<LoanFeeListResponse>('POST', `/api/v1/loans/${loanId}/fees`, data);
+        },
+        deleteLoanFee(loanId: number, feeId: number) {
+            return api.request<LoanFeeListResponse>('DELETE', `/api/v1/loans/${loanId}/fees/${feeId}`);
+        },
+
         stuckLoans() {
             return api.request<LoanStuckResponse>('GET', '/api/v1/loans/stuck');
         },
@@ -118,6 +187,17 @@ export function addLoanMethods(api: ApiClient) {
             return api.request<LenderAccessInfo>(
                 'POST', `/api/v1/loans/lenders/access/${counterpartyId}/revoke`
             );
+        },
+
+        // ─── Займы между своими проектами (зеркало) ────────────────────────────
+        loanChain(loanId: number) {
+            return api.request<LoanChain>('GET', `/api/v1/loans/${loanId}/chain`);
+        },
+        createLoanMirror(loanId: number, data: LoanMirrorCreate) {
+            return api.request<LoanChain>('POST', `/api/v1/loans/${loanId}/mirror`, data);
+        },
+        syncLoanMirror(loanId: number) {
+            return api.request<LoanChain>('POST', `/api/v1/loans/${loanId}/mirror/sync`);
         },
 
         // ─── Excel import ─────────────────────────────────────────────────────

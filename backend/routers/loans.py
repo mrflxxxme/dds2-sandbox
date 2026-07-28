@@ -11,37 +11,63 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
 from backend.database import get_db
-from backend.models import Project
+from backend.auth import get_current_user
+from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.loan import (
+    CreditLineDetail,
+    CreditLineDraw,
+    CreditLineListResponse,
+    LoanAccrualDaysResponse,
+    LoanAccrualMonthsResponse,
     LenderAccessCreate,
     LenderDetail,
     LenderAccessCreated,
     LenderAccessInfo,
     LenderAccessListResponse,
     LoanByLenderResponse,
+    LoanChain,
+    LoanChainListResponse,
     LoanCreate,
     LoanDashboard,
     LoanDetail,
     LoanExtend,
+    LoanFeeIn,
+    LoanFeeListResponse,
     LoanFilter,
     LoanForecastResponse,
     LoanImportResult,
+    LoanLentResponse,
     LoanListResponse,
+    LoanMirrorCreate,
     LoanPaymentMatch,
     LoanPaymentResponse,
     LoanRepay,
+    LoanRatePeriodIn,
     LoanResponse,
+    LoanScheduleReplace,
+    LoanScheduleResponse,
     LoanStuckResponse,
     LoanUpdate,
 )
-from backend.services import lender_access_service, loan_analytics, loan_import
+from backend.services import (
+    lender_access_service,
+    loan_analytics,
+    loan_daily,
+    loan_import,
+    loan_mirror,
+    loan_schedule,
+)
 from backend.services.loan_service import (
     LoanPaymentAlreadyExistsError,
     LoanService,
     ProjectMismatchError,
+    draw_credit_line,
+    get_credit_line,
     get_lender_detail,
+    list_credit_lines,
     list_stuck_loans,
+    set_rate_period,
 )
 from backend.utils.rate_limit import rate_limit_write
 from backend.utils.time import utcnow
@@ -169,6 +195,66 @@ async def revoke_lender_access(
     return await lender_access_service.revoke_access(db, project.id, counterparty_id)
 
 
+@router.get("/accrual-months", response_model=LoanAccrualMonthsResponse)
+async def accrual_months(
+    months: int = Query(12, ge=1, le=36),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Начисленные проценты и комиссии по КАЛЕНДАРНЫМ месяцам — база для ОПиУ.
+
+    Считается по дням, поэтому разные календари выплат (25→25, месяц + 5-е,
+    аннуитет) сводятся в один месячный P&L без искажений.
+    """
+    return await loan_analytics.accrual_by_month(db, project.id, utcnow().date(), months)
+
+
+@router.get("/accrual-days", response_model=LoanAccrualDaysResponse)
+async def portfolio_accrual_days(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    direction: str = Query("INCOMING", pattern="^(INCOMING|OUTGOING)$"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Начисление по дням по всему портфелю: сколько стоит день.
+
+    `direction=OUTGOING` — сколько день приносит по выданным займам.
+    """
+    return await loan_daily.portfolio_daily(
+        db, project_id=project.id, date_from=date_from, date_to=date_to, direction=direction
+    )
+
+
+@router.get("/lent", response_model=LoanLentResponse)
+async def loans_lent(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Выданные займы: сколько нам должны тела и процентов, и сколько это приносит."""
+    return await loan_analytics.lent_summary(db, project.id, utcnow().date())
+
+
+@router.get("/credit-lines", response_model=CreditLineListResponse)
+async def credit_lines(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Все кредитные линии проекта: лимиты, выборка, свободный остаток."""
+    return await list_credit_lines(db, project_id=project.id)
+
+
+@router.get("/chains", response_model=LoanChainListResponse)
+async def loan_chains(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Займы, у которых есть вторая сторона в другом проекте: обе книги одного договора."""
+    return await loan_mirror.list_chains(db, project_id=project.id)
+
+
 @router.get("/stuck", response_model=LoanStuckResponse)
 async def stuck_loans(
     project: Project = Depends(get_current_project),
@@ -291,6 +377,194 @@ async def repay_loan(
     service = LoanService(db)
     loan = await service.repay(loan_id=loan_id, data=body, project_id=project.id)
     return LoanResponse.model_validate(loan)
+
+
+# ─── Кредитная линия ─────────────────────────────────────────────────────────
+
+
+@router.get("/{loan_id}/credit-line", response_model=CreditLineDetail)
+async def credit_line(
+    loan_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Состояние линии: лимит, выбрано, свободно, движения и история ставок."""
+    return await get_credit_line(db, loan_id=loan_id, project_id=project.id)
+
+
+@router.post(
+    "/{loan_id}/credit-line/draw",
+    response_model=CreditLineDetail,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def credit_line_draw(
+    loan_id: int,
+    body: CreditLineDraw,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Выборка транша по линии — увеличивает тело долга, проверяет лимит."""
+    return await draw_credit_line(db, loan_id=loan_id, project_id=project.id, data=body)
+
+
+@router.post(
+    "/{loan_id}/rate-periods",
+    response_model=CreditLineDetail,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def add_rate_period(
+    loan_id: int,
+    body: LoanRatePeriodIn,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ставка с даты (плавающая: ключевая ЦБ + надбавка). Повтор даты перезаписывает."""
+    return await set_rate_period(db, loan_id=loan_id, project_id=project.id, data=body)
+
+
+# ─── Займ между своими проектами (зеркало) ───────────────────────────────────
+
+
+@router.get("/{loan_id}/chain", response_model=LoanChain)
+async def loan_chain(
+    loan_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Договор целиком: обе стороны, движения, начисление по календарным месяцам."""
+    return await loan_mirror.get_chain(db, loan_id=loan_id, project_id=project.id)
+
+
+@router.post(
+    "/{loan_id}/mirror",
+    response_model=LoanChain,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def loan_mirror_create(
+    loan_id: int,
+    body: LoanMirrorCreate,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Завести вторую сторону договора в другом проекте (направление переворачивается).
+
+    Целевой проект приходит телом запроса — доступ к нему сервис проверяет отдельно:
+    `get_current_project` ручается только за текущий.
+    """
+    return await loan_mirror.create_mirror(
+        db, loan_id=loan_id, project_id=project.id, user_id=user.id, data=body
+    )
+
+
+@router.post(
+    "/{loan_id}/mirror/sync",
+    response_model=LoanChain,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def loan_mirror_sync(
+    loan_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Досинхронизировать стороны: недостающие движения и ставки едут на обе."""
+    return await loan_mirror.sync_mirror(db, loan_id=loan_id, project_id=project.id)
+
+
+@router.get("/{loan_id}/accrual-days", response_model=LoanAccrualDaysResponse)
+async def loan_accrual_days(
+    loan_id: int,
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Подневная расшифровка начисления: тело, ставка дня и проценты за сутки.
+
+    Своды показывают итог, а спорить с банком можно только по дням — так и
+    находились расхождения в день смены ставки и в день выборки транша.
+    """
+    return await loan_daily.daily_accrual(
+        db, loan_id=loan_id, project_id=project.id, date_from=date_from, date_to=date_to
+    )
+
+
+# ─── График платежей и разовые комиссии ──────────────────────────────────────
+
+
+@router.get("/{loan_id}/schedule", response_model=LoanScheduleResponse)
+async def loan_schedule_get(
+    loan_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Плановый график платежей со сверкой факта: что заплатили, когда, с каким отклонением."""
+    return await loan_schedule.get_schedule(db, loan_id=loan_id, project_id=project.id)
+
+
+@router.put(
+    "/{loan_id}/schedule",
+    response_model=LoanScheduleResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def loan_schedule_put(
+    loan_id: int,
+    body: LoanScheduleReplace,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Заменить график целиком — он приходит из договора одной таблицей."""
+    return await loan_schedule.replace_schedule(
+        db, loan_id=loan_id, project_id=project.id, data=body
+    )
+
+
+@router.get("/{loan_id}/fees", response_model=LoanFeeListResponse)
+async def loan_fees_list(
+    loan_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Разовые комиссии по займу (за выдачу, за установление лимита)."""
+    return await loan_schedule.list_fees(db, loan_id=loan_id, project_id=project.id)
+
+
+@router.post(
+    "/{loan_id}/fees",
+    response_model=LoanFeeListResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def loan_fee_add(
+    loan_id: int,
+    body: LoanFeeIn,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Завести разовую комиссию. По умолчанию амортизируется на срок договора."""
+    return await loan_schedule.add_fee(db, loan_id=loan_id, project_id=project.id, data=body)
+
+
+@router.delete(
+    "/{loan_id}/fees/{fee_id}",
+    response_model=LoanFeeListResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def loan_fee_delete(
+    loan_id: int,
+    fee_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Удалить разовую комиссию."""
+    return await loan_schedule.delete_fee(
+        db, loan_id=loan_id, project_id=project.id, fee_id=fee_id
+    )
 
 
 # ─── Manual match: attach Transaction ↔ LoanPayment ─────────────────────────

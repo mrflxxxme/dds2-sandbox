@@ -1150,7 +1150,7 @@ function SkuAnalyticsPanel({
                                                 <button className="btn btn-primary btn-sm" disabled={savingArr} onClick={() => saveArrival(l.order_no)}>✓</button>
                                                 <button className="btn btn-sm" disabled={savingArr} onClick={() => setEditOrder(null)}>✕</button>
                                             </>
-                                        ) : l.order_no !== 'RETURN' && l.order_no !== 'OPENING' ? (
+                                        ) : l.order_no !== 'RETURN' && l.order_no !== 'OPENING' && l.order_no !== 'AUTO-OPENING' ? (
                                             <>
                                                 <span
                                                     style={{ cursor: 'pointer', textDecoration: 'underline dotted' }}

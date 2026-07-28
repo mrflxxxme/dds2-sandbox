@@ -667,6 +667,17 @@ def _compute_tax_and_profit(
     return tax, total_profit
 
 
+def _per_unit(total: Decimal, qty_raw: int) -> float:
+    """Цена/прибыль за штуку периода. При нулевых/отрицательных нетто-штуках
+    (одни возвраты или чистые расходы — хранение/реклама без продаж) НЕ делим
+    на «1»: иначе весь период-расход становился «прибылью за штуку», а страница
+    остатков умножала его на весь сток (прод 28.07: 15 строк давали −8.7M из
+    −12.1M KPI «Прибыль» — 72% минуса фейковые)."""
+    if qty_raw <= 0:
+        return 0.0
+    return float(round(total / qty_raw, 2))
+
+
 async def _compute_period_metrics(
     db: AsyncSession,
     project_id: int,
@@ -729,7 +740,6 @@ async def _compute_period_metrics(
             continue
         days = max(int(row.days_count or 0), 1)
         sale_qty_raw = int(row.sale_qty or 0)
-        sale_qty = max(sale_qty_raw, 1)
         realization = Decimal(str(row.realization or 0))
         sales_amount = Decimal(str(row.sales_amount or 0))
         ppvz_net = Decimal(str(row.ppvz_net or 0))
@@ -768,11 +778,10 @@ async def _compute_period_metrics(
             "realization": realization,
             "total_profit": total_profit,
             "sale_qty_raw": sale_qty_raw,
-            "sale_qty": sale_qty,
             "orders_qty": orders_by_nom.get(nom_id, 0),
             "days_count": days,
-            "avg_price": float(round(realization / sale_qty, 2)),
-            "avg_profit": float(round(total_profit / sale_qty, 2)),
+            "avg_price": _per_unit(realization, sale_qty_raw),
+            "avg_profit": _per_unit(total_profit, sale_qty_raw),
         }
 
     # Items ordered in the window but with no finance rows yet (cold-start:
@@ -786,7 +795,6 @@ async def _compute_period_metrics(
             "realization": Decimal("0"),
             "total_profit": Decimal("0"),
             "sale_qty_raw": 0,
-            "sale_qty": 1,
             "orders_qty": orders_qty,
             "days_count": 1,
             "avg_price": 0.0,
@@ -1676,17 +1684,20 @@ async def get_unified_stock_summary(
 
     cost_map: dict[int, float] = {}
     for nom_id, info in nom_map.items():
-        # Priority 1: per-unit cost by article_seller (case-insensitive) — legacy
-        # weighted average or, for fifo/moving_avg, the engine's as-of unit cost.
-        article = info.get("article_seller")
-        article_key = article.lower() if article else ""
-        if article_key and article_key in avg_costs_by_article:
-            cost_map[nom_id] = avg_costs_by_article[article_key]
-            continue
-        # Priority 2: WbCostOverride manual override by nm_id
+        # Priority 1: WbCostOverride — РУЧНАЯ цена по nm_id ПОБЕЖДАЕТ движок
+        # (канон юзера 2026-07-28): override ставится сознательно, чаще всего
+        # там, где закупки не заведены/кривые; раньше цена движка молча затеняла
+        # 67 из 133 живых override'ов (±1M на остатке) без какой-либо индикации.
         nm_id = info.get("article_wb")
         if nm_id and nm_id in cost_overrides and cost_overrides[nm_id] > 0:
             cost_map[nom_id] = cost_overrides[nm_id]
+            continue
+        # Priority 2: per-unit cost by article_seller (case-insensitive) — legacy
+        # weighted average or, for fifo/moving_avg, the engine's as-of unit cost.
+        article = info.get("article_seller")
+        article_key = article.strip().lower() if article else ""
+        if article_key and article_key in avg_costs_by_article:
+            cost_map[nom_id] = avg_costs_by_article[article_key]
 
     # Priority 3: WarehouseStock.cost_price (manual per-warehouse)
     for row in own_rows:
@@ -1763,6 +1774,7 @@ async def get_unified_stock_summary(
                 "wb_in_way_to_client": 0,
                 "wb_in_way_from_client": 0,
                 "total_defect": 0,
+                "transfer_transit": 0,
                 "total": 0,
                 "factory_qty": 0,
                 "vehicle_forming_qty": 0,
@@ -1791,9 +1803,13 @@ async def get_unified_stock_summary(
             }
         return unified[nom_id]
 
-    # Own warehouse stock
+    # Own warehouse stock. in_transit/defect_in_transit — отправленные, но ещё
+    # не принятые перемещения между нашими складами (send_transfer кредитует их
+    # на склад-назначение): это наш товар в пути, без него SKU, целиком уехавший
+    # в TR, пропадал из сводки (кейс TR-21: 9 234 шт невидимы 12 дней).
     for row in own_rows:
-        if row.quantity <= 0 and row.defect_quantity <= 0:
+        transit = int(row.in_transit or 0) + int(row.defect_in_transit or 0)
+        if row.quantity <= 0 and row.defect_quantity <= 0 and transit <= 0:
             continue
         entry = _ensure(row.nomenclature_id)
         wh_name = wh_name_map.get(row.warehouse_id, str(row.warehouse_id))
@@ -1802,6 +1818,8 @@ async def get_unified_stock_summary(
             entry["total_own"] += row.quantity
         if row.defect_quantity > 0:
             entry["total_defect"] += row.defect_quantity
+        if transit > 0:
+            entry["transfer_transit"] += transit
 
     # WB stock. «В пути…» — отдельные поля-колонки, не разбивка по складам;
     # total_wb = только физически на складах WB («Всего находится на складах»).
@@ -1856,17 +1874,20 @@ async def get_unified_stock_summary(
         entry = _ensure(nom_id)
         entry["vehicle_transit_qty"] = qty
 
-    # Compute totals. «В пути до получателей» (wb_in_way_to_client) НЕ входит в
-    # «Итого»: этот товар уже уехал к покупателям (по сути продан) — считать его
-    # доступным остатком для дозаказа неверно. Он остаётся отдельной колонкой.
-    # «Возвраты на склад WB» (wb_in_way_from_client) — входят: вернутся и снова
-    # станут доступны. Supply chain — отдельные колонки.
+    # Compute totals. «Итого» — КАПИТАЛ в товаре (канон 2026-07-28):
+    # «В пути до получателей» входит — до выкупа товар всё ещё наш (невыкуп
+    # вернётся); брак входит — это наш товар по себестоимости, пусть и с другой
+    # ликвидностью. Для скорости продаж / «запаса дней» фронт считает отдельный
+    # sellable-срез без этих двух слагаемых. Supply chain — отдельные колонки.
     for entry in unified.values():
         entry["total"] = (
             entry["total_own"]
             + entry["total_wb"]
+            + entry["wb_in_way_to_client"]
             + entry["wb_in_way_from_client"]
             + entry["in_transit"]
+            + entry["total_defect"]
+            + entry["transfer_transit"]
         )
 
     # Narrowed forecast fallback — only runs in forecast mode. Estimates
@@ -1947,6 +1968,8 @@ async def _group_unified(
             "reserved_by_warehouse": {},
             "reserved_details": [],
             "total": 0,
+            "total_defect": 0,
+            "transfer_transit": 0,
             "factory_qty": 0,
             "vehicle_forming_qty": 0,
             "vehicle_transit_qty": 0,
@@ -1981,6 +2004,8 @@ async def _group_unified(
             "in_transit",
             "reserved",
             "total",
+            "total_defect",
+            "transfer_transit",
             "factory_qty",
             "vehicle_forming_qty",
             "vehicle_transit_qty",

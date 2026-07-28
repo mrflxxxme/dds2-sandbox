@@ -186,9 +186,9 @@ async def get_stock_cost_map(db: AsyncSession, pid: int) -> dict[int, dict]:
     for nm_id, e in stock_map.items():
         # Приоритет цены: avg по заказам → override → cost_price складской строки
         unit_cost = 0.0
-        article = article_by_nm.get(nm_id)
-        if article and article.lower() in avg_costs:
-            unit_cost = avg_costs[article.lower()]
+        article_key = (article_by_nm.get(nm_id) or "").strip().lower()
+        if article_key and article_key in avg_costs:
+            unit_cost = avg_costs[article_key]
         elif overrides.get(nm_id, 0) > 0:
             unit_cost = overrides[nm_id]
         elif nm_id in stock_cost_price:

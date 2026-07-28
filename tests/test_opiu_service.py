@@ -158,7 +158,7 @@ class TestPnLFormulas:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _pnl(opex_by_type):
+def _pnl(opex_by_type, loan_cost=None):
     """Run _build_pnl_result over a single month with a fixed base scenario."""
     mk = "2026-01"
     d = _empty_totals()
@@ -180,6 +180,7 @@ def _pnl(opex_by_type):
         date(2026, 1, 1),
         date(2026, 1, 31),
         opex_by_type=opex_by_type,
+        loan_cost=loan_cost,
     )
 
 
@@ -224,6 +225,45 @@ class TestOperatingExpenses:
         result = _pnl({"DESIGNER": {"2026-01": 300.0}})
         rows = self._rows_by_key(result)
         assert rows["ebitda"]["total"] == rows["gross_margin"]["total"] - 300
+
+
+class TestLoanInterestInOpex:
+    """Стоимость денег — операционный расход: проценты по займам + комиссии банков."""
+
+    def _rows_by_key(self, result):
+        return {r["key"]: r for r in result["rows"]}
+
+    def test_no_row_without_loans(self):
+        """Займов нет — строки нет вовсе, лишний ноль в отчёте не нужен."""
+        rows = self._rows_by_key(_pnl({}))
+        assert "opex_loan_interest" not in rows
+
+    def test_interest_added_to_opex_and_ebitda(self):
+        """Проценты входят в опер. расходы и уменьшают EBITDA наравне с прочим опексом."""
+        result = _pnl(
+            {"DESIGNER": {"2026-01": 300.0}},
+            loan_cost={"2026-01": {"interest": 1000.0, "fee": 0.0}},
+        )
+        rows = self._rows_by_key(result)
+        assert rows["opex_loan_interest"]["total"] == 1000
+        assert rows["opex_loan_interest"]["parent_key"] == "operating_expenses"
+        assert rows["operating_expenses"]["total"] == 1300  # 300 подрядчик + 1000 проценты
+        assert rows["ebitda"]["total"] == rows["gross_margin"]["total"] - 1300
+        # Комиссий нет — детей не разворачиваем
+        assert rows["opex_loan_interest"]["expandable"] is False
+        assert "loan_fees" not in rows
+
+    def test_fees_split_into_children(self):
+        """Есть комиссии — раскрываются отдельной строкой под процентами."""
+        result = _pnl({}, loan_cost={"2026-01": {"interest": 1000.0, "fee": 250.0}})
+        rows = self._rows_by_key(result)
+        parent = rows["opex_loan_interest"]
+        assert parent["total"] == 1250
+        assert parent["expandable"] is True
+        assert rows["loan_interest"]["total"] == 1000
+        assert rows["loan_fees"]["total"] == 250
+        assert rows["loan_fees"]["parent_key"] == "opex_loan_interest"
+        assert rows["loan_fees"]["level"] == 2
 
 
 class TestOpexSql:

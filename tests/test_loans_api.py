@@ -69,14 +69,24 @@ async def test_create_loan_201(client, auth_headers):
 
 
 @pytest.mark.asyncio
-async def test_create_loan_zero_principal_422(client, auth_headers):
-    """POST with principal=0 returns 422."""
+async def test_create_loan_principal_zero_ok_negative_422(client, auth_headers):
+    """
+    principal=0 разрешён, отрицательный — нет.
+
+    У револьверных займов (кредитная линия, займ учредителя) тело задают движения —
+    выборки и возвраты, — а `principal` символический. Прежний запрет на ноль
+    заставлял заводить фиктивный рубль, лишь бы пройти валидацию.
+    """
     headers, _ = await _project_headers(client, auth_headers)
     cp_id = await _create_counterparty(client, headers)
 
     payload = _loan_payload(cp_id)
     payload["principal"] = "0"
+    resp = await client.post("/api/v1/loans", json=payload, headers=headers)
+    assert resp.status_code == 201, resp.text
+    assert Decimal(resp.json()["principal"]) == Decimal("0")
 
+    payload["principal"] = "-1"
     resp = await client.post("/api/v1/loans", json=payload, headers=headers)
     assert resp.status_code == 422
 

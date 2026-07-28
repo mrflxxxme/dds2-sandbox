@@ -36,6 +36,7 @@ from backend.services.warehouse_outbound import (
 )
 from backend.services.warehouse_stock_engine import (
     get_stock_movements,
+    get_unified_stock_summary,
     get_warehouse_stock,
 )
 
@@ -495,3 +496,15 @@ class TestGetDefectSummary:
         assert wh2.id in found[0]["warehouses"]
         assert found[0]["warehouses"][wh.id] == 20
         assert found[0]["warehouses"][wh2.id] == 15
+
+    @pytest.mark.asyncio
+    async def test_defect_counts_into_unified_total(self, db_session, project, wh, bc):
+        """Брак — наш товар (капитал): входит в «Итого» единых остатков."""
+        await _stock(db_session, project, wh, bc, 100)
+        await mark_defect(db_session, project.id, wh.id, {"barcode": bc, "quantity": 30})
+
+        rows = await get_unified_stock_summary(db_session, project.id, group_by="sku")
+        row = next(r for r in rows if r["barcode"] == bc)
+        assert row["total_own"] == 70
+        assert row["total_defect"] == 30
+        assert row["total"] == 100  # годный (70) + брак (30)

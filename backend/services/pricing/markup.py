@@ -129,7 +129,7 @@ def _sklejka_label(imt_id: int | None, aliases: dict[int, str]) -> str:
 
 def _resolve_cost(nm_id: int, meta: dict, avg_costs: dict[str, float], overrides: dict[int, float]) -> float | None:
     """Себестоимость единицы: avg по закупкам (article_seller) → override(nm) → склад."""
-    article = (meta.get("article_seller") or "").lower()
+    article = (meta.get("article_seller") or "").strip().lower()
     if article and article in avg_costs:
         return avg_costs[article]
     ov = overrides.get(nm_id, 0)

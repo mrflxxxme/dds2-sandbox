@@ -1384,6 +1384,8 @@ export interface UnifiedStockRow {
   /** WB: «В пути возвраты на склад WB» — отдельная колонка, не входит в total_wb */
   wb_in_way_from_client: number;
   total_defect: number;
+  /** Перемещения между нашими складами: отправлено, но ещё не принято (TR-*) */
+  transfer_transit: number;
   total: number;
   factory_qty: number;
   vehicle_forming_qty: number;
@@ -4886,7 +4888,8 @@ export type LoanPaymentType =
   | 'DISBURSEMENT'
   | 'PRINCIPAL_REPAY'
   | 'INTEREST_PAY'
-  | 'PENALTY';
+  | 'PENALTY'
+  | 'COMMISSION';
 
 export interface LoanShort {
   id: number;
@@ -7388,9 +7391,17 @@ export interface LoanKpis {
   active_count: number;
   total_outstanding: number;
   weighted_avg_rate: number | null;
+  /** Дашборд считает по КАЛЕНДАРНОМУ месяцу: проценты с 1-го числа по сегодня. */
   accrued_interest: number;
+  accrued_fee: number;
+  accrued_cost: number;
+  month_cost_projected: number;
+  effective_rate: number | null;
+  accrual_month: string | null;
   monthly_interest: number;
   interest_paid_total: number;
+  /** Начислено за всё время минус уплачено — сколько процентов реально висит. */
+  interest_debt: number;
   lenders_count: number;
   next_maturity_date: string | null;
   next_maturity_amount: number;
@@ -7418,12 +7429,16 @@ export interface LoanTopLender {
   weighted_avg_rate: number | null;
 }
 
+/** Точка динамики за КАЛЕНДАРНЫЙ месяц (`month` = YYYY-MM). */
 export interface LoanMonthlyPoint {
   month: string;
   disbursed: number;
   repaid: number;
   outstanding: number;
   interest: number;
+  fee: number;
+  cost: number;
+  is_partial: boolean;
 }
 
 export interface LoanDashboard {
@@ -7446,6 +7461,8 @@ export interface LoanLenderRollup {
   weighted_avg_rate: number | null;
   accrued_interest: number;
   interest_paid: number;
+  /** Начислено за всё время минус уплачено. */
+  interest_debt: number;
   monthly_interest: number;
   next_interest_date: string | null;
   next_maturity_date: string | null;
@@ -7462,10 +7479,233 @@ export interface LoanByLenderResponse {
   total_outstanding: number;
   total_accrued: number;
   total_due_period: number;
+  total_interest_debt: number;
   by_entity: LoanEntitySplit[];
   accrual_period_start: string | null;
   accrual_period_end: string | null;
   archived_count: number;
+}
+
+/** Ставка, действующая с даты (плавающая: ключевая ЦБ + надбавка). */
+export interface LoanRatePeriod {
+  id: number;
+  loan_id: number;
+  valid_from: string;
+  rate: number;
+  base_rate: number | null;
+  spread: number | null;
+  note: string | null;
+}
+
+/** Движение по кредитной линии: выборка или погашение. */
+export interface CreditLineMovement {
+  payment_id: number;
+  kind: 'DISBURSEMENT' | 'PRINCIPAL_REPAY';
+  amount: number;
+  happened_at: string;
+  balance_after: number;
+}
+
+export interface CreditLineDetail {
+  loan_id: number;
+  contract_number: string;
+  counterparty_name: string | null;
+  credit_limit: number | null;
+  drawn: number;
+  available: number | null;
+  utilization: number | null;
+  current_rate: number | null;
+  accrual_kind: 'PERIOD_25' | 'CALENDAR_MONTH';
+  accrual_period_start: string | null;
+  accrual_period_end: string | null;
+  accrued_interest: number;
+  interest_due_period: number;
+  interest_paid: number;
+  /** Комиссия за НЕиспользованный лимит — плата за зарезервированные деньги. */
+  unused_limit_rate: number | null;
+  unused_fee_accrued: number;
+  unused_fee_period: number;
+  /** Уплачено комиссий всего (касса). */
+  commission_paid: number;
+  /** Разовые комиссии: всего по договору и доля, севшая на период. */
+  one_off_fee_total: number;
+  one_off_fee_period: number;
+  /** Проценты + все комиссии за период. */
+  total_cost_period: number;
+  payment_due_date: string | null;
+  status: LoanStatus;
+  maturity_date: string | null;
+  movements: CreditLineMovement[];
+  rate_periods: LoanRatePeriod[];
+  fees: LoanFee[];
+}
+
+export interface CreditLineListResponse {
+  items: CreditLineDetail[];
+  total_limit: number;
+  total_drawn: number;
+  total_available: number;
+  /** Только проценты. */
+  total_due_period: number;
+  /** Комиссии за период: резерв лимита + доля разовых. */
+  total_fee_period: number;
+  total_cost_period: number;
+}
+
+// ─── График платежей и разовые комиссии ──────────────────────────────────────
+
+export type LoanFeeKind = 'ORIGINATION' | 'LIMIT_SETUP' | 'OTHER';
+
+/** Разовая комиссия. `amortize` — размазывать ли расход по сроку договора. */
+export interface LoanFeeIn {
+  fee_kind: LoanFeeKind;
+  amount: number;
+  charged_at: string;
+  amortize: boolean;
+  amortize_from?: string | null;
+  amortize_to?: string | null;
+  payment_id?: number | null;
+  note?: string | null;
+}
+
+export interface LoanFee extends LoanFeeIn {
+  id: number;
+  loan_id: number;
+}
+
+export interface LoanFeeListResponse {
+  items: LoanFee[];
+  total: number;
+}
+
+/** Один день начисления: тело на утро, ставка дня, проценты за сутки. */
+export interface LoanAccrualDay {
+  date: string;
+  balance: number;
+  rate: number | null;
+  interest: number;
+  cumulative: number;
+  /** Движение тела в этот день: + выборка, − возврат. */
+  movement: number | null;
+}
+
+export interface LoanAccrualDaysResponse {
+  loan_id: number;
+  contract_number: string | null;
+  date_from: string;
+  date_to: string;
+  rows: LoanAccrualDay[];
+  total_interest: number;
+  avg_balance: number;
+  effective_rate: number | null;
+  /** Проценты взяты из графика (аннуитет), а не из формулы. */
+  from_schedule: boolean;
+}
+
+/** Один получатель наших денег: сколько должен тела и процентов. */
+export interface LoanLentItem {
+  counterparty_id: number;
+  name: string;
+  loan_id: number;
+  contract_number: string;
+  rate: number | null;
+  outstanding: number;
+  /** Начислено процентов за всё время. */
+  accrued_total: number;
+  interest_received: number;
+  /** Начислено минус получено — долг по процентам. */
+  interest_due: number;
+  /** Тело + долг по процентам. */
+  total_due: number;
+  accrued_month: number;
+  /** Заполнено, если вторая сторона займа — наш же проект. */
+  mirror_project_name: string | null;
+}
+
+export interface LoanLentResponse {
+  items: LoanLentItem[];
+  total_outstanding: number;
+  total_accrued: number;
+  total_received: number;
+  total_interest_due: number;
+  total_due: number;
+  /** Доход за текущий календарный месяц. */
+  month_income: number;
+}
+
+/** Состояние строки графика: оплачена / частично / просрочена / ближайшая. */
+export type LoanScheduleState = 'PAID' | 'PARTIAL' | 'OVERDUE' | 'DUE' | 'UPCOMING';
+
+export interface LoanScheduleRowIn {
+  seq: number;
+  period_start?: string | null;
+  period_end?: string | null;
+  due_date: string;
+  days?: number | null;
+  principal_due: number;
+  interest_due: number;
+  payment_total: number;
+  balance_after?: number | null;
+  /** Строка-комиссия: напечатана в колонке процентов, но это не проценты. */
+  is_fee: boolean;
+  /** Строка плана погашения накопленного долга, а не графика кредитора. */
+  is_debt_plan: boolean;
+  note?: string | null;
+}
+
+export interface LoanScheduleRow extends LoanScheduleRowIn {
+  id: number;
+  principal_paid: number;
+  interest_paid: number;
+  /** Комиссии и пени, севшие на эту дату. */
+  fee_paid: number;
+  paid_total: number;
+  paid_at: string | null;
+  /** Факт − план: минус = недоплата. */
+  delta: number;
+  /** + опоздание, − заплатили раньше срока. */
+  days_late: number | null;
+  state: LoanScheduleState;
+}
+
+export interface LoanScheduleResponse {
+  loan_id: number;
+  contract_number: string | null;
+  rows: LoanScheduleRow[];
+  total_principal: number;
+  total_interest: number;
+  total_payment: number;
+  paid_principal: number;
+  paid_interest: number;
+  paid_total: number;
+  left_principal: number;
+  left_interest: number;
+  left_total: number;
+  next_due_date: string | null;
+  next_due_amount: number;
+  overdue_count: number;
+  overdue_amount: number;
+  total_fees: number;
+  /** Полная стоимость: проценты графика (без строк-комиссий) + сами комиссии. */
+  total_cost: number;
+}
+
+export interface LoanScheduleReplace {
+  rows: LoanScheduleRowIn[];
+}
+
+export interface CreditLineDraw {
+  amount: number;
+  drawn_at: string;
+  note?: string | null;
+}
+
+export interface LoanRatePeriodIn {
+  valid_from: string;
+  rate: number;
+  base_rate?: number | null;
+  spread?: number | null;
+  note?: string | null;
 }
 
 /** Займ, по которому срок кончился, а решения не приняли. */
@@ -7632,6 +7872,80 @@ export interface LenderAccessCreated extends LenderAccessInfo {
 
 export interface LenderAccessListResponse {
   items: LenderAccessInfo[];
+}
+
+// ─── Займы между своими проектами (зеркало) ──────────────────────────────────
+
+/** Начислено за КАЛЕНДАРНЫЙ месяц — строка для ОПиУ. */
+export interface LoanAccrualMonth {
+  month: string;
+  interest: number;
+  fee: number;
+  total: number;
+  ip: number;
+  physical: number;
+  avg_body: number;
+  effective_rate: number | null;
+  days: number;
+}
+
+export interface LoanMirrorCreate {
+  target_project_id: number;
+  counterparty_id?: number | null;
+  counterparty_name?: string | null;
+  counterparty_inn?: string | null;
+}
+
+/** Одна сторона договора: чья книга, что в ней числится. */
+export interface LoanMirrorSide {
+  loan_id: number;
+  project_id: number;
+  project_name: string | null;
+  project_slug: string | null;
+  counterparty_name: string | null;
+  direction: LoanDirection;
+  status: LoanStatus;
+  outstanding: number;
+  accrued_interest: number;
+  accrued_total: number;
+  interest_paid: number;
+  interest_debt: number;
+  current_rate: number | null;
+}
+
+/** Движение по договору: выдача тела, возврат, выплата процентов. */
+export interface LoanChainMovement {
+  happened_at: string;
+  kind: LoanPaymentType;
+  amount: number;
+  balance_after: number | null;
+}
+
+/** Договор целиком: обе книги, движения и итог. */
+export interface LoanChain {
+  contract_number: string;
+  contract_date: string | null;
+  start_date: string | null;
+  maturity_date: string | null;
+  sides: LoanMirrorSide[];
+  total_disbursed: number;
+  total_repaid: number;
+  outstanding: number;
+  accrued_total: number;
+  interest_paid: number;
+  interest_debt: number;
+  total_debt: number;
+  rate_periods: LoanRatePeriod[];
+  movements: LoanChainMovement[];
+  monthly: LoanAccrualMonth[];
+  in_sync: boolean;
+  sync_note: string | null;
+}
+
+export interface LoanChainListResponse {
+  items: LoanChain[];
+  total_outstanding: number;
+  total_interest_debt: number;
 }
 
 export interface SupplierDebtItem {

@@ -196,7 +196,7 @@ async def get_wb_bdr(
         if sa_sql:
             sa_result = await db.execute(text(sa_sql), params)
             for r in sa_result.mappings():
-                sa_to_group[(r["sa_name"] or "").lower()] = r["group_key"] or ""
+                sa_to_group[(r["sa_name"] or "").strip().lower()] = r["group_key"] or ""
 
     # Pre-aggregate enrichment data by group (brand/subject)
     if group_by in ("brand", "subject"):
@@ -336,7 +336,7 @@ async def get_wb_bdr(
             # legacy weighted-average path. Override by nm_id is the fallback for
             # SKUs the engine doesn't cover. cost_map keyed by lowercased
             # article_seller; sa_name from WB may differ in case.
-            sku = sa_name.lower() if sa_name else ""
+            sku = sa_name.strip().lower() if sa_name else ""
             sale_qty = metrics["sale_qty"]
             if method != DEFAULT_METHOD and sku in win:
                 # eff_cost is the engine's per-unit COGS for the window's month(s).

@@ -7,12 +7,16 @@ import type { LoanDetail, LoanPaymentType } from '@/types/api';
 import { money, ratePct, fmtDate, STATUS_LABEL, STATUS_BADGE, entityLabel } from '../loanFmt';
 import LoanFormModal from '../LoanFormModal';
 import ExtendModal from '../ExtendModal';
+import LoanSchedule from '../LoanSchedule';
+import LoanMirrorBlock from '../LoanMirrorBlock';
+import LoanAccrualDays from '../LoanAccrualDays';
 
 const PAY_LABEL: Record<LoanPaymentType, string> = {
     DISBURSEMENT: 'Выдача',
     PRINCIPAL_REPAY: 'Возврат тела',
     INTEREST_PAY: 'Выплата %',
     PENALTY: 'Пени',
+    COMMISSION: 'Комиссия',
 };
 
 export default function LoanDetailPage() {
@@ -26,6 +30,8 @@ export default function LoanDetailPage() {
     const [error, setError] = useState('');
     const [editing, setEditing] = useState(false);
     const [extending, setExtending] = useState(false);
+    // Растёт после правок займа — по нему перечитываются вложенные блоки.
+    const [reloadKey, setReloadKey] = useState(0);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -128,6 +134,14 @@ export default function LoanDetailPage() {
                 )}
             </div>
 
+            <div style={{ marginTop: 16 }}>
+                <LoanSchedule loanId={id} />
+            </div>
+
+            <LoanAccrualDays loanId={id} nonce={reloadKey} />
+
+            <LoanMirrorBlock loanId={id} nonce={reloadKey} />
+
             {d.notes && (
                 <div className="glass-card" style={{ marginTop: 16 }}>
                     <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 6px' }}>Заметки</h3>
@@ -136,7 +150,7 @@ export default function LoanDetailPage() {
             )}
 
             {editing && (
-                <LoanFormModal mode="edit" loan={d} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); }} />
+                <LoanFormModal mode="edit" loan={d} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); setReloadKey((n) => n + 1); }} />
             )}
             {extending && (
                 <ExtendModal loan={d} onClose={() => setExtending(false)} onExtended={(newId) => { setExtending(false); router.push(`/p/${slug}/loans/${newId}`); }} />

@@ -194,6 +194,11 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
     const [username, setUsername] = useState('');
     const [projectName, setProjectName] = useState('');
     const [mounted, setMounted] = useState(false);
+    // Пока slug не разрешён в project_id, дочерние страницы рендерить нельзя:
+    // они успевают сходить в API со СТАРЫМ проектом из localStorage и показать
+    // чужие (или пустые) данные. Гонка вылезала при переходе между проектами
+    // по прямой ссылке — раздел открывался пустым, хотя данные на месте.
+    const [projectReady, setProjectReady] = useState(false);
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
     const [isVibecoder, setIsVibecoder] = useState(false);
     const { canAccess, canManage, loading: permLoading } = usePermissions();
@@ -202,6 +207,7 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
         setMounted(true);
         if (!api.isAuthenticated()) { window.location.href = '/login'; return; }
         // Resolve slug to project_id and sync localStorage
+        setProjectReady(false);
         api.getProject(slug).then(p => {
             api.setProjectId(p.id);
             try { localStorage.setItem('dds_project_slug', p.slug); } catch { /* SSR */ }
@@ -209,6 +215,8 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
             setProjectName(p.name);
         }).catch(() => {
             setProjectName(slug);
+        }).finally(() => {
+            setProjectReady(true);
         });
         api.getProfile().then(u => setUsername(u.username)).catch(() => { });
     }, [slug]);
@@ -315,7 +323,13 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
             </aside>
 
             <main className="main-content">
-                {children}
+                {projectReady
+                    ? children
+                    : (
+                        <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)' }}>
+                            Загрузка проекта…
+                        </div>
+                    )}
             </main>
         </div>
     );

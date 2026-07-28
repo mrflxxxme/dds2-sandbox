@@ -7,6 +7,7 @@ import LoansRegistry from './LoansRegistry';
 import LoansLenders from './LoansLenders';
 import LoansForecast from './LoansForecast';
 import LoansStuck from './LoansStuck';
+import LoansCreditLines from './LoansCreditLines';
 import LoanFormModal from './LoanFormModal';
 import ImportModal from './ImportModal';
 
@@ -14,6 +15,7 @@ const TABS = [
     { key: 'dashboard', label: '📊 Дашборд' },
     { key: 'registry', label: '📒 Реестр' },
     { key: 'lenders', label: '👤 Заёмщики' },
+    { key: 'lines', label: '💳 Кредитные линии' },
     { key: 'stuck', label: '⏳ Зависшие' },
     { key: 'forecast', label: '🔮 Прогноз' },
 ];
@@ -49,6 +51,7 @@ export default function LoansSectionPage() {
                 {tab === 'dashboard' && <LoansDashboard nonce={nonce} />}
                 {tab === 'registry' && <LoansRegistry nonce={nonce} />}
                 {tab === 'lenders' && <LoansLenders nonce={nonce} onChanged={refresh} />}
+                {tab === 'lines' && <LoansCreditLines nonce={nonce} onChanged={refresh} />}
                 {tab === 'stuck' && <LoansStuck nonce={nonce} onChanged={refresh} />}
                 {tab === 'forecast' && <LoansForecast nonce={nonce} />}
             </div>
