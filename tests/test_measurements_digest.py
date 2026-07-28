@@ -13,6 +13,7 @@ from decimal import Decimal
 import pytest
 
 from backend.models.cost import Nomenclature
+from backend.models.wb_finance import WbFinanceRow
 from backend.models.wb_measurements import WbMeasurementPenalty, WbWarehouseMeasurement
 from backend.services import measurements_service as m
 
@@ -200,3 +201,70 @@ async def test_list_warehouse_early_msk_included(db_session, project):
     assert 701 in nm_ids       # ранне-утренний по МСК — включён
     assert 702 not in nm_ids   # предыдущий день по МСК — исключён
     assert total == 1
+
+
+# ── Штрафы за габариты в сводке (из финотчёта) ───────────────────────────────
+
+_DIM = "Занижение фактических габаритов упаковки товара"
+_DIM_STORNO = "Сторно. Занижение фактических габаритов упаковки товара"
+
+
+def _fin(pid, rrd_id, nm, subj, brand, btype, pen, rr=date(2026, 7, 27)):
+    return WbFinanceRow(
+        project_id=pid, rrd_id=rrd_id, realizationreport_id=1,
+        date_from=rr, date_to=rr, rr_dt=rr,
+        nm_id=nm, subject_name=subj, brand_name=brand,
+        bonus_type_name=btype, penalty=Decimal(str(pen)),
+    )
+
+
+@pytest.mark.asyncio
+async def test_finance_penalties_digest_data(db_session, project):
+    db_session.add_all([
+        _fin(project.id, 1, 910389065, "Ковры", "НУ-НУ", _DIM, 6000),
+        _fin(project.id, 2, 910389065, "Ковры", "НУ-НУ", _DIM, 4202),        # тот же nm → сумма
+        _fin(project.id, 3, 910389065, "Ковры", "НУ-НУ", _DIM_STORNO, -202),  # сторно → нетто
+        _fin(project.id, 4, 889697232, "Шторы", "Уютопия", _DIM, 1520),
+        _fin(project.id, 5, 777, "Ковры", "НУ-НУ", "Логистика", 5000),        # НЕ габаритный — игнор
+        _fin(project.id, 6, 888, "Ковры", "НУ-НУ", _DIM, 999, rr=date(2026, 7, 26)),  # другой день
+        Nomenclature(project_id=project.id, barcode=f"bc-p-{project.id}", article_wb=910389065, volume_l=Decimal("12")),
+        _meas(project.id, 91, 910389065, "Ковры", 15.0, _IN_PERIOD),
+    ])
+    await db_session.commit()
+
+    data = await m.finance_penalties_digest_data(db_session, project.id, date(2026, 7, 27))
+    assert data["total"] == Decimal("11520")   # 10000 (Ковры) + 1520 (Шторы)
+    assert data["count"] == 2                   # 2 артикула; логистика и другой день не в счёт
+    assert data["subjects"][0]["subject"] == "Ковры"
+    assert data["subjects"][0]["total"] == Decimal("10000")
+    kovry = data["subjects"][0]["items"][0]
+    assert kovry["nm_id"] == 910389065
+    assert kovry["vol"]["dev"] == pytest.approx(Decimal("25"))  # замер 15 vs карт 12 = +25%
+
+
+def test_build_penalties_digest_text():
+    data = {
+        "total": Decimal("11520"), "count": 2,
+        "subjects": [
+            {"subject": "Ковры", "total": Decimal("13000"), "items": [
+                {"nm_id": 910389065, "penalty": Decimal("10000"),
+                 "vol": {"card": Decimal("12"), "meas": Decimal("15"), "dev": Decimal("25")}},
+                {"nm_id": 910389062, "penalty": Decimal("3000"),
+                 "vol": {"card": Decimal("34.153"), "meas": Decimal("34.153"), "dev": Decimal("0")}}]},
+            {"subject": "Шторы", "total": Decimal("1520"), "items": [
+                {"nm_id": 889697232, "penalty": Decimal("1520"), "vol": {}}]},
+        ],
+    }
+    txt = m.build_penalties_digest_text(date(2026, 7, 27), data)
+    assert "<b>ПРОВЕРЬТЕ ГАБАРИТЫ</b>" in txt
+    assert "за 27.07" in txt
+    assert "<b>Ковры</b>" in txt
+    assert "<pre>" in txt and "910389065" in txt
+    assert "(+25%)" in txt
+    assert "карточка ✓" in txt            # совпадение → вместо (+0%)
+    assert "(+0%)" not in txt             # ноль-процент не показываем
+    assert "нет замера/карточки" in txt   # Шторы без объёма
+
+
+def test_build_penalties_digest_text_empty():
+    assert m.build_penalties_digest_text(date(2026, 7, 27), {"subjects": []}) is None

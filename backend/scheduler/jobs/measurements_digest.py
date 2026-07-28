@@ -78,17 +78,21 @@ async def send_measurement_digests():
                 if not chats:
                     continue
                 data = await measurements_service.warehouse_digest_data(db, project_id, df, dt)
+                # Штрафы за габариты за ВЧЕРА — из финотчёта (точные суммы).
+                pen_data = await measurements_service.finance_penalties_digest_data(db, project_id, yesterday)
 
-            text = measurements_service.build_measurement_digest_text(yesterday, today, data)
-            if not text:
-                logger.info("Measurements digest: project %d — no measurements, skip", project_id)
+            meas_text = measurements_service.build_measurement_digest_text(yesterday, today, data)
+            pen_text = measurements_service.build_penalties_digest_text(yesterday, pen_data)
+            parts = [t for t in (meas_text, pen_text) if t]
+            if not parts:
+                logger.info("Measurements digest: project %d — no data, skip", project_id)
                 continue
 
-            results = await asyncio.gather(
-                *[telegram_service.send_analytics_message(c.chat_id, text) for c in chats],
-                return_exceptions=True,
-            )
-            sent += sum(1 for r in results if r is True)
+            # Каждую часть — отдельным сообщением (лимит Telegram 4096, каждое цельное).
+            for c in chats:
+                for part in parts:
+                    if await telegram_service.send_analytics_message(c.chat_id, part):
+                        sent += 1
         except asyncio.CancelledError:
             raise
         except Exception:
