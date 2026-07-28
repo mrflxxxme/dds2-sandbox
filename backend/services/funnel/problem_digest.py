@@ -24,6 +24,7 @@ import pytz
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Project
+from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.funnel.problem_digest")
 
@@ -100,7 +101,15 @@ async def get_digest_settings(db: AsyncSession, project_id: int) -> dict[str, An
         data = json.loads(raw) if raw else {}
     except (TypeError, ValueError):
         data = {}
-    return sanitize_settings(data)
+    cfg = sanitize_settings(data)
+    # Телеметрия последних отправок (per-kind) — только на чтение; sanitize_settings
+    # ключ не знает, в сохранённую настройку он не попадает (set_ пере-sanitize'ит).
+    try:
+        status = json.loads(await get_setting(db, project_id, STATUS_KEY) or "{}")
+    except (TypeError, ValueError):
+        status = {}
+    cfg["last_status"] = status if isinstance(status, dict) else {}
+    return cfg
 
 
 async def set_digest_settings(db: AsyncSession, project_id: int, patch: dict[str, Any]) -> dict[str, Any]:
@@ -435,27 +444,65 @@ async def build_weekly_digest(db: AsyncSession, project: Project, cfg: dict[str,
 # в worker) — send-now ставит маркер, worker-тик подхватывает его в течение минуты.
 
 ASAP_KEY = "ads_problem_digest_asap"
+# Потолок минутных повторов самоизлечения (~полчаса): транзиент успеет пройти,
+# перманентная ошибка не долбит Telegram бесконечно.
+ASAP_MAX_ATTEMPTS = 30
+# Статус последней отправки (отдельный ключ: sanitize_settings его не знает и
+# не должен — это телеметрия, а не настройка).
+STATUS_KEY = "ads_problem_digest_status"
 
 
-async def request_asap_send(db: AsyncSession, project_id: int, kind: str) -> None:
-    from backend.services.settings_service import set_setting
-
-    await set_setting(db, project_id, ASAP_KEY, json.dumps({"kind": kind}))
-
-
-async def pop_asap_request(db: AsyncSession, project_id: int) -> str | None:
-    """Прочитать и снять маркер «прислать сейчас». Возвращает kind или None."""
-    from backend.services.settings_service import get_setting, set_setting
-
-    raw = await get_setting(db, project_id, ASAP_KEY)
+def parse_asap_marker(raw: Any) -> dict[str, Any] | None:
+    """Маркер «прислать сейчас» из JSON: {kind, attempts} или None (мусор/пусто)."""
     if not raw:
         return None
     try:
-        kind = json.loads(raw).get("kind")
-    except (TypeError, ValueError, AttributeError):
-        kind = None
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("kind") not in ("daily", "weekly"):
+        return None
+    attempts = data.get("attempts")
+    return {"kind": data["kind"], "attempts": int(attempts) if isinstance(attempts, int) else 0}
+
+
+async def request_asap_send(db: AsyncSession, project_id: int, kind: str, attempts: int = 0) -> None:
+    from backend.services.settings_service import set_setting
+
+    await set_setting(db, project_id, ASAP_KEY, json.dumps({"kind": kind, "attempts": attempts}))
+
+
+async def pop_asap_request(db: AsyncSession, project_id: int) -> dict[str, Any] | None:
+    """Прочитать и снять маркер «прислать сейчас»: {kind, attempts} или None."""
+    from backend.services.settings_service import get_setting, set_setting
+
+    marker = parse_asap_marker(await get_setting(db, project_id, ASAP_KEY))
     await set_setting(db, project_id, ASAP_KEY, "")
-    return kind if kind in ("daily", "weekly") else None
+    return marker
+
+
+async def record_digest_status(
+    db: AsyncSession, project_id: int, *, kind: str, ok: bool, error: str | None = None
+) -> None:
+    """Зафиксировать исход отправки сводки (телеметрия per-kind, видна в GET settings).
+
+    Сводка не пишет в sync_log (нет integration_id) — без этого следа пропуск
+    рассылки диагностировался только по логам воркера (инцидент 28.07.2026).
+    """
+    from backend.services.settings_service import get_setting, set_setting
+
+    try:
+        current = json.loads(await get_setting(db, project_id, STATUS_KEY) or "{}")
+    except (TypeError, ValueError):
+        current = {}
+    if not isinstance(current, dict):
+        current = {}
+    current[kind] = {
+        "ok": ok,
+        "at": utcnow().isoformat(),
+        "error": (error or "")[:500] or None,
+    }
+    await set_setting(db, project_id, STATUS_KEY, json.dumps(current, ensure_ascii=False))
 
 
 def _cfg_sheet_url(cfg: dict[str, Any], key: str) -> str | None:

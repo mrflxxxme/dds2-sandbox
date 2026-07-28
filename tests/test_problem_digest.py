@@ -362,3 +362,96 @@ def test_budget_gap_section_rendered():
     cells = [str(c.value) for row in ws.iter_rows() for c in row if c.value is not None]
     assert any("Нехватка бюджета" in v for v in cells)
     assert "14:30" in cells
+
+
+# ─── Самоизлечение рассылки: маркер ASAP + ретрай отправки ───────────────────
+
+
+def test_parse_asap_marker_valid_and_defaults():
+    from backend.services.funnel.problem_digest import parse_asap_marker
+
+    assert parse_asap_marker('{"kind": "daily"}') == {"kind": "daily", "attempts": 0}
+    assert parse_asap_marker('{"kind": "weekly", "attempts": 7}') == {"kind": "weekly", "attempts": 7}
+
+
+def test_parse_asap_marker_rejects_garbage():
+    from backend.services.funnel.problem_digest import parse_asap_marker
+
+    assert parse_asap_marker("") is None
+    assert parse_asap_marker(None) is None
+    assert parse_asap_marker("не json") is None
+    assert parse_asap_marker('{"kind": "hourly"}') is None  # неизвестный kind
+    assert parse_asap_marker('["daily"]') is None  # не dict
+
+
+class _FakeBot:
+    """Скрипт исходов send_document: список исключений/None (None = успех)."""
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.sent_messages = 0
+        self.sent_documents = 0
+
+    async def send_message(self, **kwargs):
+        self.sent_messages += 1
+
+    async def send_document(self, **kwargs):
+        outcome = self.outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+        self.sent_documents += 1
+
+
+_PAYLOAD = {"text": "тест", "xlsx": b"x", "filename": "digest.xlsx", "kind": "daily"}
+
+
+def _net_err(msg: str = "conn reset"):
+    from aiogram.exceptions import TelegramNetworkError
+
+    return TelegramNetworkError(method=None, message=msg)
+
+
+async def test_send_with_retry_survives_transient(monkeypatch):
+    from backend.scheduler.jobs import problem_digest as job
+
+    sleeps: list[float] = []
+
+    async def _no_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(job.asyncio, "sleep", _no_sleep)
+    bot = _FakeBot([_net_err(), _net_err(), None])  # 2 транзиента → 3-я попытка ок
+    assert await job._send_with_retry(bot, -1, _PAYLOAD) == 1
+    assert bot.sent_documents == 1
+    assert sleeps == [5.0, 15.0]
+
+
+async def test_send_with_retry_gives_up_after_max(monkeypatch):
+    import pytest
+
+    from aiogram.exceptions import TelegramNetworkError
+
+    from backend.scheduler.jobs import problem_digest as job
+
+    async def _no_sleep(delay):
+        return None
+
+    monkeypatch.setattr(job.asyncio, "sleep", _no_sleep)
+    bot = _FakeBot([_net_err(), _net_err(), _net_err()])
+    with pytest.raises(TelegramNetworkError):
+        await job._send_with_retry(bot, -1, _PAYLOAD)
+    assert bot.outcomes == []  # все 3 попытки израсходованы
+
+
+async def test_send_with_retry_permanent_error_no_retry():
+    import pytest
+
+    from aiogram.exceptions import TelegramForbiddenError
+
+    from backend.scheduler.jobs import problem_digest as job
+
+    # Бот выкинут из чата — перманентно: ни одного повтора
+    bot = _FakeBot([TelegramForbiddenError(method=None, message="bot was kicked"), None])
+    with pytest.raises(TelegramForbiddenError):
+        await job._send_with_retry(bot, -1, _PAYLOAD)
+    assert len(bot.outcomes) == 1  # вторая попытка не расходовалась
