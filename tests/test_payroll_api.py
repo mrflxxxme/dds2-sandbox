@@ -50,10 +50,11 @@ async def test_employee_crud_flow(client, auth_headers):
     headers, _ = await _project_headers(client, auth_headers)
 
     emp = await _create_employee(
-        client, headers, name="Бухгалтер", fixed_salary="100000",
+        client, headers, name="Бухгалтер", position="Бухгалтер", fixed_salary="100000",
         fixed_pay_days=[{"day": 15, "share": 1}], notes="на фиксе",
     )
     assert emp["name"] == "Бухгалтер"
+    assert emp["position"] == "Бухгалтер"
     assert [(d["day"], float(d["share"])) for d in emp["fixed_pay_days"]] == [(15, 1.0)]
 
     # List
@@ -63,18 +64,34 @@ async def test_employee_crud_flow(client, auth_headers):
     assert len(items) == 1
     assert items[0]["team_names"] == []
 
-    # PATCH: имя + явное обнуление фикса
+    # PATCH: имя + смена должности + явное обнуление фикса
     resp = await client.patch(
         f"/api/v1/payroll/employees/{emp['id']}",
-        json={"name": "Гл. бухгалтер", "clear_fixed_salary": True},
+        json={"name": "Гл. бухгалтер", "position": "Гл. бухгалтер", "clear_fixed_salary": True},
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
     updated = resp.json()
     assert updated["name"] == "Гл. бухгалтер"
+    assert updated["position"] == "Гл. бухгалтер"
     assert updated["fixed_salary"] is None
     # график не тронут (fixed_pay_days не передавали)
     assert [(d["day"], float(d["share"])) for d in updated["fixed_pay_days"]] == [(15, 1.0)]
+
+    # clear_position — явное обнуление; position без флага не трогается
+    resp = await client.patch(
+        f"/api/v1/payroll/employees/{emp['id']}",
+        json={"clear_position": True},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["position"] is None
+    resp = await client.patch(
+        f"/api/v1/payroll/employees/{emp['id']}",
+        json={"notes": "должность не трогаем"},
+        headers=headers,
+    )
+    assert resp.json()["position"] is None
 
     # DELETE — и сотрудник пропадает из списка
     resp = await client.delete(f"/api/v1/payroll/employees/{emp['id']}", headers=headers)

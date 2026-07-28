@@ -131,14 +131,21 @@ export default function SalarySheet({
             render: (_v: unknown, r: PayrollSheetEmployee) => (
                 <div>
                     <div style={{ fontWeight: 600 }}>{r.name}</div>
-                    {r.counterparty_id == null && (
-                        <span
-                            className="badge badge-warning"
-                            style={{ fontSize: 10, marginTop: 2 }}
-                            title="Контрагент не привязан — официальные выплаты из выписки не подтягиваются"
-                        >
-                            ⚠ нет контрагента
-                        </span>
+                    {(r.position || r.counterparty_id == null) && (
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 2 }}>
+                            {r.position && (
+                                <span className="badge badge-secondary" style={{ fontSize: 10 }}>{r.position}</span>
+                            )}
+                            {r.counterparty_id == null && (
+                                <span
+                                    className="badge badge-warning"
+                                    style={{ fontSize: 10 }}
+                                    title="Контрагент не привязан — официальные выплаты из выписки не подтягиваются"
+                                >
+                                    ⚠ нет контрагента
+                                </span>
+                            )}
+                        </div>
                     )}
                 </div>
             ),

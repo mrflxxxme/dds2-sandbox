@@ -353,12 +353,14 @@ async def test_sheet_custom_fixed_pay_days(db_session, client, auth_headers):
         db_session, pid,
         EmployeeIn(
             name="Логист",
+            position="Логист",
             fixed_salary=D("60000"),
             fixed_pay_days=[PayDayShare(day=15, share=D("1"))],
         ),
     )
     sheet = await _sheet(db_session, pid, "2026-06")
     payouts = sheet["employees"][0]["payouts"]
+    assert sheet["employees"][0]["position"] == "Логист"  # должность едет в ведомость
     assert [(p["pay_day"], D(p["amount"])) for p in payouts] == [(15, D("60000.00"))]
     assert payouts[0]["pay_date"] == "2026-07-15"
 
@@ -462,18 +464,71 @@ async def test_payout_mark_upsert_enriches_sheet(db_session, client, auth_header
 
 
 async def test_monthly_accruals_empty_project_short_circuit(db_session, client, auth_headers):
+    """Short-circuit без активных сотрудников — пустая разбивка той же формы."""
     pid = await _create_project(client, auth_headers)
     result = await payroll_service.get_monthly_accruals(db_session, pid, ["2026-06", "2026-07"])
-    assert result == {"2026-06": D("0"), "2026-07": D("0")}
+    assert result == {
+        "2026-06": {"managers": D("0"), "by_position": {}, "total": D("0")},
+        "2026-07": {"managers": D("0"), "by_position": {}, "total": D("0")},
+    }
 
 
 async def test_monthly_accruals_fixed_salary(db_session, client, auth_headers):
     pid = await _create_project(client, auth_headers)
     await payroll_service.create_employee(
-        db_session, pid, EmployeeIn(name="Фикс", fixed_salary=D("100000"))
+        db_session, pid,
+        EmployeeIn(name="Фикс", position="Бухгалтер", fixed_salary=D("100000")),
     )
     result = await payroll_service.get_monthly_accruals(db_session, pid, ["2026-06"])
-    assert result["2026-06"] == D("100000.00")
+    acc = result["2026-06"]
+    assert acc["total"] == D("100000.00")
+    assert acc["managers"] == D("0")
+    assert acc["by_position"] == {"Бухгалтер": D("100000.00")}
+
+
+async def test_month_accrual_breakdown_managers_positions_and_sum(
+    db_session, client, auth_headers, monkeypatch
+):
+    """
+    Разбивка: «Менеджеры» = ВСЕ процентные начисления команд (должность не
+    важна); фиксы — по должности, пустая → «Без должности»; total = сумма
+    подстрок (родитель ОПиУ = сумма детей).
+    """
+    pid = await _create_project(client, auth_headers)
+    # e1 в команде И с фиксом (должность Логист): процент уходит в «Менеджеры»,
+    # фикс — в свою должность
+    e1 = await payroll_service.create_employee(
+        db_session, pid,
+        EmployeeIn(name="Аня", position="Логист", fixed_salary=D("50000")),
+    )
+    e2 = await payroll_service.create_employee(db_session, pid, EmployeeIn(name="Боря"))
+    await payroll_service.create_employee(
+        db_session, pid, EmployeeIn(name="Вера", fixed_salary=D("70000"))  # без должности
+    )
+    team = await payroll_service.create_team(db_session, pid, TeamIn(name="Ковры"))
+    await payroll_service.replace_team_scopes(
+        db_session, pid, team.id,
+        TeamScopesReplace(scopes=[TeamScopeIn(kind="brand", value="BrandA")]),
+    )
+    await payroll_service.replace_team_members(
+        db_session, pid, team.id, TeamMembersReplace(employee_ids=[e1.id, e2.id])
+    )
+    monkeypatch.setattr(
+        "backend.services.wb_bdr_service.get_wb_bdr", _fake_bdr(by_brand={"BrandA": 700000})
+    )
+
+    acc = await payroll_service.get_month_accrual.__wrapped__(db_session, pid, "2026-06")
+    managers = D(acc["managers"])
+    by_position = {k: D(v) for k, v in acc["by_position"].items()}
+    total = D(acc["total"])
+
+    # «Менеджеры» = вся процентная часть команды (оба участника, независимо от должности)
+    sheet = await _sheet(db_session, pid, "2026-06")
+    team_total = D(sheet["teams"][0]["total_amount"])
+    assert managers > 0
+    assert managers == team_total
+    assert by_position == {"Логист": D("50000.00"), "Без должности": D("70000.00")}
+    assert total == managers + sum(by_position.values(), D("0"))  # родитель = Σ детей
 
 
 # ─── ОПиУ: строка ФОТ + исключение задвоения ─────────────────────────────────
@@ -511,12 +566,21 @@ async def test_opiu_fot_row_and_no_double_count(db_session, client, auth_headers
     assert fot["monthly"]["2026-06"] == 100000.0  # фикс начисляется каждый месяц
     assert fot["monthly"]["2026-07"] == 100000.0
 
+    # Подстроки: сотрудник без должности → «Без должности»; процентов нет →
+    # строки «Менеджеры» нет; родитель = сумма детей
+    assert fot["expandable"] is True
+    assert "opex_payroll_fot_managers" not in rows
+    child = rows["opex_payroll_fot_без_должности"]
+    assert child["parent_key"] == "opex_payroll_fot"
+    assert child["label"] == "Без должности"
+    assert child["monthly"] == fot["monthly"]
+
     legal = rows["opex_legal"]
     assert legal["monthly"]["2026-07"] == 5000.0  # 88000 сотрудника исключены
 
     ops = rows["operating_expenses"]
     assert ops["monthly"]["2026-07"] == pytest.approx(105000.0)  # ФОТ + прочий opex
-    assert ops["total"] == pytest.approx(205000.0)
+    assert ops["total"] == pytest.approx(205000.0)  # дети НЕ задваивают сумму
 
 
 async def test_opiu_inactive_employee_payments_stay_in_opex(db_session, client, auth_headers):
@@ -558,14 +622,82 @@ async def test_opiu_fot_prorata_submonth_window(db_session, client, auth_headers
         db_session, pid, date(2026, 6, 1), date(2026, 6, 15)
     )
     rows = {r["key"]: r for r in result["rows"]}
-    # 15 дней из 30 → половина месячного начисления
+    # 15 дней из 30 → половина месячного начисления, У КАЖДОЙ подстроки тоже
     assert rows["opex_payroll_fot"]["monthly"]["2026-06"] == pytest.approx(50000.0)
+    assert rows["opex_payroll_fot_без_должности"]["monthly"]["2026-06"] == pytest.approx(50000.0)
 
     full = await get_opiu.__wrapped__(
         db_session, pid, date(2026, 6, 1), date(2026, 6, 30)
     )
     full_rows = {r["key"]: r for r in full["rows"]}
     assert full_rows["opex_payroll_fot"]["monthly"]["2026-06"] == pytest.approx(100000.0)
+    assert full_rows["opex_payroll_fot_без_должности"]["monthly"]["2026-06"] == pytest.approx(
+        100000.0
+    )
+
+
+async def test_month_accrual_cache_roundtrip_new_prefix(db_session, client, auth_headers):
+    """
+    Кэш-совместимость: get_month_accrual (префикс payroll:accruals2) отдаёт
+    одинаковую JSON-safe форму на мисс и на хит (dict со строками-Decimal).
+    Регистрацию префикса в invalidate_project_reports сторожит test_conventions_sync.
+    """
+    pid = await _create_project(client, auth_headers)
+    await payroll_service.create_employee(
+        db_session, pid,
+        EmployeeIn(name="Кэш", position="Бухгалтер", fixed_salary=D("100000")),
+    )
+    first = await payroll_service.get_month_accrual(db_session, pid, "2026-06")  # miss → set
+    second = await payroll_service.get_month_accrual(db_session, pid, "2026-06")  # hit
+    assert first == second
+    assert second["total"] == "100000.00"
+    assert second["by_position"] == {"Бухгалтер": "100000.00"}
+    assert isinstance(second["managers"], str)
+
+
+async def test_opiu_fot_children_managers_and_position(
+    db_session, client, auth_headers, monkeypatch
+):
+    """
+    Дети «ФОТ (начислено)»: «Менеджеры» (весь процент команд) + должность фикса;
+    родитель = сумма детей; в «Операционные расходы» идёт только родитель.
+    """
+    from backend.services.opiu_service import get_opiu
+
+    pid = await _create_project(client, auth_headers)
+    e1 = await payroll_service.create_employee(db_session, pid, EmployeeIn(name="Аня"))
+    await payroll_service.create_employee(
+        db_session, pid,
+        EmployeeIn(name="Бухгалтер", position="Бухгалтер", fixed_salary=D("40000")),
+    )
+    team = await payroll_service.create_team(db_session, pid, TeamIn(name="Ковры"))
+    await payroll_service.replace_team_scopes(
+        db_session, pid, team.id,
+        TeamScopesReplace(scopes=[TeamScopeIn(kind="brand", value="BrandA")]),
+    )
+    await payroll_service.replace_team_members(
+        db_session, pid, team.id, TeamMembersReplace(employee_ids=[e1.id])
+    )
+    monkeypatch.setattr(
+        "backend.services.wb_bdr_service.get_wb_bdr", _fake_bdr(by_brand={"BrandA": 700000})
+    )
+
+    result = await get_opiu.__wrapped__(
+        db_session, pid, date(2026, 6, 1), date(2026, 6, 30)
+    )
+    rows = {r["key"]: r for r in result["rows"]}
+
+    managers = rows["opex_payroll_fot_managers"]["monthly"]["2026-06"]
+    accountant = rows["opex_payroll_fot_бухгалтер"]["monthly"]["2026-06"]
+    parent = rows["opex_payroll_fot"]["monthly"]["2026-06"]
+    assert managers > 0
+    assert accountant == pytest.approx(40000.0)
+    assert parent == pytest.approx(managers + accountant)  # родитель = Σ детей
+    assert rows["opex_payroll_fot_managers"]["label"] == "Менеджеры"
+    assert rows["opex_payroll_fot_managers"]["parent_key"] == "opex_payroll_fot"
+    # Опекс проекта пуст (нет других расходов) → строка ops == только родитель,
+    # дети сумму НЕ задваивают
+    assert rows["operating_expenses"]["monthly"]["2026-06"] == pytest.approx(parent)
 
 
 # ─── include_cost_tax: паритет net_payout ────────────────────────────────────

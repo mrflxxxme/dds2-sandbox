@@ -545,6 +545,7 @@ async def get_sheet(db: AsyncSession, project_id: int, month: str) -> dict:
             SheetEmployee(
                 employee_id=emp.id,
                 name=emp.name,
+                position=emp.position,
                 counterparty_id=emp.counterparty_id,
                 team_accruals=team_accruals,
                 fixed_accrual=fixed_accrual,
@@ -571,14 +572,24 @@ async def get_sheet(db: AsyncSession, project_id: int, month: str) -> dict:
     return response.model_dump(mode="json")
 
 
-@cached(prefix="payroll:accruals", ttl=86400)
-async def get_month_accrual(db: AsyncSession, project_id: int, month: str) -> str:
+# Подстрока фикс-окладов для сотрудников без заполненной должности.
+NO_POSITION_LABEL = "Без должности"
+
+
+@cached(prefix="payroll:accruals2", ttl=86400)
+async def get_month_accrual(db: AsyncSession, project_id: int, month: str) -> dict:
     """
-    Суммарное начисление проекта (команды + фиксы) за ОДИН месяц.
+    Начисление проекта за ОДИН месяц с разбивкой для подстрок ОПиУ:
+    {"managers": "...", "by_position": {"Бухгалтер": "..."}, "total": "..."}.
+
+    «Менеджеры» — ВСЕ процентные начисления команд (независимо от должности);
+    фикс-оклады группируются по position (пустая → «Без должности»).
+    total == managers + Σ by_position (ведомость считает так же).
 
     Кэш по (project_id, month) — ОПиУ с диапазоном в год не зависит от полного
-    каскада ведомостей: посчитанные месяцы переживают смену диапазона. Возврат
-    строкой ('12345.67') — JSON-safe, кэш-хит и мисс отдают одинаковый тип.
+    каскада ведомостей. Значения строками-Decimal — JSON-safe, кэш-хит и мисс
+    отдают одинаковый тип. Префикс accruals2: форма ответа сменилась со строки
+    на dict, старые ключи payroll:accruals дочистит TTL.
     """
     # Без активных сотрудников начислений не бывает — не собираем ведомость зря
     has_employees = (
@@ -593,22 +604,54 @@ async def get_month_accrual(db: AsyncSession, project_id: int, month: str) -> st
         )
     ).scalar_one_or_none()
     if has_employees is None:
-        return "0.00"
+        return {"managers": "0.00", "by_position": {}, "total": "0.00"}
+
     sheet = await get_sheet(db, project_id, month)
-    return str(sheet["totals"]["accrued_total"])
+    managers = ZERO
+    # Группировка регистронезависимо («Бухгалтер»/«бухгалтер» — одна подстрока),
+    # метка — первое встреченное написание.
+    by_position: dict[str, Decimal] = {}
+    pos_labels: dict[str, str] = {}
+    for emp in sheet["employees"]:
+        percent = sum(
+            (Decimal(str(a["amount"])) for a in emp.get("team_accruals", [])), ZERO
+        )
+        managers += percent
+        fixed = Decimal(str(emp.get("fixed_accrual", "0")))
+        if fixed:
+            # .get: в кэше могут жить ведомости, собранные до появления position
+            raw = (emp.get("position") or "").strip()
+            key = raw.casefold() or "__none__"
+            pos_labels.setdefault(key, raw or NO_POSITION_LABEL)
+            by_position[key] = by_position.get(key, ZERO) + fixed
+    return {
+        "managers": str(_money(managers)),
+        "by_position": {
+            pos_labels[k]: str(_money(v)) for k, v in sorted(by_position.items())
+        },
+        "total": str(Decimal(str(sheet["totals"]["accrued_total"]))),
+    }
 
 
 async def get_monthly_accruals(
     db: AsyncSession, project_id: int, months: list[str]
-) -> dict[str, Decimal]:
+) -> dict[str, dict[str, Any]]:
     """
-    Начисления по месяцам — база строки «ФОТ (начислено)» в ОПиУ.
+    Начисления по месяцам — база строки «ФОТ (начислено)» и её подстрок в ОПиУ.
 
-    Помесячная обёртка над get_month_accrual (и его кэшем payroll:accruals).
+    month → {"managers": Decimal, "by_position": {pos: Decimal}, "total": Decimal}.
+    Помесячная обёртка над get_month_accrual (и его кэшем payroll:accruals2).
     """
-    result: dict[str, Decimal] = {}
+    result: dict[str, dict[str, Any]] = {}
     for month in months:
-        result[month] = Decimal(str(await get_month_accrual(db, project_id, month)))
+        raw = await get_month_accrual(db, project_id, month)
+        result[month] = {
+            "managers": Decimal(str(raw.get("managers", "0"))),
+            "by_position": {
+                pos: Decimal(str(v)) for pos, v in (raw.get("by_position") or {}).items()
+            },
+            "total": Decimal(str(raw.get("total", "0"))),
+        }
     return result
 
 
@@ -657,6 +700,7 @@ def _employee_response(
     return EmployeeResponse(
         id=emp.id,
         name=emp.name,
+        position=emp.position,
         counterparty_id=emp.counterparty_id,
         counterparty_name=counterparty_name,
         fixed_salary=emp.fixed_salary,
@@ -731,6 +775,7 @@ async def create_employee(
     emp = PayrollEmployee(
         project_id=project_id,
         name=data.name,
+        position=data.position,
         counterparty_id=data.counterparty_id,
         fixed_salary=data.fixed_salary,
         fixed_pay_days=_dump_pay_days(data.fixed_pay_days),
@@ -757,6 +802,10 @@ async def update_employee(
 
     if data.name is not None:
         emp.name = data.name
+    if data.clear_position:
+        emp.position = None
+    elif data.position is not None:
+        emp.position = data.position
     if data.clear_counterparty:
         emp.counterparty_id = None
     elif data.counterparty_id is not None:

@@ -8719,6 +8719,8 @@ export interface PayrollPayDayShare {
 
 export interface PayrollEmployeeIn {
   name: string;
+  /** Должность («Бухгалтер», «Логист»…) — группирует фикс-оклад в подстроках «ФОТ (начислено)» ОПиУ. */
+  position?: string | null;
   counterparty_id?: number | null;
   fixed_salary?: number | null;
   /** null — дефолт 50/50 на 10-е и 25-е; сумма долей должна быть равна 1. */
@@ -8729,6 +8731,8 @@ export interface PayrollEmployeeIn {
 
 export interface PayrollEmployeeUpdate {
   name?: string | null;
+  position?: string | null;
+  clear_position?: boolean;
   counterparty_id?: number | null;
   clear_counterparty?: boolean;
   fixed_salary?: number | null;
@@ -8741,6 +8745,7 @@ export interface PayrollEmployeeUpdate {
 export interface PayrollEmployee {
   id: number;
   name: string;
+  position: string | null;
   counterparty_id: number | null;
   counterparty_name?: string | null;
   fixed_salary: number | string | null;
@@ -8866,6 +8871,7 @@ export interface PayrollSheetPayout {
 export interface PayrollSheetEmployee {
   employee_id: number;
   name: string;
+  position?: string | null;
   counterparty_id: number | null;
   team_accruals: PayrollSheetTeamAccrual[];
   fixed_accrual: number | string;

@@ -6,7 +6,7 @@ Router: /payroll — зарплата: сотрудники, команды, т�
 только admin/owner: лестница глобальная, одна на все проекты).
 
 Инвалидация (iron rule 7): мутации, влияющие на начисления (сотрудники,
-команды, скоупы, участники), гасят payroll:sheet + payroll:accruals +
+команды, скоупы, участники), гасят payroll:sheet + payroll:accruals2 +
 reports:opiu проекта; отметка выплаты — только payroll:sheet (на начисления
 не влияет); замена тарифа — все три префикса ГЛОБАЛЬНО.
 """
@@ -56,7 +56,7 @@ _write_admin = [Depends(require_role("admin", page="salary")), Depends(rate_limi
 # Месяц 'YYYY-MM' с валидным номером месяца — мусор режется 422 ещё на Query.
 _MONTH_PATTERN = r"^\d{4}-(0[1-9]|1[0-2])$"
 
-_ACCRUAL_PREFIXES = ("payroll:sheet", "payroll:accruals", "reports:opiu")
+_ACCRUAL_PREFIXES = ("payroll:sheet", "payroll:accruals2", "reports:opiu")
 
 
 async def _invalidate_marks(project_id: int) -> None:

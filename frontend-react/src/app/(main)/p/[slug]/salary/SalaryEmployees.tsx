@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import { api } from '@/lib/api';
 import type {
@@ -57,12 +57,29 @@ export default function SalaryEmployees({
         }
     };
 
+    // Подсказки должностей: пресеты + уникальные значения уже заведённых сотрудников.
+    const positionOptions = useMemo(() => {
+        // Без пресета «Менеджер»: в ОПиУ он бы встал вплотную к строке
+        // «Менеджеры» (процент команд) — две почти одинаковые строки в P&L.
+        const set = new Set(['Бухгалтер', 'Логист']);
+        (items ?? []).forEach((e) => { if (e.position) set.add(e.position); });
+        return [...set];
+    }, [items]);
+
     const columns = [
         {
             key: 'name', label: 'ФИО',
             render: (v: string, r: PayrollEmployee) => (
                 <span style={{ fontWeight: 600, opacity: r.is_active ? 1 : 0.5 }}>{v}</span>
             ),
+        },
+        {
+            key: 'position', label: 'Должность',
+            headerTitle: 'Группирует фикс-оклад в подстроках «ФОТ (начислено)» ОПиУ',
+            getValue: (r: PayrollEmployee) => r.position ?? '',
+            render: (_v: unknown, r: PayrollEmployee) => r.position
+                ? r.position
+                : <span style={{ color: 'var(--color-text-dim)' }}>—</span>,
         },
         {
             key: 'counterparty_name', label: 'Контрагент',
@@ -172,6 +189,7 @@ export default function SalaryEmployees({
             {(showCreate || editEmp) && (
                 <EmployeeFormModal
                     employee={editEmp ?? undefined}
+                    positionOptions={positionOptions}
                     onClose={() => { setShowCreate(false); setEditEmp(null); }}
                     onSaved={async () => {
                         setShowCreate(false);
@@ -209,13 +227,15 @@ function detectMode(days: PayrollPayDayShare[] | null | undefined): ScheduleMode
 interface CustomRow { day: string; sharePct: string; }
 
 function EmployeeFormModal({
-    employee, onClose, onSaved,
+    employee, positionOptions, onClose, onSaved,
 }: {
     employee?: PayrollEmployee;
+    positionOptions: string[];
     onClose: () => void;
     onSaved: () => void | Promise<void>;
 }) {
     const [name, setName] = useState(employee?.name ?? '');
+    const [position, setPosition] = useState(employee?.position ?? '');
     const [isActive, setIsActive] = useState(employee?.is_active ?? true);
     const [notes, setNotes] = useState(employee?.notes ?? '');
     const [fixedSalary, setFixedSalary] = useState(
@@ -303,6 +323,8 @@ function EmployeeFormModal({
                     is_active: isActive,
                     notes: notes.trim() || null,
                 };
+                if (position.trim()) payload.position = position.trim();
+                else if (employee.position != null) payload.clear_position = true;
                 if (cpId != null) payload.counterparty_id = cpId;
                 else if (employee.counterparty_id != null) payload.clear_counterparty = true;
                 if (salary != null) {
@@ -315,6 +337,7 @@ function EmployeeFormModal({
             } else {
                 await api.createPayrollEmployee({
                     name: name.trim(),
+                    position: position.trim() || null,
                     counterparty_id: cpId,
                     fixed_salary: salary,
                     fixed_pay_days: salary != null ? schedule : null,
@@ -349,11 +372,22 @@ function EmployeeFormModal({
                         <label className="form-label">ФИО *</label>
                         <input className="form-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Иванова Анна" />
                     </div>
-                    <div className="form-group" style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: 10 }}>
-                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
-                            <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
-                            Активен
-                        </label>
+                    <div className="form-group">
+                        <label className="form-label">Должность</label>
+                        <input
+                            className="form-input"
+                            list="payroll-position-options"
+                            maxLength={100}
+                            placeholder="Менеджер / Бухгалтер / Логист…"
+                            value={position}
+                            onChange={(e) => setPosition(e.target.value)}
+                        />
+                        <datalist id="payroll-position-options">
+                            {positionOptions.map((p) => <option key={p} value={p} />)}
+                        </datalist>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
+                            Группирует фикс-оклад в ФОТ ОПиУ; процент от команд всегда идёт строкой «Менеджеры».
+                        </div>
                     </div>
 
                     <div className="form-group" style={{ gridColumn: '1 / -1' }}>
@@ -473,7 +507,11 @@ function EmployeeFormModal({
                 </div>
 
                 {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginTop: 10 }}>{error}</div>}
-                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 16 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', marginRight: 'auto' }}>
+                        <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
+                        Активен
+                    </label>
                     <button className="btn btn-secondary btn-sm" onClick={onClose} disabled={saving}>Отмена</button>
                     <button className="btn btn-primary btn-sm" onClick={submit} disabled={saving}>
                         {saving ? 'Сохранение…' : 'Сохранить'}
