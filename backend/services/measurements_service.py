@@ -551,13 +551,16 @@ async def finance_penalties_digest_data(db: AsyncSession, project_id: int, day: 
 
 
 def _vol_compare_str(vol: dict) -> str:
-    """«замер X л / карт Y л (+Z%)» или «нет замера/карточки»."""
+    """Сравнение литража: «замер X / карт Y (+Z%)», «… · карточка ✓» при совпадении."""
     meas, card, dev = vol.get("meas"), vol.get("card"), vol.get("dev")
     if meas is None and card is None:
         return "нет замера/карточки"
+    base = f"замер {_fmt_l(meas)} л / карт {_fmt_l(card)} л"
     if dev is None:
-        return f"замер {_fmt_l(meas)} л / карт {_fmt_l(card)} л"
-    return f"замер {_fmt_l(meas)} л / карт {_fmt_l(card)} л ({dev:+.0f}%)"
+        return base
+    if abs(dev) < Decimal("0.5"):  # округляется до 0% → карточка совпадает
+        return f"{base} · карточка ✓"
+    return f"{base} ({dev:+.0f}%)"
 
 
 def build_penalties_digest_text(day: date, data: dict) -> str | None:

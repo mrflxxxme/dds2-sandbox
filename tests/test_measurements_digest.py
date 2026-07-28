@@ -246,9 +246,11 @@ def test_build_penalties_digest_text():
     data = {
         "total": Decimal("11520"), "count": 2,
         "subjects": [
-            {"subject": "Ковры", "total": Decimal("10000"), "items": [
+            {"subject": "Ковры", "total": Decimal("13000"), "items": [
                 {"nm_id": 910389065, "penalty": Decimal("10000"),
-                 "vol": {"card": Decimal("12"), "meas": Decimal("15"), "dev": Decimal("25")}}]},
+                 "vol": {"card": Decimal("12"), "meas": Decimal("15"), "dev": Decimal("25")}},
+                {"nm_id": 910389062, "penalty": Decimal("3000"),
+                 "vol": {"card": Decimal("34.153"), "meas": Decimal("34.153"), "dev": Decimal("0")}}]},
             {"subject": "Шторы", "total": Decimal("1520"), "items": [
                 {"nm_id": 889697232, "penalty": Decimal("1520"), "vol": {}}]},
         ],
@@ -259,6 +261,8 @@ def test_build_penalties_digest_text():
     assert "<b>Ковры</b>" in txt
     assert "<pre>" in txt and "910389065" in txt
     assert "(+25%)" in txt
+    assert "карточка ✓" in txt            # совпадение → вместо (+0%)
+    assert "(+0%)" not in txt             # ноль-процент не показываем
     assert "нет замера/карточки" in txt   # Шторы без объёма
 
 
