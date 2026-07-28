@@ -42,6 +42,21 @@ class PayrollScopeKind(str, enum.Enum):
     SUBJECT = "subject"
 
 
+class PayrollClientBillingMode(str, enum.Enum):
+    """Формат оплаты клиента консалтингового агентства."""
+
+    FIXED = "fixed"  # фикс-сумма в месяц
+    PERCENT = "percent"  # ставка «Команда» лестницы × недельная «Чистая выплата» клиента
+    PROFIT_SHARE = "profit_share"  # fee_percent × чистая прибыль месяца (ЧП вводится руками)
+
+
+class PayrollClientEntryKind(str, enum.Enum):
+    """Ручные суммы клиента: недельная база (внешний кабинет) или ЧП месяца."""
+
+    WEEK_BASE = "week_base"  # «Чистая выплата» за неделю Пн-Вс (date_from = Пн)
+    MONTH_PROFIT = "month_profit"  # чистая прибыль месяца (date_from = 1-е число)
+
+
 class PayrollEmployee(Base, TimestampMixin, SoftDeleteMixin):
     """
     Сотрудник. counterparty_id связывает с контрагентом-физлицом из банковской
@@ -145,6 +160,67 @@ class PayrollTeamScope(Base):
     __table_args__ = (
         UniqueConstraint("team_id", "kind", "value", name="uq_payroll_team_scope"),
         Index("ix_payroll_team_scope_team_id", "team_id"),
+    )
+
+
+class PayrollClientProject(Base, TimestampMixin, SoftDeleteMixin):
+    """
+    Клиентский проект консалтингового агентства.
+
+    project_id — проект-агентство, в котором ведётся учёт. Сплит выручки:
+    manager_share (45%) уходит команде team_id как обычное начисление
+    (ведомость + ФОТ «Менеджеры»), остаток — агентству (в ОПиУ пока не
+    включается — решение юзера 2026-07-28 «попозже»).
+    linked_project_id — кабинет клиента, если он заведён проектом в этой же
+    системе (percent-режим считается автоматически от его недельной «Чистой
+    выплаты»); NULL — внешний клиент, недельные базы вводятся руками.
+    """
+
+    __tablename__ = "payroll_client_project"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    billing_mode: Mapped[str] = mapped_column(String(20), nullable=False)  # PayrollClientBillingMode
+    team_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("payroll_team.id"), nullable=True)
+    linked_project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
+    fixed_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)  # для fixed
+    fee_percent: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)  # для profit_share
+    manager_share: Mapped[Decimal] = mapped_column(
+        Numeric(6, 4), nullable=False, default=Decimal("0.45"), server_default="0.45"
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    team: Mapped["PayrollTeam | None"] = relationship()
+    entries: Mapped[list["PayrollClientEntry"]] = relationship(
+        back_populates="client", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("ix_payroll_client_project_project_id", "project_id"),
+        Index("ix_payroll_client_project_team_id", "team_id"),
+    )
+
+
+class PayrollClientEntry(Base, TimestampMixin):
+    """Ручная сумма клиента: недельная база (внешние) либо ЧП месяца."""
+
+    __tablename__ = "payroll_client_entry"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    client_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("payroll_client_project.id"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)  # PayrollClientEntryKind
+    date_from: Mapped[date] = mapped_column(Date, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+
+    client: Mapped["PayrollClientProject"] = relationship(back_populates="entries")
+
+    __table_args__ = (
+        UniqueConstraint("client_id", "kind", "date_from", name="uq_payroll_client_entry"),
+        Index("ix_payroll_client_entry_client_id", "client_id"),
     )
 
 

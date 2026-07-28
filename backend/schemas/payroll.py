@@ -289,6 +289,144 @@ class PayrollSheetResponse(BaseModel):
     totals: SheetTotals
 
 
+# ─── Агентство (консалтинг) ──────────────────────────────────────────────────
+
+ALLOWED_BILLING_MODES = ["fixed", "percent", "profit_share"]
+ALLOWED_ENTRY_KINDS = ["week_base", "month_profit"]
+
+
+class ClientProjectIn(BaseModel):
+    """Клиент агентства. Сплит: manager_share команде, остаток агентству."""
+
+    name: str = Field(..., min_length=1, max_length=200)
+    billing_mode: str
+    team_id: int | None = None
+    linked_project_id: int | None = None  # кабинет клиента в системе (percent)
+    fixed_amount: Decimal | None = Field(None, ge=0)
+    fee_percent: Decimal | None = Field(None, ge=0, le=1)  # доля от ЧП (profit_share)
+    manager_share: Decimal = Field(Decimal("0.45"), ge=0, le=1)
+    is_active: bool = True
+    notes: str | None = None
+
+    @field_validator("billing_mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in ALLOWED_BILLING_MODES:
+            raise ValueError(f"billing_mode must be one of: {ALLOWED_BILLING_MODES}")
+        return v
+
+
+class ClientProjectUpdate(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=200)
+    billing_mode: str | None = None
+    team_id: int | None = None
+    clear_team: bool = False
+    linked_project_id: int | None = None
+    clear_linked_project: bool = False
+    fixed_amount: Decimal | None = Field(None, ge=0)
+    fee_percent: Decimal | None = Field(None, ge=0, le=1)
+    manager_share: Decimal | None = Field(None, ge=0, le=1)
+    is_active: bool | None = None
+    notes: str | None = None
+
+    @field_validator("billing_mode")
+    @classmethod
+    def validate_mode(cls, v: str | None) -> str | None:
+        if v is not None and v not in ALLOWED_BILLING_MODES:
+            raise ValueError(f"billing_mode must be one of: {ALLOWED_BILLING_MODES}")
+        return v
+
+
+class ClientEntryOut(BaseModel):
+    kind: str
+    date_from: date
+    amount: Decimal
+
+
+class ClientProjectResponse(BaseModel):
+    id: int
+    name: str
+    billing_mode: str
+    team_id: int | None
+    team_name: str | None = None
+    linked_project_id: int | None
+    linked_project_name: str | None = None
+    fixed_amount: Decimal | None
+    fee_percent: Decimal | None
+    manager_share: Decimal
+    is_active: bool
+    notes: str | None
+    entries: list[ClientEntryOut] = []
+
+
+class ClientProjectListResponse(BaseModel):
+    items: list[ClientProjectResponse]
+
+
+class ClientEntryUpsert(BaseModel):
+    """Ручная сумма: недельная база внешнего кабинета либо ЧП месяца."""
+
+    kind: str
+    date_from: date  # week_base — понедельник недели; month_profit — 1-е число
+    amount: Decimal = Field(..., ge=0)
+
+    @field_validator("kind")
+    @classmethod
+    def validate_kind(cls, v: str) -> str:
+        if v not in ALLOWED_ENTRY_KINDS:
+            raise ValueError(f"kind must be one of: {ALLOWED_ENTRY_KINDS}")
+        return v
+
+
+class ProjectOption(BaseModel):
+    """Проект инсталляции для привязки кабинета клиента."""
+
+    id: int
+    name: str
+    slug: str
+
+
+class ProjectOptionsResponse(BaseModel):
+    items: list[ProjectOption]
+
+
+class AgencyClientWeek(BaseModel):
+    """Неделя percent-режима: база, ступень, ставка «Команда», fee."""
+
+    date_from: date
+    date_to: date
+    base_amount: Decimal
+    threshold: Decimal | None
+    team_rate: Decimal
+    fee: Decimal
+    manual: bool  # база введена руками (внешний кабинет)
+
+
+class AgencySheetClient(BaseModel):
+    client_id: int
+    name: str
+    billing_mode: str
+    team_id: int | None
+    team_name: str | None
+    manager_share: Decimal
+    weeks: list[AgencyClientWeek] = []  # percent
+    profit_amount: Decimal | None = None  # profit_share: введённая ЧП месяца
+    fee_percent: Decimal | None = None
+    fee_total: Decimal
+    manager_amount: Decimal  # уходит команде (в ведомость и ФОТ «Менеджеры»)
+    agency_amount: Decimal  # остаток агентству (в ОПиУ пока не включается)
+    # Не хватает данных: нет команды / нет ЧП месяца / нет недельных баз внешнего.
+    warnings: list[str] = []
+
+
+class AgencySheetResponse(BaseModel):
+    month: str
+    clients: list[AgencySheetClient]
+    totals_fee: Decimal
+    totals_manager: Decimal
+    totals_agency: Decimal
+
+
 # ─── Отметки выплат ──────────────────────────────────────────────────────────
 
 
