@@ -1,0 +1,165 @@
+"""
+Payroll models: сотрудники, команды брендов и тарифная лестница зарплаты.
+
+Схема начисления: команда (1-2 сотрудника) владеет набором брендов и/или
+категорий (предметов); её начисление за неделю = недельная «Чистая выплата»
+БДР по этим брендам × ставка «Команда» из тарифной лестницы (ступень —
+ближайший порог снизу, ниже минимального порога — минимальная ставка,
+отрицательная неделя — 0). Процент делится между участниками поровну.
+Начисление за месяц = сумма недель, привязанных к месяцу (неделя Пн-Вс
+принадлежит месяцу своего четверга). Выплата 50/50 десятого и двадцать
+пятого числа следующего месяца. Отдельно — фиксированные оклады
+(fixed_salary + fixed_pay_days). Официальная часть вычитается по факту
+из банковской выписки через counterparty_id.
+"""
+
+import enum
+from datetime import date
+from decimal import Decimal
+
+from sqlalchemy import (
+    Boolean,
+    Date,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from backend.database import Base
+from backend.models.mixins import SoftDeleteMixin, TimestampMixin
+
+
+class PayrollScopeKind(str, enum.Enum):
+    """Чем владеет команда: брендом или категорией (предметом) WB."""
+
+    BRAND = "brand"
+    SUBJECT = "subject"
+
+
+class PayrollEmployee(Base, TimestampMixin, SoftDeleteMixin):
+    """
+    Сотрудник. counterparty_id связывает с контрагентом-физлицом из банковской
+    выписки — по нему подтягивается факт официальных выплат.
+    """
+
+    __tablename__ = "payroll_employee"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    counterparty_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=True)
+    # Месячный фикс-оклад (бухгалтер, логист). None — сотрудник только на проценте.
+    fixed_salary: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    # График выплат фикса: [{"day": 10, "share": 0.5}, {"day": 25, "share": 0.5}].
+    # None — дефолт 50/50 на 10-е и 25-е. Логист: [{"day": 15, "share": 1}].
+    fixed_pay_days: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (Index("ix_payroll_employee_project_id", "project_id"),)
+
+
+class PayrollTeam(Base, TimestampMixin, SoftDeleteMixin):
+    """Команда — единица начисления процента. Привязана к одному проекту."""
+
+    __tablename__ = "payroll_team"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+
+    members: Mapped[list["PayrollTeamMember"]] = relationship(back_populates="team", cascade="all, delete-orphan")
+    scopes: Mapped[list["PayrollTeamScope"]] = relationship(back_populates="team", cascade="all, delete-orphan")
+
+    __table_args__ = (Index("ix_payroll_team_project_id", "project_id"),)
+
+
+class PayrollTeamMember(Base):
+    """Участник команды. Доли всегда равные, поэтому поля доли нет."""
+
+    __tablename__ = "payroll_team_member"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    team_id: Mapped[int] = mapped_column(Integer, ForeignKey("payroll_team.id"), nullable=False)
+    employee_id: Mapped[int] = mapped_column(Integer, ForeignKey("payroll_employee.id"), nullable=False)
+
+    team: Mapped["PayrollTeam"] = relationship(back_populates="members")
+    employee: Mapped["PayrollEmployee"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("team_id", "employee_id", name="uq_payroll_team_member"),
+        Index("ix_payroll_team_member_team_id", "team_id"),
+        Index("ix_payroll_team_member_employee_id", "employee_id"),
+    )
+
+
+class PayrollTeamScope(Base):
+    """Бренд или категория, выплата по которым идёт в базу начисления команды."""
+
+    __tablename__ = "payroll_team_scope"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    team_id: Mapped[int] = mapped_column(Integer, ForeignKey("payroll_team.id"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(10), nullable=False)  # PayrollScopeKind
+    # Значение как в wb_finance_rows: brand_name либо subject_name.
+    value: Mapped[str] = mapped_column(String(300), nullable=False)
+
+    team: Mapped["PayrollTeam"] = relationship(back_populates="scopes")
+
+    __table_args__ = (
+        UniqueConstraint("team_id", "kind", "value", name="uq_payroll_team_scope"),
+        Index("ix_payroll_team_scope_team_id", "team_id"),
+    )
+
+
+class PayrollTariffStep(Base, TimestampMixin):
+    """
+    Ступень тарифной лестницы: порог недельной выплаты → ставки.
+
+    Глобальный справочник уровня инсталляции (без project_id, как category_ref):
+    лестница одна для всех команд всех проектов (решение юзера 2026-07-28).
+    Версионность через valid_from: действующий набор — строки максимального
+    valid_from <= даты расчёта.
+    """
+
+    __tablename__ = "payroll_tariff_step"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    valid_from: Mapped[date] = mapped_column(Date, nullable=False)
+    threshold: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    company_rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    team_rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+
+    __table_args__ = (UniqueConstraint("valid_from", "threshold", name="uq_payroll_tariff_step"),)
+
+
+class PayrollPayoutMark(Base, TimestampMixin):
+    """
+    Отметка «выплачено» по строке плана выплат (сотрудник × месяц × день выплаты).
+    month — первое число расчётного месяца (за который начислено, не месяца выплаты).
+    amount — фактически выплаченная сумма, если отличается от плановой.
+    """
+
+    __tablename__ = "payroll_payout_mark"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    employee_id: Mapped[int] = mapped_column(Integer, ForeignKey("payroll_employee.id"), nullable=False)
+    month: Mapped[date] = mapped_column(Date, nullable=False)
+    pay_day: Mapped[int] = mapped_column(Integer, nullable=False)
+    paid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("employee_id", "month", "pay_day", name="uq_payroll_payout_mark"),
+        Index("ix_payroll_payout_mark_project_id", "project_id"),
+        Index("ix_payroll_payout_mark_employee_id", "employee_id"),
+    )
