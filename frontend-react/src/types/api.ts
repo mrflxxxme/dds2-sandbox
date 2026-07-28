@@ -8717,12 +8717,20 @@ export interface PayrollPayDayShare {
   share: number | string;
 }
 
+/** Период оклада: с месяца month действует amount (история изменений). */
+export interface PayrollSalaryPeriod {
+  /** 'YYYY-MM'. */
+  month: string;
+  amount: number | string;
+}
+
 export interface PayrollEmployeeIn {
   name: string;
   /** Должность («Бухгалтер», «Логист»…) — группирует фикс-оклад в подстроках «ФОТ (начислено)» ОПиУ. */
   position?: string | null;
   counterparty_id?: number | null;
-  fixed_salary?: number | null;
+  /** История фикс-окладов; оклад месяца = период с max(month) <= месяц, до первого периода — 0. */
+  salary_periods?: PayrollSalaryPeriod[] | null;
   /** null — дефолт 50/50 на 10-е и 25-е; сумма долей должна быть равна 1. */
   fixed_pay_days?: PayrollPayDayShare[] | null;
   is_active?: boolean;
@@ -8735,8 +8743,8 @@ export interface PayrollEmployeeUpdate {
   clear_position?: boolean;
   counterparty_id?: number | null;
   clear_counterparty?: boolean;
-  fixed_salary?: number | null;
-  clear_fixed_salary?: boolean;
+  /** undefined — не трогать; массив (в т.ч. пустой []) — полная замена истории окладов. */
+  salary_periods?: PayrollSalaryPeriod[] | null;
   fixed_pay_days?: PayrollPayDayShare[] | null;
   is_active?: boolean | null;
   notes?: string | null;
@@ -8748,7 +8756,9 @@ export interface PayrollEmployee {
   position: string | null;
   counterparty_id: number | null;
   counterparty_name?: string | null;
-  fixed_salary: number | string | null;
+  salary_periods: PayrollSalaryPeriod[];
+  /** Оклад, действующий в текущем месяце (для таблицы; null — нет периода). */
+  current_salary: number | string | null;
   fixed_pay_days: PayrollPayDayShare[] | null;
   is_active: boolean;
   notes: string | null;

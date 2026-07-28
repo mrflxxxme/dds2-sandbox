@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import { api } from '@/lib/api';
 import type {
@@ -8,8 +8,9 @@ import type {
     PayrollEmployee,
     PayrollEmployeeUpdate,
     PayrollPayDayShare,
+    PayrollSalaryPeriod,
 } from '@/types/api';
-import { money, payScheduleLabel } from './payrollFmt';
+import { money, monthGenLabel, payScheduleLabel, shiftMonth } from './payrollFmt';
 
 export default function SalaryEmployees({
     nonce, onChanged,
@@ -95,15 +96,35 @@ export default function SalaryEmployees({
         },
         {
             key: 'fixed_salary', label: 'Фикс-оклад', align: 'right' as const,
-            getValue: (r: PayrollEmployee) => Number(r.fixed_salary ?? 0),
-            render: (_v: unknown, r: PayrollEmployee) => r.fixed_salary == null
-                ? <span style={{ color: 'var(--color-text-dim)' }}>—</span>
-                : `${money(r.fixed_salary)} ₽/мес`,
+            headerTitle: 'Оклад, действующий в текущем месяце; полная история — в подсказке ячейки и в карточке',
+            getValue: (r: PayrollEmployee) => Number(r.current_salary ?? 0),
+            render: (_v: unknown, r: PayrollEmployee) => {
+                const periods = [...r.salary_periods].sort((a, b) => a.month.localeCompare(b.month));
+                if (r.current_salary == null && periods.length === 0) {
+                    return <span style={{ color: 'var(--color-text-dim)' }}>—</span>;
+                }
+                const last = periods[periods.length - 1];
+                const history = periods
+                    .map((p) => `с ${monthGenLabel(p.month)}: ${money(p.amount, 0)} ₽`)
+                    .join('\n');
+                // Пометка «с {месяц}»: была история (периодов > 1) либо оклад ещё не начал действовать.
+                const showSince = last != null && (periods.length > 1 || r.current_salary == null);
+                return (
+                    <div title={history || undefined}>
+                        <div>{r.current_salary == null ? '—' : `${money(r.current_salary, 0)} ₽/мес`}</div>
+                        {showSince && (
+                            <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
+                                с {monthGenLabel(last.month)}
+                            </div>
+                        )}
+                    </div>
+                );
+            },
         },
         {
             key: 'schedule', label: 'График фикса',
-            getValue: (r: PayrollEmployee) => (r.fixed_salary == null ? '' : payScheduleLabel(r.fixed_pay_days)),
-            render: (_v: unknown, r: PayrollEmployee) => r.fixed_salary == null
+            getValue: (r: PayrollEmployee) => (r.salary_periods.length === 0 ? '' : payScheduleLabel(r.fixed_pay_days)),
+            render: (_v: unknown, r: PayrollEmployee) => r.salary_periods.length === 0
                 ? <span style={{ color: 'var(--color-text-dim)' }}>—</span>
                 : <span style={{ fontSize: 12.5 }}>{payScheduleLabel(r.fixed_pay_days)}</span>,
         },
@@ -226,6 +247,9 @@ function detectMode(days: PayrollPayDayShare[] | null | undefined): ScheduleMode
 
 interface CustomRow { day: string; sharePct: string; }
 
+/** Строка редактора истории окладов; uid — стабильный ключ (строки сортируются по месяцу). */
+interface SalaryRowDraft { uid: number; month: string; amount: string; }
+
 function EmployeeFormModal({
     employee, positionOptions, onClose, onSaved,
 }: {
@@ -238,9 +262,15 @@ function EmployeeFormModal({
     const [position, setPosition] = useState(employee?.position ?? '');
     const [isActive, setIsActive] = useState(employee?.is_active ?? true);
     const [notes, setNotes] = useState(employee?.notes ?? '');
-    const [fixedSalary, setFixedSalary] = useState(
-        employee?.fixed_salary != null ? String(Number(employee.fixed_salary)) : ''
+    // История окладов: undefined на сабмите = секцию не трогали (не слать поле).
+    const [salaryRows, setSalaryRows] = useState<SalaryRowDraft[]>(() =>
+        (employee?.salary_periods ?? [])
+            .slice()
+            .sort((a, b) => a.month.localeCompare(b.month))
+            .map((p, i) => ({ uid: i, month: p.month, amount: String(Number(p.amount)) }))
     );
+    const [salaryTouched, setSalaryTouched] = useState(false);
+    const salaryUidRef = useRef(employee?.salary_periods?.length ?? 0);
     const [mode, setMode] = useState<ScheduleMode>(detectMode(employee?.fixed_pay_days));
     const [customRows, setCustomRows] = useState<CustomRow[]>(
         employee?.fixed_pay_days?.length
@@ -283,6 +313,43 @@ function EmployeeFormModal({
         };
     }, [cpSearch, cpId]);
 
+    // ─── Редактор истории окладов ────────────────────────────────────────────
+    const patchSalaryRow = (uid: number, patch: Partial<Omit<SalaryRowDraft, 'uid'>>) => {
+        setSalaryTouched(true);
+        setSalaryRows((rows) => rows.map((r) => (r.uid === uid ? { ...r, ...patch } : r)));
+    };
+
+    const addSalaryRow = () => {
+        setSalaryTouched(true);
+        const uid = salaryUidRef.current++;
+        // Дефолт месяца: следующий за последним периодом, но не раньше текущего.
+        const nowIso = new Date().toISOString().slice(0, 7);
+        const months = salaryRows.map((r) => r.month).filter(Boolean).sort();
+        const max = months[months.length - 1];
+        const month = max && max >= nowIso ? shiftMonth(max, 1) : nowIso;
+        setSalaryRows((rows) => [...rows, { uid, month, amount: '' }]);
+    };
+
+    const removeSalaryRow = (uid: number) => {
+        setSalaryTouched(true);
+        setSalaryRows((rows) => rows.filter((r) => r.uid !== uid));
+    };
+
+    const buildSalaryPeriods = (): { periods: PayrollSalaryPeriod[]; err?: string } => {
+        const rows = salaryRows.map((r) => ({ month: r.month, amount: Number(r.amount) }));
+        if (rows.some((r) => !/^\d{4}-\d{2}$/.test(r.month))) {
+            return { periods: [], err: 'У каждого периода оклада укажите месяц' };
+        }
+        if (new Set(rows.map((r) => r.month)).size !== rows.length) {
+            return { periods: [], err: 'Месяцы периодов оклада не должны повторяться' };
+        }
+        if (rows.some((r) => !Number.isFinite(r.amount) || r.amount < 0)) {
+            return { periods: [], err: 'Сумма оклада — неотрицательное число' };
+        }
+        rows.sort((a, b) => a.month.localeCompare(b.month));
+        return { periods: rows };
+    };
+
     const buildSchedule = (): { schedule: PayrollPayDayShare[] | null; err?: string } => {
         if (mode === 'default') return { schedule: employee ? DEFAULT_SCHEDULE : null };
         if (mode === 'once15') return { schedule: [{ day: 15, share: 1 }] };
@@ -306,13 +373,14 @@ function EmployeeFormModal({
 
     const submit = async () => {
         if (!name.trim()) { setError('Укажите ФИО'); return; }
-        const salary = fixedSalary.trim() === '' ? null : Number(fixedSalary);
-        if (salary != null && (!Number.isFinite(salary) || salary < 0)) {
-            setError('Фикс-оклад — неотрицательное число');
-            return;
-        }
+        const { periods, err: salaryErr } = buildSalaryPeriods();
+        if (salaryErr) { setError(salaryErr); return; }
+        // Есть ли оклад ПОСЛЕ правок (секцию не трогали → смотрим на текущие данные).
+        const hasSalary = salaryTouched || !employee
+            ? periods.length > 0
+            : employee.salary_periods.length > 0;
         const { schedule, err } = buildSchedule();
-        if (salary != null && err) { setError(err); return; }
+        if (hasSalary && err) { setError(err); return; }
 
         setSaving(true);
         setError('');
@@ -327,20 +395,17 @@ function EmployeeFormModal({
                 else if (employee.position != null) payload.clear_position = true;
                 if (cpId != null) payload.counterparty_id = cpId;
                 else if (employee.counterparty_id != null) payload.clear_counterparty = true;
-                if (salary != null) {
-                    payload.fixed_salary = salary;
-                    payload.fixed_pay_days = schedule;
-                } else if (employee.fixed_salary != null) {
-                    payload.clear_fixed_salary = true;
-                }
+                // Полная замена истории (в т.ч. [] = очистить); не трогали — поле не шлём.
+                if (salaryTouched) payload.salary_periods = periods;
+                if (hasSalary) payload.fixed_pay_days = schedule;
                 await api.updatePayrollEmployee(employee.id, payload);
             } else {
                 await api.createPayrollEmployee({
                     name: name.trim(),
                     position: position.trim() || null,
                     counterparty_id: cpId,
-                    fixed_salary: salary,
-                    fixed_pay_days: salary != null ? schedule : null,
+                    salary_periods: periods.length > 0 ? periods : null,
+                    fixed_pay_days: periods.length > 0 ? schedule : null,
                     is_active: isActive,
                     notes: notes.trim() || null,
                 });
@@ -433,23 +498,53 @@ function EmployeeFormModal({
                         )}
                     </div>
 
-                    <div className="form-group">
-                        <label className="form-label">Фикс-оклад, ₽/мес (опционально)</label>
-                        <input
-                            type="number"
-                            min={0}
-                            className="form-input"
-                            placeholder="50 000"
-                            value={fixedSalary}
-                            onChange={(e) => setFixedSalary(e.target.value)}
-                        />
-                    </div>
-                    <div className="form-group">
+                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
                         <label className="form-label">Заметки</label>
                         <input className="form-input" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="бухгалтер / логист…" />
                     </div>
 
-                    {fixedSalary.trim() !== '' && (
+                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                        <label className="form-label">Оклад (история изменений)</label>
+                        {salaryRows.length === 0 ? (
+                            <div style={{ fontSize: 12.5, color: 'var(--color-text-dim)', marginBottom: 6 }}>
+                                Оклада нет — только процент от команд.
+                            </div>
+                        ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 6 }}>
+                                {[...salaryRows].sort((a, b) => a.month.localeCompare(b.month)).map((r) => (
+                                    <div key={r.uid} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                        <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>с</span>
+                                        <input
+                                            type="month" className="form-input" style={{ width: 165 }}
+                                            value={r.month}
+                                            onChange={(e) => patchSalaryRow(r.uid, { month: e.target.value })}
+                                        />
+                                        <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>—</span>
+                                        <input
+                                            type="number" min={0} className="form-input" style={{ width: 140 }}
+                                            placeholder="50 000"
+                                            value={r.amount}
+                                            onChange={(e) => patchSalaryRow(r.uid, { amount: e.target.value })}
+                                        />
+                                        <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>₽/мес</span>
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            title="Удалить период"
+                                            onClick={() => removeSalaryRow(r.uid)}
+                                        >
+                                            ✕
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        <button className="btn btn-secondary btn-sm" onClick={addSalaryRow}>+ Добавить период</button>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
+                            Оклад действует с указанного месяца до следующего периода. Пример: 50 000 с 2026-01, 80 000 с 2026-07.
+                        </div>
+                    </div>
+
+                    {salaryRows.length > 0 && (
                         <div className="form-group" style={{ gridColumn: '1 / -1' }}>
                             <label className="form-label">График выплат фикса</label>
                             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 8 }}>

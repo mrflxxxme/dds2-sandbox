@@ -18,6 +18,7 @@ from backend.schemas.payroll import (
     EmployeeIn,
     PayDayShare,
     PayoutMarkIn,
+    SalaryPeriodIn,
     TeamIn,
     TeamMembersReplace,
     TeamScopeIn,
@@ -59,6 +60,11 @@ async def _create_counterparty(db_session, project_id: int, primary_type: str = 
     await db_session.commit()
     await db_session.refresh(cp)
     return cp.id
+
+
+def _fix(amount: str, month: str = "2020-01") -> list[SalaryPeriodIn]:
+    """Один оклад-период с далёкого прошлого = поведение «оклад всегда был»."""
+    return [SalaryPeriodIn(month=month, amount=D(amount))]
 
 
 def _step(threshold: str, team_rate: str) -> PayrollTariffStep:
@@ -301,7 +307,7 @@ async def test_sheet_fixed_salary_official_window_and_dues(db_session, client, a
     cp_id = await _create_counterparty(db_session, pid)
     await payroll_service.create_employee(
         db_session, pid,
-        EmployeeIn(name="Бухгалтер", counterparty_id=cp_id, fixed_salary=D("100000")),
+        EmployeeIn(name="Бухгалтер", counterparty_id=cp_id, salary_periods=_fix("100000")),
     )
     db_session.add_all([
         _txn(pid, cp_id, datetime(2026, 7, 10, 12, 0), "40000"),   # окно M+1 ✓
@@ -337,7 +343,7 @@ async def test_sheet_unofficial_due_can_be_negative(db_session, client, auth_hea
     cp_id = await _create_counterparty(db_session, pid)
     await payroll_service.create_employee(
         db_session, pid,
-        EmployeeIn(name="Переплата", counterparty_id=cp_id, fixed_salary=D("10000")),
+        EmployeeIn(name="Переплата", counterparty_id=cp_id, salary_periods=_fix("10000")),
     )
     db_session.add(_txn(pid, cp_id, datetime(2026, 7, 3, 9, 0), "15000"))
     await db_session.commit()
@@ -354,7 +360,7 @@ async def test_sheet_custom_fixed_pay_days(db_session, client, auth_headers):
         EmployeeIn(
             name="Логист",
             position="Логист",
-            fixed_salary=D("60000"),
+            salary_periods=_fix("60000"),
             fixed_pay_days=[PayDayShare(day=15, share=D("1"))],
         ),
     )
@@ -372,7 +378,7 @@ async def test_sheet_project_isolation(db_session, client, auth_headers):
     pid1 = await _create_project(client, auth_headers)
     pid2 = await _create_project(client, auth_headers)
     await payroll_service.create_employee(
-        db_session, pid1, EmployeeIn(name="Чужой", fixed_salary=D("50000"))
+        db_session, pid1, EmployeeIn(name="Чужой", salary_periods=_fix("50000"))
     )
 
     sheet2 = await _sheet(db_session, pid2, "2026-06")
@@ -384,15 +390,15 @@ async def test_sheet_project_isolation(db_session, client, auth_headers):
 async def test_sheet_softdeleted_and_inactive_filtered(db_session, client, auth_headers):
     pid = await _create_project(client, auth_headers)
     alive = await payroll_service.create_employee(
-        db_session, pid, EmployeeIn(name="Живой", fixed_salary=D("10000"))
+        db_session, pid, EmployeeIn(name="Живой", salary_periods=_fix("10000"))
     )
     dead = await payroll_service.create_employee(
-        db_session, pid, EmployeeIn(name="Удалённый", fixed_salary=D("99999"))
+        db_session, pid, EmployeeIn(name="Удалённый", salary_periods=_fix("99999"))
     )
     await payroll_service.delete_employee(db_session, pid, dead.id)
     # Неактивный без начислений — скрыт; фикс неактивному не начисляется
     await payroll_service.create_employee(
-        db_session, pid, EmployeeIn(name="Спящий", fixed_salary=D("77777"), is_active=False)
+        db_session, pid, EmployeeIn(name="Спящий", salary_periods=_fix("77777"), is_active=False)
     )
 
     sheet = await _sheet(db_session, pid, "2026-06")
@@ -437,7 +443,7 @@ async def test_team_softdelete_member_excluded_from_split(
 async def test_payout_mark_upsert_enriches_sheet(db_session, client, auth_headers):
     pid = await _create_project(client, auth_headers)
     emp = await payroll_service.create_employee(
-        db_session, pid, EmployeeIn(name="Отмеченный", fixed_salary=D("40000"))
+        db_session, pid, EmployeeIn(name="Отмеченный", salary_periods=_fix("40000"))
     )
     await payroll_service.upsert_payout_mark(
         db_session, pid,
@@ -477,13 +483,165 @@ async def test_monthly_accruals_fixed_salary(db_session, client, auth_headers):
     pid = await _create_project(client, auth_headers)
     await payroll_service.create_employee(
         db_session, pid,
-        EmployeeIn(name="Фикс", position="Бухгалтер", fixed_salary=D("100000")),
+        EmployeeIn(name="Фикс", position="Бухгалтер", salary_periods=_fix("100000")),
     )
     result = await payroll_service.get_monthly_accruals(db_session, pid, ["2026-06"])
     acc = result["2026-06"]
     assert acc["total"] == D("100000.00")
     assert acc["managers"] == D("0")
     assert acc["by_position"] == {"Бухгалтер": D("100000.00")}
+
+
+# ─── История окладов (PayrollSalaryPeriod) ───────────────────────────────────
+
+
+async def test_salary_period_history_in_sheet(db_session, client, auth_headers):
+    """Оклад 50к с 2026-01, 80к с 2026-07: июнь=50к, июль=80к, декабрь-2025=0."""
+    pid = await _create_project(client, auth_headers)
+    await payroll_service.create_employee(
+        db_session, pid,
+        EmployeeIn(
+            name="Бух",
+            salary_periods=[
+                SalaryPeriodIn(month="2026-01", amount=D("50000")),
+                SalaryPeriodIn(month="2026-07", amount=D("80000")),
+            ],
+        ),
+    )
+
+    june = await _sheet(db_session, pid, "2026-06")
+    assert D(june["employees"][0]["fixed_accrual"]) == D("50000.00")
+
+    july = await _sheet(db_session, pid, "2026-07")
+    assert D(july["employees"][0]["fixed_accrual"]) == D("80000.00")
+
+    dec = await _sheet(db_session, pid, "2025-12")  # до первого периода
+    assert D(dec["employees"][0]["fixed_accrual"]) == D("0.00")
+    assert D(dec["totals"]["accrued_total"]) == D("0.00")
+
+
+async def test_salary_period_resolve_pure():
+    from backend.models.payroll import PayrollSalaryPeriod
+
+    periods = [
+        PayrollSalaryPeriod(valid_from=date(2026, 1, 1), amount=D("50000")),
+        PayrollSalaryPeriod(valid_from=date(2026, 7, 1), amount=D("80000")),
+    ]
+    assert payroll_service.resolve_salary(periods, date(2025, 12, 1)) is None
+    assert payroll_service.resolve_salary(periods, date(2026, 1, 1)) == D("50000")
+    assert payroll_service.resolve_salary(periods, date(2026, 6, 15)) == D("50000")
+    assert payroll_service.resolve_salary(periods, date(2026, 7, 1)) == D("80000")
+    assert payroll_service.resolve_salary([], date(2026, 7, 1)) is None
+
+
+async def test_opiu_fot_respects_salary_history(db_session, client, auth_headers):
+    """ОПиУ прошлых месяцев: до первого периода ФОТ = 0, не сегодняшний оклад."""
+    from backend.services.opiu_service import get_opiu
+
+    pid = await _create_project(client, auth_headers)
+    await payroll_service.create_employee(
+        db_session, pid,
+        EmployeeIn(
+            name="Бух",
+            salary_periods=[SalaryPeriodIn(month="2026-01", amount=D("50000"))],
+        ),
+    )
+
+    result = await get_opiu.__wrapped__(
+        db_session, pid, date(2025, 12, 1), date(2026, 1, 31)
+    )
+    rows = {r["key"]: r for r in result["rows"]}
+    fot = rows["opex_payroll_fot"]
+    assert fot["monthly"]["2025-12"] == 0.0  # истории задним числом нет
+    assert fot["monthly"]["2026-01"] == pytest.approx(50000.0)
+
+
+async def test_opex_exclusion_scoped_by_accruals(db_session, client, auth_headers):
+    """
+    Кейс Ирины-логиста: исключаем из opex только выплаты, которым соответствует
+    начисление. Окладник — с min(valid_from) периодов (до — остаётся в opex);
+    процентщик (в команде) — вся история; привязанный без начислений — ничего.
+    """
+    from backend.services.opiu_service import get_opiu
+
+    pid = await _create_project(client, auth_headers)
+    cp_log = await _create_counterparty(db_session, pid, primary_type="LEGAL")
+    cp_pct = await _create_counterparty(db_session, pid, primary_type="LEGAL")
+    cp_none = await _create_counterparty(db_session, pid, primary_type="LEGAL")
+
+    # Ирина: оклад-периоды с марта-2026
+    await payroll_service.create_employee(
+        db_session, pid,
+        EmployeeIn(
+            name="Ирина", position="Логист", counterparty_id=cp_log,
+            salary_periods=[SalaryPeriodIn(month="2026-03", amount=D("50000"))],
+        ),
+    )
+    # Процентщик: в команде, без окладов
+    pct = await payroll_service.create_employee(
+        db_session, pid, EmployeeIn(name="Процентщик", counterparty_id=cp_pct)
+    )
+    team = await payroll_service.create_team(db_session, pid, TeamIn(name="Т"))
+    await payroll_service.replace_team_members(
+        db_session, pid, team.id, TeamMembersReplace(employee_ids=[pct.id])
+    )
+    # Привязан, но без команд и без окладов — начислений нет вовсе
+    await payroll_service.create_employee(
+        db_session, pid, EmployeeIn(name="Просто привязан", counterparty_id=cp_none)
+    )
+
+    db_session.add_all([
+        _txn(pid, cp_log, datetime(2026, 1, 15, 10, 0), "40000"),   # ДО периода → opex
+        _txn(pid, cp_log, datetime(2026, 4, 10, 10, 0), "30000"),   # после → исключена
+        _txn(pid, cp_pct, datetime(2026, 1, 20, 10, 0), "20000"),   # процентщик → искл.
+        _txn(pid, cp_none, datetime(2026, 4, 5, 10, 0), "5000"),    # без начислений → opex
+    ])
+    await db_session.commit()
+
+    result = await get_opiu.__wrapped__(
+        db_session, pid, date(2026, 1, 1), date(2026, 4, 30)
+    )
+    rows = {r["key"]: r for r in result["rows"]}
+    legal = rows["opex_legal"]
+    assert legal["monthly"]["2026-01"] == 40000.0  # Ирина-до-периода; процентщик исключён
+    assert legal["monthly"]["2026-04"] == 5000.0   # только «просто привязан»
+
+
+async def test_opiu_fot_children_largest_remainder(db_session, client, auth_headers, monkeypatch):
+    """
+    Под-месячное окно (factor 10/31): независимое округление детей даёт ±0.01 —
+    reconciliation обязан свести родителя к Σ детей (largest-remainder).
+    """
+    from backend.services import payroll_service as ps
+    from backend.services.opiu_service import get_opiu
+
+    pid = await _create_project(client, auth_headers)
+
+    async def fake_accruals(db, project_id, months):
+        return {
+            mk: {
+                "managers": D("30000"),
+                "by_position": {"Бухгалтер": D("70000")},
+                "total": D("100000"),
+            }
+            for mk in months
+        }
+
+    monkeypatch.setattr(ps, "get_monthly_accruals", fake_accruals)
+
+    result = await get_opiu.__wrapped__(
+        db_session, pid, date(2026, 7, 1), date(2026, 7, 10)  # 10 из 31 дня
+    )
+    rows = {r["key"]: r for r in result["rows"]}
+    parent = rows["opex_payroll_fot"]["monthly"]["2026-07"]
+    managers = rows["opex_payroll_fot_managers"]["monthly"]["2026-07"]
+    accountant = rows["opex_payroll_fot_бухгалтер"]["monthly"]["2026-07"]
+
+    # Независимое округление: 9677.42 + 22580.65 = 32258.07 ≠ 32258.06 (родитель)
+    assert parent == pytest.approx(32258.06, abs=0.001)
+    assert managers + accountant == pytest.approx(parent, abs=0.001)  # сведено
+    assert managers == pytest.approx(9677.42, abs=0.001)
+    assert accountant == pytest.approx(22580.64, abs=0.001)  # −0.01 у крупнейшего
 
 
 async def test_month_accrual_breakdown_managers_positions_and_sum(
@@ -499,11 +657,11 @@ async def test_month_accrual_breakdown_managers_positions_and_sum(
     # фикс — в свою должность
     e1 = await payroll_service.create_employee(
         db_session, pid,
-        EmployeeIn(name="Аня", position="Логист", fixed_salary=D("50000")),
+        EmployeeIn(name="Аня", position="Логист", salary_periods=_fix("50000")),
     )
     e2 = await payroll_service.create_employee(db_session, pid, EmployeeIn(name="Боря"))
     await payroll_service.create_employee(
-        db_session, pid, EmployeeIn(name="Вера", fixed_salary=D("70000"))  # без должности
+        db_session, pid, EmployeeIn(name="Вера", salary_periods=_fix("70000"))  # без должности
     )
     team = await payroll_service.create_team(db_session, pid, TeamIn(name="Ковры"))
     await payroll_service.replace_team_scopes(
@@ -546,7 +704,7 @@ async def test_opiu_fot_row_and_no_double_count(db_session, client, auth_headers
     cp_other = await _create_counterparty(db_session, pid, primary_type="LEGAL")
     await payroll_service.create_employee(
         db_session, pid,
-        EmployeeIn(name="Сотрудник", counterparty_id=cp_emp, fixed_salary=D("100000")),
+        EmployeeIn(name="Сотрудник", counterparty_id=cp_emp, salary_periods=_fix("100000")),
     )
     db_session.add_all([
         # Выплата ЗП сотруднику в июле — НЕ должна попасть в opex_legal
@@ -596,7 +754,7 @@ async def test_opiu_inactive_employee_payments_stay_in_opex(db_session, client, 
     await payroll_service.create_employee(
         db_session, pid,
         EmployeeIn(name="Бывший", counterparty_id=cp_id,
-                   fixed_salary=D("100000"), is_active=False),
+                   salary_periods=_fix("100000"), is_active=False),
     )
     db_session.add(_txn(pid, cp_id, datetime(2026, 7, 12, 10, 0), "30000"))
     await db_session.commit()
@@ -615,7 +773,7 @@ async def test_opiu_fot_prorata_submonth_window(db_session, client, auth_headers
 
     pid = await _create_project(client, auth_headers)
     await payroll_service.create_employee(
-        db_session, pid, EmployeeIn(name="Фикс", fixed_salary=D("100000"))
+        db_session, pid, EmployeeIn(name="Фикс", salary_periods=_fix("100000"))
     )
 
     result = await get_opiu.__wrapped__(
@@ -645,7 +803,7 @@ async def test_month_accrual_cache_roundtrip_new_prefix(db_session, client, auth
     pid = await _create_project(client, auth_headers)
     await payroll_service.create_employee(
         db_session, pid,
-        EmployeeIn(name="Кэш", position="Бухгалтер", fixed_salary=D("100000")),
+        EmployeeIn(name="Кэш", position="Бухгалтер", salary_periods=_fix("100000")),
     )
     first = await payroll_service.get_month_accrual(db_session, pid, "2026-06")  # miss → set
     second = await payroll_service.get_month_accrual(db_session, pid, "2026-06")  # hit
@@ -668,7 +826,7 @@ async def test_opiu_fot_children_managers_and_position(
     e1 = await payroll_service.create_employee(db_session, pid, EmployeeIn(name="Аня"))
     await payroll_service.create_employee(
         db_session, pid,
-        EmployeeIn(name="Бухгалтер", position="Бухгалтер", fixed_salary=D("40000")),
+        EmployeeIn(name="Бухгалтер", position="Бухгалтер", salary_periods=_fix("40000")),
     )
     team = await payroll_service.create_team(db_session, pid, TeamIn(name="Ковры"))
     await payroll_service.replace_team_scopes(

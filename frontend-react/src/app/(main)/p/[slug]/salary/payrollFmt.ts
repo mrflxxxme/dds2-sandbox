@@ -46,6 +46,15 @@ export const monthTitle = (iso: string | null | undefined): string => {
     return `${MONTH_NAMES[mi]} ${y}`;
 };
 
+/** «2026-07» → «июля 2026» (родительный падеж, для «с …»). */
+export const monthGenLabel = (iso: string | null | undefined): string => {
+    if (!iso) return '—';
+    const [y, m] = iso.split('-');
+    const mi = m ? Number(m) - 1 : NaN;
+    if (!y || Number.isNaN(mi) || mi < 0 || mi > 11) return iso;
+    return `${MONTH_GEN[mi]} ${y}`;
+};
+
 /** «2026-07-10» → «10 июля». */
 export const dayMonthLabel = (iso: string | null | undefined): string => {
     if (!iso) return '—';

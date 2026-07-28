@@ -10,7 +10,9 @@ Service: payroll — зарплата: сотрудники, команды, т�
   набор = максимальный valid_from <= последнего дня месяца). Ступень — наибольший
   порог <= базы; ниже минимального порога — минимальная ступень; база <= 0 → 0.
 - Сумма команды = база × team_rate, делится поровну между активными участниками.
-- Фикс-оклад (fixed_salary) начисляется за полный месяц активному сотруднику.
+- Фикс-оклад ведётся ПЕРИОДАМИ (PayrollSalaryPeriod): оклад месяца M = amount
+  периода с max(valid_from) <= первое число M; до первого периода — 0
+  («у бух была 50к, с июля 80к» — прошлые месяцы не переписываются задним числом).
 - План выплат: процентная часть 50/50 на 10-е и 25-е СЛЕДУЮЩЕГО месяца; фикс —
   по fixed_pay_days (NULL = 50/50 на 10/25). Строки мержатся по дню.
 - Официалка: факт из банковской выписки по counterparty_id сотрудника за
@@ -33,6 +35,7 @@ from backend.models.counterparty import Counterparty
 from backend.models.payroll import (
     PayrollEmployee,
     PayrollPayoutMark,
+    PayrollSalaryPeriod,
     PayrollTariffStep,
     PayrollTeam,
     PayrollTeamMember,
@@ -48,6 +51,7 @@ from backend.schemas.payroll import (
     OkResponse,
     PayoutMarkIn,
     PayrollSheetResponse,
+    SalaryPeriodOut,
     SheetEmployee,
     SheetPayout,
     SheetTeam,
@@ -153,6 +157,25 @@ def resolve_step(
     return chosen
 
 
+def resolve_salary(
+    periods: Sequence[PayrollSalaryPeriod], month: date
+) -> Decimal | None:
+    """
+    Оклад месяца: amount периода с max(valid_from) <= первое число месяца.
+
+    До первого периода — None (начисления нет: история окладов не переписывает
+    прошлые месяцы задним числом).
+    """
+    first = month.replace(day=1)
+    best_from: date | None = None
+    best_amount: Decimal | None = None
+    for period in periods:
+        if period.valid_from <= first and (best_from is None or period.valid_from > best_from):
+            best_from = period.valid_from
+            best_amount = period.amount
+    return best_amount
+
+
 def build_payout_plan(
     percent_total: Decimal,
     fixed_salary: Decimal,
@@ -225,11 +248,16 @@ async def _get_employee(
 ) -> PayrollEmployee:
     emp = (
         await db.execute(
-            select(PayrollEmployee).where(
+            select(PayrollEmployee)
+            .where(
                 PayrollEmployee.id == employee_id,
                 PayrollEmployee.project_id == project_id,
                 PayrollEmployee.is_deleted == False,  # noqa: E712
             )
+            .options(selectinload(PayrollEmployee.salary_periods))
+            # replace-набор периодов пишется мимо relationship — без
+            # populate_existing identity map отдал бы устаревшую коллекцию
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if emp is None:
@@ -317,6 +345,7 @@ async def get_sheet(db: AsyncSession, project_id: int, month: str) -> dict:
                     PayrollEmployee.project_id == project_id,
                     PayrollEmployee.is_deleted == False,  # noqa: E712
                 )
+                .options(selectinload(PayrollEmployee.salary_periods))
                 .order_by(PayrollEmployee.id)
                 .limit(_EMPLOYEES_LIMIT)
             )
@@ -496,11 +525,9 @@ async def get_sheet(db: AsyncSession, project_id: int, month: str) -> dict:
             for tid, amt in sorted(by_team.items())
         ]
         percent_total = _money(sum((a.amount for a in team_accruals), ZERO))
-        fixed_accrual = (
-            _money(emp.fixed_salary)
-            if (emp.is_active and emp.fixed_salary is not None)
-            else _money(ZERO)
-        )
+        # Оклад расчётного месяца — из истории периодов (не сегодняшний!)
+        salary = resolve_salary(emp.salary_periods, month_start) if emp.is_active else None
+        fixed_accrual = _money(salary) if salary is not None else _money(ZERO)
         accrued_total = _money(percent_total + fixed_accrual)
 
         # Неактивный сотрудник без начислений в ведомости не показывается
@@ -697,13 +724,19 @@ def _employee_response(
     counterparty_name: str | None = None,
     team_names: list[str] | None = None,
 ) -> EmployeeResponse:
+    periods = sorted(emp.salary_periods, key=lambda p: p.valid_from)
     return EmployeeResponse(
         id=emp.id,
         name=emp.name,
         position=emp.position,
         counterparty_id=emp.counterparty_id,
         counterparty_name=counterparty_name,
-        fixed_salary=emp.fixed_salary,
+        salary_periods=[
+            SalaryPeriodOut(month=p.valid_from.strftime("%Y-%m"), amount=p.amount)
+            for p in periods
+        ],
+        # Оклад, действующий в ТЕКУЩЕМ месяце (None — период ещё не начался)
+        current_salary=resolve_salary(periods, utcnow().date().replace(day=1)),
         fixed_pay_days=emp.fixed_pay_days,
         is_active=emp.is_active,
         notes=emp.notes,
@@ -721,6 +754,8 @@ async def list_employees(db: AsyncSession, project_id: int) -> EmployeeListRespo
                     PayrollEmployee.project_id == project_id,
                     PayrollEmployee.is_deleted == False,  # noqa: E712
                 )
+                .options(selectinload(PayrollEmployee.salary_periods))
+                .execution_options(populate_existing=True)
                 .order_by(PayrollEmployee.id)
                 .limit(_EMPLOYEES_LIMIT)
             )
@@ -777,14 +812,23 @@ async def create_employee(
         name=data.name,
         position=data.position,
         counterparty_id=data.counterparty_id,
-        fixed_salary=data.fixed_salary,
         fixed_pay_days=_dump_pay_days(data.fixed_pay_days),
         is_active=data.is_active,
         notes=data.notes,
     )
+    for period in data.salary_periods or []:
+        emp.salary_periods.append(
+            PayrollSalaryPeriod(
+                valid_from=_parse_month(period.month), amount=period.amount
+            )
+        )
     db.add(emp)
+    await db.flush()
+    emp_id = emp.id
     await db.commit()
-    await db.refresh(emp)
+    # refresh() экспайрит relationship → лениво грузить salary_periods в async
+    # нельзя (MissingGreenlet); перечитываем с selectinload
+    emp = await _get_employee(db, project_id, emp_id)
     cp_names = await _counterparty_names(
         db, project_id, {emp.counterparty_id} if emp.counterparty_id else set()
     )
@@ -811,10 +855,21 @@ async def update_employee(
     elif data.counterparty_id is not None:
         await _validate_counterparty(db, project_id, data.counterparty_id)
         emp.counterparty_id = data.counterparty_id
-    if data.clear_fixed_salary:
-        emp.fixed_salary = None
-    elif data.fixed_salary is not None:
-        emp.fixed_salary = data.fixed_salary
+    if data.salary_periods is not None:
+        # None — не трогать; список (в т.ч. пустой) — полная замена истории
+        await db.execute(
+            delete(PayrollSalaryPeriod).where(
+                PayrollSalaryPeriod.employee_id == emp.id
+            )
+        )
+        for period in data.salary_periods:
+            db.add(
+                PayrollSalaryPeriod(
+                    employee_id=emp.id,
+                    valid_from=_parse_month(period.month),
+                    amount=period.amount,
+                )
+            )
     if "fixed_pay_days" in provided:
         emp.fixed_pay_days = _dump_pay_days(data.fixed_pay_days)
     if data.is_active is not None:
@@ -823,7 +878,8 @@ async def update_employee(
         emp.notes = data.notes
 
     await db.commit()
-    await db.refresh(emp)
+    # Периоды писались мимо relationship — перечитываем сотрудника целиком
+    emp = await _get_employee(db, project_id, employee_id)
     cp_names = await _counterparty_names(
         db, project_id, {emp.counterparty_id} if emp.counterparty_id else set()
     )

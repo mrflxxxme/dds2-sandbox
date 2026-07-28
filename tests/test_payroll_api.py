@@ -50,11 +50,21 @@ async def test_employee_crud_flow(client, auth_headers):
     headers, _ = await _project_headers(client, auth_headers)
 
     emp = await _create_employee(
-        client, headers, name="Бухгалтер", position="Бухгалтер", fixed_salary="100000",
+        client, headers, name="Бухгалтер", position="Бухгалтер",
+        salary_periods=[
+            {"month": "2026-01", "amount": "50000"},
+            {"month": "2026-07", "amount": "80000"},
+        ],
         fixed_pay_days=[{"day": 15, "share": 1}], notes="на фиксе",
     )
     assert emp["name"] == "Бухгалтер"
     assert emp["position"] == "Бухгалтер"
+    assert [(p["month"], float(p["amount"])) for p in emp["salary_periods"]] == [
+        ("2026-01", 50000.0),
+        ("2026-07", 80000.0),
+    ]
+    # Сегодня 2026-07-28 — действует период с июля
+    assert float(emp["current_salary"]) == 80000.0
     assert [(d["day"], float(d["share"])) for d in emp["fixed_pay_days"]] == [(15, 1.0)]
 
     # List
@@ -64,19 +74,40 @@ async def test_employee_crud_flow(client, auth_headers):
     assert len(items) == 1
     assert items[0]["team_names"] == []
 
-    # PATCH: имя + смена должности + явное обнуление фикса
+    # PATCH: имя + смена должности; salary_periods не передаём — не трогаются
     resp = await client.patch(
         f"/api/v1/payroll/employees/{emp['id']}",
-        json={"name": "Гл. бухгалтер", "position": "Гл. бухгалтер", "clear_fixed_salary": True},
+        json={"name": "Гл. бухгалтер", "position": "Гл. бухгалтер"},
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
     updated = resp.json()
     assert updated["name"] == "Гл. бухгалтер"
     assert updated["position"] == "Гл. бухгалтер"
-    assert updated["fixed_salary"] is None
+    assert len(updated["salary_periods"]) == 2  # история не тронута
     # график не тронут (fixed_pay_days не передавали)
     assert [(d["day"], float(d["share"])) for d in updated["fixed_pay_days"]] == [(15, 1.0)]
+
+    # Полная замена истории окладов одним периодом
+    resp = await client.patch(
+        f"/api/v1/payroll/employees/{emp['id']}",
+        json={"salary_periods": [{"month": "2026-03", "amount": "60000"}]},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert [(p["month"], float(p["amount"])) for p in resp.json()["salary_periods"]] == [
+        ("2026-03", 60000.0)
+    ]
+
+    # Пустой список — очистить историю; current_salary пропадает
+    resp = await client.patch(
+        f"/api/v1/payroll/employees/{emp['id']}",
+        json={"salary_periods": []},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["salary_periods"] == []
+    assert resp.json()["current_salary"] is None
 
     # clear_position — явное обнуление; position без флага не трогается
     resp = await client.patch(
@@ -312,7 +343,10 @@ async def test_sheet_bad_month_422(client, auth_headers):
 async def test_payout_mark_upsert_and_foreign_404(client, auth_headers):
     headers1, _ = await _project_headers(client, auth_headers)
     headers2, _ = await _project_headers(client, auth_headers)
-    emp = await _create_employee(client, headers1, name="Аня", fixed_salary="50000")
+    emp = await _create_employee(
+        client, headers1, name="Аня",
+        salary_periods=[{"month": "2020-01", "amount": "50000"}],
+    )
 
     resp = await client.put(
         "/api/v1/payroll/payout-mark",
