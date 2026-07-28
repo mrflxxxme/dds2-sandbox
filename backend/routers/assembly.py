@@ -114,7 +114,11 @@ async def list_assembly_requests(
     draft_id: int | None = Query(None),
     status: str | None = Query(None),
     view: str | None = Query(
-        None, description='Вид списка: "active" (скрыть Принято ВБ/Закрыта/Отменена) | "archived" | "all"'
+        None,
+        description=(
+            'Вид списка: "active" (скрыть Принято ВБ/Возврат на склад/Закрыта/Отменена)'
+            ' | "archived" | "all"'
+        ),
     ),
     search: str | None = Query(None),
     date_from: date | None = Query(None),
