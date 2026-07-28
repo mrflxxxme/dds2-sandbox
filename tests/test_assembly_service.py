@@ -504,6 +504,23 @@ class TestListAssemblyRequests:
         ]
         assert req.id in explicit_ids
 
+        # Возврат на склад (RETURNED) — тоже в архиве: WB не принял, заявка ждёт
+        # переотгрузки/закрытия и в активном списке не нужна.
+        req.status = AssemblyStatus.RETURNED
+        await db_session.commit()
+
+        active_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID, view="active"))[0]]
+        arch_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID, view="archived"))[0]]
+        assert req.id not in active_ids and req.id in arch_ids
+
+        # Но по явному статусу «Возврат на склад» заявка находится и в активном виде —
+        # иначе переотгрузку (reopen_for_reship) было бы не с чего запустить.
+        returned_ids = [
+            r.id
+            for r in (await list_assembly_requests(db_session, PROJECT_ID, status="RETURNED", view="active"))[0]
+        ]
+        assert req.id in returned_ids
+
     async def test_list_source_filter(self, db_session):
         """source: 'pre_dist' — заявки с меткой машины (предраспределение/долив);
         'prebooking' — 🅿️ предзаявки; 'plain' — без того и другого; None — все."""
