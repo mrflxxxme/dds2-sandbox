@@ -205,6 +205,11 @@ async def invalidate_project_reports(project_id: int):
         "payroll:sheet",
         "payroll:accruals2",
         "payroll:scope_options",
+        # Агентство: ведомость производна от БДР ЧУЖОГО проекта (кабинета
+        # клиента), а ETL кабинета гасит только свои ключи — reverse-lookup по
+        # клиентам не делаем осознанно: инвалидация здесь только «своя»
+        # (project_id агентства), свежесть добирается коротким TTL 10 мин.
+        "payroll:agency_sheet",
     ):
         await invalidate_cache(f"{prefix}:project_id={project_id}")
 

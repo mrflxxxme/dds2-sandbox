@@ -400,6 +400,7 @@ class AgencyClientWeek(BaseModel):
     team_rate: Decimal
     fee: Decimal
     manual: bool  # база введена руками (внешний кабинет)
+    has_entry: bool = False  # ручная запись week_base реально существует (0 ≠ «не введено»)
 
 
 class AgencySheetClient(BaseModel):

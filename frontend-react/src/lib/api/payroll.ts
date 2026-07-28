@@ -16,6 +16,14 @@ import type {
     PayrollSheetResponse,
     PayrollPayoutMarkIn,
     PayrollOkResponse,
+    PayrollAgencySheetResponse,
+    PayrollClientEntryKind,
+    PayrollClientEntryUpsert,
+    PayrollClientProject,
+    PayrollClientProjectIn,
+    PayrollClientProjectListResponse,
+    PayrollClientProjectUpdate,
+    PayrollProjectOptionsResponse,
 } from '@/types/api';
 
 export function addPayrollMethods(api: ApiClient) {
@@ -84,6 +92,44 @@ export function addPayrollMethods(api: ApiClient) {
 
         markPayrollPayout(data: PayrollPayoutMarkIn) {
             return api.request<PayrollOkResponse>('PUT', '/api/v1/payroll/payout-mark', data);
+        },
+
+        // ─── Агентство (консалтинг) ───────────────────────────────────────────
+        listPayrollAgencyClients() {
+            return api.request<PayrollClientProjectListResponse>('GET', '/api/v1/payroll/agency/clients');
+        },
+
+        createPayrollAgencyClient(data: PayrollClientProjectIn) {
+            return api.request<PayrollClientProject>('POST', '/api/v1/payroll/agency/clients', data);
+        },
+
+        updatePayrollAgencyClient(id: number, data: PayrollClientProjectUpdate) {
+            return api.request<PayrollClientProject>('PATCH', `/api/v1/payroll/agency/clients/${id}`, data);
+        },
+
+        deletePayrollAgencyClient(id: number) {
+            return api.request<PayrollOkResponse>('DELETE', `/api/v1/payroll/agency/clients/${id}`);
+        },
+
+        /** Ручная сумма клиента: недельная база внешнего кабинета либо ЧП месяца. */
+        upsertPayrollAgencyEntry(clientId: number, data: PayrollClientEntryUpsert) {
+            return api.request<PayrollOkResponse>('PUT', `/api/v1/payroll/agency/clients/${clientId}/entry`, data);
+        },
+
+        deletePayrollAgencyEntry(clientId: number, kind: PayrollClientEntryKind, dateFrom: string) {
+            const qs = new URLSearchParams({ kind, date_from: dateFrom });
+            return api.request<PayrollOkResponse>(
+                'DELETE', `/api/v1/payroll/agency/clients/${clientId}/entry?${qs}`
+            );
+        },
+
+        payrollAgencySheet(month: string) {
+            const qs = `?${new URLSearchParams({ month })}`;
+            return api.request<PayrollAgencySheetResponse>('GET', `/api/v1/payroll/agency/sheet${qs}`);
+        },
+
+        payrollAgencyProjectOptions() {
+            return api.request<PayrollProjectOptionsResponse>('GET', '/api/v1/payroll/agency/project-options');
         },
     };
 }

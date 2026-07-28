@@ -7,12 +7,14 @@ import SalarySheet from './SalarySheet';
 import SalaryTeams from './SalaryTeams';
 import SalaryEmployees from './SalaryEmployees';
 import SalaryTariff from './SalaryTariff';
+import SalaryAgency from './SalaryAgency';
 
 const TABS = [
     { key: 'sheet', label: '📋 Ведомость' },
     { key: 'teams', label: '👥 Команды' },
     { key: 'employees', label: '🧑‍💼 Сотрудники' },
     { key: 'tariff', label: '📶 Тарифная сетка' },
+    { key: 'agency', label: '💼 Агентство' },
 ];
 
 export default function SalarySectionPage() {
@@ -40,6 +42,7 @@ export default function SalarySectionPage() {
                     {tab === 'teams' && <SalaryTeams nonce={nonce} onChanged={refresh} />}
                     {tab === 'employees' && <SalaryEmployees nonce={nonce} onChanged={refresh} />}
                     {tab === 'tariff' && <SalaryTariff nonce={nonce} onChanged={refresh} />}
+                    {tab === 'agency' && <SalaryAgency nonce={nonce} onChanged={refresh} />}
                 </div>
             </div>
         </PageGuard>

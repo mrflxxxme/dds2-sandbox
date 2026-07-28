@@ -385,6 +385,7 @@ async def get_sheet(db: AsyncSession, project_id: int, month: str) -> dict:
     # employee_id → team_id → Σ per_member за месяц
     accrual_by_employee: dict[int, dict[int, Decimal]] = {}
     team_names: dict[int, str] = {}
+    team_active_members: dict[int, list[PayrollEmployee]] = {}
 
     for team in active_teams:
         team_names[team.id] = team.name
@@ -395,6 +396,7 @@ async def get_sheet(db: AsyncSession, project_id: int, month: str) -> dict:
             and not m.employee.is_deleted
             and m.employee.is_active
         ]
+        team_active_members[team.id] = active_members
         n_members = len(active_members)
         week_rows: list[SheetWeekAccrual] = []
         team_total = ZERO
@@ -442,6 +444,36 @@ async def get_sheet(db: AsyncSession, project_id: int, month: str) -> dict:
                 total_amount=_money(team_total),
             )
         )
+
+    # ── Агентство: manager-доля клиентов уходит команде отдельной строкой ──
+    # Лениво (payroll_agency_service импортирует этот модуль — не зациклиться).
+    from backend.services import payroll_agency_service
+
+    agency_by_team = await payroll_agency_service.get_team_agency_amounts(
+        db, project_id, month
+    )
+    # employee_id → доп. строки team_accruals «{team} · {client} (агентство)»;
+    # попадают в accrued_total / план выплат / ФОТ «Менеджеры» автоматически.
+    agency_rows_by_employee: dict[int, list[SheetTeamAccrual]] = {}
+    for team in active_teams:
+        client_amounts = agency_by_team.get(team.id, [])
+        if not client_amounts:
+            continue
+        members = team_active_members.get(team.id, [])
+        if not members:
+            continue  # начислять некому — команда без активных участников
+        for client_name, manager_amount in client_amounts:
+            n_split = len(members)
+            per_member = _money(manager_amount / n_split)
+            # Хвост округления — последнему участнику (как в build_payout_plan):
+            # иначе Σ строк ведомости теряет до n/2 копеек против totals_manager
+            last_amount = _money(manager_amount - per_member * (n_split - 1))
+            label = f"{team.name} · {client_name} (агентство)"
+            for i, emp in enumerate(members):
+                amount = last_amount if i == n_split - 1 else per_member
+                agency_rows_by_employee.setdefault(emp.id, []).append(
+                    SheetTeamAccrual(team_id=team.id, team_name=label, amount=amount)
+                )
 
     # Официалка: транзакции за КАЛЕНДАРНЫЙ месяц, СЛЕДУЮЩИЙ за расчётным
     pay_month_start = _next_month(month_start)
@@ -524,6 +556,9 @@ async def get_sheet(db: AsyncSession, project_id: int, month: str) -> dict:
             SheetTeamAccrual(team_id=tid, team_name=team_names.get(tid, ""), amount=_money(amt))
             for tid, amt in sorted(by_team.items())
         ]
+        # Агентские строки — после обычных; процентная часть (и ФОТ «Менеджеры»)
+        # суммирует ВСЕ team_accruals, включая агентские
+        team_accruals.extend(agency_rows_by_employee.get(emp.id, []))
         percent_total = _money(sum((a.amount for a in team_accruals), ZERO))
         # Оклад расчётного месяца — из истории периодов (не сегодняшний!)
         salary = resolve_salary(emp.salary_periods, month_start) if emp.is_active else None

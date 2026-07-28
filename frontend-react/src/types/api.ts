@@ -8925,6 +8925,129 @@ export interface PayrollPayoutMarkIn {
   comment?: string | null;
 }
 
+// ─── Payroll: Агентство (консалтинг) ─────────────────────────────────────────
+
+export type PayrollBillingMode = 'fixed' | 'percent' | 'profit_share';
+export type PayrollClientEntryKind = 'week_base' | 'month_profit';
+
+/** Клиент агентства. Сплит: manager_share команде, остаток агентству. */
+export interface PayrollClientProjectIn {
+  name: string;
+  billing_mode: PayrollBillingMode;
+  team_id?: number | null;
+  /** Кабинет клиента в системе (percent). */
+  linked_project_id?: number | null;
+  fixed_amount?: number | null;
+  /** Доля от ЧП (profit_share), 0..1. */
+  fee_percent?: number | null;
+  /** Доля команды, дефолт 0.45. */
+  manager_share?: number;
+  is_active?: boolean;
+  notes?: string | null;
+}
+
+export interface PayrollClientProjectUpdate {
+  name?: string | null;
+  billing_mode?: PayrollBillingMode | null;
+  team_id?: number | null;
+  clear_team?: boolean;
+  linked_project_id?: number | null;
+  clear_linked_project?: boolean;
+  fixed_amount?: number | null;
+  fee_percent?: number | null;
+  manager_share?: number | null;
+  is_active?: boolean | null;
+  notes?: string | null;
+}
+
+export interface PayrollClientEntry {
+  kind: PayrollClientEntryKind;
+  /** week_base — понедельник недели; month_profit — 1-е число месяца. */
+  date_from: string;
+  amount: number | string;
+}
+
+export interface PayrollClientProject {
+  id: number;
+  name: string;
+  billing_mode: PayrollBillingMode;
+  team_id: number | null;
+  team_name?: string | null;
+  linked_project_id: number | null;
+  linked_project_name?: string | null;
+  fixed_amount: number | string | null;
+  fee_percent: number | string | null;
+  manager_share: number | string;
+  is_active: boolean;
+  notes: string | null;
+  entries: PayrollClientEntry[];
+}
+
+export interface PayrollClientProjectListResponse {
+  items: PayrollClientProject[];
+}
+
+/** Ручная сумма: недельная база внешнего кабинета либо ЧП месяца. */
+export interface PayrollClientEntryUpsert {
+  kind: PayrollClientEntryKind;
+  date_from: string;
+  amount: number;
+}
+
+/** Проект инсталляции для привязки кабинета клиента. */
+export interface PayrollProjectOption {
+  id: number;
+  name: string;
+  slug: string;
+}
+
+export interface PayrollProjectOptionsResponse {
+  items: PayrollProjectOption[];
+}
+
+/** Неделя percent-режима: база, ступень, ставка «Команда», fee. */
+export interface PayrollAgencyClientWeek {
+  date_from: string;
+  date_to: string;
+  base_amount: number | string;
+  threshold: number | string | null;
+  team_rate: number | string;
+  fee: number | string;
+  /** База вводится руками (внешний кабинет). */
+  manual: boolean;
+  /** Ручная запись week_base реально существует (false — неделя ещё не введена). */
+  has_entry: boolean;
+}
+
+export interface PayrollAgencySheetClient {
+  client_id: number;
+  name: string;
+  billing_mode: PayrollBillingMode;
+  team_id: number | null;
+  team_name: string | null;
+  manager_share: number | string;
+  /** percent. */
+  weeks: PayrollAgencyClientWeek[];
+  /** profit_share: введённая ЧП месяца. */
+  profit_amount: number | string | null;
+  fee_percent: number | string | null;
+  fee_total: number | string;
+  /** Уходит команде (в ведомость и ФОТ «Менеджеры»). */
+  manager_amount: number | string;
+  /** Остаток агентству (в ОПиУ пока не включается). */
+  agency_amount: number | string;
+  /** Не хватает данных: нет команды / нет ЧП месяца / нет недельных баз внешнего. */
+  warnings: string[];
+}
+
+export interface PayrollAgencySheetResponse {
+  month: string;
+  clients: PayrollAgencySheetClient[];
+  totals_fee: number | string;
+  totals_manager: number | string;
+  totals_agency: number | string;
+}
+
 export interface PayrollOkResponse {
   ok: boolean;
 }

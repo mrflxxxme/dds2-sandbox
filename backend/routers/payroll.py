@@ -18,12 +18,19 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.auth import get_current_user
 from backend.cache import invalidate_cache
 from backend.database import get_db
-from backend.models import Project
+from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.rbac import require_role
 from backend.schemas.payroll import (
+    AgencySheetResponse,
+    ClientEntryUpsert,
+    ClientProjectIn,
+    ClientProjectListResponse,
+    ClientProjectResponse,
+    ClientProjectUpdate,
     EmployeeIn,
     EmployeeListResponse,
     EmployeeResponse,
@@ -31,6 +38,7 @@ from backend.schemas.payroll import (
     OkResponse,
     PayoutMarkIn,
     PayrollSheetResponse,
+    ProjectOptionsResponse,
     ScopeOptionsResponse,
     TariffReplace,
     TariffResponse,
@@ -41,7 +49,7 @@ from backend.schemas.payroll import (
     TeamScopesReplace,
     TeamUpdate,
 )
-from backend.services import payroll_service
+from backend.services import payroll_agency_service, payroll_service
 from backend.services.payroll_service import PayrollNotFoundError
 from backend.utils.rate_limit import rate_limit_write
 from backend.utils.time import utcnow
@@ -56,7 +64,14 @@ _write_admin = [Depends(require_role("admin", page="salary")), Depends(rate_limi
 # Месяц 'YYYY-MM' с валидным номером месяца — мусор режется 422 ещё на Query.
 _MONTH_PATTERN = r"^\d{4}-(0[1-9]|1[0-2])$"
 
-_ACCRUAL_PREFIXES = ("payroll:sheet", "payroll:accruals2", "reports:opiu")
+# agency_sheet в общем списке: агентские клиенты влияют на ведомость/ФОТ, а
+# команды/сотрудники — на агентскую ведомость (team_name, участники).
+_ACCRUAL_PREFIXES = (
+    "payroll:sheet",
+    "payroll:accruals2",
+    "payroll:agency_sheet",
+    "reports:opiu",
+)
 
 
 async def _invalidate_marks(project_id: int) -> None:
@@ -368,3 +383,171 @@ async def upsert_payout_mark(
         raise HTTPException(status_code=404, detail=str(e)) from None
     await _invalidate_marks(project.id)
     return result
+
+
+# ─── Агентство (консалтинг) ──────────────────────────────────────────────────
+
+
+@router.get(
+    "/agency/clients",
+    response_model=ClientProjectListResponse,
+    summary="Клиенты агентства",
+    dependencies=[_read],
+)
+async def list_agency_clients(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Клиентские проекты консалтинга с ручными суммами и командой."""
+    return await payroll_agency_service.list_clients(db, project.id)
+
+
+@router.post(
+    "/agency/clients",
+    response_model=ClientProjectResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Создать клиента агентства",
+    dependencies=_write,
+)
+async def create_agency_client(
+    body: ClientProjectIn,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Создать клиентский проект (fixed / percent / profit_share).
+
+    linked_project_id — только кабинет, где текущий юзер владелец/участник."""
+    try:
+        result = await payroll_agency_service.create_client(db, project.id, body, user.id)
+    except PayrollNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    await _invalidate_accruals(project.id)
+    return result
+
+
+@router.patch(
+    "/agency/clients/{client_id}",
+    response_model=ClientProjectResponse,
+    summary="Изменить клиента агентства",
+    dependencies=_write,
+)
+async def update_agency_client(
+    client_id: int,
+    body: ClientProjectUpdate,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Частичное обновление; clear_* флаги — явное обнуление привязок.
+
+    linked_project_id — только кабинет, где текущий юзер владелец/участник."""
+    try:
+        result = await payroll_agency_service.update_client(
+            db, project.id, client_id, body, user.id
+        )
+    except PayrollNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    await _invalidate_accruals(project.id)
+    return result
+
+
+@router.delete(
+    "/agency/clients/{client_id}",
+    response_model=OkResponse,
+    summary="Удалить клиента агентства",
+    dependencies=_write,
+)
+async def delete_agency_client(
+    client_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Soft-delete клиентского проекта."""
+    try:
+        result = await payroll_agency_service.delete_client(db, project.id, client_id)
+    except PayrollNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    await _invalidate_accruals(project.id)
+    return result
+
+
+@router.put(
+    "/agency/clients/{client_id}/entry",
+    response_model=OkResponse,
+    summary="Ручная сумма клиента",
+    dependencies=_write,
+)
+async def upsert_agency_entry(
+    client_id: int,
+    body: ClientEntryUpsert,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upsert недельной базы (week_base, Пн) или ЧП месяца (month_profit, 1-е)."""
+    try:
+        result = await payroll_agency_service.upsert_entry(db, project.id, client_id, body)
+    except PayrollNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    await _invalidate_accruals(project.id)
+    return result
+
+
+@router.delete(
+    "/agency/clients/{client_id}/entry",
+    response_model=OkResponse,
+    summary="Удалить ручную сумму клиента",
+    dependencies=_write,
+)
+async def delete_agency_entry(
+    client_id: int,
+    kind: str = Query(..., pattern="^(week_base|month_profit)$"),
+    date_from: date = Query(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Удалить запись ручной суммы (идемпотентно)."""
+    try:
+        result = await payroll_agency_service.delete_entry(
+            db, project.id, client_id, kind, date_from
+        )
+    except PayrollNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    await _invalidate_accruals(project.id)
+    return result
+
+
+@router.get(
+    "/agency/sheet",
+    response_model=AgencySheetResponse,
+    summary="Ведомость агентства",
+    dependencies=[_read],
+)
+async def get_agency_sheet(
+    month: str = Query(..., pattern=_MONTH_PATTERN, description="Расчётный месяц YYYY-MM"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Fee клиентов за месяц + сплит менеджеры/агентство (с warnings)."""
+    try:
+        return await payroll_agency_service.get_agency_sheet(db, project.id, month)
+    except ValueError as e:
+        # Дефенс: месяц отвалидирован Query-паттерном выше
+        raise HTTPException(status_code=422, detail=str(e)) from None
+
+
+@router.get(
+    "/agency/project-options",
+    response_model=ProjectOptionsResponse,
+    summary="Проекты для привязки кабинета",
+    dependencies=[_read],
+)
+async def agency_project_options(
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Проекты, где текущий юзер участник/владелец, — кандидаты в linked_project_id."""
+    return await payroll_agency_service.get_project_options(db, user.id)
