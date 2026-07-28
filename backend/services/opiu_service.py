@@ -268,6 +268,34 @@ async def get_opiu(
             for mk, v in raw.items()
         }
 
+    # ── 7d. ФОТ (начислено) ──
+    # Зарплата — операционный расход, но по НАЧИСЛЕНИЮ (платят в следующем
+    # месяце и частично мимо счёта), поэтому источник — payroll-ведомость, а не
+    # выписка. Выплаты сотрудникам из выписки исключены из opex_by_type в SQL
+    # (см. build_opex_by_type_sql) — иначе задвоение. К бренду/артикулу ФОТ не
+    # относится — при фильтре строку не показываем (как прочий opex).
+    # Под-месячное окно (напр. 01–10.06) получает ФОТ ПРОПОРЦИОНАЛЬНО дням
+    # пересечения с месяцем — иначе неполный месяц тащил бы весь месячный ФОТ
+    # (тот же класс бага, что месячный бакет COGS движка оценки, см. learnings).
+    payroll_fot: dict[str, float] = {}
+    if not brand and not article and months_sorted:
+        import calendar as _calendar
+        from datetime import datetime as _datetime
+
+        from backend.services.payroll_service import get_monthly_accruals
+
+        raw_fot = await get_monthly_accruals(db, project_id, months_sorted)
+        for mk in months_sorted:
+            month_start = _datetime.strptime(mk, "%Y-%m").date()
+            days_in_month = _calendar.monthrange(month_start.year, month_start.month)[1]
+            month_end = month_start.replace(day=days_in_month)
+            overlap = (min(date_to, month_end) - max(date_from, month_start)).days + 1
+            if overlap <= 0:
+                payroll_fot[mk] = 0.0
+            else:
+                factor = min(overlap, days_in_month) / days_in_month
+                payroll_fot[mk] = float(raw_fot.get(mk, 0)) * factor
+
     pnl_result: dict = _build_pnl_result(
         monthly_data,
         total_data,
@@ -282,6 +310,7 @@ async def get_opiu(
         tax_by_month=tax_by_month,
         opex_by_type=opex_by_type,
         loan_cost=loan_cost,
+        payroll_fot=payroll_fot,
     )
     return pnl_result
 
@@ -300,6 +329,7 @@ def _build_pnl_result(
     tax_by_month=None,
     opex_by_type=None,
     loan_cost=None,
+    payroll_fot=None,
 ):
     """Build the final P&L rows and return the result dict.
 
@@ -401,8 +431,17 @@ def _build_pnl_result(
     loan_inc_t = sum(loan_inc_m.values())
     loan_t = loan_int_t + loan_fee_t - loan_inc_t
 
-    ops_m = {mk: sum(c[3][mk] for c in opex_child_defs) + loan_m[mk] for mk in months_sorted}
-    ops_t = sum(c[0] for c in opex_child_defs) + loan_t
+    # ФОТ (начислено): из payroll-ведомости, по НАЧИСЛЕНИЮ за расчётный месяц.
+    # Кассовые выплаты сотрудникам исключены из opex_by_type (см. get_opiu 7d).
+    payroll_fot = payroll_fot or {}
+    fot_m = {mk: float(payroll_fot.get(mk, 0.0)) for mk in months_sorted}
+    fot_t = sum(fot_m.values())
+
+    ops_m = {
+        mk: sum(c[3][mk] for c in opex_child_defs) + loan_m[mk] + fot_m[mk]
+        for mk in months_sorted
+    }
+    ops_t = sum(c[0] for c in opex_child_defs) + loan_t + fot_t
 
     ebitda_m = {mk: margin_m[mk] - ops_m[mk] for mk in months_sorted}
     ebitda_t = margin_t - ops_t
@@ -490,6 +529,20 @@ def _build_pnl_result(
                 _r("loan_interest_income", "Проценты полученные", 2, False,
                    neg_m, -loan_inc_t, real_m, real_t, parent_key="opex_loan_interest")
             )
+    if fot_t:
+        opex_child_rows.append(
+            _r(
+                "opex_payroll_fot",
+                "ФОТ (начислено)",
+                1,
+                False,
+                fot_m,
+                fot_t,
+                real_m,
+                real_t,
+                parent_key="operating_expenses",
+            )
+        )
 
     rows = [
         _r("realization", "Реализация", 0, True, real_m, real_t),

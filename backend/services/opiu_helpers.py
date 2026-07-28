@@ -126,6 +126,18 @@ def build_opex_by_type_sql() -> str:
           AND c.is_deleted = false
           AND c.project_id = :project_id
           AND c.primary_type NOT IN ({excluded})
+          AND t.counterparty_id NOT IN (
+              -- ФОТ идёт в ОПиУ отдельной строкой НАЧИСЛЕНИЕМ (payroll_service.
+              -- get_monthly_accruals); фактические выплаты сотрудникам из выписки
+              -- исключаем из opex, иначе зарплата задваивается. Зеркально стороне
+              -- начисления: НЕАКТИВНОМУ сотруднику начисление = 0, поэтому его
+              -- фактические выплаты ОСТАЮТСЯ в opex (иначе расход пропал бы совсем).
+              SELECT pe.counterparty_id FROM payroll_employee pe
+              WHERE pe.project_id = :project_id
+                AND pe.counterparty_id IS NOT NULL
+                AND pe.is_deleted = false
+                AND pe.is_active = true
+          )
         GROUP BY month_key, c.primary_type
         HAVING COALESCE(SUM(t.expense), 0) > 0
     """  # noqa: S608

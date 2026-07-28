@@ -20,6 +20,7 @@ const SECTION_PAGES: Record<string, { key: string; label: string }[]> = {
         { key: 'reports', label: 'Отчёты' },
         { key: 'cost', label: 'Себестоимость' },
         { key: 'refs', label: 'Справочники' },
+        { key: 'salary', label: 'Зарплата' },
     ],
     'Склад': [
         { key: 'assembly', label: 'Заявки на сборку' },

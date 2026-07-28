@@ -38,6 +38,7 @@ ALL_PAGES: list[str] = [
     "reports",
     "cost",
     "refs",
+    "salary",
     "assembly",
     "assembly-analytics",
     "logistics",
@@ -64,7 +65,7 @@ ALL_PAGES: list[str] = [
 ]
 
 SECTION_PAGES: dict[str, list[str]] = {
-    "finance": ["import", "txn", "inbox", "reports", "cost", "refs"],
+    "finance": ["import", "txn", "inbox", "reports", "cost", "refs", "salary"],
     "warehouse": [
         "assembly",
         "assembly-analytics",

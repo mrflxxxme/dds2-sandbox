@@ -8706,3 +8706,209 @@ export interface FbsMatrix {
   wb_stock_known: boolean;
   trend_days: number;
 }
+
+// ─── Payroll (Зарплата) ──────────────────────────────────────────────────────
+// Зеркало backend/schemas/payroll.py. Numeric/Decimal-поля бэка приходят
+// СТРОКАМИ — тип `number | string`, перед formatNumber всегда Number(x).
+
+/** Строка графика выплат фикс-оклада: день месяца (1–28) и доля (0..1]. */
+export interface PayrollPayDayShare {
+  day: number;
+  share: number | string;
+}
+
+export interface PayrollEmployeeIn {
+  name: string;
+  counterparty_id?: number | null;
+  fixed_salary?: number | null;
+  /** null — дефолт 50/50 на 10-е и 25-е; сумма долей должна быть равна 1. */
+  fixed_pay_days?: PayrollPayDayShare[] | null;
+  is_active?: boolean;
+  notes?: string | null;
+}
+
+export interface PayrollEmployeeUpdate {
+  name?: string | null;
+  counterparty_id?: number | null;
+  clear_counterparty?: boolean;
+  fixed_salary?: number | null;
+  clear_fixed_salary?: boolean;
+  fixed_pay_days?: PayrollPayDayShare[] | null;
+  is_active?: boolean | null;
+  notes?: string | null;
+}
+
+export interface PayrollEmployee {
+  id: number;
+  name: string;
+  counterparty_id: number | null;
+  counterparty_name?: string | null;
+  fixed_salary: number | string | null;
+  fixed_pay_days: PayrollPayDayShare[] | null;
+  is_active: boolean;
+  notes: string | null;
+  team_names: string[];
+}
+
+export interface PayrollEmployeeListResponse {
+  items: PayrollEmployee[];
+}
+
+export type PayrollScopeKind = 'brand' | 'subject';
+
+export interface PayrollTeamScope {
+  kind: PayrollScopeKind;
+  value: string;
+}
+
+export interface PayrollTeamIn {
+  name: string;
+  is_active?: boolean;
+}
+
+export interface PayrollTeamUpdate {
+  name?: string | null;
+  is_active?: boolean | null;
+}
+
+export interface PayrollTeamMember {
+  employee_id: number;
+  name: string;
+}
+
+export interface PayrollTeam {
+  id: number;
+  name: string;
+  is_active: boolean;
+  scopes: PayrollTeamScope[];
+  members: PayrollTeamMember[];
+}
+
+export interface PayrollTeamListResponse {
+  items: PayrollTeam[];
+}
+
+/** Доступные значения брендов/категорий из wb_finance_rows проекта. */
+export interface PayrollScopeOptions {
+  brands: string[];
+  subjects: string[];
+}
+
+export interface PayrollTariffStepIn {
+  threshold: number;
+  /** Доли (0..1), не проценты: 0.972% → 0.00972. */
+  company_rate: number;
+  team_rate: number;
+}
+
+export interface PayrollTariffReplace {
+  valid_from: string;
+  steps: PayrollTariffStepIn[];
+}
+
+export interface PayrollTariffStep {
+  id: number;
+  threshold: number | string;
+  company_rate: number | string;
+  team_rate: number | string;
+}
+
+export interface PayrollTariffResponse {
+  valid_from: string | null;
+  steps: PayrollTariffStep[];
+}
+
+/** Начисление команды за одну неделю WB (Пн-Вс). */
+export interface PayrollSheetWeekAccrual {
+  date_from: string;
+  date_to: string;
+  /** «Чистая выплата» по скоупам команды за неделю. */
+  base_amount: number | string;
+  /** Ступень лестницы (null — выплата <= 0, ставка 0). */
+  threshold: number | string | null;
+  team_rate: number | string;
+  team_amount: number | string;
+  per_member: number | string;
+}
+
+export interface PayrollSheetTeam {
+  team_id: number;
+  name: string;
+  scopes: PayrollTeamScope[];
+  member_names: string[];
+  weeks: PayrollSheetWeekAccrual[];
+  total_amount: number | string;
+}
+
+export interface PayrollSheetTeamAccrual {
+  team_id: number;
+  team_name: string;
+  amount: number | string;
+}
+
+export interface PayrollOfficialTxn {
+  date: string;
+  amount: number | string;
+  purpose: string | null;
+  bank: string;
+}
+
+/** Строка плана выплат: день (10/25/из графика фикса) месяца, следующего за расчётным. */
+export interface PayrollSheetPayout {
+  pay_day: number;
+  pay_date: string;
+  amount: number | string;
+  paid: boolean;
+  paid_amount: number | string | null;
+  comment: string | null;
+}
+
+export interface PayrollSheetEmployee {
+  employee_id: number;
+  name: string;
+  counterparty_id: number | null;
+  team_accruals: PayrollSheetTeamAccrual[];
+  fixed_accrual: number | string;
+  accrued_total: number | string;
+  /** Факт из выписки за месяц выплат (следующий за расчётным). */
+  official_paid: number | string;
+  official_txns: PayrollOfficialTxn[];
+  /** accrued_total − official_paid. */
+  unofficial_due: number | string;
+  payouts: PayrollSheetPayout[];
+}
+
+export interface PayrollSheetWeekRef {
+  date_from: string;
+  date_to: string;
+}
+
+export interface PayrollSheetTotals {
+  accrued_total: number | string;
+  official_total: number | string;
+  unofficial_total: number | string;
+}
+
+export interface PayrollSheetResponse {
+  /** 'YYYY-MM'. */
+  month: string;
+  /** Недели Пн-Вс, привязанные к месяцу (по четвергу). */
+  weeks: PayrollSheetWeekRef[];
+  teams: PayrollSheetTeam[];
+  employees: PayrollSheetEmployee[];
+  totals: PayrollSheetTotals;
+}
+
+export interface PayrollPayoutMarkIn {
+  employee_id: number;
+  /** 'YYYY-MM' — расчётный месяц. */
+  month: string;
+  pay_day: number;
+  paid: boolean;
+  amount?: number | null;
+  comment?: string | null;
+}
+
+export interface PayrollOkResponse {
+  ok: boolean;
+}

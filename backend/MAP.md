@@ -46,6 +46,7 @@ from backend.models.mixins import SoftDeleteMixin
 | Тесты | `tests/` (корень проекта) |
 | Миграции | `migrations/versions/` + `alembic.ini` (корень) |
 | Займы (частные, ВКЛ, аннуитет) | `models/loan.py`, `schemas/loan.py`, `routers/loans.py`, `services/loan_service.py` (CRUD, линия), `loan_interest.py` (движок: проценты по дням, комиссии, график), `loan_schedule.py` (график платежей + разовые комиссии + план погашения долга `is_debt_plan` — строки, которые НЕ подменяют начисление), `loan_daily.py` (начисление по дням: займ и портфель, «сколько стоит день»), `loan_mirror.py` (займ между своими проектами: две книги одного договора), `loan_analytics.py` (дашборд по КАЛЕНДАРНЫМ месяцам, свод по заёмщикам, прогноз, `lent_summary` — сколько должны нам), `loan_import.py`; лендер-портал — `lender_portal_service.py` |
+| Зарплата (команды × бренды, тарифная лестница, ведомость) | `models/payroll.py`, `schemas/payroll.py`, `services/payroll_service.py` (недели месяца по четвергу, ступень лестницы, ведомость `payroll:sheet`, помесячный ФОТ `payroll:accruals` для ОПиУ, БДР зовётся с `include_cost_tax=False`), `routers/payroll.py` (page-гейт `salary`; тариф — только admin: лестница глобальная, без `project_id`); исключение выплат сотрудников из opex — `services/opiu_helpers.py:build_opex_by_type_sql` |
 | Справочники | `services/refs_service.py` (Account, Override, CounterpartyCategory) |
 | Курсы валют | `services/fx_service.py` (`FxRate`) |
 | Мониторинг и health | `services/monitoring_service.py`, `health_check_service.py` |

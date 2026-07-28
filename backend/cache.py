@@ -198,8 +198,11 @@ async def invalidate_project_reports(project_id: int):
         "loan_cost_months",
         "loan_income_months",
         "loan_lent",
-        # Payroll (ведомость ЗП зависит от БДР — инвалидируется вместе с отчётами)
+        # Payroll (ведомость ЗП зависит от БДР — инвалидируется вместе с отчётами;
+        # accruals — помесячный ФОТ для ОПиУ; scope_options — DISTINCT по wb_finance_rows)
         "payroll:sheet",
+        "payroll:accruals",
+        "payroll:scope_options",
     ):
         await invalidate_cache(f"{prefix}:project_id={project_id}")
 
