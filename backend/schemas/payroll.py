@@ -21,6 +21,7 @@ class PayDayShare(BaseModel):
 
 class EmployeeIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
+    position: str | None = Field(None, max_length=100)
     counterparty_id: int | None = None
     fixed_salary: Decimal | None = Field(None, ge=0)
     # None — дефолт 50/50 на 10-е и 25-е; сумма долей должна быть равна 1.
@@ -45,6 +46,8 @@ class EmployeeIn(BaseModel):
 
 class EmployeeUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=200)
+    position: str | None = Field(None, max_length=100)
+    clear_position: bool = False
     counterparty_id: int | None = None
     clear_counterparty: bool = False
     fixed_salary: Decimal | None = Field(None, ge=0)
@@ -61,6 +64,7 @@ class EmployeeResponse(BaseModel):
 
     id: int
     name: str
+    position: str | None
     counterparty_id: int | None
     counterparty_name: str | None = None
     fixed_salary: Decimal | None
@@ -220,6 +224,7 @@ class SheetPayout(BaseModel):
 class SheetEmployee(BaseModel):
     employee_id: int
     name: str
+    position: str | None = None
     counterparty_id: int | None
     team_accruals: list[SheetTeamAccrual]
     fixed_accrual: Decimal

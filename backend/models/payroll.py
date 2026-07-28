@@ -53,6 +53,10 @@ class PayrollEmployee(Base, TimestampMixin, SoftDeleteMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # Должность («Бухгалтер», «Логист»…) — группирует фикс-оклады в разбивке
+    # ФОТ ОПиУ; процентные начисления команд идут строкой «Менеджеры» независимо
+    # от должности.
+    position: Mapped[str | None] = mapped_column(String(100), nullable=True)
     counterparty_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=True)
     # Месячный фикс-оклад (бухгалтер, логист). None — сотрудник только на проценте.
     fixed_salary: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
