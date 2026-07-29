@@ -362,3 +362,117 @@ def test_budget_gap_section_rendered():
     cells = [str(c.value) for row in ws.iter_rows() for c in row if c.value is not None]
     assert any("Нехватка бюджета" in v for v in cells)
     assert "14:30" in cells
+
+
+# ─── Гейт «одна сводка в чат в день» (защита от дублей) ──────────────────────
+
+
+class _FakeDb:
+    """Мини-сессия поверх словаря project_settings (get_setting/set_setting)."""
+
+    def __init__(self, store: dict[str, str] | None = None):
+        self.store = store if store is not None else {}
+
+
+def _patch_settings(monkeypatch, db: "_FakeDb"):
+    """Подменить settings_service на словарь FakeDb (импорты внутри функций)."""
+    import backend.services.settings_service as ss
+
+    async def _get(_db, _pid, key):
+        return db.store.get(key)
+
+    async def _set(_db, _pid, key, value):
+        db.store[key] = value
+
+    monkeypatch.setattr(ss, "get_setting", _get)
+    monkeypatch.setattr(ss, "set_setting", _set)
+
+
+async def test_claim_send_blocks_second_send_same_day(monkeypatch):
+    from datetime import date as _date
+
+    from backend.services.funnel.problem_digest import claim_send
+
+    db = _FakeDb()
+    _patch_settings(monkeypatch, db)
+    day = _date(2026, 7, 29)
+
+    assert await claim_send(db, 4, "daily", -100, day) is True  # первая отправка
+    assert await claim_send(db, 4, "daily", -100, day) is False  # повтор в тот же день заблокирован
+    assert await claim_send(db, 4, "daily", -100, _date(2026, 7, 30)) is True  # завтра снова можно
+
+
+async def test_claim_send_isolates_chats_and_kinds(monkeypatch):
+    from datetime import date as _date
+
+    from backend.services.funnel.problem_digest import claim_send
+
+    db = _FakeDb()
+    _patch_settings(monkeypatch, db)
+    day = _date(2026, 7, 29)
+
+    assert await claim_send(db, 4, "daily", -100, day) is True
+    assert await claim_send(db, 4, "daily", -200, day) is True  # другой чат — свой слот
+    assert await claim_send(db, 4, "weekly", -100, day) is True  # недельная — свой слот
+    assert await claim_send(db, 4, "daily", -100, day) is False
+
+
+async def test_release_claims_allows_deliberate_resend(monkeypatch):
+    from datetime import date as _date
+
+    from backend.services.funnel.problem_digest import claim_send, release_claims
+
+    db = _FakeDb()
+    _patch_settings(monkeypatch, db)
+    day = _date(2026, 7, 29)
+
+    await claim_send(db, 4, "daily", -100, day)
+    await claim_send(db, 4, "weekly", -100, day)
+    await release_claims(db, 4, "daily", day)  # «прислать сейчас» по дневной
+
+    assert await claim_send(db, 4, "daily", -100, day) is True  # дневную можно повторить
+    assert await claim_send(db, 4, "weekly", -100, day) is False  # недельную не трогали
+
+
+async def test_claim_map_prunes_old_days(monkeypatch):
+    from datetime import date as _date
+
+    from backend.services.funnel.problem_digest import SENT_KEY, claim_send
+
+    db = _FakeDb({SENT_KEY: '{"daily:-1": "2026-01-01", "daily:-2": "2026-07-28"}'})
+    _patch_settings(monkeypatch, db)
+
+    await claim_send(db, 4, "daily", -3, _date(2026, 7, 29))
+    import json as _json
+
+    saved = _json.loads(db.store[SENT_KEY])
+    assert "daily:-1" not in saved  # старше 30 дней — выброшен
+    assert saved["daily:-2"] == "2026-07-28"  # свежий чужой слот сохранён
+    assert saved["daily:-3"] == "2026-07-29"
+
+
+async def test_send_once_skips_when_already_sent(monkeypatch):
+    """Джоба/тик: слот занят → повторного сообщения в чат НЕ будет."""
+    from datetime import date as _date
+
+    from backend.scheduler.jobs import problem_digest as job
+
+    calls = []
+
+    async def _fake_send(bot, chat_id, payload):
+        calls.append(chat_id)
+        return 1
+
+    claims = iter([True, False])
+
+    async def _fake_claim(db, project_id, kind, chat_id, day):
+        return next(claims)
+
+    monkeypatch.setattr(job, "_send_to_chat", _fake_send)
+    monkeypatch.setattr(job, "claim_send", _fake_claim)
+
+    payload = {"text": "t", "xlsx": b"x", "filename": "f.xlsx", "kind": "daily"}
+    day = _date(2026, 7, 29)
+    assert await job._send_once(None, 4, -100, payload, day) == 1
+    assert await job._send_once(None, 4, -100, payload, day) == 0
+    assert calls == [-100]  # ровно одна доставка
