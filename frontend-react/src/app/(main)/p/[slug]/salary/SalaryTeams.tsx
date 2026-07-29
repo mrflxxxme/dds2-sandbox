@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
+import MonthField from './MonthField';
 import type {
     PayrollEmployee,
     PayrollScopeOptions,
@@ -391,14 +392,12 @@ function TeamFormModal({
                                         <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, flexWrap: 'wrap' }}>
                                             <span style={{ minWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.name}</span>
                                             <span style={{ color: 'var(--color-text-muted)' }}>с</span>
-                                            <input
-                                                type="month" className="form-input" style={{ width: 150 }}
-                                                value={b.from} onChange={(ev) => setBound(e.id, { from: ev.target.value })}
+                                            <MonthField
+                                                value={b.from} onChange={(v) => setBound(e.id, { from: v })}
                                             />
                                             <span style={{ color: 'var(--color-text-muted)' }}>по</span>
-                                            <input
-                                                type="month" className="form-input" style={{ width: 150 }}
-                                                value={b.to} onChange={(ev) => setBound(e.id, { to: ev.target.value })}
+                                            <MonthField
+                                                value={b.to} onChange={(v) => setBound(e.id, { to: v })}
                                             />
                                         </div>
                                     );

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import { api } from '@/lib/api';
+import MonthField from './MonthField';
 import type {
     CounterpartyListItem,
     PayrollEmployee,
@@ -514,10 +515,9 @@ function EmployeeFormModal({
                                 {[...salaryRows].sort((a, b) => a.month.localeCompare(b.month)).map((r) => (
                                     <div key={r.uid} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                                         <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>с</span>
-                                        <input
-                                            type="month" className="form-input" style={{ width: 165 }}
+                                        <MonthField
                                             value={r.month}
-                                            onChange={(e) => patchSalaryRow(r.uid, { month: e.target.value })}
+                                            onChange={(v) => patchSalaryRow(r.uid, { month: v })}
                                         />
                                         <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>—</span>
                                         <input

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import KpiCard from '@/components/KpiCard';
 import { api } from '@/lib/api';
+import MonthField from './MonthField';
 import { type ExcelExtraSheet } from '@/lib/utils';
 import type {
     PayrollAgencySheetClient,
@@ -803,9 +804,9 @@ function ClientFormModal({
                         {[...billingRows].sort((a, b) => a.month.localeCompare(b.month)).map((r) => (
                             <div key={r.uid} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' }}>
                                 <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>с</span>
-                                <input
-                                    type="month" className="form-input" style={{ width: 150 }} value={r.month}
-                                    onChange={(e) => patchBillingRow(r.uid, { month: e.target.value })}
+                                <MonthField
+                                    value={r.month}
+                                    onChange={(v) => patchBillingRow(r.uid, { month: v })}
                                 />
                                 <select
                                     className="form-input" style={{ width: 230 }} value={r.mode}
