@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytz
-from sqlalchemy import String, cast, distinct, func, or_, select
+from sqlalchemy import String, case, cast, distinct, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.cost import Nomenclature
@@ -593,3 +593,130 @@ def build_penalties_digest_text(day: date, data: dict) -> str | None:
         if extra > 0:
             lines.append(f"   … и ещё {extra}")
     return "\n".join(lines)
+
+
+# ─── UI-вкладки «Удержания за габариты» / «Сводка» — источник = финотчёт ──────
+#
+# Точные суммы (совпадают с кабинетом), в отличие от analytics-API, который
+# отдаёт габаритные удержания с задержкой. Каждый артикул обогащён сравнением
+# литража (карточка vs последний замер). Бренд/предмет — из финотчёта, с фолбэком.
+
+
+def _fin_penalty_conds(project_id, date_from, date_to, subject, brand, search):
+    conds = [
+        WbFinanceRow.project_id == project_id,
+        WbFinanceRow.bonus_type_name.ilike(_DIM_PENALTY_LIKE),
+    ]
+    if date_from is not None:
+        conds.append(WbFinanceRow.rr_dt >= date_from)
+    if date_to is not None:
+        conds.append(WbFinanceRow.rr_dt <= date_to)
+    if subject:
+        conds.append(WbFinanceRow.subject_name == subject)
+    if brand:
+        conds.append(WbFinanceRow.brand_name == brand)
+    if search and search.strip():
+        s = search.strip().replace("%", r"\%").replace("_", r"\_")
+        conds.append(cast(WbFinanceRow.nm_id, String).ilike(f"%{s}%"))
+    return conds
+
+
+def _pen_rev_exprs():
+    """Раздельные суммы: начисление (не сторно) и сторно (bonus_type 'Сторно…')."""
+    is_storno = WbFinanceRow.bonus_type_name.ilike("Сторно%")
+    pen = func.coalesce(func.sum(case((is_storno, 0), else_=WbFinanceRow.penalty)), 0)
+    rev = func.coalesce(func.sum(case((is_storno, WbFinanceRow.penalty), else_=0)), 0)
+    return pen, rev
+
+
+async def _enrich_penalty_articles(db, project_id, raw):
+    """raw: list[dict] c nm_id/subject_name/brand → добор предмета + сравнение литража."""
+    nm_ids = {r["nm_id"] for r in raw if r["nm_id"]}
+    smap = await _subject_map(db, project_id, {r["nm_id"] for r in raw if not (r["subject_name"] and r["subject_name"].strip())})
+    vmap = await _volume_compare_map(db, project_id, nm_ids)
+    for r in raw:
+        if not (r["subject_name"] and r["subject_name"].strip()):
+            r["subject_name"] = smap.get(r["nm_id"])
+        v = vmap.get(r["nm_id"], {})
+        r["card_volume"] = v.get("card")
+        r["meas_volume"] = v.get("meas")
+        r["deviation"] = v.get("dev")
+    return raw
+
+
+async def list_finance_penalties(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    subject: str | None = None,
+    brand: str | None = None,
+    search: str | None = None,
+    limit: int = 500,
+    offset: int = 0,
+) -> tuple[list[dict], int, Decimal, Decimal]:
+    """Удержания за габариты по строкам (артикул × день начисления) из финотчёта."""
+    conds = _fin_penalty_conds(project_id, date_from, date_to, subject, brand, search)
+    pen, rev = _pen_rev_exprs()
+    rows = (
+        await db.execute(
+            select(
+                WbFinanceRow.nm_id, WbFinanceRow.rr_dt,
+                WbFinanceRow.subject_name, WbFinanceRow.brand_name, pen, rev,
+            )
+            .where(*conds)
+            .group_by(WbFinanceRow.nm_id, WbFinanceRow.rr_dt, WbFinanceRow.subject_name, WbFinanceRow.brand_name)
+        )
+    ).all()
+    data = [
+        {"nm_id": nm, "rr_dt": rr, "subject_name": subj, "brand": brand_,
+         "penalty": Decimal(p), "reversal": Decimal(r), "net": Decimal(p) + Decimal(r)}
+        for nm, rr, subj, brand_, p, r in rows
+        if Decimal(p) != 0 or Decimal(r) != 0
+    ]
+    total_penalty = sum((d["penalty"] for d in data), Decimal(0))
+    total_reversal = sum((d["reversal"] for d in data), Decimal(0))
+    data.sort(key=lambda d: (d["rr_dt"] or date.min, d["net"]), reverse=True)
+    page = data[offset : offset + limit]
+    await _enrich_penalty_articles(db, project_id, page)
+    return page, len(data), total_penalty, total_reversal
+
+
+async def summarize_finance_penalties(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    subject: str | None = None,
+    brand: str | None = None,
+    search: str | None = None,
+) -> tuple[list[dict], dict]:
+    """Сводка удержаний за габариты по артикулам из финотчёта."""
+    conds = _fin_penalty_conds(project_id, date_from, date_to, subject, brand, search)
+    pen, rev = _pen_rev_exprs()
+    rows = (
+        await db.execute(
+            select(
+                WbFinanceRow.nm_id, WbFinanceRow.subject_name, WbFinanceRow.brand_name,
+                pen, rev, func.count(distinct(WbFinanceRow.rr_dt)),
+            )
+            .where(*conds)
+            .group_by(WbFinanceRow.nm_id, WbFinanceRow.subject_name, WbFinanceRow.brand_name)
+        )
+    ).all()
+    data = [
+        {"nm_id": nm, "subject_name": subj, "brand": brand_,
+         "total_penalty": Decimal(p), "total_reversal": Decimal(r),
+         "net": Decimal(p) + Decimal(r), "days_count": int(days)}
+        for nm, subj, brand_, p, r, days in rows
+        if Decimal(p) != 0 or Decimal(r) != 0
+    ]
+    data.sort(key=lambda d: d["net"], reverse=True)
+    await _enrich_penalty_articles(db, project_id, data)
+    totals = {
+        "articles": len(data),
+        "total_penalty": sum((d["total_penalty"] for d in data), Decimal(0)),
+        "total_reversal": sum((d["total_reversal"] for d in data), Decimal(0)),
+        "net": sum((d["net"] for d in data), Decimal(0)),
+    }
+    return data, totals

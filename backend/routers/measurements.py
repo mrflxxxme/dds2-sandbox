@@ -70,8 +70,8 @@ async def list_measurement_penalties(
     db: AsyncSession = Depends(get_db),
 ):
     """Удержания за занижение габаритов (по результатам замеров) за период."""
-    items, total, total_penalty, total_reversal = await measurements_service.list_measurement_penalties(
-        db, project.id, date_from, date_to, nm_id, subject, brand, search, limit, offset
+    items, total, total_penalty, total_reversal = await measurements_service.list_finance_penalties(
+        db, project.id, date_from, date_to, subject, brand, search, limit, offset
     )
     return {
         "items": items,
@@ -92,7 +92,7 @@ async def penalties_summary_by_article(
     db: AsyncSession = Depends(get_db),
 ):
     """Сводка удержаний по артикулам: суммы удержаний/сторно, нетто, кол-во."""
-    items, totals = await measurements_service.summarize_penalties_by_article(
+    items, totals = await measurements_service.summarize_finance_penalties(
         db, project.id, date_from, date_to, subject, brand, search
     )
     return {"items": items, **totals}

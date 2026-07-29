@@ -6612,30 +6612,19 @@ export interface WarehouseMeasurement {
   measured_at: string | null;
 }
 
+/** Удержание за габариты — строка «артикул × день начисления» из финотчёта WB. */
 export interface MeasurementPenalty {
-  id: number;
-  dim_id: number;
   nm_id: number;
+  rr_dt: string | null;          // дата начисления
   subject_name: string | null;
   brand: string | null;
-  prc_over: string | null;
-  /** фактический замер WB */
-  act_length: number | null;
-  act_width: number | null;
-  act_height: number | null;
-  act_volume: string | null;
-  /** заявлено продавцом */
-  dec_length: number | null;
-  dec_width: number | null;
-  dec_height: number | null;
-  dec_volume: string | null;
-  penalty_amount: string | null;
-  reversal_amount: string | null;
-  units_count: number | null;
-  is_valid: boolean | null;
-  is_valid_at: string | null;
-  penalty_date: string | null;
-  photo_urls: string[] | null;
+  penalty: string;              // начислено, ₽
+  reversal: string;             // сторно, ₽ (≤0)
+  net: string;                  // нетто, ₽
+  /** сравнение литража: текущая карточка vs последний замер */
+  card_volume: string | null;
+  meas_volume: string | null;
+  deviation: string | null;     // (замер − карточка)/карточка·100, %
 }
 
 export interface WarehouseMeasurementListResponse {
@@ -6667,8 +6656,10 @@ export interface PenaltyArticleSummaryRow {
   total_penalty: string;
   total_reversal: string;
   net: string;
-  penalties_count: number;
-  measurements_count: number;
+  days_count: number;           // число дней начисления
+  card_volume: string | null;
+  meas_volume: string | null;
+  deviation: string | null;
 }
 
 export interface PenaltyArticleSummaryResponse {
