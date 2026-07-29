@@ -1,0 +1,46 @@
+name: Manual Hamza Stock Load
+
+# Разовая загрузка фактических остатков склада «Хамза» из инвентаризации (Excel).
+# Запускается вручную: Actions → Manual Hamza Stock Load → Run workflow.
+# Сначала mode=dry-run (проверка, ничего не пишет), затем mode=commit (запись).
+# Логику см. scripts/load_hamza_stock.py.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Режим запуска'
+        required: true
+        type: choice
+        options:
+          - dry-run
+          - commit
+        default: dry-run
+      project_slug:
+        description: 'Project slug'
+        required: true
+        default: 'default'
+
+jobs:
+  run:
+    name: Run stock load on App Server (${{ inputs.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Run script on App Server
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          MODE: ${{ inputs.mode }}
+          SLUG: ${{ inputs.project_slug }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${HOST}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          echo "== Режим: --${MODE} | project-slug: ${SLUG} =="
+          ssh -i ~/.ssh/deploy_key "${USER}@${HOST}" \
+            "cd /opt/dds_app && docker compose -f docker-compose.app.yml exec -T backend python -m scripts.load_hamza_stock --project-slug ${SLUG} --${MODE}"
