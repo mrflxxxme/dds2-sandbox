@@ -458,6 +458,62 @@ async def pop_asap_request(db: AsyncSession, project_id: int) -> str | None:
     return kind if kind in ("daily", "weekly") else None
 
 
+# ─── Гейт «одна сводка в чат в день» ────────────────────────────────────────
+# Отправка в Telegram НЕИДЕМПОТЕНТНА: при таймауте «доставлено» неотличимо от
+# «не доставлено», и любой повтор даёт дубль в чате (инцидент 29.07.2026 —
+# 5 одинаковых сводок подряд). Поэтому отметку ставим ДО отправки и НИКОГДА не
+# снимаем автоматически: доставка «не более одного раза». Не дошло — человек
+# жмёт «прислать сейчас» (force), это осознанное действие.
+
+SENT_KEY = "ads_problem_digest_sent"
+
+
+def _sent_slot(kind: str, chat_id: int) -> str:
+    return f"{kind}:{chat_id}"
+
+
+async def _load_sent_map(db: AsyncSession, project_id: int) -> dict[str, str]:
+    from backend.services.settings_service import get_setting
+
+    try:
+        data = json.loads(await get_setting(db, project_id, SENT_KEY) or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+async def claim_send(db: AsyncSession, project_id: int, kind: str, chat_id: int, day: date) -> bool:
+    """Занять слот отправки (kind, chat) на день. False — сегодня уже отправляли.
+
+    Вызывать ПЕРЕД отправкой: слот занимается независимо от её исхода, чтобы
+    сетевой таймаут после реальной доставки не приводил к повторному сообщению.
+    """
+    from backend.services.settings_service import set_setting
+
+    sent = await _load_sent_map(db, project_id)
+    slot = _sent_slot(kind, chat_id)
+    stamp = day.isoformat()
+    if sent.get(slot) == stamp:
+        return False
+    sent[slot] = stamp
+    # Чужие слоты старше 30 дней не копим (чаты приходят и уходят).
+    horizon = (day - timedelta(days=30)).isoformat()
+    sent = {k: v for k, v in sent.items() if v >= horizon}
+    await set_setting(db, project_id, SENT_KEY, json.dumps(sent, ensure_ascii=False))
+    return True
+
+
+async def release_claims(db: AsyncSession, project_id: int, kind: str, day: date) -> None:
+    """Снять отметки за день по этому kind — осознанный повтор («прислать сейчас»)."""
+    from backend.services.settings_service import set_setting
+
+    sent = await _load_sent_map(db, project_id)
+    stamp = day.isoformat()
+    left = {k: v for k, v in sent.items() if not (k.startswith(f"{kind}:") and v == stamp)}
+    if left != sent:
+        await set_setting(db, project_id, SENT_KEY, json.dumps(left, ensure_ascii=False))
+
+
 def _cfg_sheet_url(cfg: dict[str, Any], key: str) -> str | None:
     """Постоянная ссылка на настроенную Google-таблицу (кладём в текст всегда,
     даже если заливка недоступна — сама таблица живёт по стабильному URL)."""

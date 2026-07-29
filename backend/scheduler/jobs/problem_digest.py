@@ -10,6 +10,7 @@
 import asyncio
 import json
 import logging
+from datetime import date
 
 import pytz
 from sqlalchemy import select
@@ -23,6 +24,7 @@ from backend.services.funnel.problem_digest import (
     attach_sheet_link,
     build_daily_digest,
     build_weekly_digest,
+    claim_send,
     pop_asap_request,
     sanitize_settings,
 )
@@ -88,7 +90,7 @@ async def send_problem_digests() -> None:
         for chat_id in cfg["chat_ids"]:
             for payload in payloads:
                 try:
-                    sent += await _send_to_chat(bot, chat_id, payload)
+                    sent += await _send_once(bot, project_id, chat_id, payload, now_msk.date())
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -96,6 +98,24 @@ async def send_problem_digests() -> None:
                     errors += 1
 
     logger.info("Problem digest complete: sent=%d, errors=%d", sent, errors)
+
+
+async def _send_once(bot, project_id: int, chat_id: int, payload: dict, day: date) -> int:
+    """Отправить сводку в чат НЕ БОЛЕЕ одного раза за день (гейт `claim_send`).
+
+    Слот занимается до отправки: сетевой таймаут после реальной доставки не
+    должен приводить к повтору — дубль в чате хуже пропуска (его чинит кнопка
+    «прислать сейчас»). Возвращает 1, если отправляли, 0 — если слот занят.
+    """
+    async with AsyncSessionLocal() as db:
+        allowed = await claim_send(db, project_id, str(payload.get("kind") or "daily"), chat_id, day)
+    if not allowed:
+        logger.info(
+            "Problem digest: уже отправляли сегодня (project=%s, chat=%s, kind=%s) — пропуск",
+            project_id, chat_id, payload.get("kind"),
+        )
+        return 0
+    return await _send_to_chat(bot, chat_id, payload)
 
 
 async def problem_digest_asap_tick() -> None:
@@ -138,7 +158,7 @@ async def problem_digest_asap_tick() -> None:
                 payload = await build(db, project, cfg, now_msk)
                 await attach_sheet_link(db, project_id, cfg, payload)
             for chat_id in cfg["chat_ids"]:
-                await _send_to_chat(bot, chat_id, payload)
+                await _send_once(bot, project_id, chat_id, payload, now_msk.date())
             logger.info("Problem digest asap: sent (project=%s, kind=%s)", project_id, kind)
         except asyncio.CancelledError:
             raise

@@ -922,12 +922,25 @@ async def send_problem_digest_now(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Прислать сводку в настроенные чаты прямо сейчас (тест, не дожидаясь 09:30)."""
+    """Прислать сводку в настроенные чаты прямо сейчас (тест, не дожидаясь 09:30).
+
+    Осознанный повтор: снимаем дневной гейт `claim_send` — иначе после утренней
+    рассылки кнопка молча ничего бы не делала. Автоматика (джоба и worker-тик)
+    гейт соблюдает: сводка уходит в чат не более раза в день.
+    """
+    import pytz
+
     from aiogram.exceptions import TelegramAPIError, TelegramNetworkError
 
     from backend.integrations import telegram_bot
-    from backend.scheduler.jobs.problem_digest import _send_to_chat
-    from backend.services.funnel.problem_digest import attach_sheet_link, get_digest_settings
+    from backend.scheduler.jobs.problem_digest import _send_once
+    from backend.services.funnel.problem_digest import (
+        MSK,
+        attach_sheet_link,
+        get_digest_settings,
+        release_claims,
+    )
+    from backend.utils.time import utcnow
 
     # В API-контейнере глобальный бот не инициализирован (create_bot — только
     # worker) — поднимаем разовый Bot на время запроса.
@@ -941,19 +954,23 @@ async def send_problem_digest_now(
     cfg = await get_digest_settings(db, project.id)
     if not cfg["chat_ids"]:
         raise HTTPException(400, "В настройке сводки нет chat_ids — добавьте чат")
+    today_msk = utcnow().replace(tzinfo=pytz.UTC).astimezone(MSK).date()
     try:
         payload = await _build_problem_digest(db, project, kind)
         await attach_sheet_link(db, project.id, cfg, payload)
+        await release_claims(db, project.id, kind, today_msk)
         sent = 0
         try:
             for chat_id in cfg["chat_ids"]:
-                await _send_to_chat(bot, chat_id, payload)
-                sent += 1
+                sent += await _send_once(bot, project.id, chat_id, payload, today_msk)
         except TelegramNetworkError:
             # Из API-контейнера прода api.telegram.org недоступен (РКН; прокси-путь
             # живёт в worker) — ставим маркер, worker-тик отправит в течение минуты.
+            # Слот освобождаем: сюда попадаем, когда до Telegram вовсе не достучались
+            # (соединения нет), т.е. доставки не было и повтор воркером — не дубль.
             from backend.services.funnel.problem_digest import request_asap_send
 
+            await release_claims(db, project.id, kind, today_msk)
             await request_asap_send(db, project.id, kind)
             return {"ok": True, "queued": True, "note": "Telegram недоступен из API — отправит worker в течение 1-2 минут"}
         except TelegramAPIError as exc:
