@@ -1,6 +1,6 @@
 """Schemas for WB warehouse measurements & dimension penalties (замеры)."""
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict
@@ -24,31 +24,21 @@ class WarehouseMeasurementSchema(BaseModel):
 
 
 class MeasurementPenaltySchema(BaseModel):
+    """Удержание за габариты — строка «артикул × день начисления» из финотчёта."""
+
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
-    dim_id: int
     nm_id: int
+    rr_dt: date | None = None       # дата начисления (финотчёт)
     subject_name: str | None = None
     brand: str | None = None
-    prc_over: Decimal | None = None
-    # фактический замер WB
-    act_length: int | None = None
-    act_width: int | None = None
-    act_height: int | None = None
-    act_volume: Decimal | None = None
-    # заявлено продавцом
-    dec_length: int | None = None
-    dec_width: int | None = None
-    dec_height: int | None = None
-    dec_volume: Decimal | None = None
-    penalty_amount: Decimal | None = None
-    reversal_amount: Decimal | None = None
-    units_count: int | None = None
-    is_valid: bool | None = None
-    is_valid_at: datetime | None = None
-    penalty_date: datetime | None = None
-    photo_urls: list[str] | None = None
+    penalty: Decimal                # начислено, ₽
+    reversal: Decimal               # сторно, ₽ (≤0)
+    net: Decimal                    # нетто, ₽
+    # Сравнение литража: текущая карточка vs последний замер
+    card_volume: Decimal | None = None
+    meas_volume: Decimal | None = None
+    deviation: Decimal | None = None  # (замер − карточка) / карточка · 100, %
 
 
 class WarehouseMeasurementListResponse(BaseModel):
@@ -80,8 +70,10 @@ class PenaltyArticleSummaryRow(BaseModel):
     total_penalty: Decimal
     total_reversal: Decimal
     net: Decimal
-    penalties_count: int
-    measurements_count: int
+    days_count: int                 # число дней начисления
+    card_volume: Decimal | None = None
+    meas_volume: Decimal | None = None
+    deviation: Decimal | None = None
 
 
 class PenaltyArticleSummaryResponse(BaseModel):

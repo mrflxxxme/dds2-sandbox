@@ -268,3 +268,47 @@ def test_build_penalties_digest_text():
 
 def test_build_penalties_digest_text_empty():
     assert m.build_penalties_digest_text(date(2026, 7, 27), {"subjects": []}) is None
+
+
+# ── UI-вкладки на финотчёте: list_finance_penalties / summarize_finance_penalties ──
+
+@pytest.mark.asyncio
+async def test_list_finance_penalties(db_session, project):
+    db_session.add_all([
+        _fin(project.id, 11, 910389065, "Ковры", "НУ-НУ", _DIM, 6000),
+        _fin(project.id, 12, 910389065, "Ковры", "НУ-НУ", _DIM_STORNO, -1000),  # сторно того же дня
+        _fin(project.id, 13, 889697232, "Шторы", "Уютопия", _DIM, 1520),
+        _fin(project.id, 14, 777, "Ковры", "НУ-НУ", "Логистика", 5000),          # не габаритный — игнор
+        Nomenclature(project_id=project.id, barcode=f"bc-lf-{project.id}", article_wb=910389065, volume_l=Decimal("12")),
+        _meas(project.id, 95, 910389065, "Ковры", 15.0, _IN_PERIOD),
+    ])
+    await db_session.commit()
+
+    items, total, tp, tr = await m.list_finance_penalties(db_session, project.id)
+    assert total == 2                        # 2 строки (артикул×день); логистика не в счёт
+    assert tp == Decimal("7520")             # 6000 + 1520
+    assert tr == Decimal("-1000")
+    top = items[0]                           # net desc: Ковры 5000 > Шторы 1520
+    assert top["nm_id"] == 910389065
+    assert top["penalty"] == Decimal("6000")
+    assert top["reversal"] == Decimal("-1000")
+    assert top["net"] == Decimal("5000")
+    assert top["deviation"] == pytest.approx(Decimal("25"))  # замер 15 vs карт 12
+
+
+@pytest.mark.asyncio
+async def test_summarize_finance_penalties(db_session, project):
+    db_session.add_all([
+        _fin(project.id, 21, 910389065, "Ковры", "НУ-НУ", _DIM, 6000, rr=date(2026, 7, 26)),
+        _fin(project.id, 22, 910389065, "Ковры", "НУ-НУ", _DIM, 4000, rr=date(2026, 7, 27)),  # 2 дня
+        _fin(project.id, 23, 889697232, "Шторы", "Уютопия", _DIM, 1520, rr=date(2026, 7, 27)),
+    ])
+    await db_session.commit()
+
+    items, totals = await m.summarize_finance_penalties(db_session, project.id)
+    assert totals["articles"] == 2
+    assert totals["net"] == Decimal("11520")
+    kov = items[0]
+    assert kov["nm_id"] == 910389065
+    assert kov["net"] == Decimal("10000")
+    assert kov["days_count"] == 2

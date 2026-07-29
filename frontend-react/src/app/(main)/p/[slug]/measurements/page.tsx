@@ -90,43 +90,64 @@ const WAREHOUSE_COLS: Column[] = [
       exportValue: (r: WarehouseMeasurement) => (r.photo_urls || []).join(' ') },
 ];
 
+// Отклонение литража (замер vs карточка), уже посчитанное на бэке.
+const devVal = (v: string | null) => (v == null ? null : Number(v));
+
+function DevBadge({ dev }: { dev: number | null }) {
+    if (dev == null) return <span style={{ color: 'var(--color-dim)' }}>—</span>;
+    if (Math.abs(dev) < 0.5) return <span style={{ color: 'var(--color-success)' }}>карточка ✓</span>;
+    const attention = Math.abs(dev) >= 10;
+    const sign = dev > 0 ? '+' : '−';
+    return (
+        <span style={{ color: attention ? 'var(--color-danger)' : 'var(--color-success)', fontWeight: 600 }}>
+            {attention ? '⚠️ ' : ''}{sign}{formatNumber(Math.abs(dev), 1)}%
+        </span>
+    );
+}
+
+const volCol = (key: 'meas_volume' | 'card_volume', label: string): Column => ({
+    key, label, align: 'right',
+    render: (v) => (v == null ? '—' : formatNumber(num(v), 3)),
+    getValue: (r: MeasurementPenalty | PenaltyArticleSummaryRow) =>
+        num((r as MeasurementPenalty)[key]),
+});
+
+const devCol: Column = {
+    key: 'deviation', label: 'Отклонение, %', align: 'right',
+    render: (_v, r: MeasurementPenalty | PenaltyArticleSummaryRow) => <DevBadge dev={devVal(r.deviation)} />,
+    getValue: (r: MeasurementPenalty | PenaltyArticleSummaryRow) => num(r.deviation),
+    exportValue: (r: MeasurementPenalty | PenaltyArticleSummaryRow) =>
+        r.deviation == null ? '—' : `${formatNumber(num(r.deviation), 1)}%`,
+};
+
+// «Удержания за габариты» — источник финотчёт (точные суммы), строка = артикул × день.
 const PENALTY_COLS: Column[] = [
-    { key: 'penalty_date', label: 'Дата удержания', render: (v) => formatDate(v),
-      getValue: (r: MeasurementPenalty) => r.penalty_date ?? '' },
-    { key: 'dim_id', label: '№ замера ВБ' },
+    { key: 'rr_dt', label: 'Дата начисления', render: (v) => formatDate(v),
+      getValue: (r: MeasurementPenalty) => r.rr_dt ?? '' },
     { key: 'nm_id', label: 'Артикул (nmID)' },
     { key: 'brand', label: 'Бренд', render: (v) => v ?? '—' },
-    { key: 'subject_name', label: 'Предмет' },
-    { key: 'dec_dims', label: 'Заявлено Д×Ш×В', align: 'center',
-      render: (_v, r: MeasurementPenalty) => dims(r.dec_length, r.dec_width, r.dec_height),
-      exportValue: (r: MeasurementPenalty) => dims(r.dec_length, r.dec_width, r.dec_height) },
-    { key: 'act_dims', label: 'Замер WB Д×Ш×В', align: 'center',
-      render: (_v, r: MeasurementPenalty) => dims(r.act_length, r.act_width, r.act_height),
-      exportValue: (r: MeasurementPenalty) => dims(r.act_length, r.act_width, r.act_height) },
-    { key: 'prc_over', label: 'Превышение, %', align: 'right',
-      render: (v) => (v == null ? '—' : formatNumber(num(v), 1)),
-      getValue: (r: MeasurementPenalty) => num(r.prc_over) },
-    { key: 'units_count', label: 'Единиц', align: 'right', render: (v) => v ?? '—' },
-    { key: 'penalty_amount', label: 'Удержание, ₽', align: 'right',
-      render: (v) => formatNumber(num(v), 2), getValue: (r: MeasurementPenalty) => num(r.penalty_amount) },
-    { key: 'reversal_amount', label: 'Сторно, ₽', align: 'right',
+    { key: 'subject_name', label: 'Предмет', render: (v) => v ?? '—' },
+    volCol('meas_volume', 'Замер, л'),
+    volCol('card_volume', 'Карточка, л'),
+    devCol,
+    { key: 'penalty', label: 'Удержание, ₽', align: 'right',
+      render: (v) => formatNumber(num(v), 2), getValue: (r: MeasurementPenalty) => num(r.penalty) },
+    { key: 'reversal', label: 'Сторно, ₽', align: 'right',
       render: (v) => (num(v) ? formatNumber(num(v), 2) : '—'),
-      getValue: (r: MeasurementPenalty) => num(r.reversal_amount) },
-    { key: 'is_valid', label: 'Актуально', align: 'center',
-      render: (v) => (v ? <span className="badge badge-success">да</span>
-                         : <span className="badge badge-secondary">нет</span>),
-      exportValue: (r: MeasurementPenalty) => (r.is_valid ? 'да' : 'нет') },
-    { key: 'photo_urls', label: 'Фото', align: 'center',
-      render: (_v, r: MeasurementPenalty) => <PhotoLinks urls={r.photo_urls} />,
-      exportValue: (r: MeasurementPenalty) => (r.photo_urls || []).join(' ') },
+      getValue: (r: MeasurementPenalty) => num(r.reversal) },
+    { key: 'net', label: 'Нетто, ₽', align: 'right',
+      render: (v) => <strong>{formatNumber(num(v), 2)}</strong>,
+      getValue: (r: MeasurementPenalty) => num(r.net) },
 ];
 
 const SUMMARY_COLS: Column[] = [
     { key: 'nm_id', label: 'Артикул (nmID)' },
     { key: 'brand', label: 'Бренд', render: (v) => v ?? '—' },
     { key: 'subject_name', label: 'Предмет', render: (v) => v ?? '—' },
-    { key: 'measurements_count', label: 'Замеров', align: 'right' },
-    { key: 'penalties_count', label: 'Начислений', align: 'right' },
+    { key: 'days_count', label: 'Дней', align: 'right' },
+    volCol('meas_volume', 'Замер, л'),
+    volCol('card_volume', 'Карточка, л'),
+    devCol,
     { key: 'total_penalty', label: 'Удержания, ₽', align: 'right',
       render: (v) => formatNumber(num(v), 2), getValue: (r: PenaltyArticleSummaryRow) => num(r.total_penalty) },
     { key: 'total_reversal', label: 'Сторно, ₽', align: 'right',
@@ -339,7 +360,7 @@ export default function MeasurementsPage() {
                     title="Удержания за габариты"
                     exportName="Удержания за габариты WB"
                     emptyIcon="⚠️"
-                    emptyText="Нет удержаний за период. Нажмите «Синхронизировать»."
+                    emptyText="Нет удержаний за габариты за период."
                     pageSize={50}
                 />
             )}
