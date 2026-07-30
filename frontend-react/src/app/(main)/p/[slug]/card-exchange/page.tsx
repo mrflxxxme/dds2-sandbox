@@ -5,6 +5,7 @@ import PageGuard from '@/components/PageGuard';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import type {
+    CardExchangeOurMode,
     ExchangeSubject,
     ExchangeSupplier,
     ExchangeSessionStatus,
@@ -35,6 +36,13 @@ const SORT_OPTIONS: { value: string; label: string }[] = [
     { value: 'totalPrice:desc', label: 'Дороже' },
 ];
 
+/** Отдельный переключатель «наши товары» — вне панели фильтров. */
+const OUR_MODES: { key: '' | CardExchangeOurMode; label: string; hint: string }[] = [
+    { key: '', label: 'Вся биржа', hint: 'Все объявления биржи' },
+    { key: 'categories', label: 'Наши категории', hint: 'Объявления в предметах наших товаров' },
+    { key: 'exact', label: 'Точно наши', hint: 'Наши артикулы на бирже — поиск по всей выдаче' },
+];
+
 const VIEW_TABS: { key: 'grid' | 'list'; label: string }[] = [
     { key: 'grid', label: 'Плитка' },
     { key: 'list', label: 'Список' },
@@ -62,6 +70,9 @@ function Segmented<T extends string>({ tabs, value, onChange }: {
         </span>
     );
 }
+
+/** Корзина биржи в кабинете WB — там и оформляется перенос выбранных карточек. */
+const WB_CART_URL = 'https://seller.wildberries.ru/card-exchange/cart';
 
 const money = (v: number | null) => (v == null ? '—' : `${formatNumber(Number(v), 0)} ₽`);
 
@@ -165,6 +176,7 @@ export default function CardExchangePage() {
     const [searchInput, setSearchInput] = useState('');
     const [sort, setSort] = useState('feedbacksCount:desc');
     const [view, setView] = useState<'grid' | 'list'>('grid');
+    const [ourMode, setOurMode] = useState<'' | CardExchangeOurMode>('');
     // Фильтры как на бирже WB: предмет, бренд, продавец, рейтинг, остатки.
     const [brandsRef, setBrandsRef] = useState<string[]>([]);
     const [suppliersRef, setSuppliersRef] = useState<ExchangeSupplier[]>([]);
@@ -212,19 +224,17 @@ export default function CardExchangePage() {
     const demo = !!session && !sessionOk && IS_DEV;
     const showUi = sessionOk || demo;
 
-    // В фильтре показываем НАШИ категории (где есть наши товары) — их единицы, а не 96.
-    // Если наших нет (пустая номенклатура) — показываем все, иначе фильтр был бы пустым.
-    const categoryOptions = useMemo(() => {
-        const ours = categories.filter(c => c.is_ours);
-        const list = ours.length ? ours : categories;
-        return list
+    // В фильтре — ВСЕ корневые категории справочника; наши (где есть свои товары)
+    // подняты наверх и показаны с числом наших артикулов.
+    const categoryOptions = useMemo(() => (
+        categories
             .slice()
             .sort((a, b) => (b.our_count ?? 0) - (a.our_count ?? 0) || a.category.localeCompare(b.category, 'ru'))
             .map(c => ({
                 value: c.category,
                 label: c.our_count ? `${c.category} (${c.our_count})` : c.category,
-            }));
-    }, [categories]);
+            }))
+    ), [categories]);
 
     // Сквозной id запроса: применяем ТОЛЬКО ответ последнего (смена фильтров, debounce,
     // двойной монтаж StrictMode держат несколько запросов в полёте).
@@ -238,6 +248,7 @@ export default function CardExchangePage() {
             const res = await api.getCardExchangeShowcase({
                 search: search.trim() || null,
                 root_categories: filters.rootCategories.length ? filters.rootCategories : null,
+                our_mode: ourMode || null,
                 subject_ids: filters.subjectIds.length ? filters.subjectIds.map(Number) : null,
                 brands: filters.brands.length ? filters.brands : null,
                 supplier_ids: filters.supplierIds.length ? filters.supplierIds.map(Number) : null,
@@ -268,7 +279,7 @@ export default function CardExchangePage() {
         } finally {
             if (myReq === reqIdRef.current) setLoading(false);
         }
-    }, [search, filters, sort, cursors]);
+    }, [search, ourMode, filters, sort, cursors]);
 
     /** Смена фильтра/сортировки — всегда с первой страницы (курсоры старой выдачи не годятся). */
     const reload = useCallback(() => {
@@ -277,13 +288,13 @@ export default function CardExchangePage() {
         setPage(0);
         void load(0);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [search, filters, sort]);
+    }, [search, ourMode, filters, sort]);
 
     useEffect(() => {
         if (!sessionOk) return;
         reload();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [search, filters, sort, sessionOk]);
+    }, [search, ourMode, filters, sort, sessionOk]);
 
     const toggleCart = async (ad: ShowcaseAd) => {
         setActionError(null);
@@ -377,6 +388,8 @@ export default function CardExchangePage() {
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
                         <SearchSelect value={sort} onChange={setSort} options={SORT_OPTIONS}
                             placeholder="Больше отзывов" allLabel="Больше отзывов" maxWidth={220} />
+                        <Segmented tabs={OUR_MODES.map(m => ({ key: m.key, label: m.label, hint: m.hint }))}
+                            value={ourMode} onChange={setOurMode} />
                         <Segmented tabs={VIEW_TABS} value={view} onChange={setView} />
                         <FiltersPanel value={filters} onApply={setFilters} categories={categoryOptions}
                             subjects={subjectsRef} brands={brandsRef} suppliers={suppliersRef} />
@@ -389,7 +402,14 @@ export default function CardExchangePage() {
                             style={{ flex: '1 1 280px', maxWidth: 380, background: 'var(--color-bg-input)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '7px 12px', fontSize: 13, color: 'var(--color-text)' }} />
                         <span style={{ marginLeft: 'auto', fontSize: 12.5, color: 'var(--color-text-muted)' }}>
                             {session?.supplier_id && <>Кабинет: {session.supplier_id} · </>}
-                            Показано: {formatNumber(visibleAds.length, 0)} · В корзине: {formatNumber(cart.size, 0)}
+                            Показано: {formatNumber(visibleAds.length, 0)} ·{' '}
+                            {cart.size > 0 ? (
+                                <a href={WB_CART_URL} target="_blank" rel="noopener noreferrer"
+                                    title="Открыть корзину биржи в кабинете WB — там оформляется перенос"
+                                    style={{ color: 'var(--color-accent)', fontWeight: 600 }}>
+                                    В корзине: {formatNumber(cart.size, 0)} ↗
+                                </a>
+                            ) : <>В корзине: 0</>}
                         </span>
                     </div>
 

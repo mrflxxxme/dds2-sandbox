@@ -168,14 +168,15 @@ describe('Страница «Биржа карточек»', () => {
         expect(screen.queryByText(/Подходит к наш/)).toBeNull();
     });
 
-    it('в фильтре категорий — только наши категории', async () => {
+    it('в фильтре категорий — все категории, наши сверху с числом', async () => {
         getShowcase.mockResolvedValue(makeResp());
         render(<CardExchangePage />);
         await screen.findByText('Тестовая карточка', { exact: false });
         fireEvent.click(screen.getByRole('button', { name: /Фильтры/ }));
         fireEvent.click(await screen.findByRole('button', { name: 'Корневая категория' }));
+        // наши — с числом артикулов и сверху, но доступны ВСЕ категории справочника
         expect(await screen.findByText('Автоаксессуары (12)')).toBeInTheDocument();
-        expect(screen.queryByText(/^Красота/)).toBeNull();  // не наша — в фильтре не показываем
+        expect(screen.getByText('Красота')).toBeInTheDocument();
     });
 
     it('выбор предмета сам отмечает его корневую категорию', async () => {
@@ -192,5 +193,31 @@ describe('Страница «Биржа карточек»', () => {
         await waitFor(() => expect(getShowcase.mock.calls.at(-1)?.[0]).toMatchObject({
             subject_ids: [100], root_categories: ['Автоаксессуары'],
         }));
+    });
+
+    it('«Точно наши» — отдельная кнопка вне фильтров, шлёт our_mode', async () => {
+        getShowcase.mockResolvedValue(makeResp());
+        render(<CardExchangePage />);
+        await screen.findByText('Тестовая карточка', { exact: false });
+        fireEvent.click(screen.getByRole('button', { name: 'Точно наши' }));
+        await waitFor(() => expect(getShowcase.mock.calls.at(-1)?.[0]).toMatchObject({ our_mode: 'exact' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Вся биржа' }));
+        await waitFor(() => expect(getShowcase.mock.calls.at(-1)?.[0]).toMatchObject({ our_mode: null }));
+    });
+
+    it('счётчик корзины — ссылка в корзину биржи WB (когда что-то добавлено)', async () => {
+        getShowcase.mockResolvedValue(makeResp({ ads: [makeAd({ has_in_cart: true })] }));
+        render(<CardExchangePage />);
+        const link = await screen.findByRole('link', { name: /В корзине: 1/ });
+        expect(link).toHaveAttribute('href', 'https://seller.wildberries.ru/card-exchange/cart');
+        expect(link).toHaveAttribute('target', '_blank');
+        expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'));
+    });
+
+    it('пустая корзина — просто текст, без ссылки', async () => {
+        getShowcase.mockResolvedValue(makeResp());
+        render(<CardExchangePage />);
+        await screen.findByText('Тестовая карточка', { exact: false });
+        expect(screen.queryByRole('link', { name: /В корзине/ })).toBeNull();
     });
 });
