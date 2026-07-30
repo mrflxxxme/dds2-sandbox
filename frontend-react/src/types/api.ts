@@ -6287,6 +6287,10 @@ export interface FfRequestRow {
   total_qty: number | null;
   /** кол-во в штуках россыпи (пересчёт коробов, migfull); null — без коробов/не разрезолвлено */
   total_qty_units: number | null;
+  /** Сколько КОРОБОВ в составе (строки с кратностью >1, migfull); null — коробов нет */
+  total_boxes?: number | null;
+  /** Принято фактически (живой факт приёмки migfull) — «принято X из Y»; null — нет данных */
+  accepted_qty?: number | null;
   /** склад отгрузки МП («Склад МП» / shipped_target) */
   dest_warehouse: string | null;
   external_created_at: string | null;
@@ -8472,6 +8476,74 @@ export interface FbsStageHistory {
   orders_covered: number;
   rows: number;
   since?: string | null;
+}
+
+/**
+ * Направление доставки (округ покупателя).
+ *
+ * 🔴 В строке ДВЕ разные выборки: `orders` — задания, чей путь завершился
+ * в периоде (по ним скорость и SLA); `matured` — созревшая когорта, и только
+ * по ней считается `refused`. На всей выборке доля отказов была бы ошибкой
+ * выжившего — свежее ещё в пути.
+ */
+export interface FbsGeoDirectionRow {
+  label: string;
+  orders: number;
+  median_days: number | null;
+  p90_days: number | null;
+  avg_hops: number | null;
+  matured: number;
+  refused: number;
+  sla_total: number;
+  sla_in_time: number;
+}
+
+/** Клетка матрицы «склад отгрузки × округ назначения». */
+export interface FbsGeoMatrixRow {
+  wb_warehouse_id?: number | null;
+  warehouse_name: string;
+  label: string;
+  orders: number;
+  median_days: number | null;
+}
+
+/**
+ * Узел маршрута (СЦ). `measured` меньше `passes` — у части проходов в истории
+ * одно событие, и удержание неизвестно; при `measured = 0` длительность `null`,
+ * потому что ноль означал бы «прошёл мгновенно».
+ */
+export interface FbsGeoNodeRow {
+  label: string;
+  passes: number;
+  measured: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+}
+
+/** Перевалки против времени — управляемый рычаг маршрута. */
+export interface FbsGeoHopsRow {
+  hops: number;
+  orders: number;
+  median_days: number | null;
+}
+
+/** Доля заданий, сшитых с зеркалом статистики (иначе округ неизвестен). */
+export interface FbsGeoCoverage {
+  orders_total: number;
+  orders_matched: number;
+}
+
+/** География доставки FBS: направления, маршруты, узлы и перевалки. */
+export interface FbsGeoAnalytics {
+  date_from: string;
+  date_to: string;
+  wb_warehouse_id?: number | null;
+  maturity_days: number;
+  directions: FbsGeoDirectionRow[];
+  matrix: FbsGeoMatrixRow[];
+  nodes: FbsGeoNodeRow[];
+  hops: FbsGeoHopsRow[];
+  coverage: FbsGeoCoverage;
 }
 
 /** Аналитика этапов FBS: длительности, разрез по складам, динамика, очередь. */

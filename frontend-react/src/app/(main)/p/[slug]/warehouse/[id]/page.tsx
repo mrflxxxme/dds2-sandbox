@@ -2966,11 +2966,36 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 exportValue: (row: FfRequestRow) => row.dest_warehouse || '',
             } as Column,
         ] : []),
-        // Заявленное кол-во — во всех под-вкладках (сборка / приёмки / возвраты)
+        // Заявленное кол-во — во всех под-вкладках (сборка / приёмки / возвраты).
+        // Возврат с коробами: «штук россыпи · N кор.» — сырое кол-во строк
+        // смешивает короба и штуки (603 «кол-во» = 600 коробов + 3 шт) и
+        // читалось как штуки. Приёмка в обработке: вторая строка «принято X»
+        // — живой факт приёмки Натали (received-строки, обновляется синком).
         {
             key: 'total_qty', label: 'Кол-во', align: 'right',
-            render: (v: number | null) => (v == null ? '—' : formatNumber(v, 0)),
-            exportValue: (row: FfRequestRow) => row.total_qty ?? '',
+            render: (v: number | null, row: FfRequestRow) => {
+                const units = row.total_qty_units;
+                const main = kind === 'return' && units != null
+                    ? formatNumber(units, 0)
+                    : v == null ? '—' : formatNumber(v, 0);
+                return (
+                    <span style={{ whiteSpace: 'nowrap' }}>
+                        <span>{main}</span>
+                        {kind === 'return' && row.total_boxes != null && (
+                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                {' '}· {formatNumber(row.total_boxes, 0)} кор.
+                            </span>
+                        )}
+                        {kind === 'inbound' && row.accepted_qty != null && !row.is_completed && (
+                            <span style={{ display: 'block', fontSize: 11, color: 'var(--color-success)' }}>
+                                принято {formatNumber(row.accepted_qty, 0)}
+                            </span>
+                        )}
+                    </span>
+                );
+            },
+            exportValue: (row: FfRequestRow) =>
+                (kind === 'return' ? row.total_qty_units ?? row.total_qty : row.total_qty) ?? '',
         } as Column,
         // Кол-во в штуках россыпи (пересчёт коробов) — только сборка и только когда есть (Натали/migfull)
         ...(kind === 'assembly' && hasUnits ? [{

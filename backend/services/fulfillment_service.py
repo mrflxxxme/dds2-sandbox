@@ -1733,6 +1733,30 @@ async def _enrich_migfull_submissions(
         raw = row.get("raw")
         if isinstance(raw, dict):
             raw["incoming_lines"] = [line for line in lines if isinstance(line, dict)]
+        # Живой прогресс приёмки: Натали принимает в онлайне, факт лежит в
+        # received-строках. Только АКТИВНЫМ (у закрытых прогресс не нужен, а
+        # лишний запрос на каждую закрытую выел бы cap). 0 — валидные данные
+        # («ещё ничего не принято»), поэтому НЕ `or None`.
+        if row in active_targets and isinstance(raw, dict):
+            try:
+                received = await client.fetch_submission_lines(row["external_id"], "received")
+            except (RateLimitError, CircuitOpenError) as e:
+                logger.warning("Fulfillment migfull: received enrich stopped (%s)", e)
+                break
+            except (MigfullApiError, httpx.HTTPError, ValueError) as e:
+                logger.warning(
+                    "Fulfillment migfull: submission %s received skipped (%s)", row["external_id"], e
+                )
+                continue
+            raw["_dds_accepted"] = min(
+                sum(
+                    _safe_int(line.get("quantity"))
+                    for line in received
+                    if isinstance(line, dict)
+                    and not _is_migfull_service_item(line.get("product") or {})
+                ),
+                _QTY_MAX,
+            )
 
 
 async def _enrich_skladbot_requests(
@@ -3586,6 +3610,7 @@ def _request_to_dict(
     mismatch_map: dict | None = None,
     transfer_map: dict | None = None,
     repack_pair_map: dict | None = None,
+    boxes_map: dict | None = None,
 ) -> dict:
     """FulfillmentRequest → FfRequestRow-shaped dict с обогащением связи.
 
@@ -3633,6 +3658,12 @@ def _request_to_dict(
         "local_archived_at": req.local_archived_at,
         "total_qty": req.total_qty,
         "total_qty_units": (units_map or {}).get(req.id),
+        "total_boxes": (boxes_map or {}).get(req.id),
+        # Живой прогресс приёмки (received-строки, пишет enrich синка):
+        # «принято X из Y» у приёмок в обработке.
+        "accepted_qty": (req.raw or {}).get("_dds_accepted")
+        if req.kind == FfRequestKind.INBOUND.value and isinstance(req.raw, dict)
+        else None,
         "dest_warehouse": req.dest_warehouse,
         "external_created_at": req.external_created_at,
         "synced_at": req.synced_at,
@@ -3717,13 +3748,23 @@ async def list_requests(
         db, project_id, {r.stock_transfer_id for r in requests if r.stock_transfer_id}
     )
 
-    units_map = await _migfull_units_by_request(db, project_id, warehouse_id, requests)
+    boxes_map: dict[int, int] = {}
+    units_map = await _migfull_units_by_request(
+        db, project_id, warehouse_id, requests, boxes_out=boxes_map
+    )
     mismatch_map = await compute_doc_ff_mismatch(db, project_id, assembly_ids, inbound_ids)
     repack_pair_map = await _repack_pair_numbers(db, project_id, requests)
 
     return [
         _request_to_dict(
-            r, assembly_map, inbound_map, units_map, mismatch_map, transfer_map, repack_pair_map
+            r,
+            assembly_map,
+            inbound_map,
+            units_map,
+            mismatch_map,
+            transfer_map,
+            repack_pair_map,
+            boxes_map=boxes_map,
         )
         for r in requests
     ]
@@ -3734,25 +3775,39 @@ async def _migfull_units_by_request(
     project_id: int,
     warehouse_id: int,
     requests: list[FulfillmentRequest],
+    boxes_out: dict[int, int] | None = None,
 ) -> dict[int, int]:
-    """{ff_request_id: кол-во в штуках россыпи} для migfull-сборок (колонка «Кол-во (шт)»).
+    """{ff_request_id: кол-во в штуках россыпи} для migfull сборок И возвратов.
 
-    Пересчитывает короба в штуки так же, как деталка: из raw `planned_lines`
-    (guid→qty) + сопоставление `guid→(ШК, штук в коробе)` ОДНИМ запросом по всем
-    guid списка (без HTTP, без N+1). Заявки без разрезолвленных guid (короба не
-    сопоставлены / остатки не синканы) в карту не попадают → колонка «—».
-    Не-migfull и приёмки игнорируются (короба только у migfull).
+    Пересчитывает короба в штуки так же, как деталка: сборка — из raw
+    `planned_lines`, возврат — из `incoming_lines` (фолбэк `outgoing_lines`,
+    исторические возвраты «по факту»); сопоставление `guid→(ШК, штук в
+    коробе)` ОДНИМ запросом по всем guid списка (без HTTP, без N+1). Заявки
+    без разрезолвленных guid в карту не попадают → колонка «—». Побочно
+    наполняет `boxes_out[ff_request_id]` = Σ КОРОБОВ состава (строки с
+    кратностью >1) — UI разделяет «что в штуках, что в коробах».
+    Не-migfull и приёмки игнорируются (приёмки Натали в штуках).
     """
-    migfull_assembly = [r for r in requests if r.provider == "migfull" and r.kind == FfRequestKind.ASSEMBLY.value]
-    if not migfull_assembly:
+    targets = [
+        r
+        for r in requests
+        if r.provider == "migfull"
+        and r.kind in (FfRequestKind.ASSEMBLY.value, FfRequestKind.RETURN.value)
+    ]
+    if not targets:
         return {}
     req_guid_qty: dict[int, dict[str, int]] = {}
     all_guids: set[str] = set()
-    for r in migfull_assembly:
+    for r in targets:
+        raw = r.raw or {}
+        if r.kind == FfRequestKind.ASSEMBLY.value:
+            lines = _migfull_line_rows(raw.get("planned_lines"))
+        else:
+            lines = _migfull_line_rows(raw.get("incoming_lines")) or _migfull_line_rows(
+                raw.get("outgoing_lines")
+            )
         gq: dict[str, int] = {}
-        for p in _migfull_products_from_lines(
-            _migfull_line_rows((r.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
-        ):
+        for p in _migfull_products_from_lines(lines, [], fact_field="delivery_qty"):
             guid = p["guid"]
             if p["qty"] > 0 and guid:
                 gq[guid] = gq.get(guid, 0) + p["qty"]
@@ -3765,14 +3820,19 @@ async def _migfull_units_by_request(
     units_map: dict[int, int] = {}
     for rid, gq in req_guid_qty.items():
         total_units = 0
+        total_boxes = 0
         resolved_any = False
         for guid, qty in gq.items():
             resolved = guid_barcodes.get(guid)
             if resolved:
                 total_units += qty * resolved[1]  # qty коробов/россыпи × штук в коробе
+                if resolved[1] > 1:
+                    total_boxes += qty
                 resolved_any = True
         if resolved_any:
             units_map[rid] = total_units
+            if total_boxes and boxes_out is not None:
+                boxes_out[rid] = total_boxes
     return units_map
 
 

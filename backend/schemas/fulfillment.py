@@ -165,6 +165,15 @@ class FfRequestRow(BaseModel):
     local_archived: bool = False  # локальный архив DDS (синк не трогает)
     local_archived_at: datetime | None = None
     total_qty: int | None = None  # заявлено всего, шт (skladbot — из деталки)
+    #: Кол-во в штуках россыпи (пересчёт коробов ×units_per_box; migfull
+    #: сборка/возврат). None — коробов нет или состав не разрезолвлен.
+    total_qty_units: int | None = None
+    #: Сколько КОРОБОВ в составе (Σ qty строк с кратностью >1; migfull) — UI
+    #: разделяет «что в штуках, что в коробах». None — коробов нет.
+    total_boxes: int | None = None
+    #: Принято фактически (живые received-строки приёмки migfull, Σ шт) —
+    #: прогресс «принято X из Y» у приёмок в обработке. None — нет данных.
+    accepted_qty: int | None = None
     dest_warehouse: str | None = None  # склад отгрузки МП («Склад МП» / shipped_target)
     external_created_at: date | None = None
     synced_at: datetime
