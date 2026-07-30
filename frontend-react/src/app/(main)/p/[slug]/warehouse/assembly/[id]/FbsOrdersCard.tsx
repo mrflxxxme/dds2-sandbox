@@ -13,11 +13,11 @@ import WbThumb from '@/components/WbThumb';
 import { wbProductUrl } from '@/lib/wbMedia';
 import type { FbsOrder } from '@/types/api';
 import {
-    SupplierStatusBadge,
-    WB_STATUS_LABEL,
+    CABINET_STATUS_LABEL,
+    NOT_SCANNED_CABINET_KEYS,
+    cabinetOrderStatus,
     durationSinceLabel,
     hoursAgoLabel,
-    isAwaitingWbAccept,
     num,
     orderAgeColor,
     transitDaysColor,
@@ -25,11 +25,14 @@ import {
 
 export default function FbsOrdersCard({
     fbsSupplyId,
-    shippedAt,
+    supplyStatus,
+    scanDt,
 }: {
     fbsSupplyId: string;
-    /** Момент передачи поставки (assembly.shipped_at) — якорь колонки «В пути». */
-    shippedAt?: string | null;
+    /** Производный статус поставки (active/to_ship/in_delivery/rejected) — фаза кабинета. */
+    supplyStatus?: string | null;
+    /** Момент скана QR поставки — граница «наша зона / зона WB» и якорь «В пути». */
+    scanDt?: string | null;
 }) {
     const [orders, setOrders] = useState<FbsOrder[] | null>(null);
     const [loading, setLoading] = useState(true);
@@ -96,9 +99,14 @@ export default function FbsOrdersCard({
                         <tbody>
                             {items.map(o => {
                                 const now = Date.now();
-                                const ageColor = orderAgeColor(o.created_at_wb, o.supplier_status, o.wb_status, now);
+                                // Фаза поставки для кабинетного статуса: done = закрыта
+                                // (to_ship/in_delivery), scanned = QR отсканирован.
+                                const done = supplyStatus === 'to_ship' || supplyStatus === 'in_delivery';
+                                const scanned = supplyStatus === 'in_delivery' || !!scanDt;
+                                const cab = cabinetOrderStatus(o.supplier_status, o.wb_status, done, scanned);
+                                const ageColor = orderAgeColor(o.created_at_wb, cab, now);
                                 // Подсветка строки — ТОЛЬКО пока WB не отсканировал заказ
-                                // (после приёмки СЦ это зона логистики WB) и ждём ≥ суток.
+                                // (после скана QR это зона логистики WB) и ждём ≥ суток.
                                 const stuck = ageColor === 'var(--color-danger)';
                                 return (
                                 <tr key={o.wb_order_id} className={stuck ? 'fbs-row-stuck' : undefined}>
@@ -139,22 +147,20 @@ export default function FbsOrdersCard({
                                         {o.sale_price == null ? '—' : formatNumber(num(o.sale_price))}
                                     </td>
                                     <td>
-                                        <SupplierStatusBadge status={o.supplier_status} />
-                                        {o.wb_status && WB_STATUS_LABEL[o.wb_status] && (
-                                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
-                                                {WB_STATUS_LABEL[o.wb_status]}
-                                            </div>
-                                        )}
+                                        {/* Статусы кабинета WB: «Отгрузите товар» / «Ждёт сортировки» /
+                                            «Отсортировано»… — одна шкала с кабинетом (канон 30.07). */}
+                                        <span className={`badge ${CABINET_STATUS_LABEL[cab].badge}`}>
+                                            {CABINET_STATUS_LABEL[cab].label}
+                                        </span>
                                     </td>
                                     <td style={{ color: transitDaysColor(o.transit_days) ?? undefined, whiteSpace: 'nowrap', fontWeight: 500 }}>
-                                        {/* transit_days бэка — целые СУТКИ: переданное вчера вечером
-                                            показывало «0», как будто колонка сломана. Часы/дни считаем
-                                            от момента передачи поставки; цвет — по суточным порогам. */}
-                                        {o.transit_days == null
-                                            ? '—'
-                                            : (isAwaitingWbAccept(o.supplier_status, o.wb_status) && shippedAt
-                                                ? durationSinceLabel(shippedAt) ?? formatNumber(o.transit_days, 0)
-                                                : formatNumber(o.transit_days, 0))}
+                                        {/* «В пути» — от СКАНА QR (до скана товар ещё у нас).
+                                            Часы/дни: целые сутки бэка давали «0» для вчерашнего. */}
+                                        {cab === 'awaiting_sort' && scanDt
+                                            ? durationSinceLabel(scanDt, now) ?? '—'
+                                            : NOT_SCANNED_CABINET_KEYS.includes(cab) || o.transit_days == null
+                                                ? '—'
+                                                : formatNumber(o.transit_days, 0)}
                                     </td>
                                     <td>{o.ddate ? formatDate(o.ddate) : '—'}</td>
                                 </tr>

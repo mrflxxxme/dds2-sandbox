@@ -150,36 +150,66 @@ export const ORDER_AGE_WARN_HOURS = 12;
 /** Порог «заказ ЗАВИС» — сутки без скана WB (сборка + передача + приёмка СЦ). */
 export const ORDER_AGE_DANGER_HOURS = 24;
 
-/** До-скановые `wbStatus`: WB заказ ещё НЕ принял (зеркало бэкендного белого списка). */
-export const WB_PRE_ACCEPT_STATUSES: readonly string[] = ['waiting', 'sent_to_carrier', 'accepted_by_carrier'];
+/** `wbStatus`, означающие отмену заказа (обе оси схлопнуты фронтом одинаково с бэком). */
+const WB_CANCEL_STATUSES: readonly string[] = ['canceled', 'canceled_by_client', 'declined_by_client'];
 
 /**
- * WB ещё не отсканировал заказ: не отменён и `wb_status` до-скановый
- * (пустой = «в пути», строки до появления колонки — канон домена).
- * Ровно этот признак решает, «висит» ли заказ: после скана СЦ вопросы
- * уже к логистике WB, подсвечивать у нас нечего.
+ * Статус задания В ТЕРМИНАХ КАБИНЕТА WB (решение владельца 30.07: «надо то же
+ * самое всё это сделать»). Кабинет выводит его из ФАЗЫ ПОСТАВКИ + оси WB:
+ *   поставка не закрыта → «На сборке»; закрыта, QR не отсканирован →
+ *   «Отгрузите товар» (ещё НАША зона — тут живёт подсветка зависших);
+ *   отсканирован → «Ждёт сортировки»; дальше говорит ось WB
+ *   («Отсортировано» / «Готово к выдаче» / «Получено покупателем»).
  */
-export function isAwaitingWbAccept(
+export type FbsCabinetStatusKey =
+    | 'new' | 'assembling' | 'ship_goods' | 'awaiting_sort'
+    | 'sorted' | 'ready_for_pickup' | 'postponed' | 'sold' | 'defect' | 'cancelled';
+
+export const CABINET_STATUS_LABEL: Record<FbsCabinetStatusKey, { label: string; badge: string }> = {
+    new: { label: 'Новое', badge: 'badge-info' },
+    assembling: { label: 'На сборке', badge: 'badge-info' },
+    ship_goods: { label: 'Отгрузите товар', badge: 'badge-warning' },
+    awaiting_sort: { label: 'Ждёт сортировки', badge: 'badge-info' },
+    sorted: { label: 'Отсортировано', badge: 'badge-success' },
+    ready_for_pickup: { label: 'Готово к выдаче', badge: 'badge-success' },
+    postponed: { label: 'Отложенная доставка', badge: 'badge-secondary' },
+    sold: { label: 'Получено покупателем', badge: 'badge-success' },
+    defect: { label: 'Брак', badge: 'badge-danger' },
+    cancelled: { label: 'Отменено', badge: 'badge-secondary' },
+};
+
+/** Фазы, где заказ ещё НЕ отсканирован WB — наша зона: подсветка зависших живёт тут. */
+export const NOT_SCANNED_CABINET_KEYS: readonly FbsCabinetStatusKey[] = ['new', 'assembling', 'ship_goods'];
+
+export function cabinetOrderStatus(
     supplierStatus: string | null | undefined,
     wbStatus: string | null | undefined,
-): boolean {
-    if (!supplierStatus || TERMINAL_STATUSES.includes(supplierStatus)) return false;
-    if (!wbStatus) return true;
-    return WB_PRE_ACCEPT_STATUSES.includes(wbStatus);
+    supplyDone: boolean,
+    supplyScanned: boolean,
+): FbsCabinetStatusKey {
+    if ((supplierStatus && TERMINAL_STATUSES.includes(supplierStatus))
+        || (wbStatus && WB_CANCEL_STATUSES.includes(wbStatus))) return 'cancelled';
+    if (wbStatus === 'sold') return 'sold';
+    if (wbStatus === 'defect') return 'defect';
+    if (wbStatus === 'sorted') return 'sorted';
+    if (wbStatus === 'ready_for_pickup') return 'ready_for_pickup';
+    if (wbStatus === 'postponed_delivery') return 'postponed';
+    if (supplyScanned) return 'awaiting_sort';
+    if (supplyDone) return 'ship_goods';
+    return supplierStatus === 'new' ? 'new' : 'assembling';
 }
 
 /**
- * Цвет возраста задания, пока WB его НЕ отсканировал: дольше суток — красный,
- * дольше 12 ч — оранжевый. После скана СЦ (sorted/ПВЗ/выкуп) и на отменах —
- * без подсветки: заказ больше не наша зона ответственности.
+ * Цвет возраста задания, пока WB его НЕ отсканировал (`NOT_SCANNED_CABINET_KEYS`):
+ * дольше суток — красный, дольше 12 ч — оранжевый. После скана — зона
+ * логистики WB, не красим.
  */
 export function orderAgeColor(
     iso: string | null | undefined,
-    supplierStatus: string | null | undefined,
-    wbStatus: string | null | undefined,
+    cabinetKey: FbsCabinetStatusKey,
     now: number = Date.now(),
 ): string | null {
-    if (!isAwaitingWbAccept(supplierStatus, wbStatus)) return null;
+    if (!NOT_SCANNED_CABINET_KEYS.includes(cabinetKey)) return null;
     const ts = parseUtcMs(iso);
     if (ts == null) return null;
     const hours = (now - ts) / 3_600_000;
@@ -436,9 +466,9 @@ export const SUPPLY_STATUS_LABEL: Record<FbsSupplyStatus, {
     hint: string;
 }> = {
     active: {
-        label: 'Активная',
+        label: 'Сборка заказов',
         badge: 'badge-info',
-        hint: 'Черновик поставки: задания докладываются, передать её ещё не передали',
+        hint: 'Поставка не закрыта: задания докладываются — в кабинете WB это вкладка «На сборке»',
     },
     to_ship: {
         label: 'Отгрузите поставку',
@@ -446,9 +476,9 @@ export const SUPPLY_STATUS_LABEL: Record<FbsSupplyStatus, {
         hint: 'Поставка закрыта, но QR на пункте приёма WB ещё не отсканирован — товар не сдан',
     },
     in_delivery: {
-        label: 'В доставке',
+        label: 'Сортируем / в обработке',
         badge: 'badge-success',
-        hint: 'QR отсканирован на пункте приёма WB — в кабинете это «Поставка в обработке». '
+        hint: 'QR отсканирован на пункте приёма WB — в кабинете это «Сортируем» / «Поставка в обработке». '
             + 'Факта приёмки поставка в API не несёт: он виден только по её заданиям',
     },
     rejected: {
@@ -477,6 +507,11 @@ export function supplyStatusOf(s: Pick<FbsSupply, 'status' | 'done' | 'scan_dt' 
     if (s.reject_dt) return 'rejected';
     if (!s.done) return 'active';
     return s.scan_dt ? 'in_delivery' : 'to_ship';
+}
+
+/** Ярлык/бейдж по СТРОКОВОМУ статусу поставки (напр. `fbs_supply_status` заявки). */
+export function supplyStatusInfo(v: string | null | undefined) {
+    return v && v in SUPPLY_STATUS_LABEL ? SUPPLY_STATUS_LABEL[v as FbsSupplyStatus] : null;
 }
 
 export function supplyStatusMeta(s: Pick<FbsSupply, 'status' | 'done' | 'scan_dt' | 'reject_dt'>) {
