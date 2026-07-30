@@ -14,6 +14,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+    CABINET_STATUS_LABEL,
+    NOT_SCANNED_CABINET_KEYS,
     ORDER_AGE_DANGER_HOURS,
     ORDER_AGE_WARN_HOURS,
     PSEUDO_STATUS_LABEL,
@@ -21,6 +23,7 @@ import {
     TRANSIT_STALE_DAYS,
     TRANSIT_WARN_DAYS,
     WRITEOFF_REASON_LABEL,
+    cabinetOrderStatus,
     daysSince,
     durationSinceLabel,
     hoursAgoLabel,
@@ -28,6 +31,7 @@ import {
     transitDaysColor,
     writeoffReasonLabel,
 } from '@/app/(main)/p/[slug]/warehouse/fbs/fbsShared';
+import type { FbsCabinetStatusKey } from '@/app/(main)/p/[slug]/warehouse/fbs/fbsShared';
 
 /**
  * Коды причин, которые РЕАЛЬНО отдаёт бэкенд (`ALLOWED_WRITEOFF_REASONS`,
@@ -153,31 +157,62 @@ describe('hoursAgoLabel (возраст заказа как в кабинете 
     });
 });
 
+describe('cabinetOrderStatus (статусы кабинета WB — канон 30.07)', () => {
+    it('фазы поставки: не закрыта → На сборке; закрыта без скана → Отгрузите товар; скан → Ждёт сортировки', () => {
+        expect(cabinetOrderStatus('new', null, false, false)).toBe('new');
+        expect(cabinetOrderStatus('confirm', 'waiting', false, false)).toBe('assembling');
+        expect(cabinetOrderStatus('complete', 'waiting', true, false)).toBe('ship_goods');
+        expect(cabinetOrderStatus('complete', 'waiting', true, true)).toBe('awaiting_sort');
+    });
+
+    it('ось WB перебивает фазу: sorted/ПВЗ/выкуп/брак', () => {
+        expect(cabinetOrderStatus('complete', 'sorted', true, true)).toBe('sorted');
+        expect(cabinetOrderStatus('complete', 'ready_for_pickup', true, true)).toBe('ready_for_pickup');
+        expect(cabinetOrderStatus('complete', 'sold', true, true)).toBe('sold');
+        expect(cabinetOrderStatus('complete', 'defect', true, true)).toBe('defect');
+    });
+
+    it('отмены с обеих осей → cancelled', () => {
+        expect(cabinetOrderStatus('cancel', 'canceled', true, true)).toBe('cancelled');
+        expect(cabinetOrderStatus('new', 'declined_by_client', false, false)).toBe('cancelled');
+    });
+
+    it('у каждого ключа есть ярлык и бейдж (контракт словаря)', () => {
+        const keys: FbsCabinetStatusKey[] = [
+            'new', 'assembling', 'ship_goods', 'awaiting_sort', 'sorted',
+            'ready_for_pickup', 'postponed', 'sold', 'defect', 'cancelled',
+        ];
+        for (const k of keys) {
+            expect(CABINET_STATUS_LABEL[k].label.length, `ключ ${k}`).toBeGreaterThan(2);
+            expect(CABINET_STATUS_LABEL[k].badge).toMatch(/^badge-/);
+        }
+        expect(CABINET_STATUS_LABEL.ship_goods.label).toBe('Отгрузите товар');
+        expect(CABINET_STATUS_LABEL.awaiting_sort.label).toBe('Ждёт сортировки');
+        expect(CABINET_STATUS_LABEL.sorted.label).toBe('Отсортировано');
+    });
+});
+
 describe('orderAgeColor (подсветка, пока WB не отсканировал)', () => {
     const now = Date.parse('2026-07-30T12:00:00Z');
 
-    it('не отсканирован: >24ч красный, >12ч оранжевый, свежий без цвета', () => {
-        expect(orderAgeColor('2026-07-29T10:00:00Z', 'new', null, now)).toBe('var(--color-danger)');
-        expect(orderAgeColor('2026-07-29T23:00:00Z', 'confirm', 'waiting', now)).toBe('var(--color-warning)');
-        expect(orderAgeColor('2026-07-30T08:00:00Z', 'new', 'waiting', now)).toBeNull();
+    it('не отсканирован (new/assembling/ship_goods): >24ч красный, >12ч оранжевый', () => {
+        expect(orderAgeColor('2026-07-29T10:00:00Z', 'new', now)).toBe('var(--color-danger)');
+        expect(orderAgeColor('2026-07-29T23:00:00Z', 'assembling', now)).toBe('var(--color-warning)');
+        // Кейс ASM-899: передано, но QR не отсканирован — 1 дн 17 ч, красим.
+        expect(orderAgeColor('2026-07-28T18:31:10Z', 'ship_goods', now)).toBe('var(--color-danger)');
+        expect(orderAgeColor('2026-07-30T08:00:00Z', 'new', now)).toBeNull();
     });
 
-    it('ПЕРЕДАННЫЙ, но не отсканированный — красим: скан WB и есть граница зависания', () => {
-        // Кейс ASM-899: complete + waiting, заказ поступил 1 дн 17 ч назад.
-        expect(orderAgeColor('2026-07-28T18:31:10Z', 'complete', 'waiting', now)).toBe('var(--color-danger)');
-        expect(orderAgeColor('2026-07-28T18:31:10Z', 'complete', '', now)).toBe('var(--color-danger)');
+    it('после скана QR — не красим (зона логистики WB)', () => {
+        expect(orderAgeColor('2026-07-25T10:00:00Z', 'awaiting_sort', now)).toBeNull();
+        expect(orderAgeColor('2026-07-25T10:00:00Z', 'sorted', now)).toBeNull();
+        expect(orderAgeColor('2026-07-25T10:00:00Z', 'sold', now)).toBeNull();
+        expect(orderAgeColor('2026-07-25T10:00:00Z', 'cancelled', now)).toBeNull();
     });
 
-    it('после скана СЦ и на отменах — не красим (зона логистики WB)', () => {
-        expect(orderAgeColor('2026-07-25T10:00:00Z', 'complete', 'sorted', now)).toBeNull();
-        expect(orderAgeColor('2026-07-25T10:00:00Z', 'complete', 'ready_for_pickup', now)).toBeNull();
-        expect(orderAgeColor('2026-07-25T10:00:00Z', 'complete', 'sold', now)).toBeNull();
-        expect(orderAgeColor('2026-07-25T10:00:00Z', 'cancel', 'canceled', now)).toBeNull();
-        expect(orderAgeColor('2026-07-25T10:00:00Z', 'new', 'declined_by_client', now)).toBeNull();
-    });
-
-    it('пороги согласованы: warn < danger', () => {
+    it('пороги согласованы: warn < danger; не-скановые ключи зафиксированы', () => {
         expect(ORDER_AGE_WARN_HOURS).toBeLessThan(ORDER_AGE_DANGER_HOURS);
+        expect([...NOT_SCANNED_CABINET_KEYS].sort()).toEqual(['assembling', 'new', 'ship_goods']);
     });
 });
 

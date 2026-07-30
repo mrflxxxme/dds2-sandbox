@@ -13,14 +13,14 @@ import WbThumb from '@/components/WbThumb';
 import { wbProductUrl } from '@/lib/wbMedia';
 import type { FbsOrder, FbsStickerType, FbsSupply } from '@/types/api';
 import {
-    SupplierStatusBadge,
-    WB_STATUS_LABEL,
+    CABINET_STATUS_LABEL,
+    NOT_SCANNED_CABINET_KEYS,
+    cabinetOrderStatus,
     deliverStickers,
     durationSinceLabel,
     fetchStickersChunked,
     hoursAgoLabel,
     isActiveOrder,
-    isAwaitingWbAccept,
     isStickerReady,
     num,
     orderAgeColor,
@@ -197,9 +197,13 @@ export default function SupplyOrdersPanel({
                         <tbody>
                             {items.map(o => {
                                 const now = Date.now();
-                                const ageColor = orderAgeColor(o.created_at_wb, o.supplier_status, o.wb_status, now);
+                                // Статус в терминах кабинета WB: фаза поставки + ось WB.
+                                const cab = cabinetOrderStatus(
+                                    o.supplier_status, o.wb_status, !!supply.done, !!supply.scan_dt,
+                                );
+                                const ageColor = orderAgeColor(o.created_at_wb, cab, now);
                                 // Подсветка — ТОЛЬКО пока WB не отсканировал (после
-                                // приёмки СЦ вопросы к логистике WB) и ждём ≥ суток.
+                                // скана QR вопросы к логистике WB) и ждём ≥ суток.
                                 const stuck = ageColor === 'var(--color-danger)';
                                 return (
                                 <tr key={o.wb_order_id} className={stuck ? 'fbs-row-stuck' : undefined}>
@@ -246,23 +250,20 @@ export default function SupplyOrdersPanel({
                                         {o.sale_price == null ? '—' : formatNumber(num(o.sale_price))}
                                     </td>
                                     <td>
-                                        <SupplierStatusBadge status={o.supplier_status} />
-                                        {/* Ось WB детальнее supplier_status: «Готово к выдаче» и
-                                            «Отсортировано» видны только здесь. */}
-                                        {o.wb_status && WB_STATUS_LABEL[o.wb_status] && (
-                                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
-                                                {WB_STATUS_LABEL[o.wb_status]}
-                                            </div>
-                                        )}
+                                        {/* Статусы кабинета WB: «Отгрузите товар» / «Ждёт сортировки» /
+                                            «Отсортировано»… — одна шкала с кабинетом (канон 30.07). */}
+                                        <span className={`badge ${CABINET_STATUS_LABEL[cab].badge}`}>
+                                            {CABINET_STATUS_LABEL[cab].label}
+                                        </span>
                                     </td>
                                     <td style={{ color: transitDaysColor(o.transit_days) ?? undefined, whiteSpace: 'nowrap', fontWeight: 500 }}>
-                                        {/* Часы/дни от передачи поставки: целые сутки бэка давали «0»
-                                            для переданного вчера. Якорь — scan_dt|closed_at поставки. */}
-                                        {o.transit_days == null
-                                            ? '—'
-                                            : (isAwaitingWbAccept(o.supplier_status, o.wb_status) && (supply.scan_dt || supply.closed_at)
-                                                ? durationSinceLabel(supply.scan_dt || supply.closed_at) ?? formatNumber(o.transit_days, 0)
-                                                : formatNumber(o.transit_days, 0))}
+                                        {/* «В пути» — от СКАНА QR (до скана товар ещё у нас, показывать
+                                            нечего). Часы/дни: целые сутки бэка давали «0» для вчерашнего. */}
+                                        {cab === 'awaiting_sort' && supply.scan_dt
+                                            ? durationSinceLabel(supply.scan_dt, now) ?? '—'
+                                            : NOT_SCANNED_CABINET_KEYS.includes(cab) || o.transit_days == null
+                                                ? '—'
+                                                : formatNumber(o.transit_days, 0)}
                                     </td>
                                     <td>{o.ddate ? formatDate(o.ddate) : '—'}</td>
                                 </tr>

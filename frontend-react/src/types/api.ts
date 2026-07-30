@@ -2092,6 +2092,17 @@ export interface AssemblyRequest {
   kind?: AssemblyKind;
   /** Поставка FBS (WB-GI-…) — источник зеркала kind=fbs; у fbo всегда null. */
   fbs_supply_id?: string | null;
+  /**
+   * Производное состояние поставки FBS (FbsSupplyStatus: active/to_ship/
+   * in_delivery/rejected) — фронт рисует ярлыки кабинета WB («Сборка заказов» /
+   * «Отгрузите поставку» / «Сортируем»). Только у kind=fbs.
+   */
+  fbs_supply_status?: string | null;
+  /**
+   * Момент скана QR поставки на приёмке WB — граница «наша зона / зона WB»:
+   * до скана задания «Отгрузите товар» (подсвечиваем зависшие), после — WB.
+   */
+  fbs_scan_dt?: string | null;
   wb_fbo_supply_id: number | null;
   wb_supply_name?: string;
   wb_warehouse_name?: string;

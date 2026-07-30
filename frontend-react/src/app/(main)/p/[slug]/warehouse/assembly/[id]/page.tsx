@@ -15,6 +15,7 @@ import FbsOrdersCard from './FbsOrdersCard';
 import type { Column } from '@/components/DataTable';
 import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyPickupCostHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply, WbSupplyState, WbSupplySyncStatus } from '@/types/api';
 import { assemblyKindOf } from '@/lib/assembly-kind';
+import { supplyStatusInfo } from '../../fbs/fbsShared';
 
 // Статус заноса заявки в кабинет WB (для вкладки «Поставка WB»).
 const WB_SYNC_MAP: Record<WbSupplySyncStatus, { label: string; className: string }> = {
@@ -806,6 +807,16 @@ export default function AssemblyDetailPage() {
                     <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)' }}>
                         Учётная заявка FBS — сборку ведёт фулфилмент, статусы обновляются автоматически
                     </span>
+                    {/* Фаза поставки в терминах кабинета WB (Сборка заказов / Отгрузите
+                        поставку / Сортируем) — прямо в плашке, чтобы не ходить в раздел FBS. */}
+                    {assembly.fbs_supply_status && supplyStatusInfo(assembly.fbs_supply_status) && (
+                        <span
+                            className={`badge ${supplyStatusInfo(assembly.fbs_supply_status)!.badge}`}
+                            title={supplyStatusInfo(assembly.fbs_supply_status)!.hint}
+                        >
+                            {supplyStatusInfo(assembly.fbs_supply_status)!.label}
+                        </span>
+                    )}
                     {assembly.fbs_supply_id && (
                         <Link
                             href={`/p/${slug}/warehouse/fbs?supply=${encodeURIComponent(assembly.fbs_supply_id)}`}
@@ -1250,7 +1261,11 @@ export default function AssemblyDetailPage() {
                 в разделе FBS: когда поступил заказ (+«N ч назад»), товар, цена,
                 статус. FBO-таблица позиций (короба/«на складе») тут не о том. */}
             {isFbs && assembly.fbs_supply_id && (
-                <FbsOrdersCard fbsSupplyId={assembly.fbs_supply_id} shippedAt={assembly.shipped_at} />
+                <FbsOrdersCard
+                    fbsSupplyId={assembly.fbs_supply_id}
+                    supplyStatus={assembly.fbs_supply_status}
+                    scanDt={assembly.fbs_scan_dt}
+                />
             )}
 
             {/* Цепочка попыток отгрузки (отгрузил → не приняли → вернул → переотгрузил) */}

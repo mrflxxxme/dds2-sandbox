@@ -293,6 +293,13 @@ class AssemblyRequestResponse(BaseModel):
     kind: str = "fbo"
     #: Поставка FBS (WB-GI-…) — источник зеркала kind=fbs; у fbo всегда None.
     fbs_supply_id: str | None = None
+    #: Производное состояние поставки FBS (active/to_ship/in_delivery/rejected —
+    #: `FbsSupplyStatus`): фронт рисует по нему ярлыки кабинета WB («Сборка
+    #: заказов» / «Отгрузите поставку» / «Сортируем»). Только у kind=fbs.
+    fbs_supply_status: str | None = None
+    #: Момент скана QR поставки на приёмке WB — граница «наша зона / зона WB»:
+    #: до скана задания «Отгрузите товар» (подсвечиваем зависшие), после — WB.
+    fbs_scan_dt: datetime | None = None
     wb_fbo_supply_id: int | None = None
     wb_supply_name: str | None = None  # wb_fbo_supplies.name
     wb_warehouse_name: str | None = None  # wb_fbo_supplies.warehouse_name (WB destination)

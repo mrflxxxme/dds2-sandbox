@@ -429,6 +429,15 @@ async def _build_items_with_stock(
     return items_out
 
 
+def _fbs_supply_status_value(supply: Any) -> str | None:
+    """Производный статус поставки FBS (`supply_status()`), строкой для схемы."""
+    if supply is None:
+        return None
+    from backend.models.wb_fbs import supply_status
+
+    return supply_status(bool(supply.done), supply.scan_dt, supply.reject_dt)
+
+
 async def _build_response(
     db: AsyncSession,
     request: AssemblyRequest,
@@ -442,6 +451,7 @@ async def _build_response(
     box_qty_by_wh_bc: dict[tuple[int, str], int | None] | None = None,
     machine_box_qty: dict[tuple[int, str], int] | None = None,
     box_weight_kg: Decimal | None = None,
+    fbs_supply_map: dict[str, Any] | None = None,
 ) -> dict:
     """
     Build AssemblyRequestResponse dict from ORM model.
@@ -577,6 +587,25 @@ async def _build_response(
         total_weight = suggested_total_weight_kg
         weight_is_estimated = True
 
+    # Поставка FBS зеркала: производный статус (ярлыки кабинета WB) + момент
+    # скана QR — граница «наша зона / зона WB» для подсветки зависших заданий.
+    # В списке карта приходит батчем (без N+1); деталка добирает одну строку.
+    fbs_supply = None
+    if request.fbs_supply_id:
+        if fbs_supply_map is not None:
+            fbs_supply = fbs_supply_map.get(request.fbs_supply_id)
+        else:
+            from backend.models.wb_fbs import WbFbsSupply
+
+            fbs_supply = (
+                await db.execute(
+                    select(WbFbsSupply).where(
+                        WbFbsSupply.project_id == request.project_id,
+                        WbFbsSupply.wb_supply_id == request.fbs_supply_id,
+                    )
+                )
+            ).scalar_one_or_none()
+
     return {
         "id": request.id,
         "warehouse_id": request.warehouse_id,
@@ -585,6 +614,8 @@ async def _build_response(
         "status": request.status,
         "kind": request.kind,
         "fbs_supply_id": request.fbs_supply_id,
+        "fbs_supply_status": _fbs_supply_status_value(fbs_supply),
+        "fbs_scan_dt": fbs_supply.scan_dt if fbs_supply is not None else None,
         "wb_fbo_supply_id": request.wb_fbo_supply_id,
         "wb_supply_name": request.wb_fbo_supply.name if request.wb_fbo_supply else None,
         "wb_warehouse_name": request.wb_fbo_supply.warehouse_name if request.wb_fbo_supply else None,
@@ -777,6 +808,20 @@ async def prefetch_list_maps(
         if vid_to_order:
             machine_box_qty = await resolve_source_machine_box_qty(db, project_id, vid_to_order)
 
+    # Поставки FBS зеркал — одним IN-запросом: статус/скан кабинета в списке.
+    fbs_supply_map: dict[str, Any] = {}
+    fbs_ids = sorted({r.fbs_supply_id for r in requests if r.fbs_supply_id})
+    if fbs_ids:
+        from backend.models.wb_fbs import WbFbsSupply
+
+        sup_rows = await db.execute(
+            select(WbFbsSupply).where(
+                WbFbsSupply.project_id == project_id,
+                WbFbsSupply.wb_supply_id.in_(fbs_ids),
+            )
+        )
+        fbs_supply_map = {s.wb_supply_id: s for s in sup_rows.scalars().all()}
+
     return {
         "nom_map": nom_map,
         "stock_by_wh_nom": stock_by_wh_nom,
@@ -787,6 +832,7 @@ async def prefetch_list_maps(
         "box_qty_by_wh_bc": box_qty_by_wh_bc,
         "machine_box_qty": machine_box_qty,
         "box_weight_kg": box_weight_kg,
+        "fbs_supply_map": fbs_supply_map,
     }
 
 
