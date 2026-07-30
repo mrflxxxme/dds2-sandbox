@@ -137,6 +137,23 @@ from backend.models.order_city import (
     OrderCityMap,
 )
 
+# Payroll (зарплата: сотрудники, команды, тарифная лестница)
+from backend.models.payroll import (
+    PayrollClientBillingMode,
+    PayrollClientBillingPeriod,
+    PayrollClientEntry,
+    PayrollClientEntryKind,
+    PayrollClientProject,
+    PayrollEmployee,
+    PayrollPayoutMark,
+    PayrollSalaryPeriod,
+    PayrollScopeKind,
+    PayrollTariffStep,
+    PayrollTeam,
+    PayrollTeamMember,
+    PayrollTeamScope,
+)
+
 # Payment Requests (заявки на оплату перевозчику)
 from backend.models.payment_request import (
     PAYMENT_REQUEST_TRANSITIONS,
@@ -363,6 +380,20 @@ __all__ = [
     "LoanDirection",
     "LoanStatus",
     "LoanPaymentType",
+    # Payroll
+    "PayrollClientBillingMode",
+    "PayrollClientBillingPeriod",
+    "PayrollClientEntry",
+    "PayrollClientEntryKind",
+    "PayrollClientProject",
+    "PayrollEmployee",
+    "PayrollPayoutMark",
+    "PayrollSalaryPeriod",
+    "PayrollScopeKind",
+    "PayrollTariffStep",
+    "PayrollTeam",
+    "PayrollTeamMember",
+    "PayrollTeamScope",
     # Enums
     "EventType2",
     "TransactionStatus",

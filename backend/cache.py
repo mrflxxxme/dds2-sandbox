@@ -198,6 +198,18 @@ async def invalidate_project_reports(project_id: int):
         "loan_cost_months",
         "loan_income_months",
         "loan_lent",
+        # Payroll (ведомость ЗП зависит от БДР — инвалидируется вместе с отчётами;
+        # accruals2 — помесячный ФОТ с разбивкой для ОПиУ (v2: dict вместо строки,
+        # старые ключи payroll:accruals дочистит TTL); scope_options — DISTINCT
+        # по wb_finance_rows)
+        "payroll:sheet",
+        "payroll:accruals2",
+        "payroll:scope_options",
+        # Агентство: ведомость производна от БДР ЧУЖОГО проекта (кабинета
+        # клиента), а ETL кабинета гасит только свои ключи — reverse-lookup по
+        # клиентам не делаем осознанно: инвалидация здесь только «своя»
+        # (project_id агентства), свежесть добирается коротким TTL 10 мин.
+        "payroll:agency_sheet",
     ):
         await invalidate_cache(f"{prefix}:project_id={project_id}")
 

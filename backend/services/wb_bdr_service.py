@@ -85,6 +85,7 @@ async def get_wb_bdr(
     article: str | None = None,
     group_by: str = "article",
     period_mode: str = "sale",
+    include_cost_tax: bool = True,
 ) -> dict:
     """
     Build BDR from locally cached WB finance data.
@@ -95,6 +96,14 @@ async def get_wb_bdr(
     view); "report" attributes by WB report period so "Итого к оплате" reconciles
     with the WB cabinet. Only the wb_finance SQL date predicate changes — ads /
     cost / cancel enrichment keep their own date windows.
+
+    include_cost_tax: False пропускает себестоимость (load_avg_costs /
+    compute_project_valuation — при fifo это сотни тысяч строк в Python) и
+    налоговый блок. net_payout/to_pay от них НЕ зависят (net_payout = to_pay −
+    adv_sum + finalize_net_payout; реклама load_ads остаётся) — режим для
+    потребителей, которым нужна только «Чистая выплата» (payroll-ведомость:
+    ~8 вызовов на месяц). cost_price/cost_total/tax_*/profit при False = 0/нет.
+    Дефолт True — поведение существующих вызовов не меняется ни на бит.
 
     Uses SQL-level aggregation for performance (handles 1M+ rows).
     """
@@ -151,13 +160,19 @@ async def get_wb_bdr(
     # ── 5. Load enrichment data (small queries) ──
     ads_map = await load_ads(db, project_id, date_from, date_to)
     orders_stocks_map = await load_orders_stocks(db, project_id, date_from, date_to)
-    cost_overrides = await load_cost_overrides(db, project_id)
+    cost_overrides = await load_cost_overrides(db, project_id) if include_cost_tax else {}
     # Налог: настройки на каждый месяц диапазона. Одинаковые во всех месяцах
     # (обычный случай) → прежний одноставочный путь бит-в-бит; смешанные →
     # «Итого» считается помесячно, строки — по взвешенной эффективной ставке.
-    tax_by_month = await load_tax_settings_by_month(db, project_id, date_from, date_to)
-    tax_uniform = tax_settings_uniform(tax_by_month)
-    tax_info = next(iter(tax_by_month.values()))
+    # include_cost_tax=False → налог не считаем вовсе (tax_info={} в ответе).
+    if include_cost_tax:
+        tax_by_month = await load_tax_settings_by_month(db, project_id, date_from, date_to)
+        tax_uniform = tax_settings_uniform(tax_by_month)
+        tax_info = next(iter(tax_by_month.values()))
+    else:
+        tax_by_month = {}
+        tax_uniform = True
+        tax_info = {}
     cancel_stats = await load_cancel_stats(db, project_id, date_from, date_to)
 
     # COGS source depends on the project's valuation method. lifetime_avg keeps the
@@ -166,14 +181,16 @@ async def get_wb_bdr(
     # source per-period COGS from the path-dependent valuation engine (win[sku]["cogs"]),
     # with eff_cost shown as the per-unit price; override fallback covers SKUs the
     # engine doesn't know.
-    method = await get_valuation_method(db, project_id)
+    # include_cost_tax=False → себестоимость не грузим (главная экономия: у fifo
+    # compute_project_valuation переваривает сотни тысяч строк в Python).
+    method = await get_valuation_method(db, project_id) if include_cost_tax else DEFAULT_METHOD
     win: dict[str, dict] = {}
     # cost_map грузится при ЛЮБОМ методе: для движковых методов это страховка —
     # SKU, по которому движок дал 0 (партии не сматчились по ключу, нетто-ноль
     # окна), не должен уходить в P&L с нулевой себестоимостью, когда средняя
     # закупочная известна (прод-кейс elka_240х220: 123 шт/нед по 0 ₽ при
     # известных 1 396 ₽ — прибыль завышалась на ~172 тыс. за неделю).
-    cost_map = await load_avg_costs(db, project_id)
+    cost_map = await load_avg_costs(db, project_id) if include_cost_tax else {}
     if method != DEFAULT_METHOD:
         valuation = await compute_project_valuation(db, project_id)
         win = slice_window(valuation, date_from, date_to, method)
@@ -408,7 +425,11 @@ async def get_wb_bdr(
     summary_result["cost_total"] = float(total_cost)
 
     # ── 8. Tax calculation ──
-    if tax_uniform:
+    # include_cost_tax=False → пропускаем целиком: net_payout/to_pay от налога
+    # не зависят, а blended-путь делает дополнительные SQL-проходы.
+    if not include_cost_tax:
+        pass
+    elif tax_uniform:
         apply_tax(summary_result, tax_info, D(str(summary_result["adv_sum"])), total_cost)
     else:
         # Смена ставок внутри диапазона: «Итого»-налог помесячно (точно), строки —
@@ -446,8 +467,9 @@ async def get_wb_bdr(
         tax_info = blended_tax_info(
             {mk: m["income"] for mk, m in monthly_tax.items()}, tax_by_month
         )
-    for art_row in result_articles:
-        apply_tax_article(art_row, tax_info)
+    if include_cost_tax:
+        for art_row in result_articles:
+            apply_tax_article(art_row, tax_info)
 
     # ── 9. Computed enrichment fields ──
     total_real = float(summary_result.get("realization", 0)) or 1
