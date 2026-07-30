@@ -464,6 +464,42 @@ class WbFbsOrder(Base, TimestampMixin):
     )
 
 
+# ─── Журнал переходов статусов заданий ──────────────────────────────────────
+
+
+class WbFbsOrderEvent(Base):
+    """Переход статуса задания FBS — строка таймлайна «Статус заказа».
+
+    WB Marketplace API истории НЕ отдаёт (только текущие статусы), поэтому
+    журнал пишет наш синк В МОМЕНТ ОБНАРУЖЕНИЯ перехода: `changed_at` — время
+    фиксации (точность = каденс синка, 5 мин), не время события у WB. Точные
+    даты прошлого дают синтетические якоря модалки (created_at_wb задания,
+    closed_at/scan_dt поставки, written_off_at) — их в журнал не пишем, чтобы
+    не дублировать источники истины.
+
+    Append-only, без SoftDelete (как `FulfillmentStatusEvent`): каскадно
+    умирает с заданием, повторный синк без изменений событий не плодит.
+    """
+
+    __tablename__ = "wb_fbs_order_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    order_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("wb_fbs_orders.id", ondelete="CASCADE"), nullable=False
+    )
+    #: Какая ось сменилась: supplier_status | wb_status.
+    axis: Mapped[str] = mapped_column(String(20), nullable=False)
+    old_value: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    new_value: Mapped[str] = mapped_column(String(30), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        # Таймлайн одного задания — единственный читатель журнала.
+        Index("ix_wb_fbs_order_events_order", "project_id", "order_id", "changed_at"),
+    )
+
+
 # ─── Поставки FBS ───────────────────────────────────────────────────────────
 
 
