@@ -762,3 +762,67 @@ class TestManualTransitionsDenied:
         assert resp.status_code == 422
         message = resp.json()["error"]["message"]
         assert "fbo" in message and "fbs" in message
+
+
+class TestReviewFixInvariants:
+    """Фиксы ревью 30.07: sandbox-гейт, merge-гейт, фантомный транзит."""
+
+    async def test_sandbox_contour_early_exit(self, db_session, project, wh, nom, monkeypatch):
+        """В песочнице зеркало не работает ВООБЩЕ: у заявок нет метки контура,
+        и sandbox-поставка рождала бы РЕАЛЬНУЮ заявку в общем реестре."""
+        wb_wh = await _mk_fbs_wh(db_session, project.id, wh.id)
+        supply_id = await _mk_supply(db_session, project.id)
+        await _mk_order(db_session, project.id, wb_wh, supply_id, nom)
+
+        from backend.services.wb_fbs import assembly_mirror as mirror_mod
+
+        monkeypatch.setattr(mirror_mod, "is_sandbox_contour", lambda: True)
+        assert await sync_fbs_assembly_mirror(db_session, project.id) == 0
+        assert await _mirror_of(db_session, project.id, supply_id) is None
+
+        # Возврат в боевой контур — зеркало создаётся штатно.
+        monkeypatch.setattr(mirror_mod, "is_sandbox_contour", lambda: False)
+        assert await sync_fbs_assembly_mirror(db_session, project.id) == 1
+
+    async def test_merge_rejects_fbs_mirror(self, db_session, project, wh, nom):
+        """merge_assembly_requests — путь ко ВТОРОМУ списанию: позиции зеркала
+        в обычной сборке получили бы резерв и ship-списание. Гейт в сервисе."""
+        from backend.services.assembly.crud import merge_assembly_requests
+
+        wb_wh = await _mk_fbs_wh(db_session, project.id, wh.id)
+        supply_id = await _mk_supply(db_session, project.id)
+        await _mk_order(db_session, project.id, wb_wh, supply_id, nom)
+        await sync_fbs_assembly_mirror(db_session, project.id)
+        mirror = await _mirror_of(db_session, project.id, supply_id)
+        assert mirror is not None
+
+        plain = AssemblyRequest(
+            project_id=project.id,
+            warehouse_id=wh.id,
+            number=f"ASM-PLAIN-{_uid()}",
+            status=AssemblyStatus.IN_PROGRESS.value,
+            pallets_count=1,
+            pallet_weight_kg=10,
+        )
+        db_session.add(plain)
+        await db_session.commit()
+
+        with pytest.raises(ValueError, match="автоматически"):
+            await merge_assembly_requests(db_session, project.id, [mirror.id, plain.id])
+
+    async def test_shipped_mirror_not_in_transit_capital(self, db_session, project, wh, nom):
+        """SHIPPED-зеркало — не транзит: его единицы уже списаны по complete и
+        уехали покупателю. Без kind-фильтра фантом оседал в «Итого — капитал»."""
+        from backend.services.warehouse_stock_engine import get_unified_stock_summary
+
+        wb_wh = await _mk_fbs_wh(db_session, project.id, wh.id)
+        supply_id = await _mk_supply(db_session, project.id, done=True)
+        await _mk_order(db_session, project.id, wb_wh, supply_id, nom, supplier_status="complete")
+        await sync_fbs_assembly_mirror(db_session, project.id)
+        mirror = await _mirror_of(db_session, project.id, supply_id)
+        assert mirror is not None
+        assert mirror.status == AssemblyStatus.SHIPPED.value
+
+        rows = await get_unified_stock_summary(db_session, project.id)
+        transit = {r.get("barcode"): r.get("in_transit", 0) for r in rows}
+        assert transit.get(nom.barcode, 0) == 0, "зеркало не должно давать in_transit"

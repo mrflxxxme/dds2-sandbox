@@ -727,6 +727,9 @@ async def _supply_discrepancies(
         AssemblyRequest.project_id == project_id,
         AssemblyRequest.is_deleted == False,  # noqa: E712
         AssemblyRequest.status.in_(_SUPPLY_SCOPE_STATUSES),
+        # Зеркала FBS не имеют ни WB-поставки, ни пропуска — без фильтра каждое
+        # SHIPPED-зеркало печатало бы ложный «🪪 пропуск WB не оформлен» в TG.
+        AssemblyRequest.kind != AssemblyKind.FBS.value,
     ]
     if warehouse_ids:
         asm_filters.append(AssemblyRequest.warehouse_id.in_(warehouse_ids))

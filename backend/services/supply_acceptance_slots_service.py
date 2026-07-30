@@ -19,7 +19,7 @@ from datetime import date
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models.assembly import AssemblyRequest, AssemblyStatus
+from backend.models.assembly import AssemblyKind, AssemblyRequest, AssemblyStatus
 from backend.models.wb_fbo import WbFboSupply
 from backend.services.warehouse_acceptance_service import (
     _normalize_acceptance_wh,
@@ -141,6 +141,9 @@ async def _load_active_supply_rows(db: AsyncSession, project_id: int) -> list[di
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted == False,  # noqa: E712
             AssemblyRequest.status.in_(_ACTIVE_STATUSES),
+            # Зеркала FBS не сдаются на склады WB: их wb_warehouse_name_manual —
+            # имя склада ПРОДАВЦА, матч по нему давал фантомные строки слотов.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
         )
         .limit(_MAX_ACTIVE_SUPPLIES)
     )

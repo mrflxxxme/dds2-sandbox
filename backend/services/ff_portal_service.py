@@ -128,6 +128,10 @@ async def get_scoped_assembly(db: AsyncSession, ctx: FfContext, assembly_id: int
     ).scalar_one_or_none()
     if not req or not ctx.allows(req.project_id, req.warehouse_id):
         raise HTTPException(404, "Заявка не найдена")
+    if req.kind == AssemblyKind.FBS.value:
+        # Учётное зеркало FBS оператору ФФ не отдаём: его нельзя ни править,
+        # ни двигать (list_assemblies уже фильтрует — деталка обязана совпадать).
+        raise HTTPException(404, "Заявка не найдена")
     return req
 
 

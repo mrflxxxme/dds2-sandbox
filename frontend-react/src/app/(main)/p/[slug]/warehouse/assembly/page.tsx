@@ -859,6 +859,9 @@ export default function AssemblyListPage() {
     const missingWeightItems = useMemo(() => {
         const byBarcode = new Map<string, string>();
         for (const req of items) {
+            // Зеркалам FBS вес не нужен (паллет/веса у них нет вовсе) —
+            // их SKU не должны звать «Заполнить вес».
+            if (assemblyKindOf(req.kind) === 'fbs') continue;
             const missing = req.weight_missing_barcodes;
             if (!missing || missing.length === 0) continue;
             const nameByBc = new Map<string, string>();

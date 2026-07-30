@@ -22,8 +22,8 @@ from sqlalchemy.orm import load_only
 
 from backend.cache import invalidate_cache
 from backend.models.assembly import (
-    AssemblyKind,
     AssemblyDraft,
+    AssemblyKind,
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,

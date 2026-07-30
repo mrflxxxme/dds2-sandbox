@@ -789,6 +789,10 @@ async def get_warehouse_need(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
             AssemblyRequest.status == AssemblyStatus.SHIPPED,
+            # Зеркала FBS не едут на склад WB — товар продан покупателю.
+            # Без фильтра фантомный «транзит» занижал потребность по SKU,
+            # которые продаются и по FBS.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             Nomenclature.article_wb.isnot(None),
         )
         .group_by(Nomenclature.article_wb)
