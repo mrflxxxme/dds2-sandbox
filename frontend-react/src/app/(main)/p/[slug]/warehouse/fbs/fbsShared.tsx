@@ -269,6 +269,39 @@ export const WB_STATUS_LABEL: Record<string, string> = {
     sent_to_carrier: 'Передано перевозчику',
 };
 
+// ─── Таймлайн «Статус заказа» ───────────────────────────────────────────────
+
+/**
+ * Ярлыки БАЗОВЫХ кодов таймлайна (`GET /fbs/orders/{id}/timeline`).
+ *
+ * Тот же паттерн, что `WRITEOFF_REASON_LABEL`: ключи — машинные коды бэкенда,
+ * человеческий текст живёт только здесь. Коды с префиксом резолвятся словарями
+ * осей (`wb:<status>` → `WB_STATUS_LABEL`, `supplier:<status>` →
+ * `SUPPLIER_STATUS_LABEL`), промах любого словаря — фолбэк «показать код как
+ * есть» — контракт закреплён тестом `src/__tests__/lib/fbsOrderTimeline.test.ts`.
+ */
+export const TIMELINE_LABEL: Record<string, string> = {
+    created: 'Оформлен',
+    assembling: 'Взят в сборку',
+    assembled: 'Продавец собрал заказ',
+    scanned: 'Принят сортировочным центром (скан QR)',
+    written_off: 'Списано со склада (учёт DDS)',
+};
+
+/** Подсказка к «≈»: время события зафиксировано синком, а не WB. */
+export const TIMELINE_APPROX_HINT = 'время зафиксировано синхронизацией (точность ~5 мин)';
+
+/** Человеческий ярлык события таймлайна по машинному коду. */
+export function timelineLabel(code: string): string {
+    if (code.startsWith('wb:')) {
+        return WB_STATUS_LABEL[code.slice('wb:'.length)] ?? code;
+    }
+    if (code.startsWith('supplier:')) {
+        return SUPPLIER_STATUS_LABEL[code.slice('supplier:'.length)] ?? code;
+    }
+    return TIMELINE_LABEL[code] ?? code;
+}
+
 /** Порядок кнопок переключателя: от консервативного к «доверяем провайдеру». */
 export const STOCK_SOURCES: readonly FbsStockSource[] = ['min_of_both', 'ff_mirror', 'ledger'];
 

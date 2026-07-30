@@ -8577,6 +8577,38 @@ export interface FbsWriteoffIssues {
 }
 
 /**
+ * Строка таймлайна «Статус заказа» (модалка по заданию — как в кабинете WB).
+ *
+ * Смесь двух источников, отсортирована сервисом по времени DESC (свежее сверху):
+ * - `kind="anchor"` — синтетический якорь из ТОЧНОЙ даты (задание оформлено,
+ *   поставка закрыта, QR отсканирован, списано в DDS);
+ * - `kind="event"` — переход из журнала `wb_fbs_order_events`; его время —
+ *   момент ФИКСАЦИИ синком (точность ~5 мин), об этом говорит `approx=true`
+ *   (UI помечает «≈» перед временем).
+ */
+export interface FbsOrderTimelineEvent {
+  kind: 'anchor' | 'event' | (string & {});
+  /**
+   * Машинный код события: created | assembling | assembled | scanned |
+   * written_off | wb:<status> | supplier:<status>. Человеческий ярлык рисует
+   * фронт — `timelineLabel()` в fbsShared.
+   */
+  code: string;
+  at: string | null;
+  /** Время приблизительное — зафиксировано синком, не WB. */
+  approx: boolean;
+}
+
+/** `GET /fbs/orders/{wb_order_id}/timeline` — история статусов задания. */
+export interface FbsOrderTimeline {
+  wb_order_id: number;
+  article: string | null;
+  subject: string | null;
+  nm_id: number | null;
+  events: FbsOrderTimelineEvent[];
+}
+
+/**
  * Структурированный detail 409-гейта настроек склада FBS
  * (`PATCH /fbs/warehouses/{id}/settings`): комбинация «Трансляция + Система ФФ»
  * при зеркале выше учёта. Фронт опознаёт гейт по `code`, а не по своей копии
