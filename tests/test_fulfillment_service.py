@@ -5222,6 +5222,7 @@ async def test_repack_matcher_mixed_lines_and_box_requirement(db_session, projec
     )
 
     assert await fulfillment_service._match_repack_pairs(db_session, project.id, warehouse.id) == 1
+    await db_session.commit()  # commit — на вызывающем (контракт матчера)
     await db_session.refresh(inb)
     await db_session.refresh(ret)
     assert inb.repack_return_id == ret.id and ret.repack_matched_at is not None
