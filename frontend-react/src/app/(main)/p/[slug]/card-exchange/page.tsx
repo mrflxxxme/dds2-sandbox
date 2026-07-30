@@ -11,6 +11,8 @@ import type {
     ShowcaseAd,
     ShowcaseCursor,
 } from '@/types/api';
+import WbThumb from '@/components/WbThumb';
+import { productImageUrl } from '@/lib/wbMedia';
 import SearchSelect from '../ads-manager/components/SearchSelect';
 import Switch from '../ads-manager/components/Switch';
 import { Ic } from '../ads-manager/components/icons';
@@ -66,6 +68,20 @@ function Segmented<T extends string>({ tabs, value, onChange }: {
 }
 
 const money = (v: number | null) => (v == null ? '—' : `${formatNumber(Number(v), 0)} ₽`);
+
+/** Фото объявления. Берём НЕ meta.photo (внешний CDN WB — режется CSP `img-src 'self'`),
+ *  а наш кэширующий прокси /api/v1/media/product-image/{nmId}. Битое фото → плейсхолдер. */
+function AdPhoto({ nmId }: { nmId: number | null }) {
+    const [failed, setFailed] = useState(false);
+    const box: React.CSSProperties = {
+        position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover',
+    };
+    if (nmId == null || failed) return <div style={{ ...box, background: 'var(--color-bg-hover)' }} />;
+    return (
+        // eslint-disable-next-line @next/next/no-img-element -- прокси отдаёт webp, next/image здесь не нужен
+        <img src={productImageUrl(nmId)} alt="" loading="lazy" style={box} onError={() => setFailed(true)} />
+    );
+}
 
 /** Бейдж «к какой нашей корневой категории подходит объявление».
  *  Категорий может быть несколько (у вариантов группы разные предметы) — показываем
@@ -378,10 +394,7 @@ export default function CardExchangePage() {
                             {visibleAds.map(ad => (
                                 <div key={ad.ad_id} className="glass-card" style={{ display: 'flex', flexDirection: 'column', padding: 12, gap: 6 }}>
                                     <div style={{ position: 'relative', aspectRatio: '3 / 4', background: 'var(--color-bg-hover)', borderRadius: 8, overflow: 'hidden' }}>
-                                        {ad.photo
-                                            // eslint-disable-next-line @next/next/no-img-element -- внешняя CDN-картинка биржи WB, как в WbThumb
-                                            ? <img src={ad.photo} alt={ad.title ?? ''} loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                                            : <div style={{ width: '100%', height: '100%' }} />}
+                                        <AdPhoto nmId={ad.nm_id} />
                                         {(ad.imt_count ?? 0) > 1 && (
                                             <span className="badge badge-secondary" style={{ position: 'absolute', left: 8, bottom: 8, fontSize: 10.5 }}>
                                                 {formatNumber(ad.imt_count!, 0)} вариантов
@@ -426,10 +439,7 @@ export default function CardExchangePage() {
                                         {visibleAds.map(ad => (
                                             <tr key={ad.ad_id} style={{ color: '#111827' }}>
                                                 <td style={{ ...tdLeft, padding: '3px 6px' }}>
-                                                    {ad.photo
-                                                        // eslint-disable-next-line @next/next/no-img-element -- внешняя CDN-картинка биржи WB
-                                                        ? <img src={ad.photo} alt="" loading="lazy" style={{ width: 34, height: 44, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--color-border)' }} />
-                                                        : <div style={{ width: 34, height: 44, borderRadius: 6, background: 'var(--color-bg-hover)' }} />}
+                                                    <WbThumb nmId={ad.nm_id} size={34} height={44} rounded={6} />
                                                 </td>
                                                 <td style={{ ...tdLeft, whiteSpace: 'normal', lineHeight: 1.25 }}>
                                                     <div style={{ fontWeight: 600 }}>{ad.title ?? '—'}</div>
