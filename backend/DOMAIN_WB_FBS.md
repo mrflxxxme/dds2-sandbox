@@ -55,6 +55,7 @@ FBS = Fulfillment by Seller: товар лежит на НАШЕМ складе,
 | `WbFbsStockState` | последнее переданное состояние остатка по `(склад WB, chrtId)`: `qty_sent` / `qty_confirmed` | `(project_id, wb_warehouse_id, chrt_id)` |
 | `WbFbsStockPush` | один прогон трансляции (лог для UI): счётчики `rows_*`, статус OK/PARTIAL/ERROR | index `(project_id, started_at)` |
 | `WbFbsOrder` | зеркало сборочного задания; **одно задание = одна единица товара** | `(project_id, wb_order_id)` + partial index `ix_wb_fbs_orders_open` по `supplier_status IN ('new','confirm')` |
+| `WbFbsOrderEvent` | журнал переходов осей `supplier_status`/`wb_status` задания — строки таймлайна «Статус заказа»; append-only, `changed_at` = момент фиксации синком | FK `order_id → wb_fbs_orders.id` **CASCADE** + index `(project_id, order_id, changed_at)` |
 | `WbFbsSupply` | поставка FBS — контейнер заданий; `done`/`scan_dt`/`reject_dt` раскладываются в `FbsSupplyStatus` (своего статуса WB не отдаёт) | `(project_id, wb_supply_id)` |
 
 Зеркала WB (`WbFbsOrder`, `WbFbsSupply`) — **без SoftDelete**: источник истины у WB, строки только
@@ -480,6 +481,23 @@ available(наш склад, номенклатура) = max(0, quantity − res
   у провайдера, ledger отстал». Строк ≤ 200 (stuck DESC), срез виден флагом `truncated`;
   `total_orders` — полный счётчик до среза. Раньше единственным следом был warning в логе воркера
   (прод 29.07: 145 заданий висело на нулевом остатке).
+- **Таймлайн задания — `GET /orders/{wb_order_id}/timeline`** (`get_order_timeline`): модалка
+  «Статус заказа», как в кабинете WB. WB истории статусов НЕ отдаёт (только текущие значения),
+  поэтому источника два, оба наши. (1) **Журнал `wb_fbs_order_events`** (`kind="event"`,
+  `approx=true`): каждая мутация осей `supplier_status`/`wb_status` фиксирует переход
+  В МОМЕНТ ОБНАРУЖЕНИЯ — `sync_order_statuses`/`_apply_statuses` (дифф снапшота до перезаписи,
+  паттерн `FulfillmentStatusEvent`), `_upsert_orders` (честно принесённая payload'ом ось
+  досылается строке + событие; фолбэк `new` сменой не считается, терминальные оси upsert не
+  применяет — их проводит синк статусов вместе с возвратом списанного), `add_orders`
+  (`new→confirm` нашей кнопкой — синк его не увидел бы: WB вернёт confirm на уже-confirm),
+  `deliver_supply` (`old→complete`), `cancel_order`. `changed_at` — момент фиксации (точность =
+  каденс синка, 5 мин), повторный синк без изменений событий не плодит (old == new → 0 строк).
+  Свежевставленные строки (в т.ч. исторические бэкфилла) событий не получают: прошлое неизвестно,
+  журнал начинается с текущего значения. (2) **Якоря из ТОЧНЫХ дат** (`kind="anchor"`,
+  `approx=false`): `created` (created_at_wb), `assembled` (closed_at поставки), `scanned`
+  (scan_dt — QR отсканирован), `written_off` (списано из ledger'а DDS). `supplier:complete` может
+  дублировать `assembled` по смыслу — отдаются оба, фронт решает сам. Сортировка DESC — сервис
+  (контракт схемы), журнал срезан 200 строками, контур- и project-изоляция как у списка заданий.
 - **Сводка по складам — отдельная ручка `GET /fbs/orders/warehouse-summary`** (`warehouse_summary`),
   ОДИН запрос с `GROUP BY wb_warehouse_id` вместо запроса на склад (прежние «limit=1 на каждый» —
   9 параллельных походов в БД ради девяти чисел). 🔴 **Период применяется ТОЛЬКО к фазам доставки.**
@@ -571,6 +589,7 @@ available(наш склад, номенклатура) = max(0, quantity − res
 | **POST** | **`/orders/backfill`** | ✓ | **`orders_service.backfill_orders_history` — история заданий за `days` (≤90) окнами ≤30 дней; историю метит `written_off_at`, чтобы не вычесть со склада прошлые продажи** |
 | POST | `/orders/stickers` | ✓ | стикеры заданий (≤100 за раз) |
 | PATCH | `/orders/{wb_order_id}/cancel` | ✓ | отмена задания |
+| GET | `/orders/{wb_order_id}/timeline` | | `orders_service.get_order_timeline` — таймлайн «Статус заказа»: якоря из точных дат + журнал переходов, DESC |
 | GET | `/supplies` | | список поставок; `status=active\|to_ship\|in_delivery\|rejected` — точнее прежнего `done` |
 | POST | `/supplies` | ✓ | создать поставку |
 | POST | `/supplies/sync` | ✓ | синк поставок |

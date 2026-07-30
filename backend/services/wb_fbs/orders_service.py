@@ -28,6 +28,10 @@ Service: WB FBS — сборочные задания (заказы со скл�
     откатился бы в `new` и товар списался бы повторно).
   • Списание в ledger строго идемпотентно по `written_off_at`, не уводит
     остаток в минус и пишет `StockMovement` типа OUTBOUND.
+  • Журнал переходов (`wb_fbs_order_events`): каждая мутация осей
+    `supplier_status`/`wb_status` фиксирует переход В МОМЕНТ ОБНАРУЖЕНИЯ
+    (дифф до/после), повторный синк без изменений событий не плодит — из
+    журнала + точных дат строится таймлайн задания (`get_order_timeline`).
   • Зеркало заданий скоуплено по КОНТУРУ (`services/wb_fbs/contour.py`): задания
     песочницы помечаются в `raw._dds_contour` и не участвуют ни в списании из
     ledger'а, ни в вычетах остатка боевого контура. Гейт режима закрывает только
@@ -66,7 +70,7 @@ from backend.models import (
 from backend.models.fulfillment import FulfillmentStock
 from backend.models.warehouse import MovementType, StockMovement, Warehouse, WarehouseStock
 
-from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS
+from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS, WbFbsOrderEvent
 from backend.services.warehouse_stock_engine import _update_stock
 from backend.services.wb_fbs.client_factory import get_fbs_client
 from backend.services.wb_fbs.contour import contour_condition, is_sandbox_contour, stamp_contour
@@ -310,6 +314,86 @@ class FbsOrderError(Exception):
     """Доменная ошибка сборочных заданий — роутер отдаёт её как 400."""
 
 
+# ─── Журнал переходов статусов (`wb_fbs_order_events`) ──────────────────────
+#
+# WB истории статусов не отдаёт (только текущие значения), поэтому каждая
+# мутация осей `supplier_status` / `wb_status` в зеркале фиксирует переход
+# В МОМЕНТ ОБНАРУЖЕНИЯ: дифф «что было в строке» → «что реально записали».
+# Идемпотентность бесплатна: old == new → ноль строк журнала.
+
+#: Оси журнала — значения колонки `wb_fbs_order_events.axis`.
+EVENT_AXIS_SUPPLIER = "supplier_status"
+EVENT_AXIS_WB = "wb_status"
+
+#: Потолок строк журнала в таймлайне (страховка от разросшейся истории).
+_TIMELINE_EVENTS_MAX = 200
+#: Строк в одном multi-VALUES INSERT событий: 7 колонок × 1000 = 7k параметров —
+#: с запасом под лимит asyncpg 32767.
+_EVENT_INSERT_CHUNK = 1000
+
+
+async def order_status_snapshot(
+    db: AsyncSession, project_id: int, wb_order_ids: Sequence[int]
+) -> dict[int, tuple[int, str, str | None]]:
+    """{wb_order_id: (pk, supplier_status, wb_status)} — снимок ДО перезаписи.
+
+    База диффа журнала (паттерн `fulfillment_service._apply_requests`): берётся
+    перед мутацией, после неё сравнивается с реально записанными значениями.
+    Без учёта контура: ключ `(project_id, wb_order_id)` уникален, а событие
+    принадлежит той же строке, которую мутация и перепишет.
+    """
+    snapshot: dict[int, tuple[int, str, str | None]] = {}
+    ids = [oid for oid in wb_order_ids if oid]
+    for chunk in _chunks(ids, _STATUS_CHUNK):
+        result = await db.execute(
+            select(
+                WbFbsOrder.wb_order_id,
+                WbFbsOrder.id,
+                WbFbsOrder.supplier_status,
+                WbFbsOrder.wb_status,
+            ).where(
+                WbFbsOrder.project_id == project_id,
+                WbFbsOrder.wb_order_id.in_(chunk),
+            )
+        )
+        for wb_order_id, pk, sup, wb in result.all():
+            snapshot[int(wb_order_id)] = (int(pk), sup, wb)
+    return snapshot
+
+
+def _axis_transitions(
+    old_sup: str,
+    old_wb: str | None,
+    new_sup: str | None,
+    new_wb: str | None,
+) -> list[tuple[str, str | None, str]]:
+    """Реально сменившиеся оси: [(axis, old, new)].
+
+    `None`/пустое НОВОЕ значение переходом не считается (`new_value` в журнале
+    NOT NULL): «ось не пришла» и «ось очистили» неразличимы в payload'ах WB,
+    и молчание не должно рождать строк.
+    """
+    out: list[tuple[str, str | None, str]] = []
+    if new_sup and new_sup != old_sup:
+        out.append((EVENT_AXIS_SUPPLIER, old_sup, new_sup))
+    if new_wb and new_wb != (old_wb or None):
+        out.append((EVENT_AXIS_WB, old_wb, new_wb))
+    return out
+
+
+async def record_order_events(db: AsyncSession, project_id: int, events: list[dict[str, Any]]) -> None:
+    """Bulk-вставка строк журнала. Без commit — транзакцией управляет вызывающий.
+
+    Ключи события: `order_id` (PK задания, не wb_order_id!), `axis`,
+    `old_value`, `new_value`, `changed_at`. `project_id` проставляется здесь.
+    """
+    if not events:
+        return
+    rows = [{"project_id": project_id, **e} for e in events]
+    for chunk in _chunks(rows, _EVENT_INSERT_CHUNK):
+        await db.execute(pg_insert(WbFbsOrderEvent).values(chunk))
+
+
 # ─── Нормализация payload'а WB ──────────────────────────────────────────────
 
 
@@ -524,22 +608,6 @@ def _supplier_status_or_new(raw: dict) -> str:
 # ─── Синк заданий ───────────────────────────────────────────────────────────
 
 
-async def _known_order_ids(db: AsyncSession, project_id: int, wb_order_ids: list[int]) -> set[int]:
-    """Какие из заданий уже есть в зеркале проекта (без учёта контура — ключ уникален)."""
-    if not wb_order_ids:
-        return set()
-    known: set[int] = set()
-    for chunk in _chunks(wb_order_ids, _STATUS_CHUNK):
-        result = await db.execute(
-            select(WbFbsOrder.wb_order_id).where(
-                WbFbsOrder.project_id == project_id,
-                WbFbsOrder.wb_order_id.in_(chunk),
-            )
-        )
-        known.update(int(row[0]) for row in result.all())
-    return known
-
-
 async def _upsert_orders(
     db: AsyncSession,
     project_id: int,
@@ -555,6 +623,11 @@ async def _upsert_orders(
     `writeoff_before` (только периодный метод): задания старше этой границы
     вставляются с `written_off_at`. Во второй элемент кортежа попадают ТОЛЬКО
     реально вставленные — у известного задания метку не меняет ничто.
+
+    Переходы статусов, честно принесённые payload'ом для СУЩЕСТВУЮЩИХ строк,
+    фиксируются в журнале `wb_fbs_order_events` (см.
+    `_record_upsert_transitions`); свежая вставка — в т.ч. историческая строка
+    бэкфилла — событий не рождает.
     """
     deduped: dict[int, dict] = {}
     for raw in raw_orders:
@@ -592,11 +665,14 @@ async def _upsert_orders(
     if not rows:
         return 0, 0
 
+    # Снимок статусов ДО upsert — двойная служба: «кто уже известен» для
+    # честного счётчика пометок и база диффа для журнала переходов.
+    snapshot = await order_status_snapshot(db, project_id, [r["wb_order_id"] for r in rows])
+
     # Счётчик пометок обязан быть честным: на конфликте `written_off_at` не
     # обновляется, поэтому «помечено» = только те, кого мы реально вставили.
     marked_ids = [r["wb_order_id"] for r in rows if r["written_off_at"] is not None]
-    known = await _known_order_ids(db, project_id, marked_ids) if marked_ids else set()
-    marked = len([oid for oid in marked_ids if oid not in known])
+    marked = len([oid for oid in marked_ids if oid not in snapshot])
 
     for chunk in _chunks(rows, _UPSERT_CHUNK):
         stmt = pg_insert(WbFbsOrder).values(chunk)
@@ -638,9 +714,75 @@ async def _upsert_orders(
         )
         await db.execute(stmt)
 
+    await _record_upsert_transitions(db, project_id, payloads, snapshot, sync_ts)
+
     await db.commit()
     await invalidate_cache(CACHE_ORDERS)
     return len(rows), marked
+
+
+async def _record_upsert_transitions(
+    db: AsyncSession,
+    project_id: int,
+    payloads: list[dict],
+    snapshot: dict[int, tuple[int, str, str | None]],
+    sync_ts: datetime,
+) -> None:
+    """Журнал переходов для upsert-пути: досылка честно принесённых осей + события.
+
+    Upsert на конфликте оси статусов НЕ трогает (их владельцы — синк статусов
+    и методы поставок), но payload иногда честно приносит ось (`supplierStatus`
+    и/или `wbStatus`). Для СУЩЕСТВУЮЩИХ строк такая ось досылается отдельным
+    UPDATE и переход фиксируется — иначе журнал разошёлся бы с зеркалом, а
+    повторный синк того же payload'а плодил бы одинаковые события.
+
+    Границы, которые держат старые инварианты:
+      • фолбэк `new` (payload БЕЗ `supplierStatus` — оба боевых метода) сменой
+        НЕ считается: «синк новых не откатывает статус известного задания»;
+      • терминальные (`cancel`/`cancel_carrier`) здесь НЕ применяются: их обязан
+        провести `_apply_statuses` — на нём висит возврат списанного
+        (`_revert_writeoff_on_cancel`), а upsert, поставив `cancel` сам, вывел бы
+        задание из опроса статусов до того, как возврат случился;
+      • СВЕЖЕВСТАВЛЕННЫЕ строки (нет в снимке) событий не получают: их прошлое
+        неизвестно, журнал начинается с текущего значения без строки — в том
+        числе исторические строки бэкфилла.
+    """
+    events: list[dict[str, Any]] = []
+    catch_up: dict[tuple[str | None, str | None], list[int]] = {}
+    for p in payloads:
+        wb_order_id = _int_or_none(p.get("id"))
+        snap = snapshot.get(wb_order_id or 0)
+        if snap is None or wb_order_id is None:
+            continue
+        pk, old_sup, old_wb = snap
+        honest_sup = _str_or_none(p.get("supplierStatus"), 20)
+        if honest_sup not in _VALID_SUPPLIER_STATUSES or honest_sup in FBS_TERMINAL_STATUSES:
+            honest_sup = None
+        honest_wb = _str_or_none(p.get("wbStatus"), 30)
+        transitions = _axis_transitions(old_sup, old_wb, honest_sup, honest_wb)
+        if not transitions:
+            continue
+        sup_new = next((n for a, _o, n in transitions if a == EVENT_AXIS_SUPPLIER), None)
+        wb_new = next((n for a, _o, n in transitions if a == EVENT_AXIS_WB), None)
+        catch_up.setdefault((sup_new, wb_new), []).append(wb_order_id)
+        for axis, old, new in transitions:
+            events.append(
+                {"order_id": pk, "axis": axis, "old_value": old, "new_value": new, "changed_at": sync_ts}
+            )
+
+    for (sup_new, wb_new), ids in catch_up.items():
+        values: dict[str, Any] = {"synced_at": sync_ts, "updated_at": sync_ts}
+        if sup_new:
+            values["supplier_status"] = sup_new
+        if wb_new:
+            values["wb_status"] = wb_new
+        for chunk in _chunks(ids, _STATUS_CHUNK):
+            await db.execute(
+                update(WbFbsOrder)
+                .where(WbFbsOrder.project_id == project_id, WbFbsOrder.wb_order_id.in_(chunk))
+                .values(**values)
+            )
+    await record_order_events(db, project_id, events)
 
 
 async def sync_new_orders(db: AsyncSession, project_id: int) -> int:
@@ -826,8 +968,15 @@ async def sync_orders_recent(db: AsyncSession, project_id: int, days: int = _REC
 
 
 async def _apply_statuses(db: AsyncSession, project_id: int, items: list[dict]) -> int:
-    """Записать статусы пачкой: группируем по одинаковой тройке значений."""
+    """Записать статусы пачкой: группируем по одинаковой тройке значений.
+
+    Параллельно ведём журнал переходов (`wb_fbs_order_events`): снимок осей ДО
+    перезаписи (паттерн `FulfillmentStatusEvent`), после — событие на каждую
+    реально сменившуюся ось. Повторный прогон с теми же статусами событий не
+    плодит: old == new → ноль строк.
+    """
     groups: dict[tuple[str, str | None, bool], list[int]] = {}
+    incoming: dict[int, tuple[str, str | None]] = {}
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -835,8 +984,13 @@ async def _apply_statuses(db: AsyncSession, project_id: int, items: list[dict]) 
         status = _str_or_none(item.get("supplierStatus"), 20)
         if not wb_order_id or not status or status not in _VALID_SUPPLIER_STATUSES:
             continue
-        key = (status, _str_or_none(item.get("wbStatus"), 30), bool(item.get("isCancellable", False)))
+        wb_status = _str_or_none(item.get("wbStatus"), 30)
+        key = (status, wb_status, bool(item.get("isCancellable", False)))
         groups.setdefault(key, []).append(wb_order_id)
+        incoming[wb_order_id] = (status, wb_status)
+
+    # Снимок ДО перезаписи — иначе дифф сравнивал бы новое с новым.
+    snapshot = await order_status_snapshot(db, project_id, list(incoming))
 
     now = utcnow()
     updated = 0
@@ -857,6 +1011,18 @@ async def _apply_statuses(db: AsyncSession, project_id: int, items: list[dict]) 
                 )
             )
             updated += result.rowcount or 0  # type: ignore[attr-defined]
+
+    events: list[dict[str, Any]] = []
+    for wb_order_id, (new_sup, new_wb) in incoming.items():
+        snap = snapshot.get(wb_order_id)
+        if snap is None:
+            continue
+        pk, old_sup, old_wb = snap
+        for axis, old, new in _axis_transitions(old_sup, old_wb, new_sup, new_wb):
+            events.append(
+                {"order_id": pk, "axis": axis, "old_value": old, "new_value": new, "changed_at": now}
+            )
+    await record_order_events(db, project_id, events)
 
     await _revert_writeoff_on_cancel(db, project_id, groups)
     return updated
@@ -1384,6 +1550,86 @@ async def list_orders(
     }
 
 
+# ─── Таймлайн задания ───────────────────────────────────────────────────────
+
+
+async def get_order_timeline(db: AsyncSession, project_id: int, wb_order_id: int) -> dict:
+    """Таймлайн «Статус заказа» (`FbsOrderTimelineOut`) — модалка как в кабинете WB.
+
+    Два источника, оба наши (WB историю не отдаёт вовсе):
+      • якоря (kind="anchor", approx=False) — синтетика из ТОЧНЫХ дат:
+        `created` (задание оформлено, created_at_wb), `assembled` (поставка
+        закрыта, closed_at), `scanned` (WB отсканировал QR, scan_dt),
+        `written_off` (списано из ledger'а DDS);
+      • журнал (kind="event", approx=True) — переходы осей из
+        `wb_fbs_order_events`; их время — момент фиксации синком (точность =
+        каденс, 5 мин). `supplier:complete` может дублировать якорь `assembled`
+        по смыслу — оба отдаются, фронт решает сам.
+
+    Сортировка по времени DESC (свежее сверху, как в кабинете) — контракт
+    схемы, делается здесь. Журнал срезан `_TIMELINE_EVENTS_MAX` строками.
+    """
+    result = await db.execute(
+        select(WbFbsOrder).where(
+            WbFbsOrder.project_id == project_id,
+            WbFbsOrder.wb_order_id == wb_order_id,
+            contour_condition(WbFbsOrder.raw),
+        )
+    )
+    order = result.scalar_one_or_none()
+    if order is None:
+        raise FbsOrderError(f"Сборочное задание {wb_order_id} не найдено в проекте")
+
+    events: list[dict[str, Any]] = []
+
+    def _anchor(code: str, at: datetime | None) -> None:
+        if at is not None:
+            events.append({"kind": "anchor", "code": code, "at": at, "approx": False})
+
+    _anchor("created", order.created_at_wb)
+    if order.supply_id:
+        supply_row = (
+            await db.execute(
+                select(WbFbsSupply.closed_at, WbFbsSupply.scan_dt).where(
+                    WbFbsSupply.project_id == project_id,
+                    WbFbsSupply.wb_supply_id == order.supply_id,
+                    contour_condition(WbFbsSupply.raw),
+                )
+            )
+        ).first()
+        if supply_row is not None:
+            closed_at, scan_dt = supply_row
+            _anchor("assembled", closed_at)
+            _anchor("scanned", scan_dt)
+    _anchor("written_off", order.written_off_at)
+
+    journal = await db.execute(
+        select(WbFbsOrderEvent.axis, WbFbsOrderEvent.new_value, WbFbsOrderEvent.changed_at)
+        .where(
+            WbFbsOrderEvent.project_id == project_id,
+            WbFbsOrderEvent.order_id == order.id,
+        )
+        .order_by(WbFbsOrderEvent.changed_at.desc(), WbFbsOrderEvent.id.desc())
+        .limit(_TIMELINE_EVENTS_MAX)
+    )
+    for axis, new_value, changed_at in journal.all():
+        prefix = "supplier" if axis == EVENT_AXIS_SUPPLIER else "wb"
+        events.append(
+            {"kind": "event", "code": f"{prefix}:{new_value}", "at": changed_at, "approx": True}
+        )
+
+    # Стабильная сортировка: при равном времени порядок вставки сохраняется
+    # (якоря хронологией, журнал свежее-первым) — выдача детерминирована.
+    events.sort(key=lambda e: e["at"], reverse=True)
+    return {
+        "wb_order_id": order.wb_order_id,
+        "article": order.article,
+        "subject": order.subject,
+        "nm_id": order.nm_id,
+        "events": events,
+    }
+
+
 # ─── Стикеры ────────────────────────────────────────────────────────────────
 
 
@@ -1473,7 +1719,7 @@ async def get_stickers(
 async def cancel_order(db: AsyncSession, project_id: int, wb_order_id: int) -> None:
     """Отменить сборочное задание (`PATCH /orders/{id}/cancel`)."""
     result = await db.execute(
-        select(WbFbsOrder.supplier_status, WbFbsOrder.is_cancellable).where(
+        select(WbFbsOrder.id, WbFbsOrder.supplier_status, WbFbsOrder.is_cancellable).where(
             WbFbsOrder.project_id == project_id,
             WbFbsOrder.wb_order_id == wb_order_id,
         )
@@ -1481,7 +1727,7 @@ async def cancel_order(db: AsyncSession, project_id: int, wb_order_id: int) -> N
     row = result.first()
     if row is None:
         raise FbsOrderError(f"Сборочное задание {wb_order_id} не найдено в проекте")
-    status, is_cancellable = row
+    order_pk, status, is_cancellable = row
     if status in FBS_TERMINAL_STATUSES:
         raise FbsOrderError(f"Задание {wb_order_id} уже отменено (статус «{status}»)")
     if not is_cancellable:
@@ -1505,6 +1751,20 @@ async def cancel_order(db: AsyncSession, project_id: int, wb_order_id: int) -> N
             synced_at=now,
             updated_at=now,
         )
+    )
+    # Переход в журнал: гард выше гарантирует old != cancel (терминальный — 409).
+    await record_order_events(
+        db,
+        project_id,
+        [
+            {
+                "order_id": int(order_pk),
+                "axis": EVENT_AXIS_SUPPLIER,
+                "old_value": status,
+                "new_value": FbsSupplierStatus.CANCEL.value,
+                "changed_at": now,
+            }
+        ],
     )
     await db.commit()
     await invalidate_cache(CACHE_ORDERS)
@@ -1969,8 +2229,11 @@ __all__ = [
     "FbsOrderError",
     "backfill_orders_history",
     "cancel_order",
+    "get_order_timeline",
     "get_stickers",
     "list_orders",
+    "order_status_snapshot",
+    "record_order_events",
     "sync_new_orders",
     "sync_order_statuses",
     "sync_orders_recent",
