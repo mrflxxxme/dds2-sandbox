@@ -20,6 +20,7 @@ import {
     TRANSIT_WARN_DAYS,
     WRITEOFF_REASON_LABEL,
     daysSince,
+    hoursAgoLabel,
     transitDaysColor,
     writeoffReasonLabel,
 } from '@/app/(main)/p/[slug]/warehouse/fbs/fbsShared';
@@ -123,5 +124,27 @@ describe('daysSince (возраст самого старого несписан
         expect(daysSince('2026-07-27T12:00:00', now)).toBe(3);
         // явное смещение уважаем — оно уже несёт таймзону
         expect(daysSince('2026-07-27T12:00:00+00:00', now)).toBe(3);
+    });
+});
+
+describe('hoursAgoLabel (возраст заказа как в кабинете WB)', () => {
+    const now = Date.parse('2026-07-30T12:00:00Z');
+
+    it('форматы: минуты, часы+минуты, дни', () => {
+        expect(hoursAgoLabel('2026-07-30T11:59:40Z', now)).toBe('только что');
+        expect(hoursAgoLabel('2026-07-30T11:48:00Z', now)).toBe('12 мин назад');
+        expect(hoursAgoLabel('2026-07-30T06:07:00Z', now)).toBe('5 ч 53 мин назад');
+        expect(hoursAgoLabel('2026-07-30T07:00:00Z', now)).toBe('5 ч назад');
+        expect(hoursAgoLabel('2026-07-27T08:00:00Z', now)).toBe('3 дн 4 ч назад');
+        expect(hoursAgoLabel('2026-07-27T12:00:00Z', now)).toBe('3 дн назад');
+    });
+
+    it('naive-UTC без Z читается как UTC (не локальное)', () => {
+        expect(hoursAgoLabel('2026-07-30T06:07:00', now)).toBe('5 ч 53 мин назад');
+    });
+
+    it('null/мусор → null', () => {
+        expect(hoursAgoLabel(null, now)).toBeNull();
+        expect(hoursAgoLabel('не дата', now)).toBeNull();
     });
 });
