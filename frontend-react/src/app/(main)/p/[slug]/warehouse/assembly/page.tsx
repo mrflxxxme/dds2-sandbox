@@ -12,7 +12,7 @@ import { usePermissions } from '@/lib/hooks/usePermissions';
 import type { AssemblyBulkStatus, AssemblyDraft, AssemblyKind, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, FfLinkInfo, SourceVehicleOption, Warehouse, WbSupplySyncStatus } from '@/types/api';
 import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
 import { ASSEMBLY_STATUS_MAP } from '@/lib/assembly-status';
-import { KIND_BADGE_CLASS, KIND_FILTER_OPTIONS, KIND_LABEL, assemblyKindOf } from '@/lib/assembly-kind';
+import { KIND_BADGE_CLASS, KIND_LABEL, assemblyKindOf } from '@/lib/assembly-kind';
 import CreatedRequestsModal, { type CreatedRequestRow } from './distribute/components/CreatedRequestsModal';
 
 // ─── Status config ──────────────────────────────────────────────────────────
@@ -507,8 +507,10 @@ export default function AssemblyListPage() {
     // '' | pre_dist | prebooking | plain | `veh:<CostOrder.id>` (конкретная машина)
     // | `draft:<draft_id>` (заявки конкретного черновика).
     const [sourceFilter, setSourceFilter] = useState<string>('');
-    // Тип заявки: '' — все, fbo — операционные, fbs — учётные зеркала сборки ФФ.
-    const [kindFilter, setKindFilter] = useState<'' | AssemblyKind>('');
+    // Вкладка страницы: fbo — операционные заявки логиста (дефолт), fbs —
+    // учётные зеркала сборки ФФ. Раздельные вкладки (решение владельца 30.07):
+    // авто-зеркала не должны разбавлять рабочий список логиста.
+    const [pageTab, setPageTab] = useState<AssemblyKind>('fbo');
     const [sourceVehicles, setSourceVehicles] = useState<SourceVehicleOption[]>([]);
 
     // ─── Персист фильтров ───────────────────────────────────────────────
@@ -540,7 +542,8 @@ export default function AssemblyListPage() {
             setFfLinkFilter(f.ffLinkFilter === 'none' || f.ffLinkFilter === 'linked' ? f.ffLinkFilter : '');
             setJointOnly(f.jointOnly === true);
             setSourceFilter(typeof f.sourceFilter === 'string' ? f.sourceFilter : '');
-            setKindFilter(f.kindFilter === 'fbo' || f.kindFilter === 'fbs' ? f.kindFilter : '');
+            // Миграция со старого фильтра «Тип» (kindFilter): 'fbs' → вкладка FBS.
+            setPageTab(f.pageTab === 'fbs' || f.kindFilter === 'fbs' ? 'fbs' : 'fbo');
         } catch { /* SSR / битый JSON — просто стартуем с дефолтов */ }
         // Диплинк прошлого проекта не должен глушить персист нового.
         sourceFromDeeplink.current = false;
@@ -623,7 +626,7 @@ export default function AssemblyListPage() {
                     : undefined,
                 source_vehicle_id: sourceFilter.startsWith('veh:') ? Number(sourceFilter.slice(4)) : undefined,
                 draft_id: sourceFilter.startsWith('draft:') ? Number(sourceFilter.slice(6)) : undefined,
-                kind: kindFilter || undefined,
+                kind: pageTab,
                 limit: LOAD_LIMIT,
             });
             if (seq !== loadSeq.current) return;
@@ -635,7 +638,7 @@ export default function AssemblyListPage() {
         } finally {
             if (seq === loadSeq.current) setLoading(false);
         }
-    }, [warehouseId, statusFilter, view, search, dateFrom, dateTo, brandFilter, ffLinkFilter, jointOnly, sourceFilter, kindFilter]);
+    }, [warehouseId, statusFilter, view, search, dateFrom, dateTo, brandFilter, ffLinkFilter, jointOnly, sourceFilter, pageTab]);
 
     // Не грузим до восстановления фильтров — иначе первый запрос уйдёт с дефолтами
     // и список моргнёт «все заявки» → «отфильтрованные».
@@ -648,17 +651,17 @@ export default function AssemblyListPage() {
         try {
             localStorage.setItem(FILTERS_KEY, JSON.stringify({
                 warehouseId, statusFilter, view, dateFrom, dateTo,
-                search, brandFilter, ffLinkFilter, jointOnly, kindFilter,
+                search, brandFilter, ffLinkFilter, jointOnly, pageTab,
                 sourceFilter: sourceFromDeeplink.current ? '' : sourceFilter,
             }));
         } catch { /* приватный режим / переполнение quota — не критично */ }
     }, [FILTERS_KEY, warehouseId, statusFilter, view, dateFrom, dateTo,
-        search, brandFilter, ffLinkFilter, jointOnly, sourceFilter, kindFilter]);
+        search, brandFilter, ffLinkFilter, jointOnly, sourceFilter, pageTab]);
 
     /** Активен ли хоть один фильтр (view='active' — дефолт, не считается) */
     const hasActiveFilters = warehouseId !== '' || statusFilter !== '' || view !== 'active'
         || dateFrom !== '' || dateTo !== '' || search !== '' || brandFilter !== ''
-        || ffLinkFilter !== '' || jointOnly || sourceFilter !== '' || kindFilter !== '';
+        || ffLinkFilter !== '' || jointOnly || sourceFilter !== '';
 
     const resetFilters = useCallback(() => {
         setWarehouseId('');
@@ -673,7 +676,7 @@ export default function AssemblyListPage() {
         setJointOnly(false);
         sourceFromDeeplink.current = false;
         setSourceFilter('');
-        setKindFilter('');
+        // Вкладку (pageTab) сброс фильтров не трогает: это раздел, не фильтр.
         // Ключ не чистим: save-эффект тут же перезапишет его дефолтами.
     }, []);
 
@@ -1354,21 +1357,53 @@ export default function AssemblyListPage() {
                         {items.length < total && ` · показаны первые ${formatNumber(items.length, 0)} — уточните фильтры`}
                     </p>
                 </div>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {pageTab === 'fbo' && (
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        <button
+                            className="btn btn-secondary"
+                            onClick={handleWbSyncAll}
+                            disabled={wbSyncing}
+                            title="Опросить кабинет WB и обновить статусы поставок по всем заявкам"
+                        >
+                            {wbSyncing ? 'Синхронизация…' : '🔄 Синхронизировать WB'}
+                        </button>
+                        {canEdit() && (
+                            <Link href={`/p/${slug}/warehouse/assembly/new`}>
+                                <button className="btn btn-primary">Создать заявку</button>
+                            </Link>
+                        )}
+                    </div>
+                )}
+            </div>
+
+            {/* Вкладки: операционные заявки логиста ‖ учётные зеркала FBS.
+                Раздельно, чтобы авто-зеркала не разбавляли рабочий список. */}
+            <div style={{ display: 'flex', gap: 0, marginBottom: 16, borderBottom: '2px solid var(--color-border)' }}>
+                {([
+                    { key: 'fbo' as AssemblyKind, label: 'Заявки FBO' },
+                    { key: 'fbs' as AssemblyKind, label: 'Заявки FBS (авто)' },
+                ]).map(t => (
                     <button
-                        className="btn btn-secondary"
-                        onClick={handleWbSyncAll}
-                        disabled={wbSyncing}
-                        title="Опросить кабинет WB и обновить статусы поставок по всем заявкам"
+                        key={t.key}
+                        onClick={() => setPageTab(t.key)}
+                        title={t.key === 'fbs'
+                            ? 'Учётные зеркала сборки фулфилмента: одна заявка = одна поставка FBS, ведутся автоматически'
+                            : 'Операционные заявки логиста (отгрузка на склады WB)'}
+                        style={{
+                            padding: '8px 20px',
+                            background: 'none',
+                            border: 'none',
+                            borderBottom: pageTab === t.key ? '2px solid var(--color-accent)' : '2px solid transparent',
+                            marginBottom: -2,
+                            fontWeight: pageTab === t.key ? 600 : 400,
+                            color: pageTab === t.key ? 'var(--color-text)' : 'var(--color-text-muted)',
+                            cursor: 'pointer',
+                            fontSize: 14,
+                        }}
                     >
-                        {wbSyncing ? 'Синхронизация…' : '🔄 Синхронизировать WB'}
+                        {t.label}
                     </button>
-                    {canEdit() && (
-                        <Link href={`/p/${slug}/warehouse/assembly/new`}>
-                            <button className="btn btn-primary">Создать заявку</button>
-                        </Link>
-                    )}
-                </div>
+                ))}
             </div>
 
             {/* Баннер: товары без веса, участвующие в сборках → расчёт веса неполный. */}
@@ -1423,8 +1458,9 @@ export default function AssemblyListPage() {
                 </div>
             )}
 
-            {/* Полоска-сводка «Распределение» — блоки переехали на /warehouse/assembly/distribution */}
-            {(drafts.length > 0 || createdGroups.length > 0) && (
+            {/* Полоска-сводка «Распределение» — блоки переехали на /warehouse/assembly/distribution.
+                На вкладке FBS не показываем: распределение — FBO-поток. */}
+            {pageTab === 'fbo' && (drafts.length > 0 || createdGroups.length > 0) && (
                 <div
                     className="glass-card"
                     style={{
@@ -1564,18 +1600,6 @@ export default function AssemblyListPage() {
                         </select>
                     </div>
                     <div className="form-group">
-                        <select
-                            className="form-input"
-                            value={kindFilter}
-                            onChange={e => { setKindFilter(e.target.value as '' | AssemblyKind); }}
-                            title="Тип заявки: FBO — операционная заявка логиста, FBS — учётное зеркало сборки фулфилмента (ведётся автоматически)"
-                        >
-                            {KIND_FILTER_OPTIONS.map(o => (
-                                <option key={o.value} value={o.value}>{o.label}</option>
-                            ))}
-                        </select>
-                    </div>
-                    <div className="form-group">
                         <input
                             className="form-input"
                             type="date"
@@ -1623,9 +1647,13 @@ export default function AssemblyListPage() {
             ) : items.length === 0 ? (
                 <div className="glass-card" style={{ padding: 64, textAlign: 'center' }}>
                     <div style={{ fontSize: 48, marginBottom: 16 }}>📋</div>
-                    <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 8 }}>Нет заявок на сборку</div>
+                    <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 8 }}>
+                        {pageTab === 'fbs' ? 'Нет заявок FBS' : 'Нет заявок на сборку'}
+                    </div>
                     <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
-                        Создайте заявку из поставки FBO или нажмите &laquo;Создать заявку&raquo;
+                        {pageTab === 'fbs'
+                            ? 'Заявки появятся автоматически, когда фулфилмент начнёт собирать поставки FBS (тумблер «Авто-учёт сборки FBS» — в разделе FBS → Склады)'
+                            : 'Создайте заявку из поставки FBO или нажмите «Создать заявку»'}
                     </div>
                 </div>
             ) : (
