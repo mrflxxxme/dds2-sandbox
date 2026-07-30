@@ -5206,8 +5206,10 @@ async def test_repack_matcher_skips_linked_and_out_of_window(db_session, project
 
 
 @pytest.mark.asyncio
-async def test_repack_matcher_requires_all_box_lines(db_session, project, warehouse):
-    """Возврат со строкой-россыпью — возможно, РЕАЛЬНЫЙ возврат: не матчим."""
+async def test_repack_matcher_mixed_lines_and_box_requirement(db_session, project, warehouse):
+    """Смесь короба+россыпь в возврате МАТЧИТСЯ (живой кейс PVB-0000068: 87
+    короб-строк и 3 россыпи одним возвратом); возврат ВООБЩЕ без короб-строк —
+    возможно, РЕАЛЬНЫЙ возврат: не матчим."""
     box_guid, loose_guid, _base = await _mk_repack_sku(db_session, project, warehouse, 10)
     d = date(2026, 7, 30)
     ret = await _mk_repack_req(
@@ -5219,10 +5221,24 @@ async def test_repack_matcher_requires_all_box_lines(db_session, project, wareho
         lines=[_mig_line(loose_guid, 25)], created=d,
     )
 
-    assert await fulfillment_service._match_repack_pairs(db_session, project.id, warehouse.id) == 0
+    assert await fulfillment_service._match_repack_pairs(db_session, project.id, warehouse.id) == 1
     await db_session.refresh(inb)
     await db_session.refresh(ret)
-    assert inb.repack_return_id is None and ret.repack_matched_at is None
+    assert inb.repack_return_id == ret.id and ret.repack_matched_at is not None
+
+    # Чисто-россыпной возврат при точно совпадающем поступлении — НЕ вскрытие.
+    ret2 = await _mk_repack_req(
+        db_session, project, warehouse, kind="return",
+        lines=[_mig_line(loose_guid, 7)], created=d,
+    )
+    inb2 = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound",
+        lines=[_mig_line(loose_guid, 7)], created=d,
+    )
+    assert await fulfillment_service._match_repack_pairs(db_session, project.id, warehouse.id) == 0
+    await db_session.refresh(inb2)
+    await db_session.refresh(ret2)
+    assert inb2.repack_return_id is None and ret2.repack_matched_at is None
 
 
 @pytest.mark.asyncio

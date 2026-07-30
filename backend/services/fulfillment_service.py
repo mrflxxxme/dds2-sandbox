@@ -4729,24 +4729,28 @@ def _repack_units_by_barcode(
     guid_qty: dict[str, int],
     resolver: dict[str, tuple[str, str, int]],
     *,
-    boxes_only: bool,
+    require_box: bool,
 ) -> dict[str, int] | None:
     """Схлопнуть {guid: qty} в {base_barcode: штук россыпи}; None — не годится.
 
-    boxes_only=True (возврат): ВСЕ строки обязаны резолвиться в короб-SKU —
-    иначе это не «вскрытие», а возможно РЕАЛЬНЫЙ возврат (не трогаем).
-    boxes_only=False (поступление): достаточно, чтобы все строки резолвились
+    require_box=True (возврат): хотя бы ОДНА строка обязана быть короб-SKU —
+    без единого короба это не «вскрытие», а возможно РЕАЛЬНЫЙ возврат (не
+    трогаем). Смесь короба+россыпь валидна: живой кейс PVB-0000068 — Натали
+    сняла с остатка 87 короб-строк И 3 строки россыпи одним возвратом.
+    require_box=False (поступление): достаточно, чтобы все строки резолвились
     (россыпь как есть, короб — в штуки россыпи).
     """
     out: dict[str, int] = {}
+    has_box = False
     for guid, qty in guid_qty.items():
         resolved = resolver.get(guid)
         if resolved is None:
             return None
         kind, base_barcode, units = resolved
-        if boxes_only and kind != "box":
-            return None
+        has_box = has_box or kind == "box"
         out[base_barcode] = out.get(base_barcode, 0) + qty * units
+    if require_box and not has_box:
+        return None
     return out or None
 
 
@@ -4847,7 +4851,7 @@ async def _match_repack_pairs(
     # 4 707 и 1 217 шт при паре на 398).
     ret_unit_totals: set[int] = set()
     for req in fresh_returns:
-        comp = _repack_units_by_barcode(_repack_guid_qty(req.raw), resolver, boxes_only=True)
+        comp = _repack_units_by_barcode(_repack_guid_qty(req.raw), resolver, require_box=True)
         if comp:
             ret_unit_totals.add(sum(comp.values()))
 
@@ -4869,7 +4873,7 @@ async def _match_repack_pairs(
 
     inbound_comp: dict[int, dict[str, int]] = {}
     for inb in inbounds:
-        comp = _repack_units_by_barcode(_repack_guid_qty(inb.raw), resolver, boxes_only=False)
+        comp = _repack_units_by_barcode(_repack_guid_qty(inb.raw), resolver, require_box=False)
         if comp:
             inbound_comp[inb.id] = comp
     inbound_pool = {inb.id: inb for inb in inbounds if inb.id in inbound_comp}
@@ -4877,7 +4881,7 @@ async def _match_repack_pairs(
     matched = 0
     now = utcnow()
     for ret in returns:
-        ret_comp = _repack_units_by_barcode(_repack_guid_qty(ret.raw), resolver, boxes_only=True)
+        ret_comp = _repack_units_by_barcode(_repack_guid_qty(ret.raw), resolver, require_box=True)
         if not ret_comp or ret.external_created_at is None:
             continue
         ret_total = sum(ret_comp.values())
