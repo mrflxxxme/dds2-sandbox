@@ -305,6 +305,11 @@ class AssemblyRequestResponse(BaseModel):
     #: джоб/бэкфилл создаёт записи задним числом, и «передана раньше созданной»
     #: читалось как парадокс (прод-вопрос 30.07).
     fbs_supply_created_at: datetime | None = None
+    #: Прогресс сортировки (kind=fbs): живых заданий всего / ещё НЕ прошедших
+    #: СЦ. Ответ на «почему заявка не переходит дальше» прямо в строке списка:
+    #: «ждут сортировки: N из M». None — не считалось (fbo).
+    fbs_orders_total: int | None = None
+    fbs_orders_pending: int | None = None
     wb_fbo_supply_id: int | None = None
     wb_supply_name: str | None = None  # wb_fbo_supplies.name
     wb_warehouse_name: str | None = None  # wb_fbo_supplies.warehouse_name (WB destination)
