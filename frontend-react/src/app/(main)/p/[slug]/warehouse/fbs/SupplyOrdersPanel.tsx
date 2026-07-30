@@ -26,6 +26,8 @@ import {
     isStuckAfterScan,
     num,
     orderAgeColor,
+    orderPriceRub,
+    TERMINAL_CABINET_KEYS,
     transitDaysColor,
 } from './fbsShared';
 
@@ -224,8 +226,9 @@ export default function SupplyOrdersPanel({
                                         </div>
                                         {/* Возраст заказа — как в кабинете WB («5 ч 53 мин назад»):
                                             сборщику важнее, сколько заказ ЖДЁТ, чем календарная дата.
-                                            Красим по порогам ожидания сборки (12 ч / сутки). */}
-                                        {o.created_at_wb && (
+                                            Красим по порогам ожидания сборки (12 ч / сутки).
+                                            У завершённых/отменённых таймер не тикает — статус финальный. */}
+                                        {o.created_at_wb && !TERMINAL_CABINET_KEYS.includes(cab) && (
                                             <div style={{ fontSize: 13, fontWeight: 600, color: ageColor ?? 'var(--color-text-muted)' }}>
                                                 {hoursAgoLabel(o.created_at_wb, now)}
                                             </div>
@@ -257,11 +260,11 @@ export default function SupplyOrdersPanel({
                                         </div>
                                     </td>
                                     <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                        {/* Канон статистики: coalesce(sale_price, price) — salePrice
-                                            WB шлёт единицам, price есть у всех. */}
-                                        {(o.sale_price ?? o.price) == null
+                                        {/* Рублёвый канон orderPriceRub: у валют СНГ — пересчёт WB,
+                                            номинал (60.10 BYN) выдавал «60 ₽». */}
+                                        {orderPriceRub(o) == null
                                             ? '—'
-                                            : formatNumber(num(o.sale_price ?? o.price))}
+                                            : formatNumber(orderPriceRub(o) as number)}
                                     </td>
                                     <td>
                                         {/* Статусы кабинета WB: «Отгрузите товар» / «Ждёт сортировки» /

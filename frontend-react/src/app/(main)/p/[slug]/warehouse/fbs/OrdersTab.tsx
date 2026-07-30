@@ -44,7 +44,9 @@ import {
     isStuckAfterScan,
     num,
     orderAgeColor,
+    orderPriceRub,
     selectStickerIds,
+    TERMINAL_CABINET_KEYS,
     transitDaysColor,
 } from './fbsShared';
 import type { FbsCabinetStatusKey } from './fbsShared';
@@ -489,14 +491,18 @@ export default function OrdersTab({
             key: 'wb_order_id', label: 'Задание',
             render: (v: number, row: FbsOrder) => {
                 // Возраст красится, пока WB не отсканировал QR (наша зона).
-                const ageColor = orderAgeColor(row.created_at_wb, cabOf(row), now);
+                const cab = cabOf(row);
+                const ageColor = orderAgeColor(row.created_at_wb, cab, now);
+                // У завершённых/отменённых таймер не тикает: «3 дн назад»
+                // у проданного заказа — бессмыслица.
+                const terminal = TERMINAL_CABINET_KEYS.includes(cab);
                 return (
                     <div>
                         <div style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</div>
                         <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                             {row.created_at_wb ? formatDateTime(row.created_at_wb) : '—'}
                         </div>
-                        {row.created_at_wb && (
+                        {row.created_at_wb && !terminal && (
                             <div style={{ fontSize: 12, fontWeight: 600, color: ageColor ?? 'var(--color-text-muted)' }}>
                                 {hoursAgoLabel(row.created_at_wb, now)}
                             </div>
@@ -545,16 +551,15 @@ export default function OrdersTab({
         },
         {
             key: 'sale_price', label: 'Цена, ₽', align: 'right',
-            headerTitle: 'Цена задания: salePrice (со скидкой покупателя), если WB его прислал, иначе price',
-            // Канон бэкенд-статистики: coalesce(sale_price, price) — salePrice
-            // WB шлёт единицам заказов, price заполнен у всех (тот же фикс, что
-            // в FbsOrdersCard и SupplyOrdersPanel).
-            getValue: (row: FbsOrder) => num(row.sale_price ?? row.price),
+            headerTitle: 'Цена задания в рублях: salePrice→price у рублёвых, пересчёт WB у валют СНГ',
+            // Рублёвый канон orderPriceRub: у СНГ-заказов номинал (60.10 BYN)
+            // показывать нельзя (тот же фикс в FbsOrdersCard и SupplyOrdersPanel).
+            getValue: (row: FbsOrder) => orderPriceRub(row) ?? 0,
             render: (_v: unknown, row: FbsOrder) => {
-                const price = row.sale_price ?? row.price;
-                return price == null ? '—' : formatNumber(num(price));
+                const price = orderPriceRub(row);
+                return price == null ? '—' : formatNumber(price);
             },
-            exportValue: (row: FbsOrder) => num(row.sale_price ?? row.price),
+            exportValue: (row: FbsOrder) => orderPriceRub(row) ?? '',
         },
         // «Штраф ≈» — только «Наша отмена»: у прочих фаз (включая клиентские
         // отмены — WB их не штрафует) поле всегда пустое, и колонка лишь

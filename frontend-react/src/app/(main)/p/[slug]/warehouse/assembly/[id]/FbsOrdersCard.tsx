@@ -24,7 +24,9 @@ import {
     isStuckAfterScan,
     num,
     orderAgeColor,
+    orderPriceRub,
     parseUtcMs,
+    TERMINAL_CABINET_KEYS,
     transitDaysColor,
 } from '../../fbs/fbsShared';
 import type { FbsCabinetStatusKey } from '../../fbs/fbsShared';
@@ -86,14 +88,17 @@ export default function FbsOrdersCard({
             sortingFn: 'basic',
             exportValue: (o: FbsOrder) => `${o.wb_order_id} · ${o.created_at_wb ?? ''}`,
             render: (_v, o: FbsOrder) => {
-                const ageColor = orderAgeColor(o.created_at_wb, cabOf(o), now);
+                const cab = cabOf(o);
+                const ageColor = orderAgeColor(o.created_at_wb, cab, now);
+                // Таймер не тикает у завершённых/отменённых — статус финальный.
+                const terminal = TERMINAL_CABINET_KEYS.includes(cab);
                 return (
                     <div>
                         <div style={{ fontFamily: 'monospace', fontSize: 12 }}>{o.wb_order_id}</div>
                         <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                             {o.created_at_wb ? formatDateTime(o.created_at_wb) : '—'}
                         </div>
-                        {o.created_at_wb && (
+                        {o.created_at_wb && !terminal && (
                             <div style={{ fontSize: 13, fontWeight: 600, color: ageColor ?? 'var(--color-text-muted)' }}>
                                 {hoursAgoLabel(o.created_at_wb, now)}
                             </div>
@@ -131,16 +136,15 @@ export default function FbsOrdersCard({
         },
         {
             key: 'sale_price', label: 'Цена, ₽', align: 'right',
-            // Канон бэкенд-статистики: coalesce(sale_price, price). salePrice WB
-            // шлёт единицам заказов (скидка покупателя) — колонка по нему одному
-            // стояла в прочерках при заполненном price у всех заданий.
-            getValue: (o: FbsOrder) => num(o.sale_price ?? o.price),
+            // Рублёвый канон orderPriceRub: salePrice→price у рублёвых, у валют
+            // СНГ — пересчёт WB (номинал 60.10 BYN читался как «60 ₽»).
+            getValue: (o: FbsOrder) => orderPriceRub(o) ?? 0,
             sortingFn: 'basic',
             render: (_v, o: FbsOrder) => {
-                const price = o.sale_price ?? o.price;
+                const price = orderPriceRub(o);
                 return (
                     <span style={{ whiteSpace: 'nowrap' }}>
-                        {price == null ? '—' : formatNumber(num(price))}
+                        {price == null ? '—' : formatNumber(price)}
                     </span>
                 );
             },

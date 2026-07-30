@@ -85,6 +85,17 @@ def test_order_price_prefers_sale_price_including_zero() -> None:
     assert order_price(o2) == Decimal("100")
 
 
+def test_order_price_cis_currency_uses_wb_conversion() -> None:
+    # Валюта СНГ: номинал (60.10 BYN) показывать нельзя — только пересчёт WB.
+    o = WbFbsOrder(
+        price=Decimal("60.10"), currency_code="933", converted_price=Decimal("1770")
+    )
+    assert order_price(o) == Decimal("1770")
+    # Пересчёта нет → None (занизить лучше, чем выдать тенге за рубли).
+    o2 = WbFbsOrder(price=Decimal("25000"), currency_code="398", converted_price=None)
+    assert order_price(o2) is None
+
+
 # ─── build_cancel_stats: сводка корзины ──────────────────────────────────────
 
 SELLER = "cancel"
@@ -134,6 +145,17 @@ async def cancel_env(db_session, project, other_project, monkeypatch):
             _order(pid, 910002, sale_price=Decimal("500"), price=Decimal("2000")),
             # Предмета нет в тарифах → штраф пропущен, не выдуман.
             _order(pid, 910003, subject="Неизвестный предмет"),
+            # Валюта СНГ: в выручку и штраф идёт пересчёт WB, не номинал.
+            # 2×10 % от 1770 = 354.
+            _order(
+                pid,
+                910005,
+                price=Decimal("60.10"),
+                currency_code="933",
+                converted_price=Decimal("1770"),
+            ),
+            # Валюта СНГ БЕЗ пересчёта: строка даёт ноль, а не номинал тенге.
+            _order(pid, 910006, price=Decimal("25000"), currency_code="398"),
             # Чужой проект — не должен попасть никуда.
             _order(other_project.id, 910004),
         ]
@@ -173,12 +195,14 @@ async def test_seller_bucket_full_stats(db_session, cancel_env):
         dt_to=date(2026, 7, 31),
         warehouse_scoped=False,
     )
-    # Выручка = 1000 + 500 (sale_price важнее price) + 1000, чужой проект мимо.
-    assert stats["revenue"] == Decimal("2500")
-    assert stats["orders"] == 3
-    # Оценка: 200 + 100; третий — без ставки.
-    assert stats["penalty_est"] == Decimal("300.00")
-    assert stats["penalty_est_count"] == 2
+    # Выручка = 1000 + 500 (sale_price важнее price) + 1000 + 1770 (пересчёт
+    # BYN, не номинал 60.10) + 0 (тенге без пересчёта); чужой проект мимо.
+    assert stats["revenue"] == Decimal("4270")
+    assert stats["orders"] == 5
+    # Оценка: 200 + 100 + 354 (от рублёвого пересчёта); без ставки и без
+    # пересчёта — мимо.
+    assert stats["penalty_est"] == Decimal("654.00")
+    assert stats["penalty_est_count"] == 3
     assert stats["no_commission_count"] == 1
     assert stats["estimate_truncated"] is False
     # Факт: только тип «отмена продавцом» в окне дат заказа, свой проект.
@@ -199,7 +223,7 @@ async def test_client_bucket_revenue_only(db_session, cancel_env):
         dt_to=None,
         warehouse_scoped=False,
     )
-    assert stats["revenue"] == Decimal("2500")
+    assert stats["revenue"] == Decimal("4270")
     # Клиентские отмены WB не штрафует: ни оценки, ни похода за фактом.
     assert stats["penalty_est"] == Decimal(0)
     assert stats["penalty_est_count"] == 0
@@ -219,7 +243,7 @@ async def test_warehouse_scope_hides_fact(db_session, cancel_env):
         warehouse_scoped=True,
     )
     # Оценка живёт (она построчная), а факт скрыт: у финотчёта нет склада.
-    assert stats["penalty_est"] == Decimal("300.00")
+    assert stats["penalty_est"] == Decimal("654.00")
     assert stats["fact_scoped_out"] is True
     assert stats["penalty_fact"] == Decimal(0)
     # Граница отчёта отдаётся и здесь — плашке нужно объяснять свежие нули.

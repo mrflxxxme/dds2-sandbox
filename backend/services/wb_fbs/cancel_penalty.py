@@ -49,7 +49,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.wb_fbs import WbFbsOrder
@@ -126,13 +126,29 @@ def estimate_penalty(price: Decimal | None, commission_pct: float | Decimal | No
     return max(amount, _MIN_SELLER_CANCEL).quantize(Decimal("0.01"))
 
 
-def _price_expr() -> Any:
-    """Канон цены задания — тот же `coalesce(sale_price, price)`, что в списке.
+#: Дубль `orders_service.RUB_CURRENCY_CODE`: импортировать оттуда нельзя —
+#: orders_service сам импортирует этот модуль (цикл).
+RUB_CURRENCY_CODE = "643"
 
-    Иначе сводка и строки под ней разошлись бы: `sale_price` (цена со скидкой
-    продавца) заполнен у меньшинства заданий, а `price` есть почти всегда.
+
+def _price_expr() -> Any:
+    """Цена задания В РУБЛЯХ — зеркало `orders_service.revenue_rub_expr()`.
+
+    WB торгует и в СНГ: `price`/`salePrice` приходят в валюте ПРОДАЖИ (тенге,
+    сумы, белорусские рубли — заказ 5384434223 лежал как «60.10» BYN и
+    показывался «60 ₽»). Рубль или пустой код → прежний канон
+    `coalesce(sale_price, price)`; иная валюта → ТОЛЬКО `converted_price`
+    (пересчёт WB); без него строка даёт NULL/0 — занизить лучше, чем сложить
+    тенге с рублями.
     """
-    return func.coalesce(WbFbsOrder.sale_price, WbFbsOrder.price)
+    is_rub = or_(
+        WbFbsOrder.currency_code.is_(None),
+        WbFbsOrder.currency_code == RUB_CURRENCY_CODE,
+    )
+    return case(
+        (is_rub, func.coalesce(WbFbsOrder.sale_price, WbFbsOrder.price)),
+        else_=WbFbsOrder.converted_price,
+    )
 
 
 def order_price(order: WbFbsOrder) -> Decimal | None:
@@ -141,7 +157,9 @@ def order_price(order: WbFbsOrder) -> Decimal | None:
     Именно `is None`, а не `or`: цена 0 (нулевой заказ) — валидное значение, и
     `sale_price or price` подменил бы её ценой до скидки.
     """
-    return order.sale_price if order.sale_price is not None else order.price
+    if order.currency_code in (None, RUB_CURRENCY_CODE):
+        return order.sale_price if order.sale_price is not None else order.price
+    return order.converted_price
 
 
 async def build_cancel_stats(

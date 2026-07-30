@@ -505,6 +505,10 @@ class FbsOrderOut(BaseModel):
     #: в корзине «Наша отмена», чтобы итог плашки был разложим по строкам.
     #: `None` = не корзина отмен либо нет ставки комиссии категории.
     penalty_est: Decimal | None = None
+    #: Цена задания В РУБЛЯХ (канон `revenue_rub_expr`): рубль → sale_price →
+    #: price; валюта СНГ → пересчёт WB (`converted_price`). None — заказ в
+    #: чужой валюте, а пересчёт WB не прислал: показать номинал нельзя.
+    price_rub: Decimal | None = None
 
 
 class FbsCancelStats(BaseModel):
