@@ -242,6 +242,13 @@ class WbFbsWarehouse(Base, TimestampMixin):
     #: доступный FBO-остаток ≤ этого числа. NULL — на FBO не смотрим вовсе,
     #: 0 — классический сценарий «продаём со своего склада то, что кончилось на WB».
     fbo_max_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Авто-учёт сборки FBS: у склада WMS провайдера сам заводит свои заявки по
+    #: FBS-заказам — наша система зеркалит их учётными заявками kind=fbs
+    #: (одна на поставку WB-GI-…, статусы ведёт джоб). Сток/резерв зеркало не
+    #: трогает: списание остаётся за `writeoff_completed_orders`.
+    auto_assembly: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     synced_at: Mapped[datetime | None] = mapped_column(DateTime)
 
