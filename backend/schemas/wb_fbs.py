@@ -33,6 +33,12 @@ ALLOWED_ORDER_STATUS_FILTERS = [
     FBS_IN_DELIVERY_STUCK_STATUS,
 ]
 ALLOWED_STICKER_TYPES = ["svg", "zplv", "zplh", "png"]
+#: Коды причин «не списано» — контракт с фронтом (словарь WRITEOFF_REASON_LABEL
+#: в fbsShared.tsx, закреплено тестами с обеих сторон): `no_stock` — остатка
+#: нет; `no_card` — нет карточки товара; `no_link` — склад продавца не привязан;
+#: `queued` — остаток ЕСТЬ, задание просто ещё не подхвачено прогоном списания
+#: (окно 5-минутного джоба / backlog) — это не проблема, а очередь.
+ALLOWED_WRITEOFF_REASONS = ["no_stock", "no_card", "no_link", "queued"]
 #: Производные состояния поставки (см. `models.wb_fbs.supply_status`) — своего
 #: поля статуса Marketplace API не отдаёт.
 ALLOWED_SUPPLY_STATUSES = ["active", "to_ship", "in_delivery", "rejected"]
@@ -551,8 +557,9 @@ class FbsWriteoffIssueRow(BaseModel):
     #: Россыпь в зеркале ФФ (None — зеркала нет): физически товар у провайдера
     #: может лежать — сигнал, что наш ledger отстал, а не что товара нет.
     ff_loose: int | None = None
-    #: no_stock — остаток 0 | no_card — нет карточки товара | no_link — склад
-    #: продавца не привязан к нашему.
+    #: Код из `ALLOWED_WRITEOFF_REASONS`: no_stock — остатка нет | no_card —
+    #: нет карточки товара | no_link — склад продавца не привязан | queued —
+    #: остаток есть, ждёт ближайшего прогона списания (не проблема).
     reason: str = "no_stock"
 
 
@@ -561,6 +568,9 @@ class FbsWriteoffIssuesOut(BaseModel):
 
     total_orders: int = 0
     rows: list[FbsWriteoffIssueRow] = Field(default_factory=list)
+    #: Выдача срезана капом строк (total_orders считается ДО среза) — фронт
+    #: обязан сказать «показаны первые N», а не молча спрятать хвост.
+    truncated: bool = False
 
 
 class FbsOrderBackfillRequest(BaseModel):
