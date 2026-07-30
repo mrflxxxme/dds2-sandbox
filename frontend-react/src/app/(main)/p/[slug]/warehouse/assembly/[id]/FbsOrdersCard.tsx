@@ -4,11 +4,13 @@
  * в разделе FBS (решение владельца 30.07): сборку ведёт фулфилмент, поэтому
  * вместо FBO-позиций (короба/паллеты/«на складе») показываем сами заказы —
  * когда поступил (с точностью до минуты + «N ч назад»), что за товар, цена,
- * статус по обеим осям (продавца и WB). Read-only: никаких действий.
+ * статус кабинета WB. Read-only; таблица — TanStack (сортировка + Excel).
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 import WbThumb from '@/components/WbThumb';
 import { wbProductUrl } from '@/lib/wbMedia';
 import type { FbsOrder } from '@/types/api';
@@ -21,8 +23,10 @@ import {
     hoursAgoLabel,
     num,
     orderAgeColor,
+    parseUtcMs,
     transitDaysColor,
 } from '../../fbs/fbsShared';
+import type { FbsCabinetStatusKey } from '../../fbs/fbsShared';
 
 export default function FbsOrdersCard({
     fbsSupplyId,
@@ -64,6 +68,117 @@ export default function FbsOrdersCard({
 
     const items = orders ?? [];
 
+    // Фаза поставки одна на все строки: done = закрыта, scanned = QR отсканирован.
+    const done = supplyStatus === 'to_ship' || supplyStatus === 'in_delivery';
+    const scanned = supplyStatus === 'in_delivery' || !!scanDt;
+    const now = Date.now();
+    const cabOf = useCallback(
+        (o: FbsOrder): FbsCabinetStatusKey => cabinetOrderStatus(o.supplier_status, o.wb_status, done, scanned),
+        [done, scanned],
+    );
+
+    const cols: Column[] = useMemo(() => [
+        {
+            key: 'wb_order_id', label: 'Заказ поступил',
+            // Сортировка по времени поступления — самый частый вопрос сборщика.
+            getValue: (o: FbsOrder) => parseUtcMs(o.created_at_wb) ?? 0,
+            sortingFn: 'basic',
+            exportValue: (o: FbsOrder) => `${o.wb_order_id} · ${o.created_at_wb ?? ''}`,
+            render: (_v, o: FbsOrder) => {
+                const ageColor = orderAgeColor(o.created_at_wb, cabOf(o), now);
+                return (
+                    <div>
+                        <div style={{ fontFamily: 'monospace', fontSize: 12 }}>{o.wb_order_id}</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                            {o.created_at_wb ? formatDateTime(o.created_at_wb) : '—'}
+                        </div>
+                        {o.created_at_wb && (
+                            <div style={{ fontSize: 13, fontWeight: 600, color: ageColor ?? 'var(--color-text-muted)' }}>
+                                {hoursAgoLabel(o.created_at_wb, now)}
+                            </div>
+                        )}
+                    </div>
+                );
+            },
+        },
+        {
+            key: 'article', label: 'Товар',
+            getValue: (o: FbsOrder) => o.article || o.barcode || '',
+            render: (_v, o: FbsOrder) => (
+                <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                    {o.nm_id ? (
+                        <a
+                            href={wbProductUrl(o.nm_id)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title="Открыть карточку товара на Wildberries"
+                            onClick={e => e.stopPropagation()}
+                        >
+                            <WbThumb nmId={o.nm_id} size={36} />
+                        </a>
+                    ) : (
+                        <WbThumb nmId={null} size={36} />
+                    )}
+                    <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 500 }}>{o.article || o.barcode || '—'}</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                            {o.subject ? `${o.subject} · ` : ''}{o.nm_id ? `nm ${o.nm_id}` : ''}
+                        </div>
+                    </div>
+                </div>
+            ),
+        },
+        {
+            key: 'sale_price', label: 'Цена, ₽', align: 'right',
+            getValue: (o: FbsOrder) => num(o.sale_price),
+            sortingFn: 'basic',
+            render: (_v, o: FbsOrder) => (
+                <span style={{ whiteSpace: 'nowrap' }}>
+                    {o.sale_price == null ? '—' : formatNumber(num(o.sale_price))}
+                </span>
+            ),
+        },
+        {
+            key: '_status', label: 'Статус',
+            getValue: (o: FbsOrder) => CABINET_STATUS_LABEL[cabOf(o)].label,
+            render: (_v, o: FbsOrder) => {
+                const cab = cabOf(o);
+                return (
+                    <span
+                        className={`badge ${CABINET_STATUS_LABEL[cab].badge}`}
+                        style={{ cursor: 'pointer' }}
+                        title="История статусов"
+                        onClick={e => { e.stopPropagation(); setTimelineOrder(o); }}
+                    >
+                        {CABINET_STATUS_LABEL[cab].label}
+                    </span>
+                );
+            },
+        },
+        {
+            key: 'transit_days', label: 'В пути',
+            headerTitle: 'Сколько заказ едет с момента скана QR, пока СЦ не принял',
+            getValue: (o: FbsOrder) => o.transit_days ?? -1,
+            sortingFn: 'basic',
+            render: (_v, o: FbsOrder) => {
+                const cab = cabOf(o);
+                return (
+                    <span style={{ color: transitDaysColor(o.transit_days) ?? undefined, whiteSpace: 'nowrap', fontWeight: 500 }}>
+                        {cab === 'awaiting_sort' && scanDt
+                            ? durationSinceLabel(scanDt, now) ?? '—'
+                            : NOT_SCANNED_CABINET_KEYS.includes(cab) || o.transit_days == null
+                                ? '—'
+                                : formatNumber(o.transit_days, 0)}
+                    </span>
+                );
+            },
+        },
+        {
+            key: 'ddate', label: 'Срок',
+            render: (_v, o: FbsOrder) => o.ddate ? formatDate(o.ddate) : '—',
+        },
+    ], [cabOf, now, scanDt]);
+
     return (
         <div className="glass-card" style={{ padding: 24, marginBottom: 24 }}>
             <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>
@@ -87,97 +202,18 @@ export default function FbsOrdersCard({
                     Задания поставки ещё не синхронизированы из WB.
                 </div>
             ) : (
-                <div style={{ overflowX: 'auto' }}>
-                    <table className="data-table">
-                        <thead>
-                            <tr>
-                                <th>Заказ поступил</th>
-                                <th>Товар</th>
-                                <th style={{ textAlign: 'right' }}>Цена, ₽</th>
-                                <th>Статус</th>
-                                <th title="Сколько заказ едет с передачи поставки, пока СЦ не принял">В пути</th>
-                                <th>Срок</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {items.map(o => {
-                                const now = Date.now();
-                                // Фаза поставки для кабинетного статуса: done = закрыта
-                                // (to_ship/in_delivery), scanned = QR отсканирован.
-                                const done = supplyStatus === 'to_ship' || supplyStatus === 'in_delivery';
-                                const scanned = supplyStatus === 'in_delivery' || !!scanDt;
-                                const cab = cabinetOrderStatus(o.supplier_status, o.wb_status, done, scanned);
-                                const ageColor = orderAgeColor(o.created_at_wb, cab, now);
-                                // Подсветка строки — ТОЛЬКО пока WB не отсканировал заказ
-                                // (после скана QR это зона логистики WB) и ждём ≥ суток.
-                                const stuck = ageColor === 'var(--color-danger)';
-                                return (
-                                <tr key={o.wb_order_id} className={stuck ? 'fbs-row-stuck' : undefined}>
-                                    <td>
-                                        <div style={{ fontFamily: 'monospace', fontSize: 12 }}>{o.wb_order_id}</div>
-                                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                                            {o.created_at_wb ? formatDateTime(o.created_at_wb) : '—'}
-                                        </div>
-                                        {o.created_at_wb && (
-                                            <div style={{ fontSize: 13, fontWeight: 600, color: ageColor ?? 'var(--color-text-muted)' }}>
-                                                {hoursAgoLabel(o.created_at_wb, now)}
-                                            </div>
-                                        )}
-                                    </td>
-                                    <td>
-                                        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                                            {o.nm_id ? (
-                                                <a
-                                                    href={wbProductUrl(o.nm_id)}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    title="Открыть карточку товара на Wildberries"
-                                                >
-                                                    <WbThumb nmId={o.nm_id} size={36} />
-                                                </a>
-                                            ) : (
-                                                <WbThumb nmId={null} size={36} />
-                                            )}
-                                            <div style={{ minWidth: 0 }}>
-                                                <div style={{ fontWeight: 500 }}>{o.article || o.barcode || '—'}</div>
-                                                <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                                                    {o.subject ? `${o.subject} · ` : ''}{o.nm_id ? `nm ${o.nm_id}` : ''}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </td>
-                                    <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                        {o.sale_price == null ? '—' : formatNumber(num(o.sale_price))}
-                                    </td>
-                                    <td>
-                                        {/* Статусы кабинета WB: «Отгрузите товар» / «Ждёт сортировки» /
-                                            «Отсортировано»… — одна шкала с кабинетом (канон 30.07).
-                                            Клик — модалка «Статус заказа» с историей переходов. */}
-                                        <span
-                                            className={`badge ${CABINET_STATUS_LABEL[cab].badge}`}
-                                            style={{ cursor: 'pointer' }}
-                                            title="История статусов"
-                                            onClick={() => setTimelineOrder(o)}
-                                        >
-                                            {CABINET_STATUS_LABEL[cab].label}
-                                        </span>
-                                    </td>
-                                    <td style={{ color: transitDaysColor(o.transit_days) ?? undefined, whiteSpace: 'nowrap', fontWeight: 500 }}>
-                                        {/* «В пути» — от СКАНА QR (до скана товар ещё у нас).
-                                            Часы/дни: целые сутки бэка давали «0» для вчерашнего. */}
-                                        {cab === 'awaiting_sort' && scanDt
-                                            ? durationSinceLabel(scanDt, now) ?? '—'
-                                            : NOT_SCANNED_CABINET_KEYS.includes(cab) || o.transit_days == null
-                                                ? '—'
-                                                : formatNumber(o.transit_days, 0)}
-                                    </td>
-                                    <td>{o.ddate ? formatDate(o.ddate) : '—'}</td>
-                                </tr>
-                                );
-                            })}
-                        </tbody>
-                    </table>
-                </div>
+                <TanStackDataTable
+                    columns={cols}
+                    data={items}
+                    exportName={`FBS_${fbsSupplyId}`}
+                    enableSorting
+                    enablePagination={false}
+                    // Подсветка зависших: WB не отсканировал ≥ суток — наша зона.
+                    rowClassName={(o: FbsOrder) =>
+                        orderAgeColor(o.created_at_wb, cabOf(o), now) === 'var(--color-danger)'
+                            ? 'fbs-row-stuck'
+                            : ''}
+                />
             )}
 
             {timelineOrder && (

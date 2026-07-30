@@ -991,16 +991,6 @@ async def list_assembly_requests(
         base = base.where(AssemblyRequest.counterparty_id == counterparty_id)
     if draft_id is not None:
         base = base.where(AssemblyRequest.source_draft_id == draft_id)
-    if status is not None:
-        statuses = [s.strip() for s in status.split(",")]
-        if len(statuses) == 1:
-            base = base.where(AssemblyRequest.status == statuses[0])
-        else:
-            base = base.where(AssemblyRequest.status.in_(statuses))
-    elif view == "active":
-        base = base.where(AssemblyRequest.status.notin_(_LIST_ARCHIVED_STATUSES))
-    elif view == "archived":
-        base = base.where(AssemblyRequest.status.in_(_LIST_ARCHIVED_STATUSES))
     if date_from is not None:
         base = base.where(AssemblyRequest.created_at >= date_from)
     if date_to is not None:
@@ -1079,6 +1069,29 @@ async def list_assembly_requests(
             joint_cnt >= 2,
         )
 
+    # Счётчики фазовых вкладок kind=fbs — по тем же фильтрам, но ДО статус-среза
+    # (цифра вкладки не зависит от открытой вкладки, как в кабинете WB).
+    # Статус/вид применяются НИЖЕ этого снимка — порядок принципиален.
+    status_counts: dict[str, int] = {}
+    if kind == AssemblyKind.FBS.value:
+        counts_q = (
+            base.with_only_columns(AssemblyRequest.status, func.count())
+            .order_by(None)
+            .group_by(AssemblyRequest.status)
+        )
+        status_counts = {str(s): int(c or 0) for s, c in (await db.execute(counts_q)).all()}
+
+    if status is not None:
+        statuses = [s.strip() for s in status.split(",")]
+        if len(statuses) == 1:
+            base = base.where(AssemblyRequest.status == statuses[0])
+        else:
+            base = base.where(AssemblyRequest.status.in_(statuses))
+    elif view == "active":
+        base = base.where(AssemblyRequest.status.notin_(_LIST_ARCHIVED_STATUSES))
+    elif view == "archived":
+        base = base.where(AssemblyRequest.status.in_(_LIST_ARCHIVED_STATUSES))
+
     # Total count
     count_q = select(func.count()).select_from(base.subquery())
     total = (await db.execute(count_q)).scalar() or 0
@@ -1097,7 +1110,7 @@ async def list_assembly_requests(
     result = await db.execute(items_q)
     items = list(result.scalars().all())
 
-    return items, total
+    return items, total, status_counts
 
 
 async def get_created_groups(db: AsyncSession, project_id: int) -> list[dict]:

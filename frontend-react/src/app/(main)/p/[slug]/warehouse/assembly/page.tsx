@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
-import { formatDate, formatNumber, pluralRu, exportToExcel } from '@/lib/utils';
+import { formatDate, formatDateTime, formatNumber, pluralRu, exportToExcel } from '@/lib/utils';
 import { Toast } from '@/components';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchModal } from '@/components/FfMismatchModal';
@@ -13,6 +13,7 @@ import type { AssemblyBulkStatus, AssemblyDraft, AssemblyKind, AssemblyRequest, 
 import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
 import { ASSEMBLY_STATUS_MAP } from '@/lib/assembly-status';
 import { KIND_BADGE_CLASS, KIND_LABEL, assemblyKindOf } from '@/lib/assembly-kind';
+import { supplyStatusInfo } from '../fbs/fbsShared';
 import CreatedRequestsModal, { type CreatedRequestRow } from './distribute/components/CreatedRequestsModal';
 
 // ─── Status config ──────────────────────────────────────────────────────────
@@ -47,6 +48,15 @@ function jointTitle(row: AssemblyRequest): string {
 
 // Единый словарь статусов — src/lib/assembly-status.ts (был копией на каждой странице раздела)
 const STATUS_MAP = ASSEMBLY_STATUS_MAP;
+
+/** Фазовые вкладки FBS ↔ статусы зеркала: цепочку ведёт джоб по фазе поставки WB. */
+const FBS_PHASE_TABS: { status: string; label: string; hint: string }[] = [
+    { status: '', label: 'Все', hint: 'Все учётные заявки FBS' },
+    { status: 'IN_PROGRESS', label: 'На сборке', hint: 'Поставка не закрыта — фулфилмент собирает заказы' },
+    { status: 'SHIPPED', label: 'В доставке', hint: 'Поставка передана WB (закрыта/отсканирована), задания едут' },
+    { status: 'DELIVERED', label: 'Завершённые', hint: 'Все задания прошли сортировку / получены покупателями' },
+    { status: 'CANCELLED', label: 'Отменено', hint: 'Поставка отклонена WB или все задания отменены' },
+];
 
 // Занос заявки в кабинет WB (колонка «WB»): фолбэк-подпись, когда живой статус
 // кабинета (wb_supply_state) ещё не подтянут.
@@ -511,6 +521,8 @@ export default function AssemblyListPage() {
     // учётные зеркала сборки ФФ. Раздельные вкладки (решение владельца 30.07):
     // авто-зеркала не должны разбавлять рабочий список логиста.
     const [pageTab, setPageTab] = useState<AssemblyKind>('fbo');
+    //: Каунты фазовых вкладок FBS (status_counts ответа списка; у fbo пусто).
+    const [fbsPhaseCounts, setFbsPhaseCounts] = useState<Record<string, number>>({});
     const [sourceVehicles, setSourceVehicles] = useState<SourceVehicleOption[]>([]);
 
     // ─── Персист фильтров ───────────────────────────────────────────────
@@ -611,7 +623,9 @@ export default function AssemblyListPage() {
             const resp = await api.getAssemblyRequests({
                 warehouse_id: warehouseId || undefined,
                 status: statusFilter || undefined,
-                view,
+                // FBS: фазовые вкладки сами определяют срез, view «Активные»
+                // прятал бы DELIVERED/CANCELLED и спорил с каунтами вкладок.
+                view: pageTab === 'fbs' ? 'all' : view,
                 search: search || undefined,
                 date_from: dateFrom || undefined,
                 date_to: dateTo || undefined,
@@ -632,6 +646,7 @@ export default function AssemblyListPage() {
             if (seq !== loadSeq.current) return;
             setItems(resp.items);
             setTotal(resp.total);
+            setFbsPhaseCounts(resp.status_counts ?? {});
         } catch (e: unknown) {
             if (seq !== loadSeq.current) return;
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
@@ -1335,6 +1350,69 @@ export default function AssemblyListPage() {
         },
     ];
 
+    // FBS — ОТДЕЛЬНАЯ сущность (канон 30.07): свои колонки без FBO-полей
+    // (машины/паллеты/вес/ФФ-связь — у зеркала их не бывает, прочерки — шум).
+    // Статус — фаза ПОСТАВКИ в терминах кабинета WB (supplyStatusInfo).
+    const fbsCols: Column[] = [
+        {
+            key: 'number', label: '№',
+            render: (_v, row: AssemblyRequest) => <span style={{ fontWeight: 500 }}>{row.number}</span>,
+        },
+        {
+            key: '_phase', label: 'Статус',
+            getValue: (row: AssemblyRequest) => supplyStatusInfo(row.fbs_supply_status)?.label
+                || STATUS_MAP[row.status]?.label || row.status,
+            render: (_v, row: AssemblyRequest) => {
+                const info = supplyStatusInfo(row.fbs_supply_status);
+                return info ? (
+                    <span className={`badge ${info.badge}`} title={info.hint}>{info.label}</span>
+                ) : (
+                    <span className="badge badge-secondary">{STATUS_MAP[row.status]?.label || row.status}</span>
+                );
+            },
+            exportValue: (row: AssemblyRequest) => supplyStatusInfo(row.fbs_supply_status)?.label
+                || STATUS_MAP[row.status]?.label || row.status,
+        },
+        {
+            key: 'fbs_supply_id', label: 'Поставка',
+            render: (_v, row: AssemblyRequest) => row.fbs_supply_id ? (
+                <Link
+                    href={`/p/${slug}/warehouse/fbs?supply=${encodeURIComponent(row.fbs_supply_id)}`}
+                    onClick={e => e.stopPropagation()}
+                    style={{ fontSize: 13 }}
+                    title="Открыть раздел FBS (поставки)"
+                >
+                    {row.fbs_supply_id}
+                </Link>
+            ) : '—',
+        },
+        { key: 'warehouse_name', label: 'Склад' },
+        {
+            key: 'wb_warehouse_name_manual', label: 'Склад WB',
+            render: (_v, row: AssemblyRequest) => row.wb_warehouse_name_manual || '—',
+        },
+        {
+            key: 'brands', label: 'Бренды',
+            render: (_v, row: AssemblyRequest) => row.brands || '—',
+        },
+        {
+            key: 'items_qty', label: 'Товары', align: 'right',
+            getValue: itemsQty,
+            render: (_v, row: AssemblyRequest) => row.items ? formatNumber(itemsQty(row), 0) : '—',
+            exportValue: itemsQty,
+        },
+        {
+            key: 'created_at', label: 'Создана',
+            render: (_v, row: AssemblyRequest) => formatDateTime(row.created_at),
+            exportValue: (row: AssemblyRequest) => row.created_at,
+        },
+        {
+            key: 'shipped_at', label: 'Передана',
+            render: (_v, row: AssemblyRequest) => row.shipped_at ? formatDateTime(row.shipped_at) : '—',
+            exportValue: (row: AssemblyRequest) => row.shipped_at || '',
+        },
+    ];
+
     // ─── Render ───────────────────────────────────────────────────────────
 
     return (
@@ -1385,7 +1463,12 @@ export default function AssemblyListPage() {
                 ]).map(t => (
                     <button
                         key={t.key}
-                        onClick={() => setPageTab(t.key)}
+                        onClick={() => {
+                            setPageTab(t.key);
+                            // Статусы вкладок не пересекаются (FBO-статусы ≠ фазы FBS):
+                            // унесённый фильтр давал бы пустой список без причины.
+                            setStatusFilter('');
+                        }}
                         title={t.key === 'fbs'
                             ? 'Учётные зеркала сборки фулфилмента: одна заявка = одна поставка FBS, ведутся автоматически'
                             : 'Операционные заявки логиста (отгрузка на склады WB)'}
@@ -1405,6 +1488,28 @@ export default function AssemblyListPage() {
                     </button>
                 ))}
             </div>
+
+            {/* Фазовые вкладки FBS — как в кабинете WB («На сборке» / «В доставке» /
+                «Завершённые»): каунты по фильтрам списка, без статус-среза. */}
+            {pageTab === 'fbs' && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+                    {FBS_PHASE_TABS.map(p => {
+                        const count = p.status === ''
+                            ? Object.values(fbsPhaseCounts).reduce((s, n) => s + n, 0)
+                            : fbsPhaseCounts[p.status] ?? 0;
+                        return (
+                            <button
+                                key={p.status || 'all'}
+                                className={`btn btn-sm ${statusFilter === p.status ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setStatusFilter(p.status)}
+                                title={p.hint}
+                            >
+                                {p.label} · {formatNumber(count, 0)}
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
 
             {/* Баннер: товары без веса, участвующие в сборках → расчёт веса неполный. */}
             {missingWeightItems.length > 0 && (
@@ -1501,6 +1606,7 @@ export default function AssemblyListPage() {
                             onKeyDown={handleSearchKeyDown}
                         />
                     </div>
+                    {pageTab === 'fbo' && (
                     <div className="form-group">
                         <select
                             className="form-input"
@@ -1513,6 +1619,7 @@ export default function AssemblyListPage() {
                             <option value="all">Все</option>
                         </select>
                     </div>
+                    )}
                     <div className="form-group">
                         <select
                             className="form-input"
@@ -1525,6 +1632,7 @@ export default function AssemblyListPage() {
                             ))}
                         </select>
                     </div>
+                    {pageTab === 'fbo' && (
                     <div className="form-group">
                         <select
                             className="form-input"
@@ -1536,6 +1644,7 @@ export default function AssemblyListPage() {
                             ))}
                         </select>
                     </div>
+                    )}
                     <div className="form-group">
                         <select
                             className="form-input"
@@ -1548,6 +1657,7 @@ export default function AssemblyListPage() {
                             ))}
                         </select>
                     </div>
+                    {pageTab === 'fbo' && (<>
                     <div className="form-group">
                         <select
                             className="form-input"
@@ -1599,6 +1709,7 @@ export default function AssemblyListPage() {
                             <option value="plain">Обычные</option>
                         </select>
                     </div>
+                    </>)}
                     <div className="form-group">
                         <input
                             className="form-input"
@@ -1658,7 +1769,7 @@ export default function AssemblyListPage() {
                 </div>
             ) : (
                 <TanStackDataTable
-                    columns={cols}
+                    columns={pageTab === 'fbs' ? fbsCols : cols}
                     data={items}
                     onRowClick={(row: AssemblyRequest) => {
                         // В режиме выбора (есть отмеченные) клик по строке переключает

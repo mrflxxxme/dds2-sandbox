@@ -158,7 +158,7 @@ async def list_assembly_requests(
             status_code=422,
             detail=f"kind: допустимые значения — {', '.join(ALLOWED_ASSEMBLY_KINDS)}",
         )
-    items, total = await assembly_service.list_assembly_requests(
+    items, total, status_counts = await assembly_service.list_assembly_requests(
         db,
         project.id,
         warehouse_id=warehouse_id,
@@ -191,7 +191,7 @@ async def list_assembly_requests(
     await _enrich_source_vehicle_order_no(db, project.id, items, response_items)
     await _enrich_joint(db, project.id, items, response_items)
     await _enrich_wb_supply(db, project.id, items, response_items)
-    return AssemblyListResponse(items=response_items, total=total)
+    return AssemblyListResponse(items=response_items, total=total, status_counts=status_counts)
 
 
 async def _enrich_wb_supply(
