@@ -119,6 +119,8 @@ FBS_WB_PRE_SORT_STATUSES: tuple[str, ...] = ("waiting", "sent_to_carrier", "acce
 FBS_IN_DELIVERY_STATUS = "in_delivery"
 FBS_SORTED_STATUS = "sorted"
 FBS_IN_DELIVERY_STUCK_STATUS = "in_delivery_stuck"
+#: «Завершённые» кабинета WB: `complete`, дошедшее до покупателя (sold/defect).
+FBS_DELIVERED_STATUS = "delivered"
 
 
 class FbsSupplyStatus(str, enum.Enum):
