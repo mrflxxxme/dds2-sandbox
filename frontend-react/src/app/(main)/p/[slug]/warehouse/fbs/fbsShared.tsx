@@ -145,6 +145,68 @@ export function daysSince(iso: string | null | undefined, now: number = Date.now
     return Math.max(0, Math.floor((now - ts) / 86_400_000));
 }
 
+/** Порог «заказ ждёт подозрительно долго» (WB ещё не отсканировал), часов. */
+export const ORDER_AGE_WARN_HOURS = 12;
+/** Порог «заказ ЗАВИС» — сутки без скана WB (сборка + передача + приёмка СЦ). */
+export const ORDER_AGE_DANGER_HOURS = 24;
+
+/** До-скановые `wbStatus`: WB заказ ещё НЕ принял (зеркало бэкендного белого списка). */
+export const WB_PRE_ACCEPT_STATUSES: readonly string[] = ['waiting', 'sent_to_carrier', 'accepted_by_carrier'];
+
+/**
+ * WB ещё не отсканировал заказ: не отменён и `wb_status` до-скановый
+ * (пустой = «в пути», строки до появления колонки — канон домена).
+ * Ровно этот признак решает, «висит» ли заказ: после скана СЦ вопросы
+ * уже к логистике WB, подсвечивать у нас нечего.
+ */
+export function isAwaitingWbAccept(
+    supplierStatus: string | null | undefined,
+    wbStatus: string | null | undefined,
+): boolean {
+    if (!supplierStatus || TERMINAL_STATUSES.includes(supplierStatus)) return false;
+    if (!wbStatus) return true;
+    return WB_PRE_ACCEPT_STATUSES.includes(wbStatus);
+}
+
+/**
+ * Цвет возраста задания, пока WB его НЕ отсканировал: дольше суток — красный,
+ * дольше 12 ч — оранжевый. После скана СЦ (sorted/ПВЗ/выкуп) и на отменах —
+ * без подсветки: заказ больше не наша зона ответственности.
+ */
+export function orderAgeColor(
+    iso: string | null | undefined,
+    supplierStatus: string | null | undefined,
+    wbStatus: string | null | undefined,
+    now: number = Date.now(),
+): string | null {
+    if (!isAwaitingWbAccept(supplierStatus, wbStatus)) return null;
+    const ts = parseUtcMs(iso);
+    if (ts == null) return null;
+    const hours = (now - ts) / 3_600_000;
+    if (hours >= ORDER_AGE_DANGER_HOURS) return 'var(--color-danger)';
+    if (hours >= ORDER_AGE_WARN_HOURS) return 'var(--color-warning)';
+    return null;
+}
+
+/**
+ * Длительность «с момента X» без слова «назад»: «1 дн 17 ч» / «5 ч 53 мин» /
+ * «12 мин». Для колонки «В пути»: бэкендные transit_days — целые СУТКИ, и
+ * поставка, переданная вчера вечером, показывала бы «0» — как будто колонка
+ * сломана.
+ */
+export function durationSinceLabel(iso: string | null | undefined, now: number = Date.now()): string | null {
+    const ts = parseUtcMs(iso);
+    if (ts == null) return null;
+    const totalMin = Math.max(0, Math.floor((now - ts) / 60_000));
+    if (totalMin < 1) return '<1 мин';
+    if (totalMin < 60) return `${totalMin} мин`;
+    const days = Math.floor(totalMin / 1440);
+    const hours = Math.floor((totalMin % 1440) / 60);
+    if (days >= 1) return hours > 0 ? `${days} дн ${hours} ч` : `${days} дн`;
+    const mins = totalMin % 60;
+    return mins > 0 ? `${hours} ч ${mins} мин` : `${hours} ч`;
+}
+
 /**
  * «Сколько прошло» в стиле кабинета WB: «5 ч 53 мин назад» / «12 мин назад» /
  * «3 дн 4 ч назад». Для подписи под временем поступления задания — сборщику

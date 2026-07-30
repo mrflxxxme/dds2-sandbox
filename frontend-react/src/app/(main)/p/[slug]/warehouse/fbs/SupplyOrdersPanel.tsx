@@ -16,11 +16,15 @@ import {
     SupplierStatusBadge,
     WB_STATUS_LABEL,
     deliverStickers,
+    durationSinceLabel,
     fetchStickersChunked,
     hoursAgoLabel,
     isActiveOrder,
+    isAwaitingWbAccept,
     isStickerReady,
     num,
+    orderAgeColor,
+    transitDaysColor,
 } from './fbsShared';
 
 interface Props {
@@ -186,22 +190,30 @@ export default function SupplyOrdersPanel({
                                 <th>Товар</th>
                                 <th style={{ textAlign: 'right' }}>Цена, ₽</th>
                                 <th>Статус</th>
+                                <th title="Сколько заказ едет с передачи поставки, пока СЦ не принял">В пути</th>
                                 <th>Срок</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {items.map(o => (
-                                <tr key={o.wb_order_id}>
+                            {items.map(o => {
+                                const now = Date.now();
+                                const ageColor = orderAgeColor(o.created_at_wb, o.supplier_status, o.wb_status, now);
+                                // Подсветка — ТОЛЬКО пока WB не отсканировал (после
+                                // приёмки СЦ вопросы к логистике WB) и ждём ≥ суток.
+                                const stuck = ageColor === 'var(--color-danger)';
+                                return (
+                                <tr key={o.wb_order_id} className={stuck ? 'fbs-row-stuck' : undefined}>
                                     <td>
                                         <div style={{ fontFamily: 'monospace', fontSize: 12 }}>{o.wb_order_id}</div>
                                         <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                                             {o.created_at_wb ? formatDateTime(o.created_at_wb) : '—'}
                                         </div>
                                         {/* Возраст заказа — как в кабинете WB («5 ч 53 мин назад»):
-                                            сборщику важнее, сколько заказ ЖДЁТ, чем календарная дата. */}
+                                            сборщику важнее, сколько заказ ЖДЁТ, чем календарная дата.
+                                            Красим по порогам ожидания сборки (12 ч / сутки). */}
                                         {o.created_at_wb && (
-                                            <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
-                                                {hoursAgoLabel(o.created_at_wb)}
+                                            <div style={{ fontSize: 13, fontWeight: 600, color: ageColor ?? 'var(--color-text-muted)' }}>
+                                                {hoursAgoLabel(o.created_at_wb, now)}
                                             </div>
                                         )}
                                     </td>
@@ -243,9 +255,19 @@ export default function SupplyOrdersPanel({
                                             </div>
                                         )}
                                     </td>
+                                    <td style={{ color: transitDaysColor(o.transit_days) ?? undefined, whiteSpace: 'nowrap', fontWeight: 500 }}>
+                                        {/* Часы/дни от передачи поставки: целые сутки бэка давали «0»
+                                            для переданного вчера. Якорь — scan_dt|closed_at поставки. */}
+                                        {o.transit_days == null
+                                            ? '—'
+                                            : (isAwaitingWbAccept(o.supplier_status, o.wb_status) && (supply.scan_dt || supply.closed_at)
+                                                ? durationSinceLabel(supply.scan_dt || supply.closed_at) ?? formatNumber(o.transit_days, 0)
+                                                : formatNumber(o.transit_days, 0))}
+                                    </td>
                                     <td>{o.ddate ? formatDate(o.ddate) : '—'}</td>
                                 </tr>
-                            ))}
+                                );
+                            })}
                         </tbody>
                     </table>
                 </div>
