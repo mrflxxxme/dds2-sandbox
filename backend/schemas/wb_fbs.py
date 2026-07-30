@@ -12,6 +12,8 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.models.wb_fbs import (
+    FBS_CANCEL_CLIENT_STATUS,
+    FBS_CANCEL_SELLER_STATUS,
     FBS_DELIVERED_STATUS,
     FBS_IN_DELIVERY_STATUS,
     FBS_IN_DELIVERY_STUCK_STATUS,
@@ -33,6 +35,8 @@ ALLOWED_ORDER_STATUS_FILTERS = [
     FBS_SORTED_STATUS,
     FBS_IN_DELIVERY_STUCK_STATUS,
     FBS_DELIVERED_STATUS,
+    FBS_CANCEL_CLIENT_STATUS,
+    FBS_CANCEL_SELLER_STATUS,
 ]
 ALLOWED_STICKER_TYPES = ["svg", "zplv", "zplh", "png"]
 #: Коды причин «не списано» — контракт с фронтом (словарь WRITEOFF_REASON_LABEL
@@ -516,6 +520,10 @@ class FbsOrderListOut(BaseModel):
     #: «Завершённые» кабинета WB: complete, дошедшее до покупателя (sold/defect).
     #: Окно периода применяется как к прочим фазам доставки.
     delivered_count: int = 0
+    #: Разрез отмен (канон 30.07): клиент отменил / отменили мы (продавец или
+    #: перевозчик). Сумма равна счётчику отмен эффективного статуса.
+    cancel_client_count: int = 0
+    cancel_seller_count: int = 0
 
 
 class FbsWarehouseQueueRow(BaseModel):
