@@ -834,7 +834,10 @@ async def test_list_stocks_migfull_inbound_locked_out_of_defect(db_session, proj
 # Ни один из трёх WMS-провайдеров не снимает свой остаток под FBS-продажи
 # (сверка 29.07.2026): мы списали единицу из ledger'а (движение FBS_ORDER),
 # зеркало не шелохнулось — каждая продажа читалась как ложное «у ФФ больше».
-# list_stocks вычитает нетто FBS-отгрузок из ff_good (кап по ff_good).
+# list_stocks вычитает нетто FBS-отгрузок из ff_good, КАП по наблюдаемому
+# ПРОФИЦИТУ (ff_good − наш итог): после выравнивания остатков (ADJUSTMENT /
+# провайдер списал сам) вычет самоизлечивается в 0, а lifetime-нетто движений
+# не рождает вечное ложное «у нас больше».
 
 
 def test_fbs_ref_type_matches_orders_service():
@@ -971,6 +974,43 @@ async def test_list_stocks_without_fbs_movements_unchanged(db_session, project, 
     assert row["ff_good"] == 10
     assert row["diff"] == 3
     assert data["totals"]["ff_fbs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_fbs_no_deduction_after_adjustment_alignment(db_session, project, warehouse):
+    """После сверки ADJUSTMENT'ом (mirror == our) вычет НЕ применяется: diff = 0.
+
+    Вычет — lifetime-нетто движений и сам по себе не гаснет. Прежний кап по
+    одному ff_good после выравнивания остатков продолжал вычитать историю
+    FBS-продаж и давал ВЕЧНОЕ ложное «у нас больше». Кап по наблюдаемому
+    профициту (ff_good − our) самоизлечивается: профицита нет — вычета нет.
+    """
+    bc = f"BC-{_uid()}"
+    nom = await _seed_ff_and_our(db_session, project, warehouse, bc, ff_good=7, our_qty=7)
+    for _ in range(3):
+        await _fbs_move(db_session, project.id, warehouse.id, nom.id, bc, -1)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = next(r for r in data["rows"] if r["barcode"] == bc)
+    assert row["ff_fbs"] == 0  # applied = 0: профицита нет
+    assert row["ff_good"] == 7
+    assert row["diff"] == 0  # не −3
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_fbs_capped_by_observed_surplus(db_session, project, warehouse):
+    """Частичный профицит капит вычет: applied = min(нетто, профицит)."""
+    bc = f"BC-{_uid()}"
+    # Профицит 3 (10 − 7), нетто движений 5 → применяем только 3.
+    nom = await _seed_ff_and_our(db_session, project, warehouse, bc, ff_good=10, our_qty=7)
+    for _ in range(5):
+        await _fbs_move(db_session, project.id, warehouse.id, nom.id, bc, -1)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = next(r for r in data["rows"] if r["barcode"] == bc)
+    assert row["ff_fbs"] == 3
+    assert row["ff_good"] == 7
+    assert row["diff"] == 0  # не −2: лишнее нетто не продавливает «у нас больше»
 
 
 # ─── migfull короб → россыпь (box → loose) ──────────────────────────────────

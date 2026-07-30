@@ -62,6 +62,7 @@ from backend.services.wb_fbs.orders_service import (
     _order_to_dict,
     _parse_wb_datetime,
     _str_or_none,
+    _transit_days,
 )
 from backend.utils.time import utcnow
 
@@ -1429,11 +1430,15 @@ async def list_supply_orders(db: AsyncSession, project_id: int, wb_supply_id: st
     Поставку резолвим ДО выборки состава (как deliver/delete/barcode): чужая
     или несуществующая — это 404, а не валидное «в поставке нет заданий».
     Иначе опечатка в id маскируется под пустое состояние.
+
+    `transit_days` считается от якоря САМОЙ поставки (scan_dt → closed_at,
+    фолбэк written_off_at внутри `_transit_days`) — она уже загружена, лишних
+    запросов ноль; заполняется только для строк фазы «в пути».
     """
     supply_id = (wb_supply_id or "").strip()
     if not supply_id:
         raise FbsSupplyError("Не указана поставка")
-    await _get_supply(db, project_id, supply_id)
+    supply = await _get_supply(db, project_id, supply_id)
     result = await db.execute(
         select(WbFbsOrder)
         .where(
@@ -1444,7 +1449,13 @@ async def list_supply_orders(db: AsyncSession, project_id: int, wb_supply_id: st
         .order_by(WbFbsOrder.created_at_wb.desc().nullslast(), WbFbsOrder.id.desc())
         .limit(_SUPPLY_ORDERS_LIMIT)
     )
-    return [_order_to_dict(order) for order in result.scalars().all()]
+    anchor = supply.scan_dt or supply.closed_at
+    anchor_by_supply = {supply_id: anchor} if anchor else {}
+    now = utcnow()
+    return [
+        _order_to_dict(order, transit_days=_transit_days(order, anchor_by_supply, now))
+        for order in result.scalars().all()
+    ]
 
 
 # ─── Лист подбора ───────────────────────────────────────────────────────────

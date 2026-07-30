@@ -583,6 +583,95 @@ async def test_warehouse_settings_accept_mode_and_fbo_gate(client, auth_headers,
         await db_session.commit()
 
 
+@pytest.mark.asyncio
+async def test_warehouse_settings_gate_structured_409_not_422(client, auth_headers, db_session):
+    """Гейт «зеркало выше учёта» → 409 со структурированным detail, НЕ 422.
+
+    Фронт опознаёт «свой» конфликт по `code`, а не по тексту. Закрепление
+    порядка обработки: `except FbsMirrorAboveLedger` стоит ВНУТРИ `_fbs_errors`,
+    иначе общий `except Exception` перевёл бы класс `Fbs*` в 422 и 409
+    деградировал бы молча.
+    """
+    from backend.models import FulfillmentStock, WbFbsWarehouseLink
+    from backend.models.warehouse import Warehouse, WarehouseStock, WarehouseType
+
+    headers = await _make_project(client, auth_headers, "FBS Gate 409")
+    pid = _pid(headers)
+    wb_warehouse_id = 761_000_000 + pid
+
+    our_wh = Warehouse(
+        project_id=pid,
+        name="Наш склад гейта 409",
+        warehouse_type=WarehouseType.FULFILLMENT,
+        is_active=True,
+    )
+    db_session.add(our_wh)
+    nomenclature = Nomenclature(
+        project_id=pid, barcode=f"27{pid:08d}09", chrt_id=881_000_000 + pid
+    )
+    db_session.add(nomenclature)
+    await db_session.flush()
+    db_session.add(
+        WbFbsWarehouse(
+            project_id=pid, wb_warehouse_id=wb_warehouse_id, name="Продавец гейта 409"
+        )
+    )
+    db_session.add(
+        WbFbsWarehouseLink(
+            project_id=pid,
+            wb_warehouse_id=wb_warehouse_id,
+            warehouse_id=our_wh.id,
+            is_active=True,
+        )
+    )
+    # Зеркало 10 против учёта 4 → разрыв 6.
+    db_session.add(
+        FulfillmentStock(
+            project_id=pid,
+            warehouse_id=our_wh.id,
+            provider="skladbot",
+            barcode=nomenclature.barcode,
+            nomenclature_id=nomenclature.id,
+            qty_good=10,
+        )
+    )
+    db_session.add(
+        WarehouseStock(
+            project_id=pid,
+            warehouse_id=our_wh.id,
+            nomenclature_id=nomenclature.id,
+            barcode=nomenclature.barcode,
+            quantity=4,
+        )
+    )
+    await db_session.commit()
+    url = f"/api/v1/fbs/warehouses/{wb_warehouse_id}/settings"
+    risky = {"is_active": True, "mode": "translate", "stock_source": "ff_mirror"}
+
+    try:
+        resp = await client.patch(url, json=risky, headers=headers)
+        assert resp.status_code == 409, f"Ожидался 409, не {resp.status_code}: {resp.text}"
+        detail = resp.json()["detail"]
+        assert detail["code"] == "fbs_mirror_above_ledger"
+        assert detail["mirror_over_ledger"] == 6
+        assert detail["ledger_total"] == 4
+        assert detail["mirror_total"] == 10
+        assert "force" in detail["message"]
+
+        # force=true — решение человека, применяет как есть.
+        resp = await client.patch(url, json={**risky, "force": True}, headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["stock_source"] == "ff_mirror"
+    finally:
+        await db_session.execute(delete(WbFbsWarehouseLink).where(WbFbsWarehouseLink.project_id == pid))
+        await db_session.execute(delete(FulfillmentStock).where(FulfillmentStock.project_id == pid))
+        await db_session.execute(delete(WarehouseStock).where(WarehouseStock.project_id == pid))
+        await db_session.execute(delete(WbFbsWarehouse).where(WbFbsWarehouse.project_id == pid))
+        await db_session.execute(delete(Nomenclature).where(Nomenclature.project_id == pid))
+        await db_session.execute(delete(Warehouse).where(Warehouse.project_id == pid))
+        await db_session.commit()
+
+
 # ─── Поставки: план разбиения и массовое создание ────────────────────────────
 
 

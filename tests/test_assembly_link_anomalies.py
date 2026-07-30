@@ -975,8 +975,15 @@ async def test_stock_mismatch_fbs_inbound_storno_reduces_deduction(db_session, p
 
 
 @pytest.mark.asyncio
-async def test_stock_mismatch_fbs_capped_by_ff_good(db_session, project, warehouse):
-    """Кап по ff_good: провайдер начнёт списывать сам — зеркало не уйдёт в минус."""
+async def test_stock_mismatch_fbs_capped_by_observed_surplus(db_session, project, warehouse):
+    """Кап по наблюдаемому профициту: лишнее нетто не рождает «у нас больше».
+
+    Профицит 1 (2 − 1), нетто движений 5 → применяется только 1, ячейка
+    сходится и уходит из расхождения. Прежний кап по одному ff_good вычитал 2
+    и оставлял ВЕЧНЫЙ ложный diff = −1 (провайдер спишет сам / прошла сверка
+    ADJUSTMENT'ом — вычет истории продаж не гас). Заодно инвариант «не в
+    минус»: applied ≤ профицит ≤ ff_good.
+    """
     await _integrate(db_session, project.id, warehouse.id)
     bc = f"20{_uid()}"
     nom = await _nom(db_session, project.id, bc)
@@ -987,12 +994,26 @@ async def test_stock_mismatch_fbs_capped_by_ff_good(db_session, project, warehou
 
     res = await _raw(db_session, project.id)
     row = _wh_row(res, warehouse.id)
-    assert row is not None
-    sku = row["rows"][0]
-    assert sku["ff_good"] == 0  # 2 − min(5, 2), не −3
-    assert sku["ff_fbs"] == 2
-    assert sku["diff"] == -1
-    assert row["ff_fbs_qty"] == 2
+    assert row is None  # 2 − min(5, профицит 1) == 1 == наш → расхождения нет
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_fbs_no_deduction_after_adjustment(db_session, project, warehouse):
+    """После выравнивания (mirror == our) история FBS-движений вычет не даёт.
+
+    Профицита нет → applied = 0 → diff остаётся 0, ячейка не появляется. Со
+    старым капом по ff_good вычиталось бы 3 и рождался ложный diff = −3.
+    """
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 7, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 7)
+    for _ in range(3):
+        await _fbs_movement(db_session, project.id, warehouse.id, nom.id, bc, -1)
+
+    res = await _raw(db_session, project.id)
+    assert _wh_row(res, warehouse.id) is None
 
 
 @pytest.mark.asyncio

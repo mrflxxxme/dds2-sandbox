@@ -54,7 +54,7 @@ from backend.models import (
     FBS_SORTED_STATUS,
     FBS_TERMINAL_STATUSES,
     FBS_WB_CANCELLED_STATUSES,
-    FBS_WB_DELIVERED_STATUSES,
+    FBS_WB_PRE_SORT_STATUSES,
     FBS_WB_SORTED_STATUSES,
     FbsSupplierStatus,
     Nomenclature,
@@ -127,9 +127,15 @@ _WRITEOFF_ISSUES_MAX_ROWS = 200
 
 #: Причины незакрытого списания (`FbsWriteoffIssueRow.reason`), в порядке
 #: приоритета классификации: нет карточки → нет привязки склада → нет остатка.
+#: `queued` — пост-классификация ПОСЛЕ обогащения остатками: остатка хватает
+#: на всё, задание просто ждёт ближайшего 5-минутного прогона списания.
+#: Набор обязан совпадать со `schemas.wb_fbs.ALLOWED_WRITEOFF_REASONS`
+#: (контракт с фронтом) — равенство держит тест-связка в
+#: tests/test_wb_fbs_writeoff_issues.py::test_reason_codes_match_schema_contract.
 _WRITEOFF_ISSUE_NO_CARD = "no_card"
 _WRITEOFF_ISSUE_NO_LINK = "no_link"
 _WRITEOFF_ISSUE_NO_STOCK = "no_stock"
+_WRITEOFF_ISSUE_QUEUED = "queued"
 
 #: ISO-4217 рубля. WB отдаёт код числом, колонка — String(8).
 RUB_CURRENCY_CODE = "643"
@@ -166,34 +172,43 @@ def alive_condition() -> Any:
 
 
 def in_delivery_condition() -> Any:
-    """«Задание ЕЩЁ едет и ещё НЕ отсортировано» — первая фаза после передачи.
+    """«Задание ЕЩЁ едет к СЦ и ещё НЕ отсортировано» — первая фаза после передачи.
 
     Одного `supplierStatus` тут мало: он застывает на `complete` в момент
     передачи поставки и остаётся таким навсегда — и через день, и через месяц
-    после вручения. Ответ «что сейчас в пути» знает только `wbStatus`, поэтому
-    из `complete` вычитаем и доставленное (`FBS_WB_DELIVERED_STATUSES`), и
-    принятое сортировочным центром (`FBS_WB_SORTED_STATUSES`) — последнее живёт
-    своим счётчиком: это разные этапы и разная зона ответственности.
+    после вручения. Ответ «что сейчас в пути» знает только `wbStatus`.
+
+    🔴 БЕЛЫЙ список, не чёрный: `complete` И `wbStatus` ∈ до-сортировочным
+    (`FBS_WB_PRE_SORT_STATUSES`) ЛИБО пуст. Прежний чёрный список «complete
+    минус sorted минус sold/defect» возвращал любой НЕИЗВЕСТНЫЙ пост-сортировочный
+    статус обратно в «едет к СЦ» — 168 заказов в `ready_for_pickup` (лежат в
+    ПВЗ) через 2 дня зажигали «зависло» (прод 30.07.2026). У этой фазы (и у
+    алярма `in_delivery_stuck` поверх неё) ложный пропуск дешевле ложной
+    тревоги, поэтому новый статус WB по умолчанию НЕ считается «в пути».
 
     Отменённые сюда не попадают по построению: `effective_status_expr()` уже
     схлопнул WB-отмену в `cancel`, даже если продавец успел передать поставку.
 
-    Пустой `wb_status` считаем «в пути»: так выглядят задания, записанные до
-    появления колонки, и их честнее показать в очереди, чем молча потерять.
+    Пустой/NULL `wb_status` считаем «в пути»: так выглядят задания, записанные
+    до появления колонки (канон домена), и их честнее показать в очереди, чем
+    молча потерять.
     """
     return and_(
         effective_status_expr() == FbsSupplierStatus.COMPLETE.value,
         or_(
             WbFbsOrder.wb_status.is_(None),
-            WbFbsOrder.wb_status.notin_(
-                (*FBS_WB_DELIVERED_STATUSES, *FBS_WB_SORTED_STATUSES)
-            ),
+            WbFbsOrder.wb_status == "",
+            WbFbsOrder.wb_status.in_(FBS_WB_PRE_SORT_STATUSES),
         ),
     )
 
 
 def sorted_condition() -> Any:
-    """«Принято сортировочным центром WB» — вторая фаза, ещё не у покупателя."""
+    """«Принято сортировочным центром WB» — вторая фаза, ещё не у покупателя.
+
+    `FBS_WB_SORTED_STATUSES` включает и пост-сортировочные `ready_for_pickup` /
+    `postponed_delivery`: заказ прошёл СЦ, дальше — зона логистики WB.
+    """
     return and_(
         effective_status_expr() == FbsSupplierStatus.COMPLETE.value,
         WbFbsOrder.wb_status.in_(FBS_WB_SORTED_STATUSES),
@@ -215,10 +230,16 @@ def transit_anchor_expr() -> Any:
 
 
 def _supply_join_condition(project_id: int) -> Any:
-    """Условие LEFT OUTER JOIN зеркала поставок к заданиям (1:1 максимум)."""
+    """Условие LEFT OUTER JOIN зеркала поставок к заданиям (1:1 максимум).
+
+    Скоуп по контуру — как у всех выборок поставок домена (`_get_supply`,
+    `list_supplies`): якорь передачи боевого задания не должен браться из
+    одноимённой поставки песочницы.
+    """
     return and_(
         WbFbsSupply.project_id == project_id,
         WbFbsSupply.wb_supply_id == WbFbsOrder.supply_id,
+        contour_condition(WbFbsSupply.raw),
     )
 
 
@@ -1056,25 +1077,27 @@ def _money(value: Decimal | None) -> str | None:
 
 
 def _is_in_delivery_row(order: WbFbsOrder) -> bool:
-    """Python-зеркало `in_delivery_condition()` для ОДНОЙ строки.
+    """Python-зеркало `in_delivery_condition()` для ОДНОЙ строки — бит-в-бит.
 
-    Те же условия, что в SQL: `complete`, WB-отмена не схлопнула задание в
-    `cancel`, и `wb_status` ещё не дорос ни до сортировки, ни до вручения
-    (пустой `wb_status` считаем «в пути» — строки до появления колонки).
+    Тот же БЕЛЫЙ список, что в SQL: `complete` И (`wb_status` пуст/NULL ИЛИ
+    ∈ `FBS_WB_PRE_SORT_STATUSES`). WB-отмены (`FBS_WB_CANCELLED_STATUSES`) в
+    SQL выбывают через `effective_status_expr()`; здесь их гасит сам белый
+    список — они непустые и в до-сортировочные не входят. Неизвестный новый
+    статус WB «в пути» НЕ считается (см. docstring SQL-версии).
     """
     if order.supplier_status != FbsSupplierStatus.COMPLETE.value:
         return False
-    if order.wb_status is None:
-        return True
-    if order.wb_status in FBS_WB_CANCELLED_STATUSES:
-        return False
-    return order.wb_status not in (*FBS_WB_DELIVERED_STATUSES, *FBS_WB_SORTED_STATUSES)
+    return not order.wb_status or order.wb_status in FBS_WB_PRE_SORT_STATUSES
 
 
 async def _supply_anchor_map(
     db: AsyncSession, project_id: int, supply_ids: set[str]
 ) -> dict[str, datetime]:
-    """{wb_supply_id: COALESCE(scan_dt, closed_at)} одним IN-запросом (без N+1)."""
+    """{wb_supply_id: COALESCE(scan_dt, closed_at)} одним IN-запросом (без N+1).
+
+    Скоуп по контуру — паритет с `_supply_join_condition`: якорь боевого
+    задания не берётся из одноимённой поставки песочницы.
+    """
     ids = sorted(s for s in supply_ids if s)
     if not ids:
         return {}
@@ -1085,6 +1108,7 @@ async def _supply_anchor_map(
         ).where(
             WbFbsSupply.project_id == project_id,
             WbFbsSupply.wb_supply_id.in_(ids),
+            contour_condition(WbFbsSupply.raw),
         )
     )
     return {supply_id: anchor for supply_id, anchor in result.all() if anchor is not None}
@@ -1504,26 +1528,47 @@ def _pending_writeoff_conditions(project_id: int) -> list[Any]:
 
 
 def _active_links_subquery(project_id: int) -> Any:
-    """Подзапрос «склады продавца с активной привязкой» (для IN/NOT IN)."""
-    return select(WbFbsWarehouseLink.wb_warehouse_id).where(
-        WbFbsWarehouseLink.project_id == project_id,
-        WbFbsWarehouseLink.is_active == True,  # noqa: E712 — SQLAlchemy expression
+    """Подзапрос «склады продавца с активной привязкой К ЖИВОМУ складу» (для IN/NOT IN).
+
+    Мягко удалённый наш склад из привязки выпадает — канон домена
+    (`warehouse_service.get_linked_warehouse_ids`, DOMAIN_WB_FBS «Мягко
+    удалённый наш склад выпадает из привязок»). Без фильтра задание на склад
+    продавца, чья единственная привязка мертва, проходило выборку списания и
+    `_writeoff_locked` списывал В МЁРТВЫЙ остаток; в диагностике оно значилось
+    `no_stock` с пустыми остатками. Теперь такие задания честно уходят в
+    blocked/`no_link`.
+    """
+    return (
+        select(WbFbsWarehouseLink.wb_warehouse_id)
+        .join(Warehouse, Warehouse.id == WbFbsWarehouseLink.warehouse_id)
+        .where(
+            WbFbsWarehouseLink.project_id == project_id,
+            WbFbsWarehouseLink.is_active == True,  # noqa: E712 — SQLAlchemy expression
+            Warehouse.is_deleted == False,  # noqa: E712 — SQLAlchemy expression
+        )
     )
 
 
 async def _writeoff_context(
     db: AsyncSession, project_id: int, orders: list[WbFbsOrder]
 ) -> tuple[dict[int, list[int]], dict[tuple[int, int], int], dict[tuple[int, int], str]]:
-    """Батч-контекст списания: привязки складов и текущие остатки. Без N+1."""
+    """Батч-контекст списания: привязки складов и текущие остатки. Без N+1.
+
+    Мягко удалённые наши склады отфильтрованы (паритет с
+    `_active_links_subquery`): у склада продавца с живой И мёртвой привязкой
+    кандидатом списания остаётся только живая.
+    """
     wb_wh_ids = sorted({o.wb_warehouse_id for o in orders if o.wb_warehouse_id})
     links_by_wb: dict[int, list[int]] = {}
     if wb_wh_ids:
         links_result = await db.execute(
             select(WbFbsWarehouseLink.wb_warehouse_id, WbFbsWarehouseLink.warehouse_id)
+            .join(Warehouse, Warehouse.id == WbFbsWarehouseLink.warehouse_id)
             .where(
                 WbFbsWarehouseLink.project_id == project_id,
                 WbFbsWarehouseLink.is_active == True,  # noqa: E712
                 WbFbsWarehouseLink.wb_warehouse_id.in_(wb_wh_ids),
+                Warehouse.is_deleted == False,  # noqa: E712
             )
             .order_by(WbFbsWarehouseLink.id)
         )
@@ -1593,7 +1638,13 @@ async def writeoff_completed_orders(db: AsyncSession, project_id: int) -> int:
 
 
 async def _writeoff_locked(db: AsyncSession, project_id: int) -> int:
-    """Тело списания под локом (см. `writeoff_completed_orders`)."""
+    """Тело списания под локом (см. `writeoff_completed_orders`).
+
+    Привязки к мягко удалённым нашим складам НЕ считаются привязками
+    (`_active_links_subquery` / `_writeoff_context`): списывать в мёртвый
+    остаток нельзя — такие задания уходят в `blocked` и в диагностике
+    (`writeoff_issues`) видны как `no_link`, а не как ложный `no_stock`.
+    """
     # Задания, которые списать НЕЧЕМ, отсекаются в SQL, а не пропускаются в цикле.
     # Иначе они навсегда занимают голову очереди `LIMIT`: метку `written_off_at`
     # им никто не ставит, порядок по id — от старых к новым, и как только таких
@@ -1700,7 +1751,8 @@ async def _writeoff_locked(db: AsyncSession, project_id: int) -> int:
 # ─── Видимость незакрытых списаний ──────────────────────────────────────────
 
 
-async def writeoff_issues(db: AsyncSession, project_id: int) -> dict:
+@cached(prefix="fbs:orders", ttl=60)  # литерал: гейт ищет префикс регуляркой
+async def writeoff_issues(db: AsyncSession, project_id: int, *, kind: str = "writeoff_issues") -> dict:
     """Сводка «передано, но не списано» (`FbsWriteoffIssuesOut`) — агрегат по товару.
 
     Списание идемпотентно ретраится каждые 5 минут, но пока причина жива,
@@ -1708,17 +1760,29 @@ async def writeoff_issues(db: AsyncSession, project_id: int) -> dict:
     warning в логе воркера (прод 29.07: 145 заданий). Ручка делает отказ видимым.
 
     Причина (`reason`) — по приоритету: `no_card` (нет карточки товара) →
-    `no_link` (склад продавца не привязан к активному нашему; NULL-склад — тоже
-    сюда: `IN (подзапрос)` с NULL не матчится и в списание такое задание не
-    попадает никогда) → `no_stock` (всё привязано, но остатка нет — гвард «не в
-    минус» держит задание в очереди).
+    `no_link` (склад продавца не привязан к активному нашему ЖИВОМУ складу;
+    NULL-склад — тоже сюда: `IN (подзапрос)` с NULL не матчится и в списание
+    такое задание не попадает никогда; мягко удалённый склад из привязок
+    выпадает — см. `_active_links_subquery`) → `no_stock` (всё привязано, но
+    остатка не хватает — гвард «не в минус» держит задание в очереди).
+    Пост-классификация после обогащения: `no_stock` при `our_qty >= stuck`
+    (остатка хватает на все задания группы) — это `queued`, не проблема, а
+    очередь до ближайшего прогона; частичный дефицит (1 ≤ our_qty < stuck)
+    остаётся `no_stock` — он важнее.
 
     Агрегат по (склад продавца, товар, причина); строк наружу — не больше
-    `_WRITEOFF_ISSUES_MAX_ROWS` (по убыванию `stuck`), полный масштаб — в
-    `total_orders`, он считается ДО среза. Обогащение — батчами, без N+1.
-    `ff_loose` (россыпь зеркала ФФ по привязанным складам) отвечает на вопрос
-    «товар физически есть у провайдера?»: None — зеркала у привязанных складов
-    нет вовсе (сравнивать не с чем), число — сигнал, что наш ledger отстал.
+    `_WRITEOFF_ISSUES_MAX_ROWS` (по убыванию `stuck`), срез виден флагом
+    `truncated`; полный масштаб — в `total_orders`, он считается ДО среза.
+    Обогащение — батчами, без N+1. `ff_loose` (россыпь зеркала ФФ по
+    привязанным складам) отвечает на вопрос «товар физически есть у
+    провайдера?»: None — зеркала у привязанных складов нет вовсе (сравнивать
+    не с чем), число — сигнал, что наш ledger отстал.
+
+    Кэш: ключ строится из имён аргументов, поэтому `kind` — дискриминатор
+    (паттерн `warehouse_service._offices_cached`): без него ключ совпадал бы
+    с `warehouse_summary(db, project_id)` под тем же префиксом. `project_id`
+    в ключе есть всегда. Инвалидация — та же, что у списка заданий: все
+    мутации заданий гасят `CACHE_ORDERS`.
     """
     pending = _pending_writeoff_conditions(project_id)
     linked = _active_links_subquery(project_id)
@@ -1742,7 +1806,7 @@ async def writeoff_issues(db: AsyncSession, project_id: int) -> dict:
         or 0
     )
     if not total_orders:
-        return {"total_orders": 0, "rows": []}
+        return {"total_orders": 0, "rows": [], "truncated": False}
 
     grouped = await db.execute(
         select(
@@ -1758,11 +1822,14 @@ async def writeoff_issues(db: AsyncSession, project_id: int) -> dict:
         .where(*pending)
         .group_by(WbFbsOrder.wb_warehouse_id, WbFbsOrder.nomenclature_id, reason)
         .order_by(func.count().desc(), func.min(WbFbsOrder.created_at_wb).asc().nullslast())
-        .limit(_WRITEOFF_ISSUES_MAX_ROWS)
+        # +1 строка сверх капа — дешёвый детектор среза для флага `truncated`.
+        .limit(_WRITEOFF_ISSUES_MAX_ROWS + 1)
     )
     groups = grouped.all()
+    truncated = len(groups) > _WRITEOFF_ISSUES_MAX_ROWS
+    groups = groups[:_WRITEOFF_ISSUES_MAX_ROWS]
     if not groups:
-        return {"total_orders": total_orders, "rows": []}
+        return {"total_orders": total_orders, "rows": [], "truncated": False}
 
     wb_wh_ids = sorted({g.wb_warehouse_id for g in groups if g.wb_warehouse_id})
     nom_ids = sorted({g.nomenclature_id for g in groups if g.nomenclature_id})
@@ -1871,6 +1938,13 @@ async def writeoff_issues(db: AsyncSession, project_id: int) -> dict:
             if any(wid in mirror_wh for wid, _name in pairs):
                 ff_loose = sum(loose_map.get((wid, g.nomenclature_id), 0) for wid, _name in pairs)
         article, barcode = nom_info.get(g.nomenclature_id or 0, (None, None))
+        stuck = int(g.stuck or 0)
+        # Пост-классификация: остатка хватает на ВСЕ задания группы → это не
+        # алярм «нечем списать», а очередь до ближайшего 5-минутного прогона.
+        # Частичный дефицит (1 ≤ our_qty < stuck) важнее — остаётся no_stock.
+        reason_code = g.reason
+        if reason_code == _WRITEOFF_ISSUE_NO_STOCK and our_qty >= stuck:
+            reason_code = _WRITEOFF_ISSUE_QUEUED
         rows.append(
             {
                 "wb_warehouse_id": g.wb_warehouse_id,
@@ -1880,15 +1954,15 @@ async def writeoff_issues(db: AsyncSession, project_id: int) -> dict:
                 "nomenclature_id": g.nomenclature_id,
                 "article": article or g.order_article,
                 "barcode": barcode or g.order_barcode,
-                "stuck": int(g.stuck or 0),
+                "stuck": stuck,
                 "oldest_at": g.oldest_at,
                 "our_qty": our_qty,
                 "our_defect": our_defect,
                 "ff_loose": ff_loose,
-                "reason": g.reason,
+                "reason": reason_code,
             }
         )
-    return {"total_orders": total_orders, "rows": rows}
+    return {"total_orders": total_orders, "rows": rows, "truncated": truncated}
 
 
 __all__ = [
