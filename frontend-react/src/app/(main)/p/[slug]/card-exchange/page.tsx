@@ -33,8 +33,8 @@ const SORT_OPTIONS: { value: string; label: string }[] = [
 
 const OUR_MODES: { key: '' | CardExchangeOurMode; label: string; hint: string }[] = [
     { key: '', label: 'Вся биржа', hint: 'Все объявления биржи' },
-    { key: 'categories', label: 'Наши категории', hint: 'Объявления в предметах наших товаров' },
-    { key: 'exact', label: 'Точно наши', hint: 'Наши артикулы на бирже (скан выдачи)' },
+    { key: 'categories', label: 'Корневые категории', hint: 'Объявления в предметах наших товаров' },
+    { key: 'exact', label: 'Предмет', hint: 'Наши артикулы на бирже (скан выдачи)' },
 ];
 
 const VIEW_TABS: { key: 'grid' | 'list'; label: string }[] = [
@@ -241,6 +241,8 @@ export default function CardExchangePage() {
     };
 
     const visibleAds = demo ? DEMO_ADS : ads;
+    // В демо запросов нет — начальный loading=true не должен прятать карточки.
+    const busy = loading && !demo;
 
     const cartBtn = (ad: ShowcaseAd, compact = false) => {
         const inCart = cart.has(ad.ad_id);
@@ -316,20 +318,20 @@ export default function CardExchangePage() {
                     {scanNote && <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>{scanNote}</div>}
                     {actionError && <div className="glass-card" style={{ marginBottom: 12, color: 'var(--color-danger)' }}>{actionError}</div>}
 
-                    {loading && !demo && <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 32 }}>Загрузка…</div>}
-                    {error && !loading && !demo && (
+                    {busy && <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 32 }}>Загрузка…</div>}
+                    {error && !busy && !demo && (
                         <div className="glass-card" style={{ color: 'var(--color-danger)' }}>
                             {error} <button className="btn btn-sm btn-secondary" onClick={() => void load(true)}>Повторить</button>
                         </div>
                     )}
-                    {!loading && !error && visibleAds.length === 0 && (
+                    {!busy && !error && visibleAds.length === 0 && (
                         <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 48 }}>
                             Ничего не найдено. Измените фильтры или запрос.
                         </div>
                     )}
 
                     {/* Плитка */}
-                    {!loading && !error && visibleAds.length > 0 && view === 'grid' && (
+                    {!busy && !error && visibleAds.length > 0 && view === 'grid' && (
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14 }}>
                             {visibleAds.map(ad => (
                                 <div key={ad.ad_id} className="glass-card" style={{ display: 'flex', flexDirection: 'column', padding: 12, gap: 6 }}>
@@ -364,7 +366,7 @@ export default function CardExchangePage() {
                     )}
 
                     {/* Список — таблица в стиле «Управления рекламой» */}
-                    {!loading && !error && visibleAds.length > 0 && view === 'list' && (
+                    {!busy && !error && visibleAds.length > 0 && view === 'list' && (
                         <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
                             <div style={{ overflowX: 'auto' }}>
                                 <table className="data-table" style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>
@@ -412,7 +414,7 @@ export default function CardExchangePage() {
                         </div>
                     )}
 
-                    {!loading && !error && hasMore && (
+                    {!busy && !error && hasMore && (
                         <div style={{ textAlign: 'center', marginTop: 20 }}>
                             <button className="btn btn-secondary" onClick={() => void load(false)} disabled={loadingMore}>
                                 {loadingMore ? 'Загрузка…' : 'Показать ещё'}
