@@ -413,6 +413,18 @@ class WbPortalClient:
         data = await self._raw_post(AUTH_BASE + EXC_PREFIX + "/showcase/ads", body)
         return (data.get("data") or {}) if isinstance(data, dict) else {}
 
+    async def showcase_ad_details(self, ad_id: int) -> list[dict]:
+        """Детали объявления: `data.group[]` — товары группы (варианты одного объявления).
+
+        ЕДИНСТВЕННЫЙ источник предмета: в витрине (`showcase/ads`) предмета нет, а здесь
+        у каждого товара есть `meta.subjectName` (+ WB-категория `meta.category`). По
+        subjectName определяем корневую категорию из нашего справочника. Варианты группы
+        могут быть из разных предметов → у объявления бывает несколько категорий.
+        """
+        data = await self._raw_get(AUTH_BASE, f"{EXC_PREFIX}/showcase/ads/{ad_id}/details", {})
+        group = (data.get("data") or {}).get("group") if isinstance(data, dict) else None
+        return group if isinstance(group, list) else []
+
     async def exc_cart_get(self) -> dict:
         """Корзина биржи (группировка по продавцам): data{suppliers:[...], flags{...}}."""
         data = await self._raw_get(AUTH_BASE, EXC_PREFIX + "/cart", {})

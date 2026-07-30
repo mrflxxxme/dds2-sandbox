@@ -21,7 +21,7 @@ from backend.services.card_exchange import showcase as svc
 class FakeClient:
     """Заглушка WbPortalClient: подставные предметы/объявления, лог фильтров/курсоров."""
 
-    def __init__(self, *, subjects=None, pages=None, expired=False, portal_error=False):
+    def __init__(self, *, subjects=None, pages=None, expired=False, portal_error=False, ad_subjects=None):
         # subjects: [{"id","name"}]; pages: список страниц (каждая — список ad-dict WB-формы)
         self._subjects = subjects if subjects is not None else [
             {"id": 100, "name": "Компрессоры автомобильные", "category": ""},
@@ -29,6 +29,8 @@ class FakeClient:
             {"id": 200, "name": "Брюки", "category": ""},
         ]
         self._pages = pages if pages is not None else [[]]
+        # adID → предметы вариантов объявления (источник корневых категорий)
+        self._ad_subjects = ad_subjects or {}
         self._call = 0
         self.expired = expired
         self.portal_error = portal_error
@@ -51,6 +53,10 @@ class FakeClient:
         page = self._pages[self._call] if self._call < len(self._pages) else []
         self._call += 1
         return {"ads": page}
+
+    async def showcase_ad_details(self, ad_id):
+        names = self._ad_subjects.get(ad_id, [])
+        return [{"nmID": 1, "meta": {"subjectName": n}} for n in names]
 
     async def exc_cart_get(self):
         return {"suppliers": [], "flags": {"hasChangedPrice": False}}
@@ -80,6 +86,25 @@ def _ad(ad_id, nm_id, *, title="t", price=1000, rating=4.5, count=10, subject_ok
         "hasInCart": False,
         "isCardOwner": False,
     }
+
+
+@pytest.fixture(autouse=True)
+async def _clear_ad_subject_cache():
+    """Кэш предметов объявлений глобальный (Redis) — чистим, чтобы тесты не влияли друг на друга."""
+    from backend.cache import get_redis
+
+    async def _wipe():
+        try:
+            redis = await get_redis()
+            keys = await redis.keys(f"{svc._AD_SUBJ_PREFIX}*")
+            if keys:
+                await redis.delete(*keys)
+        except Exception:  # noqa: BLE001 — без Redis тесты всё равно проходят
+            pass
+
+    await _wipe()
+    yield
+    await _wipe()
 
 
 @pytest.fixture
@@ -242,6 +267,44 @@ async def test_cart_get(db_session, project, patch_client):
     patch_client(FakeClient())
     cart = await svc.get_cart(db_session, project.id)
     assert "suppliers" in cart
+
+
+def test_root_category_reverse_index():
+    assert cat_ref.root_category_for_subject("Компрессоры автомобильные") == "Автоаксессуары и дополнительное оборудование"
+    assert cat_ref.root_category_for_subject("Корректоры") == "Красота"
+    assert cat_ref.root_category_for_subject("Такого предмета нет") is None
+    # несколько предметов → уникальные категории
+    cats = cat_ref.root_categories_for_subjects(["Корректоры", "Компрессоры автомобильные", "Корректоры"])
+    assert cats == sorted(set(cats), key=cats.index)
+    assert "Красота" in cats and "Автоаксессуары и дополнительное оборудование" in cats
+
+
+async def test_showcase_marks_categories_and_ours(db_session, project, patch_client):
+    """Объявление получает корневые категории по предметам вариантов; наши — пересечение."""
+    await _add_nomenclature(db_session, project.id, barcode="bc-cat", nm_id=555, subject="Корректоры")
+    client = patch_client(FakeClient(
+        pages=[[_ad(10, 1), _ad(9, 2)]],
+        # у первого объявления два предмета из разных категорий, у второго — не наш
+        ad_subjects={10: ["Корректоры", "Компрессоры автомобильные"], 9: ["Компрессоры автомобильные"]},
+    ))
+    res = await svc.list_showcase(db_session, project.id, ShowcaseQuery())
+    first, second = res["ads"][0], res["ads"][1]
+    assert first["categories"] == sorted(first["categories"], key=first["categories"].index)
+    assert set(first["categories"]) == {"Красота", "Автоаксессуары и дополнительное оборудование"}
+    assert first["our_categories"] == ["Красота"]      # наши товары только в «Красоте»
+    assert second["our_categories"] == []              # пересечения с нашими нет
+    assert client.last_filter is not None
+
+
+async def test_showcase_category_enrich_survives_details_error(db_session, project, patch_client):
+    """Сбой деталей не роняет выдачу — объявление просто без категорий."""
+    class Boom(FakeClient):
+        async def showcase_ad_details(self, ad_id):
+            raise WbPortalError("details 500")
+
+    patch_client(Boom(pages=[[_ad(10, 1)]]))
+    res = await svc.list_showcase(db_session, project.id, ShowcaseQuery())
+    assert res["ads"][0]["categories"] == []
 
 
 # ─── сессия биржи: отдельный слот ────────────────────────────────────────────

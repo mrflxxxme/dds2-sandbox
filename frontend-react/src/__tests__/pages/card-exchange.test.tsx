@@ -31,7 +31,8 @@ function makeAd(over: Partial<ShowcaseAd> = {}): ShowcaseAd {
         ad_id: 1, nm_id: 100, imt_id: 101, title: 'Тестовая карточка', brand: 'BRND',
         supplier_name: 'ИП', imt_count: 3, stock_qty: 50, photo: 'http://x/1.webp',
         contact_countries: ['Китай'], is_kiz: false, total_price: 1000, rating: 4.8,
-        feedbacks_count: 10, has_in_cart: false, is_card_owner: false, is_ours: false, ...over,
+        feedbacks_count: 10, has_in_cart: false, is_card_owner: false, is_ours: false,
+        categories: [], our_categories: [], ...over,
     };
 }
 function makeResp(over: Partial<ShowcaseResponse> = {}): ShowcaseResponse {
@@ -137,9 +138,20 @@ describe('Страница «Биржа карточек»', () => {
         await waitFor(() => expect(getShowcase.mock.calls.at(-1)?.[0]).toMatchObject({ sort_order: 'asc' }));
     });
 
-    it('«наша» карточка помечена бейджем и мы её видим', async () => {
-        getShowcase.mockResolvedValue(makeResp({ ads: [makeAd({ is_ours: true })] }));
+    it('бейдж показывает нашу категорию, а при нескольких — «+N»', async () => {
+        getShowcase.mockResolvedValue(makeResp({
+            ads: [makeAd({ our_categories: ['Посуда и инвентарь', 'Красота'], categories: ['Посуда и инвентарь', 'Красота'] })],
+        }));
         render(<CardExchangePage />);
-        expect(await screen.findByText('Наша')).toBeInTheDocument();
+        expect(await screen.findByText('Посуда и инвентарь')).toBeInTheDocument();
+        expect(screen.getByText(/\+1/)).toBeInTheDocument();
+        expect(screen.queryByText('Наша')).toBeNull();
+    });
+
+    it('без наших категорий бейджа нет', async () => {
+        getShowcase.mockResolvedValue(makeResp({ ads: [makeAd({ our_categories: [] })] }));
+        render(<CardExchangePage />);
+        await screen.findByText('Тестовая карточка', { exact: false });
+        expect(screen.queryByText(/Подходит к наш/)).toBeNull();
     });
 });

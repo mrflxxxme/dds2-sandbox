@@ -28,6 +28,30 @@ def _mapping() -> dict[str, list[str]]:
     return {str(k): [str(x) for x in v] for k, v in data.items()}
 
 
+@lru_cache(maxsize=1)
+def _reverse_index() -> dict[str, str]:
+    """{имя предмета: корневая категория} — обратный индекс справочника.
+
+    Дерево чистое (каждый предмет ровно в одной категории), поэтому обратный индекс
+    однозначен. Нужен, чтобы по предмету объявления биржи (meta.subjectName из
+    showcase/ads/{id}/details) определить корневую категорию Дениса.
+    """
+    return {subject: category for category, subjects in _mapping().items() for subject in subjects}
+
+
+def root_category_for_subject(subject: str) -> str | None:
+    """Корневая категория предмета (None, если предмета нет в справочнике)."""
+    return _reverse_index().get((subject or "").strip())
+
+
+def root_categories_for_subjects(subjects: list[str]) -> list[str]:
+    """Уникальные корневые категории набора предметов, в порядке справочника."""
+    found = {root_category_for_subject(s) for s in subjects}
+    found.discard(None)
+    order = list(_mapping())
+    return sorted((c for c in found if c), key=order.index)
+
+
 def list_root_categories() -> list[dict]:
     """Корневые категории для селектора фильтра: [{"category", "subject_count"}] по имени.
 

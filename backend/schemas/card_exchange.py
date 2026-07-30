@@ -50,6 +50,10 @@ class ShowcaseAd(BaseModel):
     has_in_cart: bool = False
     is_card_owner: bool = False
     is_ours: bool = False  # nmID входит в нашу номенклатуру (подсветка «наша карточка»)
+    # Корневые категории объявления (по предметам его вариантов, справочник Дениса).
+    categories: list[str] = []
+    # Из них те, где есть НАШИ товары — их и показываем бейджем на карточке.
+    our_categories: list[str] = []
 
 
 class ShowcaseResponse(BaseModel):

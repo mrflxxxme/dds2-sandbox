@@ -8722,6 +8722,8 @@ export interface ShowcaseAd {
     has_in_cart: boolean;
     is_card_owner: boolean;
     is_ours: boolean;
+    categories: string[];
+    our_categories: string[];
 }
 
 export interface ShowcaseCursor {

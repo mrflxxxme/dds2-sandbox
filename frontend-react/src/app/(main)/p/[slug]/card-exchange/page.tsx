@@ -67,24 +67,41 @@ function Segmented<T extends string>({ tabs, value, onChange }: {
 
 const money = (v: number | null) => (v == null ? '—' : `${formatNumber(Number(v), 0)} ₽`);
 
+/** Бейдж «к какой нашей корневой категории подходит объявление».
+ *  Категорий может быть несколько (у вариантов группы разные предметы) — показываем
+ *  первую и «+N», полный список — в подсказке при наведении. */
+function CategoryBadge({ ad, style }: { ad: ShowcaseAd; style?: React.CSSProperties }) {
+    const cats = ad.our_categories?.length ? ad.our_categories : [];
+    if (!cats.length) return null;
+    const rest = cats.length - 1;
+    return (
+        <span className="badge badge-success" style={{ fontSize: 10.5, maxWidth: '100%', ...style }}
+            title={cats.length > 1 ? `Подходит к нашим категориям:\n· ${cats.join('\n· ')}` : `Подходит к нашей категории: ${cats[0]}`}>
+            <span style={{ display: 'inline-block', maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'bottom' }}>
+                {cats[0]}
+            </span>{rest > 0 ? ` +${rest}` : ''}
+        </span>
+    );
+}
+
 /** Демо-наполнение для работы над вёрсткой, когда доступа к бирже нет.
  *  ТОЛЬКО в dev: на проде без доступа показывается пустое состояние, а не выдуманные карточки. */
 const IS_DEV = process.env.NODE_ENV === 'development';
 
 const DEMO_ADS: ShowcaseAd[] = [
-    ['Компрессор автомобильный 12V, 150 PSI', 'AUTOPROFI', 'ИП Смирнов А. В.', 148_000, 4.8, 31_204, 393, 3, ['Китай'], true],
-    ['Насос автомобильный электрический', 'CARFORT', 'ООО «Карфорт»', 96_500, 4.7, 12_880, 46, 1, ['Китай'], false],
-    ['Менажница деревянная 30 см, бук', 'Kucher`s', 'ИП Кучеров Д. С.', 1_222_050, 4.9, 29_339, 83, 30, ['Российская Федерация'], false],
-    ['Наушники проводные с микрофоном 3,5 Jack', 'VOLGA MARKET', 'ИП Жуков Д. А.', 106_200, 4.6, 20_341, 124, 14, ['Китай'], false],
-    ['Органайзер для косметики с зеркалом', 'Opt-Family', 'ООО «Опт-Фэмили»', 601_042, 4.9, 32_451, 42, 2, null, false],
-    ['Светодиодная лента RGB 5 м с пультом', 'Lentа Light', 'ИП Орлов П. Н.', 1_358_031, 4.7, 45_277, 51, 3, null, true],
-    ['Кухонные весы электронные до 10 кг', 'EcoFit home', 'ООО «ЭкоФит»', 1_624_767, 4.8, 40_633, 47, 2, ['Китай'], false],
-    ['Набор ключей комбинированных 12 шт', 'ToolMaster', 'ИП Белов И. И.', 254_300, 4.6, 8_412, 0, 1, ['Китай'], false],
-    ['База под макияж выравнивающая', 'JOMTAM', 'ООО «Джомтам»', 10_031_371, 4.9, 156_020, 31_371, 5, ['Китай'], false],
-    ['Носки набор чёрные высокие 10 пар', 'Leora', 'ИП Леонова О. К.', 1_280_000, 4.8, 64_101, 0, 8, null, false],
-    ['Аэрогриль 12 л с таймером', 'HomeChef', 'ООО «ХоумШеф»', 2_140_500, 4.5, 5_902, 212, 4, ['Китай'], false],
-    ['Термокружка 500 мл, нержавейка', 'DrinkGo', 'ИП Гусев Р. А.', 480_900, 4.7, 18_744, 640, 6, ['Китай'], false],
-].map(([title, brand, supplier, price, rating, feedbacks, stock, variants, countries, ours], i) => ({
+    ['Компрессор автомобильный 12V, 150 PSI', 'AUTOPROFI', 'ИП Смирнов А. В.', 148_000, 4.8, 31_204, 393, 3, ['Китай'], ['Автоаксессуары и дополнительное оборудование']],
+    ['Насос автомобильный электрический', 'CARFORT', 'ООО «Карфорт»', 96_500, 4.7, 12_880, 46, 1, ['Китай'], ['Автоаксессуары и дополнительное оборудование', 'Автозапчасти']],
+    ['Менажница деревянная 30 см, бук', 'Kucher`s', 'ИП Кучеров Д. С.', 1_222_050, 4.9, 29_339, 83, 30, ['Российская Федерация'], ['Посуда и инвентарь']],
+    ['Наушники проводные с микрофоном 3,5 Jack', 'VOLGA MARKET', 'ИП Жуков Д. А.', 106_200, 4.6, 20_341, 124, 14, ['Китай'], []],
+    ['Органайзер для косметики с зеркалом', 'Opt-Family', 'ООО «Опт-Фэмили»', 601_042, 4.9, 32_451, 42, 2, null, ['Красота']],
+    ['Светодиодная лента RGB 5 м с пультом', 'Lentа Light', 'ИП Орлов П. Н.', 1_358_031, 4.7, 45_277, 51, 3, null, ['Электроинструмент и оборудование', 'Строительные материалы', 'Автоаксессуары и дополнительное оборудование']],
+    ['Кухонные весы электронные до 10 кг', 'EcoFit home', 'ООО «ЭкоФит»', 1_624_767, 4.8, 40_633, 47, 2, ['Китай'], ['Посуда и инвентарь']],
+    ['Набор ключей комбинированных 12 шт', 'ToolMaster', 'ИП Белов И. И.', 254_300, 4.6, 8_412, 0, 1, ['Китай'], ['Ручной инструмент и оснастка']],
+    ['База под макияж выравнивающая', 'JOMTAM', 'ООО «Джомтам»', 10_031_371, 4.9, 156_020, 31_371, 5, ['Китай'], ['Красота']],
+    ['Носки набор чёрные высокие 10 пар', 'Leora', 'ИП Леонова О. К.', 1_280_000, 4.8, 64_101, 0, 8, null, []],
+    ['Аэрогриль 12 л с таймером', 'HomeChef', 'ООО «ХоумШеф»', 2_140_500, 4.5, 5_902, 212, 4, ['Китай'], ['Посуда и инвентарь']],
+    ['Термокружка 500 мл, нержавейка', 'DrinkGo', 'ИП Гусев Р. А.', 480_900, 4.7, 18_744, 640, 6, ['Китай'], ['Посуда и инвентарь']],
+].map(([title, brand, supplier, price, rating, feedbacks, stock, variants, countries, cats], i) => ({
     ad_id: 900_001 + i,
     nm_id: 240_000_000 + i * 137,
     imt_id: 2_880_000_000 + i,
@@ -101,7 +118,9 @@ const DEMO_ADS: ShowcaseAd[] = [
     feedbacks_count: feedbacks as number,
     has_in_cart: false,
     is_card_owner: false,
-    is_ours: ours as boolean,
+    is_ours: (cats as string[]).length > 0,
+    categories: cats as string[],
+    our_categories: cats as string[],
 }));
 
 export default function CardExchangePage() {
@@ -368,9 +387,7 @@ export default function CardExchangePage() {
                                                 {formatNumber(ad.imt_count!, 0)} вариантов
                                             </span>
                                         )}
-                                        {ad.is_ours && (
-                                            <span className="badge badge-success" style={{ position: 'absolute', right: 8, top: 8, fontSize: 10.5 }}>Наша</span>
-                                        )}
+                                        <CategoryBadge ad={ad} style={{ position: 'absolute', right: 8, top: 8 }} />
                                     </div>
                                     <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--color-text)' }}>{money(ad.total_price)}</div>
                                     <div style={{ fontSize: 12.5, color: 'var(--color-text)', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
@@ -418,7 +435,7 @@ export default function CardExchangePage() {
                                                     <div style={{ fontWeight: 600 }}>{ad.title ?? '—'}</div>
                                                     <div style={{ fontSize: 11, color: '#6b7280' }}>
                                                         {ad.brand ?? '—'}{ad.nm_id ? ` · ${ad.nm_id}` : ''}
-                                                        {ad.is_ours && <span className="badge badge-success" style={{ marginLeft: 6, fontSize: 10 }}>наша</span>}
+                                                        <CategoryBadge ad={ad} style={{ marginLeft: 6 }} />
                                                     </div>
                                                 </td>
                                                 <td style={{ ...tdLeft, whiteSpace: 'normal' }}>{ad.supplier_name ?? '—'}</td>
