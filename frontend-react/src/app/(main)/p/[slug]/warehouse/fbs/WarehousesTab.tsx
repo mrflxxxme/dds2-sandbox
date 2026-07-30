@@ -188,6 +188,13 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
     const [pct, setPct] = useState(String(num(wh.safety_stock_pct)));
     const [abs, setAbs] = useState(String(wh.safety_stock_abs ?? 0));
     const [maxQty, setMaxQty] = useState(String(wh.max_qty_per_sku ?? 0));
+    /**
+     * Авто-учёт сборки FBS: зеркалим сборку, которую ведёт WMS склада, учётными
+     * заявками kind=fbs. Наша настройка (WB не трогает) → шлётся ОТДЕЛЬНЫМ
+     * PATCH сразу по клику, мимо «Сохранить настройки» и 409-гейта зеркала.
+     */
+    const [autoAssembly, setAutoAssembly] = useState(wh.auto_assembly ?? false);
+    const [autoAsmSaving, setAutoAsmSaving] = useState(false);
     const [saving, setSaving] = useState(false);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
@@ -222,8 +229,30 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
         setPct(String(num(wh.safety_stock_pct)));
         setAbs(String(wh.safety_stock_abs ?? 0));
         setMaxQty(String(wh.max_qty_per_sku ?? 0));
+        setAutoAssembly(wh.auto_assembly ?? false);
     }, [wh.is_active, wh.mode, wh.stock_source, wh.safety_stock_pct, wh.safety_stock_abs,
-        wh.max_qty_per_sku]);
+        wh.max_qty_per_sku, wh.auto_assembly]);
+
+    /**
+     * Тумблер «Авто-учёт сборки FBS» — не рискованная настройка (в WB ничего
+     * не пишет), без confirm: оптимистично переключаем, при ошибке откатываем.
+     */
+    const handleAutoAssemblyToggle = async (next: boolean) => {
+        const prev = autoAssembly;
+        setAutoAssembly(next);
+        setAutoAsmSaving(true);
+        setError('');
+        try {
+            await api.updateFbsWarehouseSettings(wh.wb_warehouse_id, { auto_assembly: next });
+            onToast(next ? 'Авто-учёт сборки FBS включён' : 'Авто-учёт сборки FBS выключен');
+            onReload();
+        } catch (e: unknown) {
+            setAutoAssembly(prev);
+            setError(e instanceof Error ? e.message : 'Ошибка сохранения авто-учёта сборки');
+        } finally {
+            setAutoAsmSaving(false);
+        }
+    };
 
     const doSave = async (force = false) => {
         setSaving(true);
@@ -499,6 +528,27 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
                           + 'В WB не уходит ничего.'
                         : 'Остатки уезжают в кабинет: WB начнёт продавать по нашим цифрам.'}
                     {' '}Режим применяется после «Сохранить настройки».
+                </div>
+            </div>
+
+            {/* Авто-учёт сборки FBS — зеркалим сборку WMS учётными заявками */}
+            <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Авто-учёт сборки FBS</div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                    <input
+                        type="checkbox"
+                        checked={autoAssembly}
+                        disabled={autoAsmSaving}
+                        onChange={e => handleAutoAssemblyToggle(e.target.checked)}
+                    />
+                    Зеркалить сборку ФФ учётными заявками
+                    {autoAsmSaving && (
+                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>сохранение…</span>
+                    )}
+                </label>
+                <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
+                    WMS фулфилмента сам ведёт сборку по FBS-заказам — система зеркалит её
+                    учётными заявками (одна на поставку WB). Применяется сразу, в WB ничего не пишет.
                 </div>
             </div>
 

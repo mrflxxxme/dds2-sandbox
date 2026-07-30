@@ -9,9 +9,10 @@ import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchModal } from '@/components/FfMismatchModal';
 import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
-import type { AssemblyBulkStatus, AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, FfLinkInfo, SourceVehicleOption, Warehouse, WbSupplySyncStatus } from '@/types/api';
+import type { AssemblyBulkStatus, AssemblyDraft, AssemblyKind, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, FfLinkInfo, SourceVehicleOption, Warehouse, WbSupplySyncStatus } from '@/types/api';
 import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
 import { ASSEMBLY_STATUS_MAP } from '@/lib/assembly-status';
+import { KIND_BADGE_CLASS, KIND_FILTER_OPTIONS, KIND_LABEL, assemblyKindOf } from '@/lib/assembly-kind';
 import CreatedRequestsModal, { type CreatedRequestRow } from './distribute/components/CreatedRequestsModal';
 
 // ─── Status config ──────────────────────────────────────────────────────────
@@ -100,6 +101,10 @@ const isBulkDeletable = (status: string): boolean => BULK_DELETABLE_STATUSES.has
 // Выбор строки в списке (чекбокс) — надмножество удаляемых + PRE_DISTRIBUTED, чтобы
 // дубли экрана «Распределить машину» можно было выделить и объединить кнопкой «🔗».
 const isRowSelectable = (status: string): boolean => isBulkDeletable(status) || status === 'PRE_DISTRIBUTED';
+// Учётные заявки FBS (kind=fbs) ведёт джоб: чекбокс выбора и все массовые
+// операции (удаление / статусы / merge / WB-занос) для них закрыты.
+const isRowSelectableRow = (row: AssemblyRequest): boolean =>
+    assemblyKindOf(row.kind) !== 'fbs' && isRowSelectable(row.status);
 
 const STATUS_OPTIONS_FILTER: { value: string; label: string }[] = [
     { value: '', label: 'Все статусы' },
@@ -144,6 +149,19 @@ function StatusBadge({
     const canEdit = EDITABLE_STATUSES.includes(item.status);
     const colorClass = STATUS_COLORS[item.status] || 'bg-slate-100 text-slate-700 border-slate-200';
     const canDelete = item.status === 'CANCELLED' || item.status === 'PENDING';
+
+    // Учётная заявка FBS: статус двигает джоб — только читаем, без селекта,
+    // «Отгрузить» и корзины.
+    if (assemblyKindOf(item.kind) === 'fbs') {
+        return (
+            <span
+                className={`inline-block text-xs font-semibold rounded-full py-1.5 px-3 border ${colorClass}`}
+                title="Ведётся автоматически: статус обновляет синк поставок FBS"
+            >
+                {status.label}
+            </span>
+        );
+    }
 
     if (!canEdit) {
         return (
@@ -489,6 +507,8 @@ export default function AssemblyListPage() {
     // '' | pre_dist | prebooking | plain | `veh:<CostOrder.id>` (конкретная машина)
     // | `draft:<draft_id>` (заявки конкретного черновика).
     const [sourceFilter, setSourceFilter] = useState<string>('');
+    // Тип заявки: '' — все, fbo — операционные, fbs — учётные зеркала сборки ФФ.
+    const [kindFilter, setKindFilter] = useState<'' | AssemblyKind>('');
     const [sourceVehicles, setSourceVehicles] = useState<SourceVehicleOption[]>([]);
 
     // ─── Персист фильтров ───────────────────────────────────────────────
@@ -520,6 +540,7 @@ export default function AssemblyListPage() {
             setFfLinkFilter(f.ffLinkFilter === 'none' || f.ffLinkFilter === 'linked' ? f.ffLinkFilter : '');
             setJointOnly(f.jointOnly === true);
             setSourceFilter(typeof f.sourceFilter === 'string' ? f.sourceFilter : '');
+            setKindFilter(f.kindFilter === 'fbo' || f.kindFilter === 'fbs' ? f.kindFilter : '');
         } catch { /* SSR / битый JSON — просто стартуем с дефолтов */ }
         // Диплинк прошлого проекта не должен глушить персист нового.
         sourceFromDeeplink.current = false;
@@ -602,6 +623,7 @@ export default function AssemblyListPage() {
                     : undefined,
                 source_vehicle_id: sourceFilter.startsWith('veh:') ? Number(sourceFilter.slice(4)) : undefined,
                 draft_id: sourceFilter.startsWith('draft:') ? Number(sourceFilter.slice(6)) : undefined,
+                kind: kindFilter || undefined,
                 limit: LOAD_LIMIT,
             });
             if (seq !== loadSeq.current) return;
@@ -613,7 +635,7 @@ export default function AssemblyListPage() {
         } finally {
             if (seq === loadSeq.current) setLoading(false);
         }
-    }, [warehouseId, statusFilter, view, search, dateFrom, dateTo, brandFilter, ffLinkFilter, jointOnly, sourceFilter]);
+    }, [warehouseId, statusFilter, view, search, dateFrom, dateTo, brandFilter, ffLinkFilter, jointOnly, sourceFilter, kindFilter]);
 
     // Не грузим до восстановления фильтров — иначе первый запрос уйдёт с дефолтами
     // и список моргнёт «все заявки» → «отфильтрованные».
@@ -626,17 +648,17 @@ export default function AssemblyListPage() {
         try {
             localStorage.setItem(FILTERS_KEY, JSON.stringify({
                 warehouseId, statusFilter, view, dateFrom, dateTo,
-                search, brandFilter, ffLinkFilter, jointOnly,
+                search, brandFilter, ffLinkFilter, jointOnly, kindFilter,
                 sourceFilter: sourceFromDeeplink.current ? '' : sourceFilter,
             }));
         } catch { /* приватный режим / переполнение quota — не критично */ }
     }, [FILTERS_KEY, warehouseId, statusFilter, view, dateFrom, dateTo,
-        search, brandFilter, ffLinkFilter, jointOnly, sourceFilter]);
+        search, brandFilter, ffLinkFilter, jointOnly, sourceFilter, kindFilter]);
 
     /** Активен ли хоть один фильтр (view='active' — дефолт, не считается) */
     const hasActiveFilters = warehouseId !== '' || statusFilter !== '' || view !== 'active'
         || dateFrom !== '' || dateTo !== '' || search !== '' || brandFilter !== ''
-        || ffLinkFilter !== '' || jointOnly || sourceFilter !== '';
+        || ffLinkFilter !== '' || jointOnly || sourceFilter !== '' || kindFilter !== '';
 
     const resetFilters = useCallback(() => {
         setWarehouseId('');
@@ -651,6 +673,7 @@ export default function AssemblyListPage() {
         setJointOnly(false);
         sourceFromDeeplink.current = false;
         setSourceFilter('');
+        setKindFilter('');
         // Ключ не чистим: save-эффект тут же перезапишет его дефолтами.
     }, []);
 
@@ -825,7 +848,11 @@ export default function AssemblyListPage() {
         if (rows.length > 0) setCreateExternal(rows);
     }, [items, selectedIds]);
     const [bulkDeleting, setBulkDeleting] = useState(false);
-    const deletableCount = useMemo(() => items.filter(i => isBulkDeletable(i.status)).length, [items]);
+    // kind=fbs не удаляем: заявка — учётное зеркало поставки FBS, её ведёт джоб.
+    const deletableCount = useMemo(
+        () => items.filter(i => assemblyKindOf(i.kind) !== 'fbs' && isBulkDeletable(i.status)).length,
+        [items],
+    );
 
     // Уникальные товары без веса, участвующие в сборках (по всем загруженным заявкам) —
     // для баннера «заполнить вес». Имя резолвим из позиций той же заявки.
@@ -855,7 +882,9 @@ export default function AssemblyListPage() {
         });
     }, []);
     const selectAllDeletable = useCallback(() => {
-        setSelectedIds(new Set(items.filter(i => isBulkDeletable(i.status)).map(i => i.id)));
+        setSelectedIds(new Set(
+            items.filter(i => assemblyKindOf(i.kind) !== 'fbs' && isBulkDeletable(i.status)).map(i => i.id),
+        ));
     }, [items]);
 
     // Экспорт «Сборочный лист»: одна строка = один товар в заявке (по всему
@@ -1025,7 +1054,7 @@ export default function AssemblyListPage() {
             // Вся ячейка — большая кликабельная зона переключения, клик НЕ открывает
             // заявку (stopPropagation), чтобы не «проваливаться» при выборе галочек.
             render: (_v, row: AssemblyRequest) => (
-                isRowSelectable(row.status) ? (
+                isRowSelectableRow(row) ? (
                     <div
                         onClick={(e) => { e.stopPropagation(); toggleSelect(row.id); }}
                         title="Выбрать (удаление / объединение)"
@@ -1047,6 +1076,15 @@ export default function AssemblyListPage() {
             render: (_v, row: AssemblyRequest) => (
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 500 }}>{row.number}</span>
+                    {assemblyKindOf(row.kind) === 'fbs' && (
+                        <span
+                            className={`badge ${KIND_BADGE_CLASS.fbs}`}
+                            style={{ fontSize: 11 }}
+                            title="Учётная заявка FBS — зеркало сборки, которую ведёт сам фулфилмент (одна на поставку WB); статусы обновляются автоматически"
+                        >
+                            {KIND_LABEL.fbs}
+                        </span>
+                    )}
                     {row.is_pre_distribution ? (
                         <span
                             className="badge badge-info"
@@ -1097,9 +1135,26 @@ export default function AssemblyListPage() {
         },
         {
             key: 'ff', label: 'Заявка ФФ',
-            getValue: (row: AssemblyRequest) => ffLinksOf(row).map(l => l.ff_request_number || `#${l.ff_request_id}`).join(', '),
+            getValue: (row: AssemblyRequest) => assemblyKindOf(row.kind) === 'fbs'
+                ? (row.fbs_supply_id || '')
+                : ffLinksOf(row).map(l => l.ff_request_number || `#${l.ff_request_id}`).join(', '),
             // migfull/«Натали»: на одну сборку может быть несколько ФФ-заявок → показываем все
             render: (_v, row: AssemblyRequest) => {
+                // kind=fbs: вместо заявки ФФ — ярлык поставки FBS (WB-GI-…), ссылка
+                // в раздел FBS (вкладка «Поставки» открывается по умолчанию).
+                if (assemblyKindOf(row.kind) === 'fbs') {
+                    if (!row.fbs_supply_id) return '—';
+                    return (
+                        <Link
+                            href={`/p/${slug}/warehouse/fbs?supply=${encodeURIComponent(row.fbs_supply_id)}`}
+                            onClick={(e) => e.stopPropagation()}
+                            title="Открыть раздел FBS (поставки)"
+                            style={{ color: 'var(--color-accent)', fontWeight: 500, fontSize: 13 }}
+                        >
+                            {row.fbs_supply_id}
+                        </Link>
+                    );
+                }
                 const links = ffLinksOf(row);
                 if (!links.length) return '—';
                 return (
@@ -1128,7 +1183,9 @@ export default function AssemblyListPage() {
                     </span>
                 );
             },
-            exportValue: (row: AssemblyRequest) => ffLinksOf(row).map(l => l.ff_request_number || `#${l.ff_request_id}`).join(', '),
+            exportValue: (row: AssemblyRequest) => assemblyKindOf(row.kind) === 'fbs'
+                ? (row.fbs_supply_id || '')
+                : ffLinksOf(row).map(l => l.ff_request_number || `#${l.ff_request_id}`).join(', '),
         },
         {
             key: 'brands', label: 'Бренд',
@@ -1215,7 +1272,10 @@ export default function AssemblyListPage() {
         },
         {
             key: 'pallets_count', label: 'Палеты', align: 'right',
-            render: (_v, row: AssemblyRequest) => (
+            // kind=fbs: паллет/машин/веса у учётного зеркала нет — прочерк.
+            render: (_v, row: AssemblyRequest) => assemblyKindOf(row.kind) === 'fbs' ? (
+                <span style={{ color: 'var(--color-text-muted)' }}>—</span>
+            ) : (
                 <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6, whiteSpace: 'nowrap' }}>
                     <EditableCell
                         value={row.pallets_count}
@@ -1234,19 +1294,21 @@ export default function AssemblyListPage() {
                     )}
                 </span>
             ),
-            exportValue: (row: AssemblyRequest) => row.pallets_count,
+            exportValue: (row: AssemblyRequest) => assemblyKindOf(row.kind) === 'fbs' ? '' : row.pallets_count,
         },
         {
             key: 'total_weight_kg', label: 'Общий вес', align: 'right',
             getValue: (row: AssemblyRequest) => row.total_weight_kg || 0,
-            render: (_v, row: AssemblyRequest) => (
+            render: (_v, row: AssemblyRequest) => assemblyKindOf(row.kind) === 'fbs' ? (
+                <span style={{ color: 'var(--color-text-muted)' }}>—</span>
+            ) : (
                 <WeightCell
                     row={row}
                     editable={EDITABLE_STATUSES.includes(row.status)}
                     onSave={(val) => handleWeightChange(row, val)}
                 />
             ),
-            exportValue: (row: AssemblyRequest) => row.total_weight_kg || 0,
+            exportValue: (row: AssemblyRequest) => assemblyKindOf(row.kind) === 'fbs' ? '' : (row.total_weight_kg || 0),
         },
         {
             key: 'estimated_ready_date', label: 'Дата готовности',
@@ -1254,7 +1316,7 @@ export default function AssemblyListPage() {
             render: (_v, row: AssemblyRequest) => (
                 <EditableDateCell
                     value={row.estimated_ready_date}
-                    editable={EDITABLE_STATUSES.includes(row.status)}
+                    editable={EDITABLE_STATUSES.includes(row.status) && assemblyKindOf(row.kind) !== 'fbs'}
                     onSave={(val) => handleDateChange(row, val)}
                 />
             ),
@@ -1499,6 +1561,18 @@ export default function AssemblyListPage() {
                         </select>
                     </div>
                     <div className="form-group">
+                        <select
+                            className="form-input"
+                            value={kindFilter}
+                            onChange={e => { setKindFilter(e.target.value as '' | AssemblyKind); }}
+                            title="Тип заявки: FBO — операционная заявка логиста, FBS — учётное зеркало сборки фулфилмента (ведётся автоматически)"
+                        >
+                            {KIND_FILTER_OPTIONS.map(o => (
+                                <option key={o.value} value={o.value}>{o.label}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div className="form-group">
                         <input
                             className="form-input"
                             type="date"
@@ -1559,7 +1633,7 @@ export default function AssemblyListPage() {
                         // В режиме выбора (есть отмеченные) клик по строке переключает
                         // её галочку и НЕ открывает заявку — чтобы выбор не слетал.
                         if (selectedIds.size > 0) {
-                            if (isRowSelectable(row.status)) toggleSelect(row.id);
+                            if (isRowSelectableRow(row)) toggleSelect(row.id);
                             return;
                         }
                         router.push(`/p/${slug}/warehouse/assembly/${row.id}`);

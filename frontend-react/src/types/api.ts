@@ -1829,6 +1829,13 @@ export interface FboAuditRevertResponse {
 
 export type AssemblyStatus = 'PENDING' | 'PRE_DISTRIBUTED' | 'IN_PROGRESS' | 'READY' | 'VEHICLE_ASSIGNED' | 'SHIPPED' | 'DELIVERED' | 'RETURNED' | 'CLOSED' | 'CANCELLED';
 
+/**
+ * Тип заявки на сборку (зеркало backend/schemas/assembly.py::ALLOWED_ASSEMBLY_KINDS):
+ * fbo — операционная заявка логиста; fbs — учётное зеркало сборки ФФ по поставке
+ * FBS WB (ведёт джоб: руками не редактируется, машины/паллет/веса нет).
+ */
+export type AssemblyKind = 'fbo' | 'fbs';
+
 export type PackageType = 'BOX' | 'MONOPALLET' | 'SUPERSAFE';
 
 export interface AssemblyRequestItem {
@@ -2047,6 +2054,14 @@ export interface AssemblyRequest {
   warehouse_name?: string;
   number: string;
   status: AssemblyStatus;
+  /**
+   * fbo — операционная заявка логиста; fbs — учётное зеркало сборки ФФ по
+   * поставке FBS (ведёт джоб). Бэк шлёт всегда (дефолт 'fbo'); optional —
+   * страховка окна деплоя старого бэка: отсутствие поля читать как 'fbo'.
+   */
+  kind?: AssemblyKind;
+  /** Поставка FBS (WB-GI-…) — источник зеркала kind=fbs; у fbo всегда null. */
+  fbs_supply_id?: string | null;
   wb_fbo_supply_id: number | null;
   wb_supply_name?: string;
   wb_warehouse_name?: string;
@@ -8117,6 +8132,12 @@ export interface FbsWarehouse {
    * (позиция с живым остатком на складах WB не транслируется).
    */
   fbo_max_qty?: number | null;
+  /**
+   * Авто-учёт сборки FBS: заявки kind=fbs заводит и ведёт джоб (одна на
+   * поставку WB-GI), сток/резерв они не трогают. Бэк шлёт всегда (дефолт
+   * false); optional — страховка окна деплоя старого бэка.
+   */
+  auto_assembly?: boolean;
   synced_at?: string | null;
   links: FbsWarehouseLink[];
 }
@@ -8146,6 +8167,12 @@ export interface FbsWarehouseSettingsPayload {
    * null в теле означал бы «не передано», поэтому «снять» кодируется -1.
    */
   fbo_max_qty?: number | null;
+  /**
+   * Авто-учёт сборки FBS: WMS склада сам ведёт сборку по FBS-заказам — мы
+   * зеркалим её учётными заявками kind=fbs (одна на поставку WB-GI).
+   * НЕ под 409-гейтом «зеркало выше учёта» — шлётся отдельным PATCH.
+   */
+  auto_assembly?: boolean | null;
   /**
    * Подтверждение рискованной комбинации «translate + ff_mirror», когда
    * зеркало ФФ выше нашего учёта: без force сервис отвечает 409 с цифрами
