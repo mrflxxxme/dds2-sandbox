@@ -8506,6 +8506,14 @@ export interface FbsOrder {
    * СЦ; у прочих фаз и без якоря — null.
    */
   transit_days?: number | null;
+  /**
+   * Фаза ПОСТАВКИ задания — для кабинетного статуса строки: закрыта ли
+   * (`done`) и отсканирован ли QR (`scan_dt`). Без них строка «complete +
+   * waiting» читалась как противоречие: закрыто у нас ≠ сдано WB. Нет
+   * поставки / зеркало её не знает → null/null.
+   */
+  supply_done?: boolean | null;
+  supply_scan_dt?: string | null;
 }
 
 export interface FbsOrderListResponse {
@@ -8526,6 +8534,11 @@ export interface FbsOrderListResponse {
    * (синк опрашивает не всё), и без потолка счётчик копил бы мёртвые строки.
    */
   in_delivery_stuck_count: number;
+  /**
+   * «Завершённые» кабинета WB: complete, дошедшее до покупателя (sold/defect).
+   * История, не очередь — окно периода применяется как к прочим фазам доставки.
+   */
+  delivered_count: number;
 }
 
 /** Очередь одного склада продавца по фазам жизни задания. */

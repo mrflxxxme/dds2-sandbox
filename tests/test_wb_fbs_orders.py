@@ -1647,6 +1647,100 @@ async def test_warehouse_summary_counts_stuck_without_period(db_session, env):
     assert row["in_delivery_stuck"] == 1
 
 
+# ─── Завершённые (delivered) и фаза поставки в строках ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_delivered_count_and_filter(db_session, env):
+    """«Завершённые» = complete + sold/defect; waiting не считается; окно уважается.
+
+    Это ИСТОРИЯ, а не очередь — в отличие от `in_delivery_stuck` период страницы
+    режет и счётчик, и выдачу (симметрично `sorted`).
+    """
+    from backend.models.wb_fbs import FBS_DELIVERED_STATUS
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    await _seed_order(
+        db_session, env.project_id, 9900, supplier_status=done, wb_status="sold",
+        created_at_wb=now - timedelta(days=1),
+    )
+    await _seed_order(
+        db_session, env.project_id, 9901, supplier_status=done, wb_status="defect",
+        created_at_wb=now - timedelta(days=2),
+    )
+    # Ещё едет — НЕ завершённое.
+    await _seed_order(
+        db_session, env.project_id, 9902, supplier_status=done, wb_status="waiting",
+        created_at_wb=now - timedelta(days=1),
+    )
+    await _seed_order(db_session, env.project_id, 9903, created_at_wb=now - timedelta(days=1))
+    # Завершённое ВНЕ окна периода — история, окно его отрезает.
+    await _seed_order(
+        db_session, env.project_id, 9904, supplier_status=done, wb_status="sold",
+        created_at_wb=now - timedelta(days=120),
+    )
+
+    listed = await orders_service.list_orders(db_session, env.project_id)
+    assert listed["delivered_count"] == 3  # sold + defect + старое sold
+
+    delivered = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_DELIVERED_STATUS
+    )
+    assert delivered["total"] == 3
+    assert {o["wb_order_id"] for o in delivered["items"]} == {9900, 9901, 9904}
+
+    day = date.today()
+    windowed = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_DELIVERED_STATUS,
+        date_from=day - timedelta(days=30), date_to=day,
+    )
+    assert windowed["delivered_count"] == 2
+    assert windowed["total"] == 2
+    assert {o["wb_order_id"] for o in windowed["items"]} == {9900, 9901}
+
+
+@pytest.mark.asyncio
+async def test_rows_carry_supply_phase(db_session, env):
+    """Каждая строка несёт фазу СВОЕЙ поставки: done/scan_dt; без поставки — None/None.
+
+    `supplier_status='complete'` значит лишь «поставка закрыта у нас» — сдано ли
+    WB, знает только скан QR, и без этой пары фронт рисовал зелёное «В доставке»
+    на неотсканированной поставке.
+    """
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    scan = now - timedelta(days=1)
+    await _seed_supply(db_session, env.project_id, "WB-GI-PH1", done=True, scan_dt=scan)
+    # Закрыта, но QR НЕ отсканирован — «Отгрузите товар», не «в доставке».
+    await _seed_supply(db_session, env.project_id, "WB-GI-PH2", done=True, scan_dt=None)
+    await _seed_order(
+        db_session, env.project_id, 9910, supplier_status=done, wb_status=None, supply_id="WB-GI-PH1"
+    )
+    await _seed_order(
+        db_session, env.project_id, 9911, supplier_status=done, wb_status=None, supply_id="WB-GI-PH2"
+    )
+    await _seed_order(db_session, env.project_id, 9912)  # без поставки
+    # supply_id есть, но зеркало поставку не знает — честные None/None.
+    await _seed_order(
+        db_session, env.project_id, 9913, supplier_status=done, wb_status=None, supply_id="WB-GI-GHOST"
+    )
+
+    listed = await orders_service.list_orders(db_session, env.project_id)
+    by_id = {o["wb_order_id"]: o for o in listed["items"]}
+    assert by_id[9910]["supply_done"] is True
+    assert by_id[9910]["supply_scan_dt"] == scan
+    assert by_id[9911]["supply_done"] is True
+    assert by_id[9911]["supply_scan_dt"] is None
+    assert by_id[9912]["supply_done"] is None
+    assert by_id[9912]["supply_scan_dt"] is None
+    assert by_id[9913]["supply_done"] is None
+    assert by_id[9913]["supply_scan_dt"] is None
+
+
 # ─── Контур: песочница не трогает боевые данные ──────────────────────────────
 
 

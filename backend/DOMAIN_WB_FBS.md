@@ -457,6 +457,13 @@ available(наш склад, номенклатура) = max(0, quantity − res
   `status_counts`: сумма счётчиков — это `total` вкладки «Все», и синтетика внутри неё удвоила бы
   каждое переданное задание. Те же псевдо-статусы принимает фильтр (`status=in_delivery` /
   `status=sorted`) — цифра на карточке склада и выдача по клику обязаны совпадать до штуки.
+  Четвёртый псевдо-статус — **`delivered` («Завершённые» кабинета)** (`FBS_DELIVERED_STATUS`,
+  `delivered_condition`): `complete` И `wb_status ∈ FBS_WB_DELIVERED_STATUSES` (sold/defect).
+  Это ИСТОРИЯ, а не очередь — фильтр и счётчик `delivered_count` уважают окно периода
+  (симметрично `sorted`, в отличие от `in_delivery_stuck`). Каждая строка выдачи несёт фазу
+  СВОЕЙ поставки (`supply_done`/`supply_scan_dt`, батч `_supply_meta_map` — тот же, что якоря
+  `transit_days`): `complete` значит лишь «поставка закрыта у нас», сдано ли WB — знает только
+  скан QR, и без этой пары строка «complete + waiting» читалась как противоречие.
 - **Псевдо-статус `in_delivery_stuck` — «зависло в пути на СЦ»** (`FBS_IN_DELIVERY_STUCK_STATUS`,
   `in_delivery_stuck_condition`): подмножество `in_delivery`, чей якорь передачи
   (`COALESCE(supply.scan_dt, supply.closed_at, order.written_off_at)`, LEFT JOIN поставки по
@@ -495,9 +502,19 @@ available(наш склад, номенклатура) = max(0, quantity − res
   Свежевставленные строки (в т.ч. исторические бэкфилла) событий не получают: прошлое неизвестно,
   журнал начинается с текущего значения. (2) **Якоря из ТОЧНЫХ дат** (`kind="anchor"`,
   `approx=false`): `created` (created_at_wb), `assembled` (closed_at поставки), `scanned`
-  (scan_dt — QR отсканирован), `written_off` (списано из ledger'а DDS). `supplier:complete` может
-  дублировать `assembled` по смыслу — отдаются оба, фронт решает сам. Сортировка DESC — сервис
-  (контракт схемы), журнал срезан 200 строками, контур- и project-изоляция как у списка заданий.
+  (scan_dt — QR отсканирован), `written_off` (списано из ledger'а DDS). 🔴 Якоря ПОСТАВКИ —
+  только у заданий, реально с ней уехавших (`supplier_status ∈ complete, cancel_carrier`;
+  отмена перевозчиком случается ПОСЛЕ передачи): closed_at/scan_dt — моменты поставки, и заказу,
+  отменённому до передачи, они приписывали чужой путь «Продавец собрал → Принят СЦ».
+  (3) **Синтез ТЕКУЩЕГО состояния** (`kind="event"`, `approx=true`, время — `synced_at`):
+  журнал пишется только с деплоя, у старых заданий он пуст — и модалка молчала про отмену/
+  сортировку, которые оси знают. Если журнал финала не содержит (дедуп по code), доклеивается
+  терминальный `supplier:<status>` (cancel/cancel_carrier), иначе пост-скановый `wb:<status>`
+  (sorted/ready_for_pickup/postponed_delivery/sold/defect/отмены WB; до-скановый `waiting` — шум,
+  его место занимают якоря). Верх модалки совпадает с бейджем строки и ДО наполнения журнала.
+  `supplier:complete` может дублировать `assembled` по смыслу — отдаются оба, фронт решает сам.
+  Сортировка DESC — сервис (контракт схемы), журнал срезан 200 строками, контур- и
+  project-изоляция как у списка заданий.
 - **Сводка по складам — отдельная ручка `GET /fbs/orders/warehouse-summary`** (`warehouse_summary`),
   ОДИН запрос с `GROUP BY wb_warehouse_id` вместо запроса на склад (прежние «limit=1 на каждый» —
   9 параллельных походов в БД ради девяти чисел). 🔴 **Период применяется ТОЛЬКО к фазам доставки.**
@@ -582,7 +599,7 @@ available(наш склад, номенклатура) = max(0, quantity − res
 | GET | `/stock/pushes` | | журнал прогонов |
 | GET | `/stock/reconcile` | | первичная сверка «захват»: что стоит в кабинете против нашего расчёта |
 | POST | `/stock/reconcile` | ✓ | применить сверку (обнулить чужое / выровнять базу дельты) |
-| GET | `/orders` | | `orders_service.list_orders`; `status` принимает и псевдо-статусы `in_delivery` / `sorted` / `in_delivery_stuck` |
+| GET | `/orders` | | `orders_service.list_orders`; `status` принимает и псевдо-статусы `in_delivery` / `sorted` / `in_delivery_stuck` / `delivered` |
 | GET | `/orders/stats` | | `orders_stats.orders_stats` — выручка за период, разрезы (бренд/предмет/под-категория/статус/дни) и доля в объёме воронки |
 | GET | `/orders/writeoff-issues` | | `orders_service.writeoff_issues` — задания `complete`, которые нечем списать: причина + остатки привязанных складов |
 | POST | `/orders/sync` | ✓ | `orders_service.sync_new_orders` — только очередь `/orders/new` |

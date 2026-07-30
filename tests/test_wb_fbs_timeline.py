@@ -443,6 +443,145 @@ async def test_timeline_contour_isolation(db_session, project):
         await orders_service.get_order_timeline(db_session, project.id, 8023)
 
 
+# ─── Синтез финала и якоря только у ездивших заказов ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_timeline_cancelled_before_transfer_has_no_supply_anchors(db_session, project):
+    """Отменённый ДО передачи заказ: без якорей поставки + синтезированная отмена.
+
+    Прод-кейс 5384278097: бейдж «Отменено», а модалка показывала «Оформлен →
+    Продавец собрал → Принят СЦ» — даты ПОСТАВКИ приписывались заказу, который
+    с ней не ездил, и ни слова об отмене (журнал у старых заказов пуст).
+    """
+    db_session.add(
+        WbFbsSupply(
+            project_id=project.id,
+            wb_supply_id="WB-GI-TL-CX",
+            done=True,
+            closed_at=datetime(2026, 7, 21, 12, 0, 0),
+            scan_dt=datetime(2026, 7, 21, 15, 0, 0),
+        )
+    )
+    await db_session.commit()
+    synced = datetime(2026, 7, 22, 9, 0, 0)
+    await _seed_order(
+        db_session,
+        project.id,
+        8040,
+        supplier_status=FbsSupplierStatus.CANCEL.value,
+        supply_id="WB-GI-TL-CX",
+        created_at_wb=datetime(2026, 7, 20, 10, 0, 0),
+        synced_at=synced,
+    )
+
+    timeline = await orders_service.get_order_timeline(db_session, project.id, 8040)
+
+    codes = [e["code"] for e in timeline["events"]]
+    assert codes == ["supplier:cancel", "created"]
+    final = timeline["events"][0]
+    assert final["kind"] == "event"
+    assert final["approx"] is True
+    assert final["at"] == synced
+
+
+@pytest.mark.asyncio
+async def test_timeline_synthesizes_wb_final_for_empty_journal(db_session, project):
+    """complete+sorted без журнала: текущее состояние доклеивается сверху (≈)."""
+    db_session.add(
+        WbFbsSupply(
+            project_id=project.id,
+            wb_supply_id="WB-GI-TL-S1",
+            done=True,
+            closed_at=datetime(2026, 7, 21, 12, 0, 0),
+            scan_dt=datetime(2026, 7, 21, 15, 0, 0),
+        )
+    )
+    await db_session.commit()
+    synced = datetime(2026, 7, 23, 9, 0, 0)
+    await _seed_order(
+        db_session,
+        project.id,
+        8041,
+        supplier_status=FbsSupplierStatus.COMPLETE.value,
+        wb_status="sorted",
+        supply_id="WB-GI-TL-S1",
+        created_at_wb=datetime(2026, 7, 20, 10, 0, 0),
+        synced_at=synced,
+    )
+
+    timeline = await orders_service.get_order_timeline(db_session, project.id, 8041)
+
+    codes = [e["code"] for e in timeline["events"]]
+    # Ездивший заказ: якоря поставки на месте, финал — синтезированный wb:sorted.
+    assert codes == ["wb:sorted", "scanned", "assembled", "created"]
+    assert timeline["events"][0]["approx"] is True
+    assert timeline["events"][0]["at"] == synced
+
+
+@pytest.mark.asyncio
+async def test_timeline_synthesis_does_not_duplicate_journal(db_session, project):
+    """Финал уже есть в журнале (тот же code) — второго события не появляется."""
+    order = await _seed_order(
+        db_session,
+        project.id,
+        8042,
+        supplier_status=FbsSupplierStatus.CANCEL.value,
+        created_at_wb=datetime(2026, 7, 20, 10, 0, 0),
+        synced_at=datetime(2026, 7, 22, 9, 0, 0),
+    )
+    db_session.add(
+        WbFbsOrderEvent(
+            project_id=project.id,
+            order_id=order.id,
+            axis=EVENT_AXIS_SUPPLIER,
+            old_value="new",
+            new_value="cancel",
+            changed_at=datetime(2026, 7, 21, 11, 0, 0),
+        )
+    )
+    await db_session.commit()
+
+    timeline = await orders_service.get_order_timeline(db_session, project.id, 8042)
+
+    codes = [e["code"] for e in timeline["events"]]
+    assert codes.count("supplier:cancel") == 1
+    # Живёт журнальное событие (точнее по времени), а не синтезированное.
+    cancel = next(e for e in timeline["events"] if e["code"] == "supplier:cancel")
+    assert cancel["at"] == datetime(2026, 7, 21, 11, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_timeline_cancel_carrier_keeps_supply_anchors(db_session, project):
+    """`cancel_carrier` — отмена ПОСЛЕ передачи: путь поставки настоящий + синтез финала."""
+    db_session.add(
+        WbFbsSupply(
+            project_id=project.id,
+            wb_supply_id="WB-GI-TL-CC",
+            done=True,
+            closed_at=datetime(2026, 7, 21, 12, 0, 0),
+            scan_dt=datetime(2026, 7, 21, 15, 0, 0),
+        )
+    )
+    await db_session.commit()
+    synced = datetime(2026, 7, 24, 9, 0, 0)
+    await _seed_order(
+        db_session,
+        project.id,
+        8043,
+        supplier_status=FbsSupplierStatus.CANCEL_CARRIER.value,
+        supply_id="WB-GI-TL-CC",
+        created_at_wb=datetime(2026, 7, 20, 10, 0, 0),
+        synced_at=synced,
+    )
+
+    timeline = await orders_service.get_order_timeline(db_session, project.id, 8043)
+
+    codes = [e["code"] for e in timeline["events"]]
+    assert codes == ["supplier:cancel_carrier", "scanned", "assembled", "created"]
+    assert timeline["events"][0]["approx"] is True
+
+
 # ─── Каскад ──────────────────────────────────────────────────────────────────
 
 
