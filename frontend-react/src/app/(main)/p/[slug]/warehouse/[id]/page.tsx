@@ -10,7 +10,7 @@ import type {
     WarehouseStockRow, StockMovement, StockTransfer, DeliveryTimesResponse,
     DefectMarkOperation, VehicleStatus,
     FulfillmentStatus, FulfillmentProviderId, FfStocksResponse, FfStockRow, FfBoxPack, FfNomenclatureOption, FfRequestRow, FfRequestKind, FfStatusEvent, FfSyncRun, FfUnlinkedAssembly,
-    FfBulkCreateResult, FfBulkCreateAssemblyResult,
+    FfBulkCreateResult, FfBulkCreateAssemblyResult, FfRepackCandidate, FfRepackCandidatesOut,
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 import Toast from '@/components/Toast';
@@ -2783,6 +2783,8 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
 
     // Модал «Связать» (общий пикер — ff-shared)
     const [linkFor, setLinkFor] = useState<FfRequestRow | null>(null);
+    // Модал «Связать вскрытие» — возврат, для которого подбираем поступление-пару
+    const [repackFor, setRepackFor] = useState<FfRequestRow | null>(null);
 
     // Массовый выбор строк (для архива/возврата) — id видимых заявок
     const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -2831,6 +2833,25 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             setRows(prev => prev.map(r => r.id === updated.id ? updated : r));
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка отвязки');
+        } finally {
+            setActingId(null);
+        }
+    };
+
+    // Разорвать пару «вскрытие коробов». DELETE зовётся с id ВОЗВРАТА:
+    // на строке поступления пара-возврат лежит в repack_return_id.
+    const handleRepackUnlink = async (row: FfRequestRow) => {
+        const returnId = row.kind === 'return' ? row.id : row.repack_return_id;
+        if (returnId == null) return;
+        if (!confirm(`Разорвать пару «вскрытие коробов» у заявки ${row.number || row.external_id}?`)) return;
+        setActingId(row.id);
+        setError('');
+        try {
+            await api.unlinkFfRepackPair(warehouseId, returnId);
+            setToast('Пара «вскрытие коробов» разорвана');
+            setReloadTick(t => t + 1);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка отвязки пары');
         } finally {
             setActingId(null);
         }
@@ -2935,14 +2956,12 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 exportValue: (row: FfRequestRow) => row.dest_warehouse || '',
             } as Column,
         ] : []),
-        // Заявленное кол-во: сборка и возвраты (у приёмок его нет)
-        ...(kind === 'assembly' || kind === 'return' ? [
-            {
-                key: 'total_qty', label: 'Кол-во товаров', align: 'right',
-                render: (v: number | null) => (v == null ? '—' : formatNumber(v, 0)),
-                exportValue: (row: FfRequestRow) => row.total_qty ?? '',
-            } as Column,
-        ] : []),
+        // Заявленное кол-во — во всех под-вкладках (сборка / приёмки / возвраты)
+        {
+            key: 'total_qty', label: 'Кол-во', align: 'right',
+            render: (v: number | null) => (v == null ? '—' : formatNumber(v, 0)),
+            exportValue: (row: FfRequestRow) => row.total_qty ?? '',
+        } as Column,
         // Кол-во в штуках россыпи (пересчёт коробов) — только сборка и только когда есть (Натали/migfull)
         ...(kind === 'assembly' && hasUnits ? [{
             key: 'total_qty_units', label: 'Кол-во (шт)', align: 'right',
@@ -2956,6 +2975,16 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                     <span>{v || row.status || '—'}</span>
                     {ffStageBadge(row)}
                     {ffRepackBadge(row, kind)}
+                    {row.repack_return_id != null && (
+                        <button
+                            className="btn btn-sm btn-secondary"
+                            title="Разорвать пару «вскрытие коробов»"
+                            onClick={() => handleRepackUnlink(row)}
+                            disabled={actingId === row.id}
+                        >
+                            {actingId === row.id ? '...' : 'Отвязать'}
+                        </button>
+                    )}
                 </span>
             ),
             exportValue: (row: FfRequestRow) => row.stage_title || row.status || '',
@@ -3021,9 +3050,23 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 }
                 return (
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                        <button className="btn btn-sm btn-secondary" onClick={() => setLinkFor(row)} disabled={acting}>
-                            Связать
-                        </button>
+                        {/* Возврат с нашим документом не связывается (бэк отвергнет) —
+                            для него ручная связка пары «вскрытие коробов» */}
+                        {kind !== 'return' && (
+                            <button className="btn btn-sm btn-secondary" onClick={() => setLinkFor(row)} disabled={acting}>
+                                Связать
+                            </button>
+                        )}
+                        {kind === 'return' && row.repack_return_id == null && (
+                            <button
+                                className="btn btn-sm btn-secondary"
+                                title="Подобрать поступление-пару «вскрытие коробов» (ФФ вскрыл короба под FBS)"
+                                onClick={() => setRepackFor(row)}
+                                disabled={acting}
+                            >
+                                Связать вскрытие
+                            </button>
+                        )}
                         {kind === 'assembly' && row.assembly_request_id == null && (
                             <button
                                 className="btn btn-sm btn-primary"
@@ -3213,6 +3256,19 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                         // Связали ФФ-заявку с нашей сборкой → эта сборка покидает блок «без связи»
                         if (kind === 'assembly') setUnlinkedReloadTick(t => t + 1);
                         setLinkFor(null);
+                    }}
+                />
+            )}
+
+            {repackFor && (
+                <FfRepackLinkModal
+                    warehouseId={warehouseId}
+                    request={repackFor}
+                    onClose={() => setRepackFor(null)}
+                    onLinked={pairNumber => {
+                        setToast(`Возврат ${repackFor.number || repackFor.external_id} связан с поступлением ${pairNumber}`);
+                        setRepackFor(null);
+                        setReloadTick(t => t + 1);
                     }}
                 />
             )}
@@ -3676,6 +3732,112 @@ function FfReverseLinkModal({ warehouseId, assembly, onClose, onLinked }: {
                             </div>
                         )}
                     </>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+                    <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+/* ─── Модал «Связать вскрытие»: поступление-пара для возврата (migfull) ──── */
+
+function FfRepackLinkModal({ warehouseId, request, onClose, onLinked }: {
+    warehouseId: number;
+    /** возврат (kind=return) без пары, для которого подбираем поступление */
+    request: FfRequestRow;
+    onClose: () => void;
+    /** успешно связали: номер выбранного поступления (для тоста родителя) */
+    onLinked: (pairNumber: string) => void;
+}) {
+    const [data, setData] = useState<FfRepackCandidatesOut | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [acting, setActing] = useState(false);
+
+    useEffect(() => {
+        const controller = new AbortController();
+        setLoading(true);
+        setError('');
+        api.getFfRepackCandidates(warehouseId, request.id)
+            .then(r => { if (!controller.signal.aborted) setData(r); })
+            .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка загрузки кандидатов'); })
+            .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+        return () => controller.abort();
+    }, [warehouseId, request.id]);
+
+    const handleLink = async (c: FfRepackCandidate) => {
+        setActing(true);
+        setError('');
+        try {
+            await api.linkFfRepackPair(warehouseId, request.id, c.id);
+            onLinked(c.number || String(c.id));
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка связывания пары');
+            setActing(false);
+        }
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-card modal-card-wide modal-card-solid" onClick={e => e.stopPropagation()}>
+                <h2 className="modal-title" style={{ marginBottom: 8 }}>
+                    Вскрытие коробов — {data?.return_number || request.number || request.external_id}
+                </h2>
+                <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                    Возврат: {data == null
+                        ? '…'
+                        : (data.return_units != null
+                            ? <b style={{ color: 'var(--color-text)' }}>{formatNumber(data.return_units, 0)} шт россыпи</b>
+                            : 'состав не разрешён')}
+                    {' '}· выберите поступление-пару — вместе они означают переупаковку, сток не двигается.
+                </p>
+
+                {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
+
+                {loading ? (
+                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка...</div>
+                ) : (data?.candidates.length ?? 0) === 0 ? (
+                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                        Кандидатов не найдено (окно ±14 дней)
+                    </div>
+                ) : (
+                    <div className="ff-link-list">
+                        {data!.candidates.map(c => (
+                            <div key={c.id} className="ff-link-row">
+                                <div className="ff-link-row-main">
+                                    <div className="ff-link-row-head">
+                                        <span className="ff-link-row-number">{c.number || '—'}</span>
+                                        {c.status && (
+                                            <span className="badge badge-secondary" style={{ fontSize: 11, padding: '2px 8px' }}>{c.status}</span>
+                                        )}
+                                        {c.exact ? (
+                                            <span
+                                                className="badge badge-success"
+                                                style={{ fontSize: 11, padding: '2px 8px' }}
+                                                title="Состав совпал точно — такой кандидат авто-матчер пометил бы сам"
+                                            >
+                                                точное
+                                            </span>
+                                        ) : (
+                                            <span className="badge badge-info" style={{ fontSize: 11, padding: '2px 8px' }} title="Пересечение состава с возвратом, % от большей стороны">
+                                                совпадение {formatNumber(c.overlap_pct, 0)}%
+                                            </span>
+                                        )}
+                                        <span className="ff-link-row-meta">
+                                            {c.external_created_at ? `${formatDate(c.external_created_at)} · ` : ''}
+                                            {formatNumber(c.units_sum, 0)} шт
+                                        </span>
+                                    </div>
+                                </div>
+                                <button className="btn btn-sm btn-primary" onClick={() => handleLink(c)} disabled={acting}>
+                                    {acting ? '...' : 'Связать'}
+                                </button>
+                            </div>
+                        ))}
+                    </div>
                 )}
 
                 <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>

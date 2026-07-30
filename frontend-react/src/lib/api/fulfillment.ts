@@ -16,6 +16,7 @@ import type {
     FfNomenclatureOption,
     FfOverviewResponse,
     FfPushAssemblyResult,
+    FfRepackCandidatesOut,
     FfRequestDetail,
     FfRequestKind,
     FfRequestRow,
@@ -122,6 +123,16 @@ export function addFulfillmentMethods(api: ApiClient) {
         },
         unlinkFulfillmentRequest(warehouseId: number, ffRequestId: number) {
             return api.request<FfRequestRow>('DELETE', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/link`);
+        },
+        // ─── Ручная пара «вскрытие коробов» (migfull: возврат ↔ поступление) ──
+        getFfRepackCandidates(warehouseId: number, ffRequestId: number) {
+            return api.request<FfRepackCandidatesOut>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/repack-candidates`);
+        },
+        linkFfRepackPair(warehouseId: number, ffRequestId: number, submissionId: number) {
+            return api.request<FfRequestRow>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/repack-link`, { submission_id: submissionId });
+        },
+        unlinkFfRepackPair(warehouseId: number, ffRequestId: number) {
+            return api.request<FfRequestRow>('DELETE', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/repack-link`);
         },
         archiveFulfillmentRequest(warehouseId: number, ffRequestId: number) {
             return api.request<FfRequestRow>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/archive`);

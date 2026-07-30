@@ -6540,6 +6540,31 @@ export interface FfLinkCandidatesResponse {
   candidates: FfLinkCandidate[];
 }
 
+/** Кандидат-поступление для РУЧНОЙ связки пары «вскрытие коробов» (migfull).
+ *  Авто-матчер помечает пару только при точном равенстве состава; здесь —
+ *  близкие кандидаты, решает человек. */
+export interface FfRepackCandidate {
+  id: number;
+  number: string | null;
+  external_created_at: string | null;
+  status: string | null;
+  /** Σ штук россыпи по составу поступления (для сравнения с возвратом) */
+  units_sum: number;
+  /** пересечение состава с возвратом, % от большей стороны (0–100) */
+  overlap_pct: number;
+  /** состав совпал точно — такой кандидат авто-матчер пометил бы сам */
+  exact: boolean;
+}
+
+/** GET /requests/{id}/repack-candidates — кандидаты пары для возврата */
+export interface FfRepackCandidatesOut {
+  return_id: number;
+  return_number: string | null;
+  /** Σ штук россыпи возврата (короба × кратность + россыпь); null — состав не разрешён в ШК */
+  return_units: number | null;
+  candidates: FfRepackCandidate[];
+}
+
 /** Итог создания заявки на сборку из ФФ-заявки */
 export interface FfCreateAssemblyResult {
   /** ФФ-заявка уже связана с созданной заявкой */
@@ -8381,6 +8406,11 @@ export interface FbsStageRow {
   max_hours: number | null;
   /** Замеры, выброшенные как недостоверные (обратный порядок вех / потолок). */
   dropped: number;
+  /**
+   * Сколько из `count` опёрлись на журнал переходов вместо истории кабинета
+   * (± каденс синка). Ноль — этап целиком посчитан по точным моментам WB.
+   */
+  approx_count: number;
 }
 
 /** Этап × склад продавца, с которого собирают. */
@@ -8394,17 +8424,28 @@ export interface FbsStageWarehouseRow {
   avg_hours: number | null;
 }
 
-/** Точка динамики: этап × бакет даты ЗАВЕРШЕНИЯ этапа (МСК). */
+/**
+ * Точка динамики: этап × начало бакета по дате ЗАВЕРШЕНИЯ этапа (МСК).
+ *
+ * Ряд РАЗРЕЖЕН: отсутствующий бакет — «замеров не было», а не «ноль часов».
+ * Дорисовка пропусков нулями покажет провалы там, где просто нет данных.
+ */
 export interface FbsStageDynamicsRow {
   stage: string;
-  bucket: string;
+  period_start: string;
   count: number;
   median_hours: number | null;
   p90_hours: number | null;
   avg_hours: number | null;
 }
 
-/** Что висит на этапе прямо сейчас. Период на этот блок не влияет. */
+/**
+ * Что висит на этапе прямо сейчас. Период на этот блок не влияет.
+ *
+ * Фазы `to_ship` и `in_transit` — разбиение псевдо-статуса `in_delivery`
+ * вкладки «Заказы» по факту скана QR, поэтому «Едет к СЦ» здесь всегда меньше
+ * «В доставке» там, а совпадает СУММА двух карточек.
+ */
 export interface FbsStageQueueRow {
   phase: string;
   title: string;
@@ -8413,11 +8454,24 @@ export interface FbsStageQueueRow {
   max_age_hours: number | null;
 }
 
-/** Покрытие журнала переходов — подпись под этапами точности `approx`. */
+/** Покрытие журнала переходов — фолбэк для заданий без догнанной истории. */
 export interface FbsStageJournal {
   events: number;
   since?: string | null;
   orders: number;
+}
+
+/**
+ * Покрытие догона истории из кабинета WB — на чём посчитаны поздние этапы.
+ *
+ * Пока `orders_covered` меньше `orders_total`, часть замеров опирается на
+ * журнал (это видно в `approx_count` строки этапа).
+ */
+export interface FbsStageHistory {
+  orders_total: number;
+  orders_covered: number;
+  rows: number;
+  since?: string | null;
 }
 
 /** Аналитика этапов FBS: длительности, разрез по складам, динамика, очередь. */
@@ -8431,6 +8485,7 @@ export interface FbsStageAnalytics {
   dynamics: FbsStageDynamicsRow[];
   queue: FbsStageQueueRow[];
   journal: FbsStageJournal;
+  history: FbsStageHistory;
 }
 
 /**
