@@ -12,6 +12,7 @@ import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import WbThumb from '@/components/WbThumb';
 import { wbProductUrl } from '@/lib/wbMedia';
 import type { FbsOrder } from '@/types/api';
+import OrderTimelineModal from '../../fbs/OrderTimelineModal';
 import {
     CABINET_STATUS_LABEL,
     NOT_SCANNED_CABINET_KEYS,
@@ -37,6 +38,8 @@ export default function FbsOrdersCard({
     const [orders, setOrders] = useState<FbsOrder[] | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    /** Задание, чью историю статусов смотрим (модалка «Статус заказа»). */
+    const [timelineOrder, setTimelineOrder] = useState<FbsOrder | null>(null);
 
     const load = useCallback(async (signal?: AbortSignal) => {
         setLoading(true);
@@ -148,8 +151,14 @@ export default function FbsOrdersCard({
                                     </td>
                                     <td>
                                         {/* Статусы кабинета WB: «Отгрузите товар» / «Ждёт сортировки» /
-                                            «Отсортировано»… — одна шкала с кабинетом (канон 30.07). */}
-                                        <span className={`badge ${CABINET_STATUS_LABEL[cab].badge}`}>
+                                            «Отсортировано»… — одна шкала с кабинетом (канон 30.07).
+                                            Клик — модалка «Статус заказа» с историей переходов. */}
+                                        <span
+                                            className={`badge ${CABINET_STATUS_LABEL[cab].badge}`}
+                                            style={{ cursor: 'pointer' }}
+                                            title="История статусов"
+                                            onClick={() => setTimelineOrder(o)}
+                                        >
                                             {CABINET_STATUS_LABEL[cab].label}
                                         </span>
                                     </td>
@@ -169,6 +178,15 @@ export default function FbsOrdersCard({
                         </tbody>
                     </table>
                 </div>
+            )}
+
+            {timelineOrder && (
+                <OrderTimelineModal
+                    wbOrderId={timelineOrder.wb_order_id}
+                    article={timelineOrder.article}
+                    nmId={timelineOrder.nm_id}
+                    onClose={() => setTimelineOrder(null)}
+                />
             )}
         </div>
     );
