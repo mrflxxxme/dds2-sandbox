@@ -2312,6 +2312,12 @@ export interface PrebookingCreateResult {
 export interface AssemblyListResponse {
   items: AssemblyRequest[];
   total: number;
+  /**
+   * Счётчики по статусам для фазовых вкладок kind=fbs («На сборке» /
+   * «В доставке» / «Завершённые»): по тем же фильтрам, что список, но БЕЗ
+   * статус-фильтра. У kind=fbo пустой объект.
+   */
+  status_counts?: Record<string, number>;
 }
 
 export interface AssemblyBulkDeleteSkip {

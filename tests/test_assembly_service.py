@@ -428,11 +428,11 @@ class TestListAssemblyRequests:
         """5. GET list -> filters by project_id (other project -> empty)."""
         await _create_test_request(db_session)
 
-        items, total = await list_assembly_requests(db_session, OTHER_PROJECT_ID)
+        items, total, _counts = await list_assembly_requests(db_session, OTHER_PROJECT_ID)
         assert total == 0
         assert items == []
 
-        items, total = await list_assembly_requests(db_session, PROJECT_ID)
+        items, total, _counts = await list_assembly_requests(db_session, PROJECT_ID)
         assert total >= 1
 
     async def test_list_excludes_deleted(self, db_session):
@@ -443,7 +443,7 @@ class TestListAssemblyRequests:
         req.soft_delete()
         await db_session.commit()
 
-        items, _total = await list_assembly_requests(db_session, PROJECT_ID)
+        items, _total, _counts = await list_assembly_requests(db_session, PROJECT_ID)
         found_ids = [r.id for r in items]
         assert req.id not in found_ids
 
@@ -463,13 +463,13 @@ class TestListAssemblyRequests:
         req.counterparty_id = carrier.id
         await db_session.commit()
 
-        items, total = await list_assembly_requests(db_session, PROJECT_ID, counterparty_id=carrier.id)
+        items, total, _counts = await list_assembly_requests(db_session, PROJECT_ID, counterparty_id=carrier.id)
         assert total >= 1
         assert all(r.counterparty_id == carrier.id for r in items)
         assert req.id in [r.id for r in items]
 
         # A different carrier sees nothing of this request.
-        other_items, _ = await list_assembly_requests(db_session, PROJECT_ID, counterparty_id=other.id)
+        other_items, _, _counts = await list_assembly_requests(db_session, PROJECT_ID, counterparty_id=other.id)
         assert req.id not in [r.id for r in other_items]
 
     async def test_list_view_archives_terminal_statuses(self, db_session):
@@ -568,7 +568,7 @@ class TestListAssemblyRequests:
         )
 
         async def _ids(source: str | None) -> set[int]:
-            items, _ = await list_assembly_requests(db_session, PROJECT_ID, source=source, limit=100)
+            items, _, _counts = await list_assembly_requests(db_session, PROJECT_ID, source=source, limit=100)
             return {r.id for r in items}
 
         pd_ids = await _ids("pre_dist")
@@ -627,7 +627,7 @@ class TestListAssemblyRequests:
         r1 = await _mk(v1.id)
         r2 = await _mk(v2.id)
 
-        items, total = await list_assembly_requests(
+        items, total, _counts = await list_assembly_requests(
             db_session, PROJECT_ID, source_vehicle_id=v1.id, limit=100
         )
         ids = {r.id for r in items}
@@ -1286,7 +1286,7 @@ class TestLifecycle:
         )
         await db_session.commit()
 
-        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=50)
+        items, _, _counts = await list_assembly_requests(db_session, PROJECT_ID, limit=50)
         maps = await prefetch_list_maps(db_session, PROJECT_ID, items)
         target = next(r for r in items if r.id == req.id)
         resp = await _build_response(db_session, target, **maps)
@@ -1331,7 +1331,7 @@ class TestLifecycle:
             is_pre_distribution=True,
         )
 
-        items, _ = await list_assembly_requests(db_session, PROJECT_ID, source_vehicle_id=vehicle.id, limit=50)
+        items, _, _counts = await list_assembly_requests(db_session, PROJECT_ID, source_vehicle_id=vehicle.id, limit=50)
         maps = await prefetch_list_maps(db_session, PROJECT_ID, items)
         target = next(r for r in items if r.id == req.id)
         resp = await _build_response(db_session, target, **maps)
@@ -1343,7 +1343,7 @@ class TestLifecycle:
         """Без заданной кратности box_qty=None и boxes=None (не 0) — «коробов» в
         листе пусто, а не ложный ноль."""
         req = await _create_test_request(db_session)
-        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=50)
+        items, _, _counts = await list_assembly_requests(db_session, PROJECT_ID, limit=50)
         maps = await prefetch_list_maps(db_session, PROJECT_ID, items)
         target = next(r for r in items if r.id == req.id)
         resp = await _build_response(db_session, target, **maps)
@@ -1361,7 +1361,7 @@ class TestLifecycle:
         )
         await db_session.commit()
 
-        items, _ = await list_assembly_requests(db_session, PROJECT_ID, status="READY", limit=50)
+        items, _, _counts = await list_assembly_requests(db_session, PROJECT_ID, status="READY", limit=50)
         maps = await prefetch_list_maps(db_session, PROJECT_ID, items)
         flags = {}
         for r in items:
@@ -2216,7 +2216,7 @@ class TestFfLinkFilter:
         )
         await _link_ff_request(db_session, assembly_request_id=linked.id, warehouse_id=wh_id)
 
-        items, _total = await list_assembly_requests(db_session, PROJECT_ID, ff_link="none")
+        items, _total, _counts = await list_assembly_requests(db_session, PROJECT_ID, ff_link="none")
         ids = {r.id for r in items}
         assert unlinked.id in ids
         assert linked.id not in ids
@@ -2238,7 +2238,7 @@ class TestFfLinkFilter:
         )
         await _link_ff_request(db_session, assembly_request_id=linked.id, warehouse_id=wh_id)
 
-        items, _total = await list_assembly_requests(db_session, PROJECT_ID, ff_link="linked")
+        items, _total, _counts = await list_assembly_requests(db_session, PROJECT_ID, ff_link="linked")
         ids = {r.id for r in items}
         assert linked.id in ids
         assert unlinked.id not in ids
@@ -2260,7 +2260,7 @@ class TestFfLinkFilter:
         )
         await _link_ff_request(db_session, assembly_request_id=linked.id, warehouse_id=wh_id)
 
-        items, _total = await list_assembly_requests(db_session, PROJECT_ID)
+        items, _total, _counts = await list_assembly_requests(db_session, PROJECT_ID)
         ids = {r.id for r in items}
         assert linked.id in ids
         assert unlinked.id in ids
@@ -2292,7 +2292,7 @@ class TestFfLinkEnrichment:
         )
         ff = await _link_ff_request(db_session, assembly_request_id=linked.id, warehouse_id=wh_id)
 
-        items, _total = await list_assembly_requests(db_session, PROJECT_ID)
+        items, _total, _counts = await list_assembly_requests(db_session, PROJECT_ID)
         responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
         await _enrich_ff_links(db_session, PROJECT_ID, items, responses)
 
@@ -2316,7 +2316,7 @@ class TestFfLinkEnrichment:
         linked = await _create_test_request(db_session)
         ff = await _link_ff_request(db_session, assembly_request_id=linked.id, warehouse_id=wh_id)
 
-        items, _total = await list_assembly_requests(db_session, PROJECT_ID)
+        items, _total, _counts = await list_assembly_requests(db_session, PROJECT_ID)
         responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
         await _enrich_ff_links(db_session, PROJECT_ID, items, responses)
 
@@ -2649,7 +2649,7 @@ class TestJointFboSupply:
                 items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=1)],
             ),
         )
-        items, total = await list_assembly_requests(db_session, PROJECT_ID, joint_only=True, limit=100)
+        items, total, _counts = await list_assembly_requests(db_session, PROJECT_ID, joint_only=True, limit=100)
         ids = {r.id for r in items}
         assert ids == {a1.id, a2.id}
         assert lone.id not in ids
@@ -2660,7 +2660,7 @@ class TestJointFboSupply:
         from backend.routers.assembly import _enrich_joint
 
         a1, a2, _fbo_id = await self._make_joint_pair(db_session)
-        items, _total = await list_assembly_requests(db_session, PROJECT_ID, limit=100)
+        items, _total, _counts = await list_assembly_requests(db_session, PROJECT_ID, limit=100)
         responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
         await _enrich_joint(db_session, PROJECT_ID, items, responses)
 
@@ -2775,7 +2775,7 @@ class TestJointFboSupply:
         await db_session.execute(text("UPDATE assembly_requests SET pallets_count = 2 WHERE id = :id"), {"id": a1.id})
         await db_session.commit()
         await _link_ff_request(db_session, assembly_request_id=a2.id, warehouse_id=a2.warehouse_id)
-        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=100)
+        items, _, _counts = await list_assembly_requests(db_session, PROJECT_ID, limit=100)
         responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
         await _enrich_joint(db_session, PROJECT_ID, items, responses)
         a1_resp = {r.id: r for r in responses}[a1.id]
@@ -2795,7 +2795,7 @@ class TestJointFboSupply:
 
         a1, _a2, _fbo_id = await self._make_joint_pair(db_session)
         await mark_ready(db_session, PROJECT_ID, a1.id)  # вторая остаётся IN_PROGRESS
-        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=100)
+        items, _, _counts = await list_assembly_requests(db_session, PROJECT_ID, limit=100)
         responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
         await _enrich_joint(db_session, PROJECT_ID, items, responses)
         assert {r.id: r for r in responses}[a1.id].joint_ready is False
@@ -2930,7 +2930,7 @@ class TestListBuildBatched:
         всегда None. В списке это поле не используется — сравниваем без него.
         """
         await self._seed_two_requests(db_session)
-        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=500)
+        items, _, _counts = await list_assembly_requests(db_session, PROJECT_ID, limit=500)
         assert len(items) >= 2
 
         prefetch = await prefetch_list_maps(db_session, PROJECT_ID, items)
@@ -2944,7 +2944,7 @@ class TestListBuildBatched:
     async def test_build_loop_is_constant_queries(self, db_session):
         """prefetch + build-loop не масштабируется по числу строк (нет N+1)."""
         await self._seed_two_requests(db_session)
-        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=500)
+        items, _, _counts = await list_assembly_requests(db_session, PROJECT_ID, limit=500)
         assert len(items) >= 2
 
         with self._count_queries() as c:
