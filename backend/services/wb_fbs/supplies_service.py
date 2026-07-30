@@ -706,8 +706,14 @@ async def _attach_orders_to_mirror(
 
     Без коммита и инвалидации — их делает вызывающий (он же решает, когда
     закрыть транзакцию перед следующим походом в WB).
+
+    Переход `new → confirm`, сделанный НАШЕЙ кнопкой, фиксируется в журнале
+    здесь же: синк статусов его не увидит (WB вернёт confirm, а строка уже
+    confirm — диффа нет), и без записи таймлайн терял бы фазу «на сборке».
     """
     now = utcnow()
+    # Снимок ДО перезаписи — база диффа журнала (уже-confirm событий не рождает).
+    snapshot = await orders_service.order_status_snapshot(db, project_id, list(ids))
     await db.execute(
         update(WbFbsOrder)
         .where(WbFbsOrder.project_id == project_id, WbFbsOrder.wb_order_id.in_(list(ids)))
@@ -717,6 +723,21 @@ async def _attach_orders_to_mirror(
             synced_at=now,
             updated_at=now,
         )
+    )
+    await orders_service.record_order_events(
+        db,
+        project_id,
+        [
+            {
+                "order_id": pk,
+                "axis": orders_service.EVENT_AXIS_SUPPLIER,
+                "old_value": old_sup,
+                "new_value": FbsSupplierStatus.CONFIRM.value,
+                "changed_at": now,
+            }
+            for pk, old_sup, _old_wb in snapshot.values()
+            if old_sup != FbsSupplierStatus.CONFIRM.value
+        ],
     )
     await db.execute(
         update(WbFbsSupply)
@@ -820,6 +841,17 @@ async def deliver_supply(db: AsyncSession, project_id: int, wb_supply_id: str) -
     await client.deliver_supply(wb_supply_id)
 
     now = utcnow()
+    # Снимок ПОСЛЕ похода в WB и ДО bulk-UPDATE (одна транзакция с ним): дифф
+    # для журнала переходов — каждое живое задание получает `old → complete`.
+    pending_rows = (
+        await db.execute(
+            select(WbFbsOrder.id, WbFbsOrder.supplier_status).where(
+                WbFbsOrder.project_id == project_id,
+                WbFbsOrder.supply_id == wb_supply_id,
+                WbFbsOrder.supplier_status.notin_(FBS_TERMINAL_STATUSES),
+            )
+        )
+    ).all()
     await db.execute(
         update(WbFbsOrder)
         .where(
@@ -833,6 +865,21 @@ async def deliver_supply(db: AsyncSession, project_id: int, wb_supply_id: str) -
             synced_at=now,
             updated_at=now,
         )
+    )
+    await orders_service.record_order_events(
+        db,
+        project_id,
+        [
+            {
+                "order_id": int(pk),
+                "axis": orders_service.EVENT_AXIS_SUPPLIER,
+                "old_value": old_sup,
+                "new_value": FbsSupplierStatus.COMPLETE.value,
+                "changed_at": now,
+            }
+            for pk, old_sup in pending_rows
+            if old_sup != FbsSupplierStatus.COMPLETE.value
+        ],
     )
     await db.execute(
         update(WbFbsSupply)

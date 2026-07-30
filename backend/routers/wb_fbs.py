@@ -50,6 +50,7 @@ from backend.schemas.wb_fbs import (
     FbsOrderListOut,
     FbsOrderStatsOut,
     FbsOrderOut,
+    FbsOrderTimelineOut,
     FbsOverrideSet,
     FbsPickListOut,
     FbsReconcileApply,
@@ -739,6 +740,23 @@ async def cancel_order(
     with _fbs_errors():
         await orders_service.cancel_order(db, project.id, wb_order_id)
     return FbsActionOut(ok=True, message="Задание отменено", affected=1)
+
+
+@router.get("/orders/{wb_order_id}/timeline", response_model=FbsOrderTimelineOut)
+async def get_order_timeline(
+    wb_order_id: int = Path(..., ge=1),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Таймлайн «Статус заказа» задания — модалка как в кабинете WB.
+
+    Read-only, читает наше зеркало (WB историю статусов не отдаёт вовсе):
+    якоря из точных дат (`approx=false`) + журнал переходов, зафиксированных
+    синком (`approx=true`, точность = каденс синка). Отсортировано по времени
+    DESC — свежее сверху.
+    """
+    with _fbs_errors():
+        return await orders_service.get_order_timeline(db, project.id, wb_order_id)
 
 
 # ─── Поставки ────────────────────────────────────────────────────────────────

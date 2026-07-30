@@ -663,7 +663,10 @@ async def test_upsert_locks_rows_in_key_order(db_session, env, monkeypatch):
     original_chunks = orders_service._chunks
 
     def spy(items, size):
-        captured.append([r["wb_order_id"] for r in items])
+        # `_chunks` внутри `_upsert_orders` зовётся не только для строк UPSERT
+        # (снапшот журнала переходов чанкует голые id) — ловим только dict-строки.
+        if items and isinstance(items[0], dict) and "wb_order_id" in items[0]:
+            captured.append([r["wb_order_id"] for r in items])
         return original_chunks(items, size)
 
     monkeypatch.setattr(orders_service, "_chunks", spy)
