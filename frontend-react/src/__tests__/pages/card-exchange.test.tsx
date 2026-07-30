@@ -24,6 +24,7 @@ const getCategories = vi.mocked(api.getCardExchangeCategories);
 const addToCart = vi.mocked(api.addCardToCart);
 const getSession = vi.mocked(api.getCardExchangeSessionStatus);
 const setSession = vi.mocked(api.setCardExchangeSession);
+const fromSupply = vi.mocked(api.useCardExchangeSessionFromSupply);
 
 function makeAd(over: Partial<ShowcaseAd> = {}): ShowcaseAd {
     return {
@@ -48,6 +49,8 @@ describe('Страница «Биржа карточек»', () => {
         getSession.mockResolvedValue({ status: 'ACTIVE', updated_at: '2026-07-30T00:00:00' });
         setSession.mockReset();
         setSession.mockResolvedValue({ status: 'ACTIVE', updated_at: '2026-07-30T00:00:00' });
+        fromSupply.mockReset();
+        fromSupply.mockResolvedValue({ status: 'ACTIVE', updated_at: '2026-07-30T00:00:00' });
     });
 
     it('loading — пока запрос витрины не ответил', () => {
@@ -87,31 +90,26 @@ describe('Страница «Биржа карточек»', () => {
         await screen.findByRole('button', { name: 'Убрать' });
     });
 
-    it('нет сессии биржи — форма доступа, витрина не запрашивается', async () => {
+    it('доступа нет — подхватывается автоматически, пользователь ничего не вводит', async () => {
         getSession.mockResolvedValue({ status: 'NONE' });
         getShowcase.mockResolvedValue(makeResp());
         render(<CardExchangePage />);
-        await screen.findByText(/Нужен доступ к бирже WB/);
-        expect(screen.getByPlaceholderText('Вставьте сюда скопированный доступ')).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: 'Взять доступ из поставок' })).toBeInTheDocument();
-        expect(getShowcase).not.toHaveBeenCalled();
-    });
-
-    it('истёкшая сессия — просит свежий токен', async () => {
-        getSession.mockResolvedValue({ status: 'EXPIRED' });
-        render(<CardExchangePage />);
-        await screen.findByText(/Доступ к бирже истёк/);
-    });
-
-    it('сохранение доступа — шлёт токен и грузит витрину', async () => {
-        getSession.mockResolvedValue({ status: 'NONE' });
-        getShowcase.mockResolvedValue(makeResp());
-        render(<CardExchangePage />);
-        const input = await screen.findByPlaceholderText('Вставьте сюда скопированный доступ');
-        fireEvent.change(input, { target: { value: 'tok123' } });
-        fireEvent.click(screen.getByRole('button', { name: 'Сохранить доступ' }));
-        await waitFor(() => expect(setSession).toHaveBeenCalledWith('tok123'));
         await screen.findByText('Тестовая карточка', { exact: false });
+        expect(fromSupply).toHaveBeenCalled();
+        // никаких токенов/команд на экране
+        expect(screen.queryByPlaceholderText('Вставьте сюда скопированный доступ')).toBeNull();
+        expect(screen.queryByText(/authorizev3/)).toBeNull();
+        expect(screen.queryByText(/Console/)).toBeNull();
+    });
+
+    it('доступ подхватить не удалось — короткое сообщение без техники', async () => {
+        getSession.mockResolvedValue({ status: 'NONE' });
+        fromSupply.mockRejectedValue(new Error('Нет активного доступа WB для поставок'));
+        render(<CardExchangePage />);
+        await screen.findByText('Нет доступа к бирже WB');
+        expect(screen.getByText(/Обновите доступ WB в разделе/)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Сохранить доступ' })).toBeNull();
+        expect(getShowcase).not.toHaveBeenCalled();
     });
 
     it('переключение в «Список» — таблица с колонками как в рекламе', async () => {

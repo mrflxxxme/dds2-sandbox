@@ -68,11 +68,10 @@ function Segmented<T extends string>({ tabs, value, onChange }: {
 const money = (v: number | null) => (v == null ? '—' : `${formatNumber(Number(v), 0)} ₽`);
 
 export default function CardExchangePage() {
-    // Доступ к бирже — отдельный слот от доступа поставок.
+    // Доступ к бирже — отдельный слот от доступа поставок. Пользователь его НЕ вводит:
+    // раздел сам подхватывает уже настроенный доступ WB (см. useEffect ниже).
     const [session, setSession] = useState<ExchangeSessionStatus | null>(null);
-    const [tokenInput, setTokenInput] = useState('');
-    const [savingToken, setSavingToken] = useState(false);
-    const [tokenError, setTokenError] = useState<string | null>(null);
+    const [noAccess, setNoAccess] = useState<string | null>(null);
 
     const [categories, setCategories] = useState<RootCategory[]>([]);
     const [ads, setAds] = useState<ShowcaseAd[]>([]);
@@ -102,10 +101,29 @@ export default function CardExchangePage() {
         return () => clearTimeout(t);
     }, [searchInput]);
 
+    // Доступ добываем сами: берём уже настроенный доступ WB (тот же, что у «Поставок»).
+    // Пользователю не показываем ни токенов, ни консольных команд — только результат.
     useEffect(() => {
-        api.getCardExchangeSessionStatus().then(setSession).catch(() => setSession({ status: 'NONE' }));
-        api.getCardExchangeCategories().then(setCategories)
-            .catch(e => setActionError(e instanceof Error ? e.message : 'Не удалось загрузить справочник категорий'));
+        let alive = true;
+        (async () => {
+            let st: ExchangeSessionStatus;
+            try {
+                st = await api.getCardExchangeSessionStatus();
+            } catch {
+                st = { status: 'NONE' };
+            }
+            if (st.status !== 'ACTIVE') {
+                try {
+                    st = await api.useCardExchangeSessionFromSupply();
+                } catch (e) {
+                    if (alive) setNoAccess(e instanceof Error ? e.message : 'Нет доступа к бирже WB');
+                }
+            }
+            if (alive) setSession(st);
+        })();
+        api.getCardExchangeCategories().then(c => { if (alive) setCategories(c); })
+            .catch(e => { if (alive) setActionError(e instanceof Error ? e.message : 'Не удалось загрузить справочник категорий'); });
+        return () => { alive = false; };
     }, []);
 
     const sessionOk = session?.status === 'ACTIVE';
@@ -160,26 +178,6 @@ export default function CardExchangePage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [search, rootCategory, ourMode, inStockOnly, sort, sessionOk]);
 
-    const saveToken = async () => {
-        setTokenError(null); setSavingToken(true);
-        try {
-            const st = await api.setCardExchangeSession(tokenInput.trim());
-            setSession(st); setTokenInput(''); void load(true);
-        } catch (e) {
-            setTokenError(e instanceof Error ? e.message : 'Не удалось сохранить доступ');
-        } finally { setSavingToken(false); }
-    };
-
-    const takeFromSupply = async () => {
-        setTokenError(null); setSavingToken(true);
-        try {
-            const st = await api.useCardExchangeSessionFromSupply();
-            setSession(st); void load(true);
-        } catch (e) {
-            setTokenError(e instanceof Error ? e.message : 'Не удалось взять доступ из поставок');
-        } finally { setSavingToken(false); }
-    };
-
     const toggleCart = async (ad: ShowcaseAd) => {
         setActionError(null); setBusyAd(ad.ad_id);
         const inCart = cart.has(ad.ad_id);
@@ -195,12 +193,6 @@ export default function CardExchangePage() {
             setActionError(e instanceof Error ? e.message : 'Ошибка корзины');
         } finally { setBusyAd(null); }
     };
-
-    // Одна команда для консоли кабинета WB: собирает доступ (токен + cookie) в буфер.
-    const GRAB_SNIPPET =
-        "copy(JSON.stringify({authorizev3:localStorage['wb-eu-passport-v2.access-token']," +
-        "cookies:document.cookie.split('; ').map(p=>{const i=p.indexOf('=');" +
-        "return{name:p.slice(0,i),value:p.slice(i+1),domain:'.wildberries.ru',path:'/'}})}))";
 
     const cartBtn = (ad: ShowcaseAd, compact = false) => {
         const inCart = cart.has(ad.ad_id);
@@ -224,39 +216,16 @@ export default function CardExchangePage() {
                     </h1>
                 </div>
 
-                {/* Доступ к бирже */}
+                {/* Нет доступа — короткое сообщение без технических подробностей. */}
                 {session && session.status !== 'ACTIVE' && (
-                    <div className="glass-card" style={{ marginBottom: 16 }}>
-                        <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text)', marginBottom: 4 }}>
-                            {session.status === 'EXPIRED' ? 'Доступ к бирже истёк' : 'Нужен доступ к бирже WB'}
+                    <div className="glass-card" style={{ textAlign: 'center', padding: 40 }}>
+                        <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text)', marginBottom: 6 }}>
+                            Нет доступа к бирже WB
                         </div>
-                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
-                            У биржи нет публичного API WB — она работает на том же доступе к кабинету, что и «Поставки».
-                            Если он уже настроен, возьмите его одной кнопкой.
+                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                            {noAccess || 'Доступ к кабинету WB не настроен или истёк.'}
+                            <br />Обновите доступ WB в разделе «Поставки» — биржа подхватит его автоматически.
                         </div>
-                        <button className="btn btn-sm btn-primary" onClick={() => void takeFromSupply()} disabled={savingToken}>
-                            {savingToken ? 'Проверка…' : 'Взять доступ из поставок'}
-                        </button>
-                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: '20px 0 8px' }}>
-                            Способ 2 — вручную. Откройте <b>seller.wildberries.ru</b> → <b>F12</b> → <b>Console</b>,
-                            вставьте команду и нажмите Enter — доступ окажется в буфере.
-                        </div>
-                        <code style={{ display: 'block', background: 'var(--color-bg-hover)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '10px 12px', fontSize: 11, lineHeight: 1.5, color: 'var(--color-text)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-                            {GRAB_SNIPPET}
-                        </code>
-                        <button className="btn btn-sm btn-secondary" style={{ marginTop: 8 }}
-                            onClick={() => void navigator.clipboard.writeText(GRAB_SNIPPET)}>
-                            Скопировать команду
-                        </button>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginTop: 12 }}>
-                            <input value={tokenInput} onChange={e => setTokenInput(e.target.value)}
-                                placeholder="Вставьте сюда скопированный доступ"
-                                style={{ flex: '1 1 320px', minWidth: 240, background: 'var(--color-bg-input)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '8px 12px', fontSize: 13, color: 'var(--color-text)' }} />
-                            <button className="btn btn-sm btn-primary" onClick={() => void saveToken()} disabled={savingToken || !tokenInput.trim()}>
-                                {savingToken ? 'Проверка…' : 'Сохранить доступ'}
-                            </button>
-                        </div>
-                        {tokenError && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginTop: 10 }}>{tokenError}</div>}
                     </div>
                 )}
 
