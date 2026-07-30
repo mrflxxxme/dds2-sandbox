@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.models.assembly import (
+    AssemblyKind,
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,
@@ -164,6 +165,8 @@ async def _check_urgent_shipments(
                 AssemblyRequest.project_id == project_id,
                 AssemblyRequest.is_deleted.is_(False),
                 AssemblyRequest.status.in_(_ACTIVE_ASSEMBLY_STATUSES),
+                # kind=fbs — учётное зеркало FBS: «уже в сборке» для потребности не значит.
+                AssemblyRequest.kind != AssemblyKind.FBS.value,
                 Nomenclature.article_wb.in_(nm_ids),
             )
             .group_by(Nomenclature.article_wb)

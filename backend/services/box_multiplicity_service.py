@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_cache
 from backend.models import WbWarehouseStock
-from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+from backend.models.assembly import AssemblyKind, AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.cost import (
     BoxMultiplicityChangeLog,
     BoxQtyPerWarehouse,
@@ -496,6 +496,8 @@ async def get_box_multiplicity_table(
                 AssemblyRequest.project_id == project_id,
                 AssemblyRequest.is_deleted == False,  # noqa: E712
                 AssemblyRequest.status.in_([*active_statuses, AssemblyStatus.SHIPPED]),
+                # kind=fbs — учётное зеркало FBS: не сток-обязательство.
+                AssemblyRequest.kind != AssemblyKind.FBS.value,
                 Nomenclature.article_wb.in_(nm_ids),
             )
             .group_by(Nomenclature.article_wb, AssemblyRequest.status)

@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from backend.cache import invalidate_project_reports
-from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+from backend.models.assembly import AssemblyKind, AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
 from backend.models.enums import VehicleStatus
 from backend.models.integrations import WbWarehouseRemains, WbWarehouseStock
@@ -217,6 +217,10 @@ async def _get_reserved_map(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted.is_(False),
+            # kind=fbs — учётное зеркало сборки ФФ: его резерв УЖЕ держат
+            # открытые FBS-задания (get_open_fbs_reserved); включить сюда =
+            # задвоить резерв (см. AssemblyKind docstring).
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.status.in_(
                 [
                     AssemblyStatus.PENDING,
@@ -255,6 +259,8 @@ async def _get_reserved_map_batch(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.warehouse_id.in_(warehouse_ids),
             AssemblyRequest.is_deleted.is_(False),
+            # kind=fbs исключён: резерв держат открытые FBS-задания (см. _get_reserved_map).
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.status.in_(
                 [
                     AssemblyStatus.PENDING,
@@ -301,6 +307,8 @@ async def _get_reserved_detail_batch(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.warehouse_id.in_(warehouse_ids),
             AssemblyRequest.is_deleted.is_(False),
+            # kind=fbs исключён — зеркало _get_reserved_map_batch (тот же инвариант).
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.status.in_(
                 [
                     AssemblyStatus.PENDING,

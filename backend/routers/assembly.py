@@ -22,6 +22,7 @@ from backend.models.fulfillment import FulfillmentRequest
 from backend.models.warehouse import Warehouse
 from backend.project_context import get_current_project
 from backend.schemas.assembly import (
+    ALLOWED_ASSEMBLY_KINDS,
     AssemblyAttempt,
     InTransitItem,
     InTransitResponse,
@@ -80,6 +81,7 @@ from backend.services.assembly.analytics import (
     get_logistics_shipments,
 )
 from backend.services.assembly.crud import review_ff_proposal
+from backend.services.assembly.status import FbsMirrorManualError
 from backend.services.assembly.link_anomalies import get_link_anomalies
 from backend.services.assembly.stock_distribution import get_stock_distribution, get_stock_distribution_history
 from backend.services.assembly.stock_mismatch_history import (
@@ -92,6 +94,17 @@ from backend.services.assembly.stock_mismatch_history import (
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/warehouse/assembly", tags=["Assembly"])
+
+
+def _transition_error(e: ValueError) -> HTTPException:
+    """ValueError сервиса переходов → HTTP-статус.
+
+    422 — гейт учётных заявок kind=fbs (ручные переходы запрещены, зеркало
+    ведёт джоб `wb_fbs.assembly_mirror`); 400 — прочие доменные отказы.
+    """
+    if isinstance(e, FbsMirrorManualError):
+        return HTTPException(422, str(e))
+    return HTTPException(400, str(e))
 
 
 def _parse_warehouse_ids(warehouse_ids: str | None) -> list[int] | None:
@@ -130,12 +143,21 @@ async def list_assembly_requests(
         None, description='Происхождение: "pre_dist" (из машины) | "prebooking" (🅿️ предзаявки) | "plain"'
     ),
     source_vehicle_id: int | None = Query(None, description="Только заявки этой машины (CostOrder.id)"),
+    kind: str | None = Query(
+        None,
+        description='Тип заявки: "fbo" (операционные) | "fbs" (учётные зеркала поставок FBS); None — все',
+    ),
     limit: int = Query(50, le=500),
     offset: int = Query(0, ge=0),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """List assembly requests with filters and pagination."""
+    if kind is not None and kind not in ALLOWED_ASSEMBLY_KINDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"kind: допустимые значения — {', '.join(ALLOWED_ASSEMBLY_KINDS)}",
+        )
     items, total = await assembly_service.list_assembly_requests(
         db,
         project.id,
@@ -152,6 +174,7 @@ async def list_assembly_requests(
         joint_only=joint_only,
         source=source,
         source_vehicle_id=source_vehicle_id,
+        kind=kind,
         limit=limit,
         offset=offset,
     )
@@ -1050,7 +1073,7 @@ async def start_assembly(
         req = await assembly_service.start_assembly(db, project.id, request_id)
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        raise _transition_error(e) from None
 
 
 @router.post("/{request_id}/ready", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
@@ -1064,7 +1087,7 @@ async def mark_ready(
         req = await assembly_service.mark_ready(db, project.id, request_id)
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        raise _transition_error(e) from None
 
 
 @router.post(
@@ -1081,7 +1104,7 @@ async def assign_vehicle(
         req = await assembly_service.assign_vehicle(db, project.id, request_id, payload)
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        raise _transition_error(e) from None
 
 
 @router.post(
@@ -1097,7 +1120,7 @@ async def unassign_vehicle(
         req = await assembly_service.unassign_vehicle(db, project.id, request_id)
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        raise _transition_error(e) from None
 
 
 @router.post("/{request_id}/ship", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
@@ -1111,7 +1134,7 @@ async def ship_request(
         req = await assembly_service.ship_request(db, project.id, request_id)
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        raise _transition_error(e) from None
 
 
 @router.post("/{request_id}/ship-joint", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
@@ -1125,7 +1148,7 @@ async def ship_joint_supply(
         req = await assembly_service.ship_joint_supply(db, project.id, request_id)
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        raise _transition_error(e) from None
 
 
 @router.post("/{request_id}/cancel", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
@@ -1139,7 +1162,7 @@ async def cancel_request(
         req = await assembly_service.cancel_request(db, project.id, request_id)
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        raise _transition_error(e) from None
 
 
 @router.post("/{request_id}/return", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
@@ -1163,7 +1186,7 @@ async def return_to_warehouse(
         )
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        raise _transition_error(e) from None
 
 
 @router.post("/{request_id}/reopen", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
@@ -1177,7 +1200,7 @@ async def reopen_for_reship(
         req = await assembly_service.reopen_for_reship(db, project.id, request_id)
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        raise _transition_error(e) from None
 
 
 @router.post("/{request_id}/close", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
@@ -1191,7 +1214,7 @@ async def close_request(
         req = await assembly_service.close_request(db, project.id, request_id)
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        raise _transition_error(e) from None
 
 
 @router.get("/{request_id}/attempts", response_model=list[AssemblyAttempt])

@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
 from backend.models import Nomenclature, Project, WarehouseStock, WbFunnelDaily, WbPrice, WbWarehouseStock
-from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+from backend.models.assembly import AssemblyKind, AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.refs import ImtAlias
 from backend.schemas.pricing import PricingGroup, PricingResponse, PricingRow, PricingSummary
 from backend.services import funnel as funnel_service
@@ -201,6 +201,8 @@ async def _load_pipeline_stock(db: AsyncSession, pid: int) -> dict[int, dict[str
             AssemblyRequest.project_id == pid,
             AssemblyRequest.is_deleted == False,  # noqa: E712
             AssemblyRequest.status.in_([*active, AssemblyStatus.SHIPPED]),
+            # kind=fbs — учётное зеркало FBS: не FBO-пайплайн.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             Nomenclature.article_wb.isnot(None),
         )
         .group_by(Nomenclature.article_wb, AssemblyRequest.status)

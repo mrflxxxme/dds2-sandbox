@@ -127,6 +127,9 @@ def _warehouse_to_dict(wh: WbFbsWarehouse, links: list[dict] | None = None) -> d
         # сохранённого значения и молча предлагала бы перезаписать его.
         "mode": wh.mode,
         "fbo_max_qty": wh.fbo_max_qty,
+        # Авто-учёт сборки FBS (заявки kind=fbs заводит джоб). Без поля в ответе
+        # форма настроек показывала бы дефолт схемы (False) вместо сохранённого.
+        "auto_assembly": wh.auto_assembly,
         "synced_at": wh.synced_at,
         "links": links or [],
     }

@@ -392,25 +392,52 @@ async def _handle_recent_orders(db: AsyncSession, project_id: int) -> tuple[int,
     return count, count
 
 
+async def _run_assembly_mirror(db: AsyncSession, project_id: int) -> int:
+    """Учётное зеркало сборки FBS (заявки kind=fbs) — best-effort.
+
+    Сбой зеркала не должен ронять родительский синк (поставки/статусы уже
+    записаны и закоммичены сервисами) — логируем и продолжаем; сессию
+    откатываем, чтобы не оставить её в failed-состоянии.
+    """
+    from backend.services.wb_fbs.assembly_mirror import sync_fbs_assembly_mirror
+
+    try:
+        return await sync_fbs_assembly_mirror(db, project_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("WB FBS assembly mirror: проект %d упал — %s", project_id, e, exc_info=True)
+        try:
+            await db.rollback()
+        except Exception:  # noqa: BLE001 — сессия могла быть уже закрыта
+            pass
+        return 0
+
+
 async def _handle_order_statuses(db: AsyncSession, project_id: int) -> tuple[int, int]:
     """Статусы не-терминальных заданий + списание ушедших в `complete`.
 
     Списание живёт здесь, а не отдельным джобом: `complete` появляется ровно в
     момент обновления статусов, и списывать логично тем же проходом
     (`writeoff_completed_orders` идемпотентен по `written_off_at`).
+
+    После списания — догон учётного зеркала сборки FBS (kind=fbs): статусы
+    заявок обязаны догонять статусы заданий без отдельного расписания.
     """
     from backend.services.wb_fbs.orders_service import sync_order_statuses, writeoff_completed_orders
 
     updated = await sync_order_statuses(db, project_id)
     written_off = await writeoff_completed_orders(db, project_id)
+    await _run_assembly_mirror(db, project_id)
     return updated, written_off
 
 
 async def _handle_supplies(db: AsyncSession, project_id: int) -> tuple[int, int]:
-    """Зеркало поставок FBS."""
+    """Зеркало поставок FBS + учётное зеркало сборки (заявки kind=fbs)."""
     from backend.services.wb_fbs.supplies_service import sync_supplies
 
     count = await sync_supplies(db, project_id)
+    await _run_assembly_mirror(db, project_id)
     return count, count
 
 
