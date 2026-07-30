@@ -284,16 +284,32 @@ async def update_warehouse_settings(
     (`observe` / `translate`) и гейт по FBO (`fbo_max_qty`: отдаём в FBS,
     только пока на складах WB осталось не больше этого; `-1` — снять гейт).
 
-    Пара «translate + ff_mirror» при зеркале ФФ выше учёта гейтится сервисом:
-    409 с цифрами разрыва; `force=true` в payload'е применяет как есть.
+    Включение рискованной тройки «is_active + translate + ff_mirror» при
+    зеркале ФФ выше учёта гейтится сервисом: 409 со структурированным detail
+    (`code=fbs_mirror_above_ledger` + цифры разрыва — фронт опознаёт «свой»
+    конфликт по коду, а не по тексту); `force=true` применяет как есть.
+
+    🔴 `except FbsMirrorAboveLedger` обязан стоять ВНУТРИ `_fbs_errors()`:
+    имя класса начинается с `Fbs`, и общий обработчик перевёл бы его в 422
+    (`_raise_domain_error`) — 409 деградировал бы молча (закреплено тестом).
     """
     with _fbs_errors():
         try:
             return await warehouse_service.update_settings(db, project.id, wb_warehouse_id, payload)
         except warehouse_service.FbsMirrorAboveLedger as e:
             # Конфликт состояния склада (зеркало обещает больше учёта), а не
-            # ошибка ввода: 409, как у гардов сверки выше.
-            raise HTTPException(409, str(e)) from e
+            # ошибка ввода: 409, как у гардов сверки выше. Структурированный
+            # detail — прецедент backend/routers/counterparty.py (inn_conflict).
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "fbs_mirror_above_ledger",
+                    "message": str(e),
+                    "mirror_over_ledger": e.mirror_over_ledger,
+                    "ledger_total": e.ledger_total,
+                    "mirror_total": e.mirror_total,
+                },
+            ) from e
 
 
 # ─── Привязки наших складов ──────────────────────────────────────────────────
@@ -590,11 +606,6 @@ async def orders_warehouse_summary(
         )
 
 
-#: Валидные значения фильтра статуса — контракт схем, включая псевдо-статусы
-#: фаз доставки (`in_delivery_stuck` добавлен туда же).
-_ORDER_STATUS_FILTERS = ALLOWED_ORDER_STATUS_FILTERS
-
-
 @router.get("/orders", response_model=FbsOrderListOut)
 async def list_orders(
     status: str | None = Query(
@@ -613,8 +624,8 @@ async def list_orders(
     db: AsyncSession = Depends(get_db),
 ):
     """Список сборочных заданий из нашего зеркала + счётчики по статусам."""
-    if status is not None and status not in _ORDER_STATUS_FILTERS:
-        raise HTTPException(422, f"status должен быть одним из: {_ORDER_STATUS_FILTERS}")
+    if status is not None and status not in ALLOWED_ORDER_STATUS_FILTERS:
+        raise HTTPException(422, f"status должен быть одним из: {ALLOWED_ORDER_STATUS_FILTERS}")
     if date_from and date_to and date_from > date_to:
         raise HTTPException(422, "date_from позже date_to")
     with _fbs_errors():
@@ -659,8 +670,9 @@ async def orders_writeoff_issues(
 ):
     """Незакрытые списания: задания `complete`, которые НЕЧЕМ списать со склада.
 
-    Агрегат по товару с причиной (`no_card` / `no_link` / `no_stock`) и
-    остатками привязанных складов — раньше отказ был виден только warning'ом
+    Агрегат по товару с причиной (`no_card` / `no_link` / `no_stock` /
+    `queued` — остатка хватает, ждёт ближайшего прогона) и остатками
+    привязанных складов — раньше отказ был виден только warning'ом
     в логе воркера. Читает наше зеркало, в WB не ходит; путь статический —
     объявлен до path-параметров.
     """

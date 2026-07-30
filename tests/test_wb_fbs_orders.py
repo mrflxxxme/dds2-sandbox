@@ -954,6 +954,37 @@ async def test_writeoff_skips_orders_without_link(db_session, env):
 
 
 @pytest.mark.asyncio
+async def test_writeoff_does_not_write_to_soft_deleted_warehouse(db_session, env):
+    """Привязка к мягко удалённому складу — НЕ привязка: в мёртвый остаток не списываем.
+
+    Канон домена: удалённый склад выпадает из привязок (`get_linked_warehouse_ids`).
+    Раньше `_active_links_subquery` мёртвых не фильтровал, и списание уходило в
+    остаток склада, которого нет в интерфейсе; теперь задание честно blocked.
+    """
+    wh = (
+        await db_session.execute(select(Warehouse).where(Warehouse.id == env.warehouse_id))
+    ).scalar_one()
+    wh.is_deleted = True
+    await db_session.commit()
+
+    await _seed_order(
+        db_session,
+        env.project_id,
+        7046,
+        supplier_status=FbsSupplierStatus.COMPLETE.value,
+        nomenclature_id=env.nomenclature_id,
+    )
+
+    written = await orders_service.writeoff_completed_orders(db_session, env.project_id)
+    assert written == 0
+    # Остаток мёртвого склада не тронут, задание осталось неотмеченным.
+    assert await _stock_qty(db_session, env.project_id, env.warehouse_id, env.nomenclature_id) == 5
+    db_session.expire_all()
+    rows = await _orders(db_session, env.project_id)
+    assert all(r.written_off_at is None for r in rows)
+
+
+@pytest.mark.asyncio
 async def test_writeoff_unwritable_orders_do_not_block_the_queue(db_session, env, monkeypatch):
     """Нерешаемые задания не занимают очередь списания.
 
@@ -1284,6 +1315,68 @@ async def test_delivery_phases_split_in_transit_from_sorted(db_session, env):
 
 
 @pytest.mark.asyncio
+async def test_in_delivery_is_whitelist_not_blacklist(db_session, env):
+    """Фаза «в пути» — БЕЛЫЙ список до-сортировочных `wbStatus`, не чёрный.
+
+    Чёрный список «complete минус sorted минус sold/defect» возвращал любой
+    неизвестный пост-сортировочный статус обратно в «едет к СЦ»: 168 заказов в
+    `ready_for_pickup` (лежат в ПВЗ) через 2 дня зажигали «зависло»
+    (прод 30.07.2026). Теперь: `waiting`/пустой/NULL — в пути; `ready_for_pickup`/
+    `postponed_delivery` — фаза «отсортировано»; НЕИЗВЕСТНЫЙ новый статус WB —
+    ни в одной фазе; WB-отмена при complete — тоже ни в одной.
+    """
+    done = FbsSupplierStatus.COMPLETE.value
+    await _seed_order(db_session, env.project_id, 9620, supplier_status=done, wb_status="ready_for_pickup")
+    await _seed_order(db_session, env.project_id, 9621, supplier_status=done, wb_status="postponed_delivery")
+    await _seed_order(db_session, env.project_id, 9622, supplier_status=done, wb_status="waiting")
+    await _seed_order(db_session, env.project_id, 9623, supplier_status=done, wb_status="")
+    await _seed_order(db_session, env.project_id, 9624, supplier_status=done, wb_status=None)
+    # Неизвестный статус WB: белый список не пускает его в «едет к СЦ».
+    await _seed_order(db_session, env.project_id, 9625, supplier_status=done, wb_status="new_wb_status_2027")
+    # WB-отмена при complete: effective — cancel, ни одна фаза не считает.
+    await _seed_order(db_session, env.project_id, 9626, supplier_status=done, wb_status="canceled_by_client")
+
+    listed = await orders_service.list_orders(db_session, env.project_id)
+    assert listed["in_delivery_count"] == 3  # waiting + "" + NULL
+    assert listed["sorted_count"] == 2  # ready_for_pickup + postponed_delivery
+
+    in_delivery = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_IN_DELIVERY_STATUS
+    )
+    assert {o["wb_order_id"] for o in in_delivery["items"]} == {9622, 9623, 9624}
+    sorted_phase = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_SORTED_STATUS
+    )
+    assert {o["wb_order_id"] for o in sorted_phase["items"]} == {9620, 9621}
+
+
+@pytest.mark.parametrize(
+    ("wb_status", "expected"),
+    [
+        (None, True),
+        ("", True),
+        ("waiting", True),
+        ("sent_to_carrier", True),
+        ("accepted_by_carrier", True),
+        ("sorted", False),
+        ("ready_for_pickup", False),
+        ("postponed_delivery", False),
+        ("sold", False),
+        ("defect", False),
+        ("canceled_by_client", False),
+        ("new_wb_status_2027", False),  # белый список: неизвестное — НЕ «в пути»
+    ],
+)
+def test_is_in_delivery_row_mirrors_whitelist(wb_status, expected):
+    """Питон-зеркало `_is_in_delivery_row` повторяет белый список SQL бит-в-бит."""
+    order = WbFbsOrder(supplier_status=FbsSupplierStatus.COMPLETE.value, wb_status=wb_status)
+    assert orders_service._is_in_delivery_row(order) is expected
+    # Не-complete — False при любом wb_status.
+    order_new = WbFbsOrder(supplier_status=FbsSupplierStatus.NEW.value, wb_status=wb_status)
+    assert orders_service._is_in_delivery_row(order_new) is False
+
+
+@pytest.mark.asyncio
 async def test_warehouse_summary_windows_delivery_but_not_the_queue(db_session, env):
     """Период режет ТОЛЬКО фазы доставки; очередь сборки отдаётся целиком.
 
@@ -1428,6 +1521,50 @@ async def test_stuck_filter_window_and_counter(db_session, env):
     assert {o["wb_order_id"] for o in listed["items"]} == {9811}
     # transit_days у зависшего задания заполнен от того же якоря.
     assert listed["items"][0]["transit_days"] == 3
+
+
+@pytest.mark.asyncio
+async def test_stuck_not_lit_by_post_sort_or_unknown_status(db_session, env):
+    """`ready_for_pickup` (лежит в ПВЗ) и неизвестный статус НЕ зажигают «зависло».
+
+    Прод 30.07.2026: чёрный список возвращал пост-сортировочные статусы в «едет
+    к СЦ», и 168 заказов из ПВЗ через 2 дня светились зависшими. Белый список:
+    при том же старом якоре зависшим остаётся только до-сортировочный `waiting`
+    (и пустой статус — канон «в пути»).
+    """
+    from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    await _seed_supply(db_session, env.project_id, "WB-GI-RFP", scan_dt=now - timedelta(days=5))
+    await _seed_order(
+        db_session,
+        env.project_id,
+        9830,
+        supplier_status=done,
+        wb_status="ready_for_pickup",
+        supply_id="WB-GI-RFP",
+    )
+    await _seed_order(
+        db_session,
+        env.project_id,
+        9831,
+        supplier_status=done,
+        wb_status="new_wb_status_2027",
+        supply_id="WB-GI-RFP",
+    )
+    await _seed_order(
+        db_session, env.project_id, 9832, supplier_status=done, wb_status="waiting", supply_id="WB-GI-RFP"
+    )
+
+    listed = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_IN_DELIVERY_STUCK_STATUS
+    )
+    assert listed["in_delivery_stuck_count"] == 1
+    assert {o["wb_order_id"] for o in listed["items"]} == {9832}
+    # ПВЗ-заказ — в фазе «отсортировано», не потерян.
+    assert listed["sorted_count"] == 1
 
 
 @pytest.mark.asyncio

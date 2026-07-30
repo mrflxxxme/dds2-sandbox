@@ -44,10 +44,25 @@ class FbsMirrorAboveLedger(Exception):
 
     Такая пара транслировала бы в WB остаток, которого в нашем учёте нет, —
     WB продаст, а списывать нечего. Конфликт СОСТОЯНИЯ, не ошибка ввода:
-    роутер переводит в HTTP 409; `force=true` в payload'е обходит гейт
-    (решение человека). `min_of_both` не гейтится — минимум не обещает
-    больше учёта по построению.
+    роутер переводит в HTTP 409 со структурированным detail (цифры разрыва —
+    атрибутами исключения); `force=true` в payload'е обходит гейт (решение
+    человека). `min_of_both` не гейтится — минимум не обещает больше учёта
+    по построению.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        mirror_over_ledger: int,
+        ledger_total: int,
+        mirror_total: int,
+    ) -> None:
+        super().__init__(message)
+        self.mirror_over_ledger = mirror_over_ledger
+        self.ledger_total = ledger_total
+        self.mirror_total = mirror_total
+
 
 #: Префиксы кэша домена (зарегистрированы в backend/cache.py).
 #: ВНИМАНИЕ: в самих декораторах `@cached(prefix=...)` префикс обязан стоять
@@ -407,12 +422,19 @@ async def _mirror_over_ledger_totals(
 ) -> tuple[int, int, int]:
     """(mirror_over_ledger, ledger_total, mirror_total) по активным привязкам склада.
 
-    mirror_over_ledger = Σ per-SKU GREATEST(россыпь зеркала − учёт, 0) — сколько
-    штук источник `ff_mirror` пообещал бы WB СВЕРХ нашего учёта. Россыпь зеркала:
-    строки `fulfillment_stocks` без `base_barcode` (короба не считаем дважды) с
-    привязанной номенклатурой, `qty_good × units_per_box`; учёт —
-    `warehouse_stock.quantity`; джойн по (warehouse_id, nomenclature_id).
-    SKU только в учёте (зеркала нет) даёт 0 — занижать зеркало безопасно.
+    mirror_over_ledger = Σ per-SKU GREATEST(источник − учёт, 0) НА УРОВНЕ
+    НОМЕНКЛАТУРЫ, где источник каждого (склад, SKU) — россыпь зеркала, если
+    ключ зеркала есть, иначе учёт (фолбэк `stock_service._source_qty`: склад
+    без зеркала кормится ledger'ом). Трансляция суммирует привязки ПУЛОМ
+    (`stock_service._sum_by_warehouse`), поэтому и разрыв меряется по пулу:
+    прежний per-(склад, SKU) GREATEST давал ложный 409 на перекрёстном
+    распределении (mirror wh1=10/ledger wh1=0, mirror wh2=0/ledger wh2=10 —
+    WB обещается 10 при учёте 10, разрыва нет).
+
+    Россыпь зеркала: строки `fulfillment_stocks` без `base_barcode` (короба не
+    считаем дважды) с привязанной номенклатурой, `qty_good × units_per_box`;
+    учёт — `warehouse_stock.quantity`; ключ (warehouse_id, nomenclature_id).
+    SKU только в учёте (ключа зеркала нет нигде) даёт источник == учёту → 0.
     """
     warehouse_ids = await get_linked_warehouse_ids(db, project_id, wb_warehouse_id)
     if not warehouse_ids:
@@ -452,8 +474,22 @@ async def _mirror_over_ledger_totals(
 
     mirror_total = sum(mirror_by_key.values())
     ledger_total = sum(ledger_by_key.values())
+
+    # Свод до уровня номенклатуры: источник (склад, SKU) = зеркало при наличии
+    # ключа, иначе учёт (фолбэк `_source_qty`); учёт суммируется как есть.
+    src_by_nom: dict[int, int] = {}
+    ledger_by_nom: dict[int, int] = {}
+    for (_wid, nom_id), qty in ledger_by_key.items():
+        ledger_by_nom[nom_id] = ledger_by_nom.get(nom_id, 0) + qty
+    for key in set(mirror_by_key) | set(ledger_by_key):
+        src = mirror_by_key.get(key)
+        if src is None:
+            src = ledger_by_key.get(key, 0)
+        nom_id = key[1]
+        src_by_nom[nom_id] = src_by_nom.get(nom_id, 0) + src
+
     over = sum(
-        max(pieces - ledger_by_key.get(key, 0), 0) for key, pieces in mirror_by_key.items()
+        max(src - ledger_by_nom.get(nom_id, 0), 0) for nom_id, src in src_by_nom.items()
     )
     return over, ledger_total, mirror_total
 
@@ -474,25 +510,43 @@ async def update_settings(
     снять гейт было бы нечем, а `0` означает совсем другое — «отдаём в FBS
     только то, чего на складах WB не осталось вовсе».
 
-    Гейт рискованной пары «translate + ff_mirror»: если ЭФФЕКТИВНАЯ пара после
-    применения изменений даёт трансляцию из зеркала ФФ, а зеркало по привязанным
-    складам обещает больше нашего учёта, — без `force` поднимаем
-    `FbsMirrorAboveLedger` (роутер → 409) ДО записи изменений: половина настроек
-    сохраниться не должна. `min_of_both` не гейтится.
+    Гейт рискованной тройки «is_active + translate + ff_mirror»: поднимаем
+    `FbsMirrorAboveLedger` (роутер → 409) ДО записи изменений — половина
+    настроек сохраниться не должна — только когда выполнены ВСЕ ТРИ условия:
+      (а) ЭФФЕКТИВНАЯ тройка после применения изменений — включённая
+          трансляция из зеркала ФФ (`is_active=True, mode=translate,
+          stock_source=ff_mirror`);
+      (б) запрос ПОВЫШАЕТ exposure: среди изменений есть `mode` или
+          `stock_source` со значением, отличным от текущего, ЛИБО `is_active`
+          меняется False→True. Правки только буферов/капов/`fbo_max_qty`
+          (StockTab без force-диалога — прежний гейт делал их тупиком 409) и
+          любое `is_active`→False (аварийный стоп!) проходят без гейта;
+      (в) нет `force` (подтверждение человека).
+    `min_of_both` не гейтится — минимум не обещает больше учёта по построению.
     """
     wh = await get_warehouse(db, project_id, wb_warehouse_id)
     changes = payload.model_dump(exclude_unset=True)
     # `force` — подтверждение гейта, а не настройка склада: в setattr не идёт.
     changes.pop("force", None)
 
-    # Эффективная пара ПОСЛЕ применения изменений (None = «не менять»).
+    # Эффективная тройка ПОСЛЕ применения изменений (None = «не менять»).
+    effective_active = (
+        changes.get("is_active") if changes.get("is_active") is not None else wh.is_active
+    )
     effective_mode = changes.get("mode") if changes.get("mode") is not None else wh.mode
     effective_source = (
         changes.get("stock_source") if changes.get("stock_source") is not None else wh.stock_source
     )
+    raises_exposure = (
+        (changes.get("mode") is not None and changes["mode"] != wh.mode)
+        or (changes.get("stock_source") is not None and changes["stock_source"] != wh.stock_source)
+        or (changes.get("is_active") is True and not wh.is_active)
+    )
     if (
-        effective_mode == FbsWarehouseMode.TRANSLATE.value
+        effective_active
+        and effective_mode == FbsWarehouseMode.TRANSLATE.value
         and effective_source == FbsStockSource.FF_MIRROR.value
+        and raises_exposure
         and not payload.force
     ):
         over, ledger_total, mirror_total = await _mirror_over_ledger_totals(
@@ -504,7 +558,10 @@ async def update_settings(
                 f"на {over} шт больше, чем есть в учёте "
                 f"(mirror_over_ledger={over}, ledger_total={ledger_total}, "
                 f"mirror_total={mirror_total}). Разберитесь с расхождением или "
-                "повторите запрос с force=true, чтобы применить как есть."
+                "повторите запрос с force=true, чтобы применить как есть.",
+                mirror_over_ledger=over,
+                ledger_total=ledger_total,
+                mirror_total=mirror_total,
             )
 
     for field, value in changes.items():

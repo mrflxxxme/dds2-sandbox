@@ -2822,8 +2822,10 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     diff desc, затем barcode.
 
     ff_good отдаётся с двумя поправками: досчёт логистики (`ff_logistics`, К
-    ff_good) и FBS-вычет (`ff_fbs`, ИЗ ff_good, capped по ff_good) — diff
-    считается от уже поправленного ff_good и остаётся честным сам.
+    ff_good, кламп по наблюдаемой недостаче) и FBS-вычет (`ff_fbs`, ИЗ ff_good,
+    кап по наблюдаемому ПРОФИЦИТУ ff_good − наш итог) — diff считается от уже
+    поправленного ff_good и остаётся честным сам, а после выравнивания остатков
+    (ADJUSTMENT / провайдер начал списывать сам) вычет самоизлечивается в 0.
     """
     result = await db.execute(
         select(FulfillmentStock)
@@ -2994,20 +2996,45 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     # FBS-вычет из ff_good: провайдер выбытие под FBS-продажи не отражает
     # (ни один из трёх WMS, сверка 29.07.2026) — без вычета каждая FBS-продажа
     # читается как ложное «у ФФ больше». База вычета — ff_good УЖЕ с досчётом
-    # логистики. КАП через min обязателен: если провайдер когда-нибудь начнёт
-    # списывать сам, ff_good не должен уходить в минус (тогда вычет станет
-    # двойным учётом — кап его сам и погасит).
+    # логистики. КАП по НАБЛЮДАЕМОМУ ПРОФИЦИТУ (как у соседа ff_logistics, где
+    # досчёт клампится наблюдаемой недостачей): surplus = ff_good − наш итог —
+    # ровно та развилка, по которой ниже считается diff. Прежний кап по одному
+    # ff_good (lifetime-нетто) после первой же сверки ADJUSTMENT'ом — или если
+    # провайдер однажды спишет сам — давал ВЕЧНОЕ ложное «у нас больше». В
+    # штатном случае профицит и есть объём FBS (полезный эффект не теряется),
+    # а самоизлечение появляется: выровняли остатки — вычет гаснет сам.
     fbs_shipped = await _fbs_shipped_by_barcode(db, project_id, warehouse_id)
+    fbs_shipped_total = 0
+    fbs_applied_total = 0
+    fbs_key_misses = 0
     for barcode, shipped in fbs_shipped.items():
+        fbs_shipped_total += shipped
         frow = rows.get(barcode)
         if frow is None:
-            # Ни зеркала ФФ, ни нашего остатка по этому ШК — вычитать не из чего.
+            # Движение есть, а строки (ни зеркала, ни учёта) нет — вычитать не
+            # из чего; счётчик промахов делает сломанную предпосылку видимой.
+            fbs_key_misses += 1
             continue
-        applied = min(shipped, frow["ff_good"])
+        our_total = frow["our_quantity"] + (frow["our_defect"] if is_migfull else 0)
+        surplus = frow["ff_good"] - our_total
+        applied = min(shipped, max(surplus, 0))
         if applied <= 0:
             continue
+        fbs_applied_total += applied
         frow["ff_fbs"] += applied
         frow["ff_good"] -= applied
+    if fbs_shipped:
+        # Раз на вызов, не на строку: clip > 0 или промахи ключа — сигнал, что
+        # предпосылка «провайдер не списывает под FBS» могла сломаться.
+        logger.info(
+            "FF FBS-вычет: project=%s warehouse=%s shipped=%s applied=%s clip=%s key_misses=%s",
+            project_id,
+            warehouse_id,
+            fbs_shipped_total,
+            fbs_applied_total,
+            fbs_shipped_total - fbs_applied_total,
+            fbs_key_misses,
+        )
 
     for row in rows.values():
         if is_migfull:

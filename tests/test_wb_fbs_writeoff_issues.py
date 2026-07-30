@@ -8,12 +8,16 @@
 по товару с причиной и остатками привязанных складов.
 
 Что закрыто:
-  • классификация трёх причин и её приоритет (no_card > no_link > no_stock);
+  • классификация причин и её приоритет (no_card > no_link > no_stock);
+  • пост-классификация queued: остатка хватает на ВСЕ задания группы — это
+    очередь до ближайшего прогона, не алярм; частичный дефицит — no_stock;
+  • коды причин — тест-связка с ALLOWED_WRITEOFF_REASONS (контракт схем);
   • NULL-склад продавца = no_link (в списание такое задание не попадает никогда);
+  • мягко удалённый наш склад = привязки нет → no_link (канон домена);
   • агрегация по (склад продавца, товар, причина): stuck / oldest_at;
   • обогащение: имя склада WB, первый привязанный наш склад, our_qty/our_defect
     по ВСЕМ привязанным складам, ff_loose (None без зеркала вовсе);
-  • cap строк + честный total_orders до среза;
+  • cap строк + честный total_orders до среза + флаг truncated;
   • списанные и не-complete задания не попадают; contour-фильтр (песочница);
   • изоляция по project_id.
 """
@@ -99,6 +103,23 @@ async def _seed(db_session, project_id, wb_order_id, **over):
 # ─── Классификация причин ────────────────────────────────────────────────────
 
 
+def test_reason_codes_match_schema_contract():
+    """Локальные коды причин сервиса ≡ ALLOWED_WRITEOFF_REASONS (контракт схем).
+
+    Сервис держит коды локальными константами (а не литералами врассыпную);
+    равенство набора со схемой — этот тест, чтобы новый код не разъехался с
+    фронтовым словарём WRITEOFF_REASON_LABEL.
+    """
+    from backend.schemas.wb_fbs import ALLOWED_WRITEOFF_REASONS
+
+    assert {
+        orders_service._WRITEOFF_ISSUE_NO_CARD,
+        orders_service._WRITEOFF_ISSUE_NO_LINK,
+        orders_service._WRITEOFF_ISSUE_NO_STOCK,
+        orders_service._WRITEOFF_ISSUE_QUEUED,
+    } == set(ALLOWED_WRITEOFF_REASONS)
+
+
 @pytest.mark.asyncio
 async def test_reason_no_stock_for_linked_card(db_session, env):
     """Карточка есть, привязка есть, остатка нет → no_stock."""
@@ -106,6 +127,7 @@ async def test_reason_no_stock_for_linked_card(db_session, env):
 
     out = await orders_service.writeoff_issues(db_session, env.project_id)
     assert out["total_orders"] == 1
+    assert out["truncated"] is False
     (row,) = out["rows"]
     assert row["reason"] == "no_stock"
     assert row["wb_warehouse_id"] == WB_WH
@@ -192,6 +214,93 @@ async def test_inactive_link_counts_as_no_link(db_session, env):
     assert out["rows"][0]["reason"] == "no_link"
 
 
+@pytest.mark.asyncio
+async def test_soft_deleted_warehouse_counts_as_no_link(db_session, env):
+    """Мягко удалённый наш склад = привязки нет → no_link, а не ложный no_stock.
+
+    Канон домена («Мягко удалённый наш склад выпадает из привязок»): раньше
+    подзапрос привязок мёртвых не фильтровал, задание получало no_stock с
+    пустыми полями, а списание уходило в мёртвый остаток.
+    """
+    wh = (
+        await db_session.execute(select(Warehouse).where(Warehouse.id == env.warehouse_id))
+    ).scalar_one()
+    wh.is_deleted = True
+    # Остаток на мёртвом складе есть — но привязкой он быть перестал.
+    db_session.add(
+        WarehouseStock(
+            project_id=env.project_id,
+            warehouse_id=env.warehouse_id,
+            nomenclature_id=env.nomenclature_id,
+            barcode=BARCODE,
+            quantity=500,
+        )
+    )
+    await db_session.commit()
+
+    await _seed(db_session, env.project_id, 90006, nomenclature_id=env.nomenclature_id)
+    out = await orders_service.writeoff_issues(db_session, env.project_id)
+    (row,) = out["rows"]
+    assert row["reason"] == "no_link"
+    # Обогащение мёртвый склад тоже не видит: ни привязки, ни остатков.
+    assert row["warehouse_id"] is None
+    assert row["our_qty"] == 0
+    assert row["ff_loose"] is None
+
+
+# ─── Пост-классификация queued ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_queued_when_stock_covers_all(db_session, env):
+    """Остатка хватает на ВСЕ задания группы → queued (очередь, не алярм).
+
+    Задание с полным остатком, ещё не подхваченное 5-минутным джобом, рядом с
+    колонкой «Остаток у нас: 500» читалось как алярм no_stock на пустом месте.
+    """
+    db_session.add(
+        WarehouseStock(
+            project_id=env.project_id,
+            warehouse_id=env.warehouse_id,
+            nomenclature_id=env.nomenclature_id,
+            barcode=BARCODE,
+            quantity=500,
+        )
+    )
+    await db_session.commit()
+    await _seed(db_session, env.project_id, 90070, nomenclature_id=env.nomenclature_id)
+    await _seed(db_session, env.project_id, 90071, nomenclature_id=env.nomenclature_id)
+
+    out = await orders_service.writeoff_issues(db_session, env.project_id)
+    (row,) = out["rows"]
+    assert row["reason"] == "queued"
+    assert row["stuck"] == 2
+    assert row["our_qty"] == 500
+
+
+@pytest.mark.asyncio
+async def test_no_stock_kept_on_partial_deficit(db_session, env):
+    """1 ≤ our_qty < stuck — частичный дефицит важнее: остаётся no_stock."""
+    db_session.add(
+        WarehouseStock(
+            project_id=env.project_id,
+            warehouse_id=env.warehouse_id,
+            nomenclature_id=env.nomenclature_id,
+            barcode=BARCODE,
+            quantity=2,
+        )
+    )
+    await db_session.commit()
+    for i in range(3):
+        await _seed(db_session, env.project_id, 90080 + i, nomenclature_id=env.nomenclature_id)
+
+    out = await orders_service.writeoff_issues(db_session, env.project_id)
+    (row,) = out["rows"]
+    assert row["reason"] == "no_stock"
+    assert row["stuck"] == 3
+    assert row["our_qty"] == 2
+
+
 # ─── Агрегация, сортировка, cap ──────────────────────────────────────────────
 
 
@@ -241,6 +350,8 @@ async def test_cap_rows_but_full_total(db_session, env, monkeypatch):
     out = await orders_service.writeoff_issues(db_session, env.project_id)
     assert out["total_orders"] == 6
     assert [r["stuck"] for r in out["rows"]] == [3, 2]
+    # Срез виден флагом — фронт обязан сказать «показаны первые N».
+    assert out["truncated"] is True
 
 
 # ─── Обогащение остатками ────────────────────────────────────────────────────
