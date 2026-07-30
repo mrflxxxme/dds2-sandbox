@@ -492,6 +492,11 @@ class FbsOrderOut(BaseModel):
     #: written_off_at, что есть) до сейчас. Только у `complete`, ещё не принятых
     #: СЦ; у прочих фаз и без якоря — None.
     transit_days: int | None = None
+    #: Фаза ПОСТАВКИ задания — для кабинетного статуса строки: закрыта ли
+    #: (`done`) и отсканирован ли QR (`scan_dt`). Без них строка «complete +
+    #: waiting» читалась как противоречие: закрыто у нас ≠ сдано WB.
+    supply_done: bool | None = None
+    supply_scan_dt: datetime | None = None
 
 
 class FbsOrderListOut(BaseModel):
