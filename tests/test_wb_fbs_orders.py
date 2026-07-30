@@ -1323,6 +1323,190 @@ async def test_warehouse_summary_windows_delivery_but_not_the_queue(db_session, 
     assert full["totals"]["in_delivery"] == 2
 
 
+# ─── Зависшие в пути на СЦ: transit_days и псевдо-статус in_delivery_stuck ───
+
+
+async def _seed_supply(db_session, project_id: int, wb_supply_id: str, **over) -> WbFbsSupply:
+    fields = {"project_id": project_id, "wb_supply_id": wb_supply_id, "done": True}
+    fields.update(over)
+    supply = WbFbsSupply(**fields)
+    db_session.add(supply)
+    await db_session.commit()
+    return supply
+
+
+@pytest.mark.asyncio
+async def test_transit_days_anchor_priority_and_fallback(db_session, env):
+    """Якорь передачи: scan_dt → closed_at → written_off_at; без якоря — None.
+
+    🔴 Дни считаются int-усечением от `total_seconds()/86400`, не `timedelta.days`
+    в сравнении (грабля проекта): 4.5 суток в пути — это «4 дня», 0.5 — «0».
+    """
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    # scan_dt перебивает closed_at.
+    await _seed_supply(
+        db_session,
+        env.project_id,
+        "WB-GI-T1",
+        scan_dt=now - timedelta(days=4, hours=12),
+        closed_at=now - timedelta(days=10),
+    )
+    # Нет scan_dt — берём closed_at.
+    await _seed_supply(db_session, env.project_id, "WB-GI-T2", closed_at=now - timedelta(days=3, hours=5))
+    await _seed_order(
+        db_session, env.project_id, 9800, supplier_status=done, wb_status=None, supply_id="WB-GI-T1"
+    )
+    await _seed_order(
+        db_session, env.project_id, 9801, supplier_status=done, wb_status=None, supply_id="WB-GI-T2"
+    )
+    # Поставки нет — фолбэк на written_off_at (списание = момент передачи).
+    await _seed_order(
+        db_session,
+        env.project_id,
+        9802,
+        supplier_status=done,
+        wb_status=None,
+        written_off_at=now - timedelta(hours=12),
+    )
+    # Ни поставки, ни списания — точку отсчёта взять неоткуда.
+    await _seed_order(db_session, env.project_id, 9803, supplier_status=done, wb_status=None)
+    # Отсортировано — фаза «едет» кончилась, transit_days не считается.
+    await _seed_order(
+        db_session, env.project_id, 9804, supplier_status=done, wb_status="sorted", supply_id="WB-GI-T1"
+    )
+    # Не complete — тем более None.
+    await _seed_order(db_session, env.project_id, 9805)
+
+    listed = await orders_service.list_orders(db_session, env.project_id)
+    by_id = {o["wb_order_id"]: o["transit_days"] for o in listed["items"]}
+    assert by_id[9800] == 4
+    assert by_id[9801] == 3
+    assert by_id[9802] == 0
+    assert by_id[9803] is None
+    assert by_id[9804] is None
+    assert by_id[9805] is None
+
+
+@pytest.mark.asyncio
+async def test_stuck_filter_window_and_counter(db_session, env):
+    """Зависло = передано 2–30 дней назад, СЦ не принял; вне окна — не зависло."""
+    from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    await _seed_supply(db_session, env.project_id, "WB-GI-S1", scan_dt=now - timedelta(days=1))
+    await _seed_supply(db_session, env.project_id, "WB-GI-S2", scan_dt=now - timedelta(days=3))
+    await _seed_supply(db_session, env.project_id, "WB-GI-S3", scan_dt=now - timedelta(days=40))
+    # Моложе порога (1 день) — штатно едет.
+    await _seed_order(
+        db_session, env.project_id, 9810, supplier_status=done, wb_status=None, supply_id="WB-GI-S1"
+    )
+    # В окне 2–30 дней — зависло.
+    await _seed_order(
+        db_session, env.project_id, 9811, supplier_status=done, wb_status=None, supply_id="WB-GI-S2"
+    )
+    # Старше потолка — застывший wb_status, не живой груз.
+    await _seed_order(
+        db_session, env.project_id, 9812, supplier_status=done, wb_status=None, supply_id="WB-GI-S3"
+    )
+    # СЦ принял — уже не «едет», каким бы старым ни был якорь.
+    await _seed_order(
+        db_session, env.project_id, 9813, supplier_status=done, wb_status="sorted", supply_id="WB-GI-S2"
+    )
+    # Без якоря — зависшим не считается (точки отсчёта нет).
+    await _seed_order(db_session, env.project_id, 9814, supplier_status=done, wb_status=None)
+
+    listed = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_IN_DELIVERY_STUCK_STATUS
+    )
+    assert listed["total"] == 1
+    assert listed["in_delivery_stuck_count"] == 1
+    assert {o["wb_order_id"] for o in listed["items"]} == {9811}
+    # transit_days у зависшего задания заполнен от того же якоря.
+    assert listed["items"][0]["transit_days"] == 3
+
+
+@pytest.mark.asyncio
+async def test_stuck_filter_ignores_page_period(db_session, env):
+    """Окно периода страницы НЕ режет зависшие: это очередь проблем, не история."""
+    from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    await _seed_supply(db_session, env.project_id, "WB-GI-P1", scan_dt=now - timedelta(days=5))
+    # Задание создано 20 дней назад — заведомо ВНЕ узкого окна страницы.
+    await _seed_order(
+        db_session,
+        env.project_id,
+        9820,
+        supplier_status=done,
+        wb_status=None,
+        supply_id="WB-GI-P1",
+        created_at_wb=now - timedelta(days=20),
+    )
+
+    day = date.today()
+    listed = await orders_service.list_orders(
+        db_session,
+        env.project_id,
+        status=FBS_IN_DELIVERY_STUCK_STATUS,
+        date_from=day - timedelta(days=1),
+        date_to=day,
+    )
+    # Период выкинул бы задание (создано 20 дней назад) — фильтр зависших его держит.
+    assert listed["total"] == 1
+    assert {o["wb_order_id"] for o in listed["items"]} == {9820}
+    assert listed["in_delivery_stuck_count"] == 1
+    # Обычные счётчики при этом окно уважают: в узком периоде заданий нет.
+    assert listed["in_delivery_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_warehouse_summary_counts_stuck_without_period(db_session, env):
+    """`in_delivery_stuck` в сводке складов — БЕЗ периода (как очередь сборки)."""
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    await _seed_supply(db_session, env.project_id, "WB-GI-W1", scan_dt=now - timedelta(days=5))
+    await _seed_order(
+        db_session,
+        env.project_id,
+        9830,
+        supplier_status=done,
+        wb_status=None,
+        supply_id="WB-GI-W1",
+        created_at_wb=now - timedelta(days=20),
+    )
+    # Свежее «едет» (вчера) — в периоде, но НЕ зависло.
+    await _seed_supply(db_session, env.project_id, "WB-GI-W2", scan_dt=now - timedelta(days=1))
+    await _seed_order(
+        db_session,
+        env.project_id,
+        9831,
+        supplier_status=done,
+        wb_status=None,
+        supply_id="WB-GI-W2",
+        created_at_wb=now - timedelta(days=1),
+    )
+
+    day = date.today()
+    summary = await orders_service.warehouse_summary(
+        db_session, env.project_id, date_from=day - timedelta(days=2), date_to=day
+    )
+    totals = summary["totals"]
+    # Период отрезал 9830 от «в доставке», но не от «зависло».
+    assert totals["in_delivery"] == 1
+    assert totals["in_delivery_stuck"] == 1
+    row = next(r for r in summary["warehouses"] if r["wb_warehouse_id"] == WB_WAREHOUSE_ID)
+    assert row["in_delivery_stuck"] == 1
+
+
 # ─── Контур: песочница не трогает боевые данные ──────────────────────────────
 
 

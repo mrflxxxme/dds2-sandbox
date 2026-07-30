@@ -100,6 +100,13 @@ upsert-ятся синком. `WbFbsStockOverride` тоже без SoftDelete н
   у `isProcessing` и у выключенного `is_active`: последний отсекался прямо в выборке целей, из-за
   чего явный запрос давал ранний `return []` ДО создания журнала — ручка отвечала успехом, а следов
   прогона не появлялось вовсе.
+- **Гейт настроек «translate + ff_mirror»** (`update_settings` → `FbsMirrorAboveLedger` → 409).
+  Если ЭФФЕКТИВНАЯ пара после PATCH (старые настройки + изменения) даёт трансляцию из зеркала ФФ,
+  а зеркало по активным привязкам обещает больше учёта (Σ per-SKU GREATEST(россыпь_зеркала − ledger,
+  0) > 0), PATCH отбивается ДО записи (не сохранить половину) с цифрами
+  `mirror_over_ledger / ledger_total / mirror_total`; `force=true` в payload'е применяет как есть.
+  `min_of_both` не гейтится — минимум не обещает больше учёта по построению. Тесты —
+  `tests/test_wb_fbs_settings_gate.py`.
 
 ### Формула FBS-остатка (прямое направление: наш склад → WB)
 Считается в `services/wb_fbs/stock_service.py` для пары «наш склад × номенклатура», затем
@@ -423,6 +430,23 @@ available(наш склад, номенклатура) = max(0, quantity − res
   `status_counts`: сумма счётчиков — это `total` вкладки «Все», и синтетика внутри неё удвоила бы
   каждое переданное задание. Те же псевдо-статусы принимает фильтр (`status=in_delivery` /
   `status=sorted`) — цифра на карточке склада и выдача по клику обязаны совпадать до штуки.
+- **Псевдо-статус `in_delivery_stuck` — «зависло в пути на СЦ»** (`FBS_IN_DELIVERY_STUCK_STATUS`,
+  `in_delivery_stuck_condition`): подмножество `in_delivery`, чей якорь передачи
+  (`COALESCE(supply.scan_dt, supply.closed_at, order.written_off_at)`, LEFT JOIN поставки по
+  `supply_id`) старше `_TRANSIT_STUCK_DAYS` (2 дн), но не старше `_TRANSIT_STUCK_MAX_DAYS` (30 дн —
+  потолок против застывшего `wbStatus` у заданий, выпавших из окна опроса `_STATUS_MAX_ORDERS`).
+  🔴 Фильтр и счётчики (`in_delivery_stuck_count` списка, `in_delivery_stuck` карточки склада)
+  ИГНОРИРУЮТ период страницы: зависшее — очередь проблем, не история. Строки фазы «едет» несут
+  `transit_days` — дни от того же якоря, `int(total_seconds() // 86400)`, НЕ `timedelta.days`
+  (грабля int-усечения); якоря поставок страницы поднимаются одним IN-запросом.
+- **`GET /orders/writeoff-issues` — видимость незакрытых списаний** (`writeoff_issues`): агрегат
+  «complete без `written_off_at`» по (склад продавца, товар, причина). Причины по приоритету:
+  `no_card` (нет карточки) → `no_link` (склад продавца без активной привязки, NULL-склад — тоже) →
+  `no_stock` (гвард «не в минус» держит задание в очереди). Обогащение батчами: имя склада WB,
+  первый привязанный наш склад, `our_qty`/`our_defect` по всем привязкам, `ff_loose` (россыпь
+  зеркала ФФ; None — зеркала нет вовсе) — сигнал «товар физически у провайдера, ledger отстал».
+  Строк ≤ 200 (stuck DESC), `total_orders` — полный счётчик до среза. Раньше единственным следом
+  был warning в логе воркера (прод 29.07: 145 заданий висело на нулевом остатке).
 - **Сводка по складам — отдельная ручка `GET /fbs/orders/warehouse-summary`** (`warehouse_summary`),
   ОДИН запрос с `GROUP BY wb_warehouse_id` вместо запроса на склад (прежние «limit=1 на каждый» —
   9 параллельных походов в БД ради девяти чисел). 🔴 **Период применяется ТОЛЬКО к фазам доставки.**
@@ -507,8 +531,9 @@ available(наш склад, номенклатура) = max(0, quantity − res
 | GET | `/stock/pushes` | | журнал прогонов |
 | GET | `/stock/reconcile` | | первичная сверка «захват»: что стоит в кабинете против нашего расчёта |
 | POST | `/stock/reconcile` | ✓ | применить сверку (обнулить чужое / выровнять базу дельты) |
-| GET | `/orders` | | `orders_service.list_orders` |
+| GET | `/orders` | | `orders_service.list_orders`; `status` принимает и псевдо-статусы `in_delivery` / `sorted` / `in_delivery_stuck` |
 | GET | `/orders/stats` | | `orders_stats.orders_stats` — выручка за период, разрезы (бренд/предмет/под-категория/статус/дни) и доля в объёме воронки |
+| GET | `/orders/writeoff-issues` | | `orders_service.writeoff_issues` — задания `complete`, которые нечем списать: причина + остатки привязанных складов |
 | POST | `/orders/sync` | ✓ | `orders_service.sync_new_orders` — только очередь `/orders/new` |
 | **POST** | **`/orders/backfill`** | ✓ | **`orders_service.backfill_orders_history` — история заданий за `days` (≤90) окнами ≤30 дней; историю метит `written_off_at`, чтобы не вычесть со склада прошлые продажи** |
 | POST | `/orders/stickers` | ✓ | стикеры заданий (≤100 за раз) |

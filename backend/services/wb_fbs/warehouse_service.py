@@ -31,12 +31,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.cache import cached, invalidate_cache
 from backend.models.fulfillment import FulfillmentStock
 from backend.models.integrations import IntegrationKey
-from backend.models.warehouse import Warehouse
-from backend.models.wb_fbs import WbFbsWarehouse, WbFbsWarehouseLink
+from backend.models.warehouse import Warehouse, WarehouseStock
+from backend.models.wb_fbs import FbsStockSource, FbsWarehouseMode, WbFbsWarehouse, WbFbsWarehouseLink
 from backend.schemas.wb_fbs import FbsWarehouseSettingsUpdate
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+class FbsMirrorAboveLedger(Exception):
+    """Гейт настроек: «translate + ff_mirror», а зеркало ФФ выше нашего учёта.
+
+    Такая пара транслировала бы в WB остаток, которого в нашем учёте нет, —
+    WB продаст, а списывать нечего. Конфликт СОСТОЯНИЯ, не ошибка ввода:
+    роутер переводит в HTTP 409; `force=true` в payload'е обходит гейт
+    (решение человека). `min_of_both` не гейтится — минимум не обещает
+    больше учёта по построению.
+    """
 
 #: Префиксы кэша домена (зарегистрированы в backend/cache.py).
 #: ВНИМАНИЕ: в самих декораторах `@cached(prefix=...)` префикс обязан стоять
@@ -391,6 +402,62 @@ async def rename_wb_warehouse(
 # ─── Наши настройки трансляции ───────────────────────────────────────────────
 
 
+async def _mirror_over_ledger_totals(
+    db: AsyncSession, project_id: int, wb_warehouse_id: int
+) -> tuple[int, int, int]:
+    """(mirror_over_ledger, ledger_total, mirror_total) по активным привязкам склада.
+
+    mirror_over_ledger = Σ per-SKU GREATEST(россыпь зеркала − учёт, 0) — сколько
+    штук источник `ff_mirror` пообещал бы WB СВЕРХ нашего учёта. Россыпь зеркала:
+    строки `fulfillment_stocks` без `base_barcode` (короба не считаем дважды) с
+    привязанной номенклатурой, `qty_good × units_per_box`; учёт —
+    `warehouse_stock.quantity`; джойн по (warehouse_id, nomenclature_id).
+    SKU только в учёте (зеркала нет) даёт 0 — занижать зеркало безопасно.
+    """
+    warehouse_ids = await get_linked_warehouse_ids(db, project_id, wb_warehouse_id)
+    if not warehouse_ids:
+        return 0, 0, 0
+
+    mirror_rows = (
+        await db.execute(
+            select(
+                FulfillmentStock.warehouse_id,
+                FulfillmentStock.nomenclature_id,
+                func.sum(FulfillmentStock.qty_good * FulfillmentStock.units_per_box).label("pieces"),
+            )
+            .where(
+                FulfillmentStock.project_id == project_id,
+                FulfillmentStock.warehouse_id.in_(warehouse_ids),
+                FulfillmentStock.base_barcode.is_(None),
+                FulfillmentStock.nomenclature_id.is_not(None),
+            )
+            .group_by(FulfillmentStock.warehouse_id, FulfillmentStock.nomenclature_id)
+        )
+    ).all()
+    mirror_by_key = {(int(r.warehouse_id), int(r.nomenclature_id)): int(r.pieces or 0) for r in mirror_rows}
+
+    ledger_rows = (
+        await db.execute(
+            select(
+                WarehouseStock.warehouse_id,
+                WarehouseStock.nomenclature_id,
+                WarehouseStock.quantity,
+            ).where(
+                WarehouseStock.project_id == project_id,
+                WarehouseStock.warehouse_id.in_(warehouse_ids),
+            )
+        )
+    ).all()
+    ledger_by_key = {(int(r.warehouse_id), int(r.nomenclature_id)): int(r.quantity or 0) for r in ledger_rows}
+
+    mirror_total = sum(mirror_by_key.values())
+    ledger_total = sum(ledger_by_key.values())
+    over = sum(
+        max(pieces - ledger_by_key.get(key, 0), 0) for key, pieces in mirror_by_key.items()
+    )
+    return over, ledger_total, mirror_total
+
+
 async def update_settings(
     db: AsyncSession,
     project_id: int,
@@ -406,9 +473,40 @@ async def update_settings(
     нужен потому, что `None` в JSON неотличим от «поле не передано»: без него
     снять гейт было бы нечем, а `0` означает совсем другое — «отдаём в FBS
     только то, чего на складах WB не осталось вовсе».
+
+    Гейт рискованной пары «translate + ff_mirror»: если ЭФФЕКТИВНАЯ пара после
+    применения изменений даёт трансляцию из зеркала ФФ, а зеркало по привязанным
+    складам обещает больше нашего учёта, — без `force` поднимаем
+    `FbsMirrorAboveLedger` (роутер → 409) ДО записи изменений: половина настроек
+    сохраниться не должна. `min_of_both` не гейтится.
     """
     wh = await get_warehouse(db, project_id, wb_warehouse_id)
     changes = payload.model_dump(exclude_unset=True)
+    # `force` — подтверждение гейта, а не настройка склада: в setattr не идёт.
+    changes.pop("force", None)
+
+    # Эффективная пара ПОСЛЕ применения изменений (None = «не менять»).
+    effective_mode = changes.get("mode") if changes.get("mode") is not None else wh.mode
+    effective_source = (
+        changes.get("stock_source") if changes.get("stock_source") is not None else wh.stock_source
+    )
+    if (
+        effective_mode == FbsWarehouseMode.TRANSLATE.value
+        and effective_source == FbsStockSource.FF_MIRROR.value
+        and not payload.force
+    ):
+        over, ledger_total, mirror_total = await _mirror_over_ledger_totals(
+            db, project_id, wb_warehouse_id
+        )
+        if over > 0:
+            raise FbsMirrorAboveLedger(
+                "Зеркало ФФ выше нашего учёта: источник «зеркало ФФ» отдал бы WB "
+                f"на {over} шт больше, чем есть в учёте "
+                f"(mirror_over_ledger={over}, ledger_total={ledger_total}, "
+                f"mirror_total={mirror_total}). Разберитесь с расхождением или "
+                "повторите запрос с force=true, чтобы применить как есть."
+            )
+
     for field, value in changes.items():
         if value is None:
             continue
