@@ -2155,7 +2155,10 @@ function FfStocksTab({ warehouseId, provider }: { warehouseId: number; provider:
     return (
         <>
             {totals && (
-                <div style={{ display: 'grid', gridTemplateColumns: `repeat(${summary.length}, 1fr)`, gap: 12, marginBottom: 16 }}>
+                /* auto-fit, а не repeat(N, 1fr): карточек бывает до десятка
+                   (Собрано/В приёмке/В коробах/Отгружено FBS — условные), и
+                   жёсткая сетка ужимала бы их в нечитаемые столбики. */
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginBottom: 16 }}>
                     {summary.map(s => {
                         const filter = s.filter ?? null;
                         const active = filter !== null && quickFilter === filter;

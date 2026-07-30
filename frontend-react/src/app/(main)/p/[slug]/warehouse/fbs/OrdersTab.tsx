@@ -28,6 +28,7 @@ import {
     PSEUDO_STATUS_LABEL,
     SUPPLIER_STATUS_LABEL,
     SupplierStatusBadge,
+    TRANSIT_STALE_DAYS,
     TRANSIT_WARN_DAYS,
     WB_STATUS_LABEL,
     SELECT_ALL_MAX,
@@ -71,7 +72,7 @@ const STATUS_TABS: { key: string; label: string; title?: string }[] = [
         key: 'in_delivery_stuck',
         label: PSEUDO_STATUS_LABEL.in_delivery_stuck,
         title: `Переданы ≥ ${TRANSIT_WARN_DAYS} дней назад, а сортировочный центр так и не принял `
-            + '— товар мог потеряться по дороге на СЦ (окно — последние 30 дней)',
+            + `— товар мог потеряться по дороге на СЦ (окно — последние ${TRANSIT_STALE_DAYS} дней)`,
     },
     { key: 'sorted', label: PSEUDO_STATUS_LABEL.sorted, title: 'Принято сортировочным центром WB, покупатель ещё не получил' },
     { key: 'cancel', label: SUPPLIER_STATUS_LABEL.cancel },
@@ -495,7 +496,9 @@ export default function OrdersTab({
             key: 'transit_days', label: 'В пути, дн', align: 'right',
             headerTitle: 'Сколько дней задание едет на сортировочный центр после передачи '
                 + 'поставки. Пусто — СЦ уже принял или момент передачи неизвестен. '
-                + `Подсветка: ≥ ${TRANSIT_WARN_DAYS} дн — задержка, дальше — ЧП`,
+                + `Подсветка: ≥ ${TRANSIT_WARN_DAYS} дн — задержка, дальше — ЧП; `
+                + `> ${TRANSIT_STALE_DAYS} дн — застывший статус старого задания `
+                + '(в чипе «Зависли в пути» не считается), не живой груз',
             render: (v: number | null) => {
                 if (v == null) return <span style={{ color: 'var(--color-text-dim)' }}>—</span>;
                 const color = transitDaysColor(v);

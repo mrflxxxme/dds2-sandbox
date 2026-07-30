@@ -221,7 +221,14 @@ export class ApiClient {
             const detail = err.detail ?? err.error?.message;
             if (typeof detail === 'string') throw this.httpError(detail, res.status);
             if (Array.isArray(detail)) throw this.httpError(detail.map((d: any) => d.msg || JSON.stringify(d)).join('; '), res.status);
-            throw this.httpError(typeof detail === 'object' ? JSON.stringify(detail) : `Error ${res.status}`, res.status);
+            if (detail && typeof detail === 'object') {
+                // Структурированный detail (напр. 409-гейт настроек FBS-склада):
+                // message остаётся JSON-строкой — существующие потребители,
+                // читающие только .message, не ломаются; сам объект едет полем
+                // error.detail для тех, кому нужен code и цифры, а не текст.
+                throw this.httpError(JSON.stringify(detail), res.status, detail);
+            }
+            throw this.httpError(`Error ${res.status}`, res.status);
         }
 
         // 204 No Content / пустое тело (DELETE-эндпоинты): res.json() на пустоте
@@ -377,11 +384,16 @@ export class ApiClient {
      * Ошибка HTTP с сохранённым кодом ответа. Текст не меняется — существующие
      * вызывающие, читающие `.message`, не ломаются; `.status` — добавка для тех,
      * кому важен КОД, а не текст (напр. 403 = «вкладка не для вас», не «ошибка»).
+     * `.detail` — структурированный detail бэка (объект), когда он был объектом:
+     * потребитель опознаёт ошибку по `detail.code`, а не парсит message.
      * Зеркалит `uploadFormData()`, которое так делало и раньше.
      */
-    private httpError(message: string, status: number): Error & { status: number } {
-        const e = new Error(message) as Error & { status: number };
+    private httpError(
+        message: string, status: number, detail?: unknown,
+    ): Error & { status: number; detail?: unknown } {
+        const e = new Error(message) as Error & { status: number; detail?: unknown };
         e.status = status;
+        if (detail !== undefined) e.detail = detail;
         return e;
     }
 

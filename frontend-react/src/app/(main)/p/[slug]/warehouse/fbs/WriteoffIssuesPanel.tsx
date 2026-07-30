@@ -14,7 +14,7 @@ import { api } from '@/lib/api';
 import { formatDateTime, formatNumber, pluralRu } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { FbsWriteoffIssueRow, FbsWriteoffIssuesOut } from '@/types/api';
+import type { FbsWriteoffIssueRow, FbsWriteoffIssues } from '@/types/api';
 import { daysSince, num, writeoffReasonLabel } from './fbsShared';
 
 interface Props {
@@ -25,18 +25,20 @@ interface Props {
 }
 
 export default function WriteoffIssuesPanel({ reloadKey, refreshTick }: Props) {
-    const [data, setData] = useState<FbsWriteoffIssuesOut | null>(null);
+    const [data, setData] = useState<FbsWriteoffIssues | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [expanded, setExpanded] = useState(false);
 
     const load = useCallback(async (signal?: AbortSignal) => {
         setLoading(true);
-        setError('');
+        // error НЕ чистим на старте: во время ретрая плашка/строка ошибки
+        // должна остаться на экране (иначе панель на секунду пропадает совсем).
         try {
             const res = await api.getFbsWriteoffIssues();
             if (signal?.aborted) return;
             setData(res);
+            setError('');
         } catch (e: unknown) {
             if (signal?.aborted) return;
             setError(e instanceof Error ? e.message : 'Ошибка загрузки сводки списаний');
@@ -53,8 +55,10 @@ export default function WriteoffIssuesPanel({ reloadKey, refreshTick }: Props) {
     }, [load, reloadKey, refreshTick]);
 
     // Ошибка не валит вкладку: панель — дополнение к списку заданий, поэтому
-    // показываем компактную плашку с повтором, а не пустой экран.
-    if (error) {
+    // показываем компактную плашку с повтором, а не пустой экран. Плашка —
+    // только пока данных НЕТ вовсе: когда тревога «Не списано: N» уже показана,
+    // ошибка перечитывания не должна её гасить — она уедет строкой в панель.
+    if (error && data === null) {
         return (
             <div
                 className="glass-card"
@@ -112,8 +116,15 @@ export default function WriteoffIssuesPanel({ reloadKey, refreshTick }: Props) {
         {
             key: 'stuck', label: 'Не списано', align: 'right',
             headerTitle: 'Сколько переданных заданий по этому товару не проведено по складу',
-            render: (v: number) => (
-                <span style={{ fontWeight: 700, color: 'var(--color-warning)' }}>{formatNumber(num(v), 0)}</span>
+            // queued — очередь, не алярм: остаток есть, спишется ближайшим
+            // прогоном. Жёлтым горят только строки с реальной причиной.
+            render: (v: number, row: FbsWriteoffIssueRow) => (
+                <span style={{
+                    fontWeight: 700,
+                    color: row.reason === 'queued' ? undefined : 'var(--color-warning)',
+                }}>
+                    {formatNumber(num(v), 0)}
+                </span>
             ),
             exportValue: (row: FbsWriteoffIssueRow) => num(row.stuck),
         },
@@ -188,8 +199,30 @@ export default function WriteoffIssuesPanel({ reloadKey, refreshTick }: Props) {
                     {expanded ? 'Скрыть' : `Показать (${formatNumber(rows.length, 0)})`}
                 </button>
             </div>
+            {/* Ошибка ПЕРЕЧИТЫВАНИЯ — строкой внутри панели: уже показанная
+                тревога «Не списано: N» не гасится из-за одного упавшего запроса. */}
+            {error && (
+                <div style={{
+                    marginTop: 8, fontSize: 12, color: 'var(--color-danger)',
+                    display: 'flex', alignItems: 'center', gap: 8,
+                }}>
+                    <span style={{ flex: 1 }}>
+                        Не удалось обновить сводку: {error} — показаны прошлые данные.
+                    </span>
+                    <button className="btn btn-sm" onClick={() => load()} disabled={loading}>
+                        {loading ? 'Загрузка…' : 'Повторить'}
+                    </button>
+                </div>
+            )}
             {expanded && (
                 <div style={{ marginTop: 12 }}>
+                    {data?.truncated && (
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                            Показаны первые {formatNumber(rows.length, 0)}{' '}
+                            {pluralRu(rows.length, ['группа', 'группы', 'групп'])} — выдача срезана
+                            сервером, итог «{formatNumber(total, 0)}» считает всё.
+                        </div>
+                    )}
                     <TanStackDataTable
                         columns={cols}
                         data={rows}
@@ -197,6 +230,10 @@ export default function WriteoffIssuesPanel({ reloadKey, refreshTick }: Props) {
                         enableSorting
                         enablePagination={rows.length > 50}
                         emptyText="Все переданные задания списаны"
+                        // Очередь (queued) приглушена: это не проблема, а ожидание
+                        // ближайшего прогона списания — алярм-строки читаются первыми.
+                        rowClassName={(row: FbsWriteoffIssueRow) =>
+                            row.reason === 'queued' ? 'fbs-row-queued' : ''}
                     />
                 </div>
             )}

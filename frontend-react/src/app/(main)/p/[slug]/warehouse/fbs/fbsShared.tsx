@@ -16,6 +16,7 @@ import type {
     FbsSupplierStatus,
     FbsSupply,
     FbsSupplyStatus,
+    FbsWriteoffReason,
 } from '@/types/api';
 import { formatAge } from './useAutoRefresh';
 
@@ -104,13 +105,22 @@ export const PSEUDO_STATUS_LABEL: Record<string, string> = {
 export const TRANSIT_WARN_DAYS = 2;
 /** С какого дня задержка — уже ЧП: товар передали, а СЦ так и не принял. */
 export const TRANSIT_DANGER_DAYS = 4;
+/**
+ * Потолок окна «зависло» (совпадает с бэком): у старых `complete` wb_status
+ * застывает (синк опрашивает не всё), и дальше этого срока «N дн в пути» —
+ * артефакт застывшего статуса, а не живой груз на дороге.
+ */
+export const TRANSIT_STALE_DAYS = 30;
 
 /**
  * Цвет значения «В пути, дн»: null — обычный текст (не подсвечиваем).
- * Пороги едины с чипом «Зависли в пути», чтобы подсветка и счётчик не спорили.
+ * Пороги едины с чипом «Зависли в пути», чтобы подсветка и счётчик не спорили:
+ * за потолком окна (> TRANSIT_STALE_DAYS) строка в чипе НЕ считается, поэтому
+ * и красить её тревожным нельзя — приглушаем как «застывший статус».
  */
 export function transitDaysColor(days: number | null | undefined): string | null {
     if (days == null) return null;
+    if (days > TRANSIT_STALE_DAYS) return 'var(--color-text-dim)';
     if (days >= TRANSIT_DANGER_DAYS) return 'var(--color-danger)';
     if (days >= TRANSIT_WARN_DAYS) return 'var(--color-warning)';
     return null;
@@ -122,7 +132,10 @@ export function transitDaysColor(days: number | null | undefined): string | null
  */
 export function daysSince(iso: string | null | undefined, now: number = Date.now()): number | null {
     if (!iso) return null;
-    const ts = Date.parse(iso);
+    // Бэк шлёт naive-UTC без 'Z' — Date.parse прочитал бы такое как ЛОКАЛЬНОЕ
+    // время и завысил возраст на часовой пояс (паттерн warehouse/[id]/page.tsx).
+    const raw = iso.endsWith('Z') || /[+-]\d\d:\d\d$/.test(iso) ? iso : iso + 'Z';
+    const ts = Date.parse(raw);
     if (!Number.isFinite(ts)) return null;
     return Math.max(0, Math.floor((now - ts) / 86_400_000));
 }
@@ -227,9 +240,12 @@ export const WRITEOFF_REASON_LABEL: Record<string, string> = {
     no_stock: 'нет остатка на складе',
     no_card: 'нет карточки товара',
     no_link: 'склад не привязан',
+    // queued — НЕ проблема: остаток есть, задание ждёт ближайшего прогона
+    // 5-минутного джоба списания. Тон нейтральный, строка в панели приглушена.
+    queued: 'ждёт списания (остаток есть)',
 };
 
-export function writeoffReasonLabel(reason: string): string {
+export function writeoffReasonLabel(reason: FbsWriteoffReason): string {
     return WRITEOFF_REASON_LABEL[reason] ?? reason;
 }
 

@@ -33,7 +33,7 @@ import type {
     FbsWarehouseCreatePayload,
     FbsWarehouseRenamePayload,
     FbsWarehouseSettingsPayload,
-    FbsWriteoffIssuesOut,
+    FbsWriteoffIssues,
 } from '@/types/api';
 
 /** Фильтры списка сборочных заданий (GET /fbs/orders). */
@@ -160,7 +160,7 @@ export function addFbsMethods(api: ApiClient) {
          * непуста, часть FBS-продаж не проведена по нашим книгам.
          */
         getFbsWriteoffIssues() {
-            return api.request<FbsWriteoffIssuesOut>('GET', '/api/v1/fbs/orders/writeoff-issues');
+            return api.request<FbsWriteoffIssues>('GET', '/api/v1/fbs/orders/writeoff-issues');
         },
         /** Сводка заказов за период: выручка, разрезы, доля в объёме воронки. */
         getFbsOrderStats(f: { dateFrom?: string; dateTo?: string; wbWarehouseId?: number } = {}) {

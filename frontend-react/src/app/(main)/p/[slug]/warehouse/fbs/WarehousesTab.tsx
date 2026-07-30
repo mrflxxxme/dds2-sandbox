@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatDateTime, formatNumber } from '@/lib/utils';
 import type {
+    FbsMirrorGateDetail,
     FbsOffice,
     FbsStockSource,
     FbsWarehouse,
@@ -27,6 +28,26 @@ import {
     warehouseModeLabel,
 } from './fbsShared';
 import { EnableTranslationModal } from './fbsReconcile';
+
+/**
+ * Опознание 409-гейта настроек по КОДУ структурированного detail, а не по
+ * пересказу серверного условия на фронте: любой будущий 409 этой ручки с
+ * другим кодом упадёт в обычную ошибку, а не в ложный «применить всё равно?».
+ */
+function mirrorGateOf(detail: unknown): FbsMirrorGateDetail | null {
+    if (!detail || typeof detail !== 'object') return null;
+    const d = detail as Partial<FbsMirrorGateDetail>;
+    return d.code === 'fbs_mirror_above_ledger' ? (d as FbsMirrorGateDetail) : null;
+}
+
+/**
+ * Содержимое диалога 409-гейта: `gate` — структурированный detail с цифрами;
+ * null — старый бэк (окно деплоя) прислал detail строкой, показываем текст.
+ */
+interface MirrorGateInfo {
+    message: string;
+    gate: FbsMirrorGateDetail | null;
+}
 
 interface Props {
     warehouses: FbsWarehouse[];
@@ -182,7 +203,7 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
      * сохранению и прислал цифры разрыва — они лежат здесь, пока открыт
      * диалог «применить всё равно?». null — диалога нет.
      */
-    const [forceAsk, setForceAsk] = useState<string | null>(null);
+    const [forceAsk, setForceAsk] = useState<MirrorGateInfo | null>(null);
 
     /** Есть ли у склада хоть одно зеркало ФФ — без него выбирать источник не из чего. */
     const hasMirror = wh.links.some(l => l.has_mirror);
@@ -229,16 +250,21 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
         } catch (e: unknown) {
             const message = e instanceof Error ? e.message : 'Ошибка сохранения настроек';
             // 409 на рискованной комбинации «translate + Система ФФ» — не ошибка,
-            // а вопрос: зеркало выше учёта, бэк прислал цифры разрыва. Прочие 409
-            // этого экрана (нет ключа, идёт трансляция…) невозможно подтвердить
-            // force'ом — они падают в обычную ошибку веткой ниже.
-            const status = (e as Error & { status?: number })?.status;
-            if (
-                status === 409 && !force
-                && payload.mode === 'translate' && payload.stock_source === 'ff_mirror'
-            ) {
+            // а вопрос: зеркало выше учёта, бэк прислал цифры разрыва. Опознаём
+            // по code структурированного detail; прочие 409 этого экрана (нет
+            // ключа, идёт трансляция…) невозможно подтвердить force'ом — они
+            // падают в обычную ошибку веткой ниже.
+            const httpErr = e as Error & { status?: number; detail?: unknown };
+            const gate = mirrorGateOf(httpErr?.detail);
+            if (httpErr?.status === 409 && !force && (
+                gate
+                // Старый бэк (окно деплоя) шлёт detail строкой без кода —
+                // фолбэк на прежнюю эвристику по отправленной комбинации.
+                || (httpErr?.detail === undefined
+                    && payload.mode === 'translate' && payload.stock_source === 'ff_mirror')
+            )) {
                 setAskEnable(false); // не громоздить модалку на модалку
-                setForceAsk(message);
+                setForceAsk({ message: gate?.message || message, gate });
                 return;
             }
             setError(message);
@@ -540,7 +566,7 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
             {forceAsk !== null && (
                 <ForceMirrorConfirmModal
                     warehouseName={wh.name || `Склад #${wh.wb_warehouse_id}`}
-                    detail={forceAsk}
+                    info={forceAsk}
                     busy={saving}
                     error={error}
                     onConfirm={() => doSave(true)}
@@ -563,20 +589,21 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
 
 /**
  * Диалог 409-гейта настроек склада: комбинация «Трансляция + Система ФФ» при
- * зеркале выше нашего учёта отклонена бэком, `detail` несёт цифры разрыва.
+ * зеркале выше нашего учёта отклонена бэком, `info` несёт цифры разрыва.
  * Подтверждение повторяет тот же PATCH с `force: true` — рискует человек,
  * а не дефолт.
  */
-function ForceMirrorConfirmModal({ warehouseName, detail, busy, error, onConfirm, onClose }: {
+function ForceMirrorConfirmModal({ warehouseName, info, busy, error, onConfirm, onClose }: {
     warehouseName: string;
-    /** Текст 409 с бэка — там цифры: на сколько штук и SKU зеркало выше учёта. */
-    detail: string;
+    /** 409 с бэка: человеческий текст + цифры разрыва (когда бэк их прислал). */
+    info: MirrorGateInfo;
     busy: boolean;
     /** Ошибка ПОВТОРНОГО сохранения (уже с force) — показываем в диалоге. */
     error: string;
     onConfirm: () => void;
     onClose: () => void;
 }) {
+    const gate = info.gate;
     return (
         <div className="modal-overlay" onClick={onClose}>
             <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 540 }}>
@@ -592,7 +619,25 @@ function ForceMirrorConfirmModal({ warehouseName, detail, busy, error, onConfirm
                         borderLeft: '4px solid var(--color-warning)',
                     }}
                 >
-                    {detail}
+                    <div>{info.message}</div>
+                    {gate && (
+                        <div style={{
+                            display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 8,
+                        }}>
+                            <span>
+                                Зеркало выше на{' '}
+                                <b style={{ color: 'var(--color-warning)' }}>
+                                    {formatNumber(num(gate.mirror_over_ledger), 0)} шт
+                                </b>
+                            </span>
+                            <span style={{ color: 'var(--color-text-muted)' }}>
+                                Наш учёт: <b>{formatNumber(num(gate.ledger_total), 0)}</b>
+                            </span>
+                            <span style={{ color: 'var(--color-text-muted)' }}>
+                                Зеркало ФФ: <b>{formatNumber(num(gate.mirror_total), 0)}</b>
+                            </span>
+                        </div>
+                    )}
                 </div>
                 <p style={{ fontSize: 13, marginBottom: 16 }}>
                     Зеркало ФФ выше нашего учёта — WB получит остаток, которого нет в наших книгах.

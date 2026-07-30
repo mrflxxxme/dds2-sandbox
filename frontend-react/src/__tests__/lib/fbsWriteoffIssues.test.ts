@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 import {
     PSEUDO_STATUS_LABEL,
     TRANSIT_DANGER_DAYS,
+    TRANSIT_STALE_DAYS,
     TRANSIT_WARN_DAYS,
     WRITEOFF_REASON_LABEL,
     daysSince,
@@ -23,8 +24,12 @@ import {
     writeoffReasonLabel,
 } from '@/app/(main)/p/[slug]/warehouse/fbs/fbsShared';
 
-/** Коды причин, которые РЕАЛЬНО отдаёт бэкенд (`FbsWriteoffIssueRow.reason`). */
-const BACKEND_REASONS = ['no_stock', 'no_card', 'no_link'];
+/**
+ * Коды причин, которые РЕАЛЬНО отдаёт бэкенд (`ALLOWED_WRITEOFF_REASONS`,
+ * `FbsWriteoffIssueRow.reason`). `queued` — не проблема, а очередь: остаток
+ * есть, задание ждёт ближайшего прогона списания.
+ */
+const BACKEND_REASONS = ['no_stock', 'no_card', 'no_link', 'queued'];
 
 describe('WRITEOFF_REASON_LABEL', () => {
     it('покрывает все коды бэкенда человеческим текстом', () => {
@@ -39,6 +44,8 @@ describe('WRITEOFF_REASON_LABEL', () => {
         expect(writeoffReasonLabel('no_stock')).toBe('нет остатка на складе');
         expect(writeoffReasonLabel('no_card')).toBe('нет карточки товара');
         expect(writeoffReasonLabel('no_link')).toBe('склад не привязан');
+        // queued — спокойный тон: это очередь на списание, не авария
+        expect(writeoffReasonLabel('queued')).toBe('ждёт списания (остаток есть)');
     });
 
     it('неизвестный код показываем как есть, а не «—»', () => {
@@ -73,11 +80,19 @@ describe('transitDaysColor', () => {
         expect(transitDaysColor(TRANSIT_WARN_DAYS)).toBe('var(--color-warning)');
         expect(transitDaysColor(TRANSIT_DANGER_DAYS - 1)).toBe('var(--color-warning)');
         expect(transitDaysColor(TRANSIT_DANGER_DAYS)).toBe('var(--color-danger)');
-        expect(transitDaysColor(30)).toBe('var(--color-danger)');
+        expect(transitDaysColor(TRANSIT_STALE_DAYS)).toBe('var(--color-danger)');
     });
 
-    it('пороги согласованы: warning наступает раньше danger', () => {
+    it('за потолком окна «зависло» — приглушение, не тревога: бэк такие строки '
+        + 'в чип не считает, это застывший wb_status старого задания', () => {
+        expect(transitDaysColor(TRANSIT_STALE_DAYS + 1)).toBe('var(--color-text-dim)');
+        expect(transitDaysColor(45)).toBe('var(--color-text-dim)');
+        expect(transitDaysColor(365)).toBe('var(--color-text-dim)');
+    });
+
+    it('пороги согласованы: warning раньше danger, потолок — дальше обоих', () => {
         expect(TRANSIT_WARN_DAYS).toBeLessThan(TRANSIT_DANGER_DAYS);
+        expect(TRANSIT_DANGER_DAYS).toBeLessThan(TRANSIT_STALE_DAYS);
     });
 });
 
@@ -99,5 +114,14 @@ describe('daysSince (возраст самого старого несписан
 
     it('будущая дата (перекос часов) — «сегодня», не отрицательное', () => {
         expect(daysSince('2026-07-31T00:00:00Z', now)).toBe(0);
+    });
+
+    it('naive-UTC без Z читается как UTC, а не как локальное время', () => {
+        // Бэк шлёт datetime без таймзоны; без нормализации Date.parse в поясе
+        // восточнее UTC завышал бы возраст на смещение пояса.
+        expect(daysSince('2026-07-27T12:00:00', now)).toBe(daysSince('2026-07-27T12:00:00Z', now));
+        expect(daysSince('2026-07-27T12:00:00', now)).toBe(3);
+        // явное смещение уважаем — оно уже несёт таймзону
+        expect(daysSince('2026-07-27T12:00:00+00:00', now)).toBe(3);
     });
 });
