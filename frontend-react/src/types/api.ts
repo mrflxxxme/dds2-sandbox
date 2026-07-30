@@ -8498,6 +8498,38 @@ export interface FbsOrder {
    */
   supply_done?: boolean | null;
   supply_scan_dt?: string | null;
+  /**
+   * Оценка штрафа WB за отмену, ₽ (только в фазах cancel_client /
+   * cancel_seller). Numeric — приходит СТРОКОЙ, перед показом Number().
+   * 0 — отмена без штрафа, null — фаза не отменная / оценки нет.
+   */
+  penalty_est?: number | string | null;
+}
+
+/**
+ * Сводка по фильтру отмен (cancel_client / cancel_seller): потерянная выручка
+ * по ВСЕЙ выборке фильтра + штраф WB двумя числами — оценка по правилам
+ * (сразу, но приблизительно, верхняя граница) и факт из финотчёта (точно, но
+ * с лагом ~5 дней). Numeric-суммы приходят СТРОКОЙ — перед показом Number().
+ */
+export interface FbsCancelStats {
+  revenue: number | string;
+  /** Заданий в выборке (дубль total — плашка не зависит от пагинации). */
+  orders: number;
+  /** Оценка по правилам WB; у клиентских отмен всегда 0 (WB их не штрафует). */
+  penalty_est: number | string;
+  penalty_est_count: number;
+  /** Заданий без ставки комиссии в тарифах — по ним оценка пропущена, не выдумана. */
+  no_commission_count: number;
+  /** Оценка усечена лимитом строк (очень широкое окно) — итог неполный. */
+  estimate_truncated: boolean;
+  /** Факт: удержания «Невыполненный заказ (отмена продавцом)» из финотчёта WB. */
+  penalty_fact: number | string;
+  penalty_fact_count: number;
+  /** До какой даты доехал финотчёт: ноль факта свежее неё = «ещё не выставлен». */
+  fact_covered_to?: string | null;
+  /** Факт скрыт: включён фильтр склада WB, а у строк финотчёта склада нет. */
+  fact_scoped_out: boolean;
 }
 
 export interface FbsOrderListResponse {
@@ -8529,6 +8561,11 @@ export interface FbsOrderListResponse {
    */
   cancel_client_count: number;
   cancel_seller_count: number;
+  /**
+   * Сводка отмен — только при фильтре status=cancel_client|cancel_seller,
+   * иначе null/отсутствует (старый бэк её не шлёт — фронт обязан переживать).
+   */
+  cancel_stats?: FbsCancelStats | null;
 }
 
 /** Очередь одного склада продавца по фазам жизни задания. */
