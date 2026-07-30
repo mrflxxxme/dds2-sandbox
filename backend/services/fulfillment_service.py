@@ -4818,7 +4818,9 @@ async def _match_repack_pairs(
         for r in returns
         if r.external_created_at is not None and r.external_created_at >= live_cutoff
     ]
-    fresh_ret_dates = [r.external_created_at for r in fresh_returns]
+    fresh_ret_dates = [
+        r.external_created_at for r in fresh_returns if r.external_created_at is not None
+    ]
 
     def _in_fresh_window(d: date | None) -> bool:
         return d is not None and any(abs(d - rd) <= window for rd in fresh_ret_dates)
