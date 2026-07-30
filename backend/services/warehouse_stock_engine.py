@@ -1526,6 +1526,10 @@ async def get_unified_stock_summary(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
             AssemblyRequest.status == AssemblyStatus.SHIPPED,
+            # Зеркала FBS — не транзит на склад WB: их единицы уже списаны
+            # writeoff_completed_orders и уехали ПОКУПАТЕЛЮ. Без фильтра
+            # проданный товар оседал фантомом в «в пути» и «Итого — капитал».
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
         )
         .group_by(AssemblyRequestItem.nomenclature_id)
         .limit(10000)

@@ -35,7 +35,7 @@ import logging
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -60,7 +60,13 @@ from backend.models.wb_fbs import (
     WbFbsWarehouseLink,
 )
 from backend.services.warehouse_stock_engine import _next_number
-from backend.services.wb_fbs.contour import contour_condition
+from backend.services.wb_fbs.contour import contour_condition, is_sandbox_contour
+from backend.services.wb_fbs.locks import (
+    MIRROR_LOCK_NAME,
+    MIRROR_LOCK_TTL_SEC,
+    acquire_lock,
+    release_lock,
+)
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.wb_fbs.assembly_mirror")
@@ -73,10 +79,19 @@ MIRROR_WINDOW_DAYS = 14
 #: `changed_by` строк истории статусов, которые пишет зеркало.
 MIRROR_CHANGED_BY = "fbs_mirror"
 
-#: Страховочные капы выборок (см. anti-pattern «.all() без limit»).
+#: Страховочные капы выборок (см. anti-pattern «.all() без limit»). Кап
+#: заданий — АВАРИЙНЫЙ: частичный набор заданий поставки дал бы ложный
+#: DELIVERED (терминал!) и занижённый состав, поэтому при его достижении
+#: прогон прерывается с ERROR, а не молча усекается.
 _SUPPLIES_CAP = 2000
 _MIRRORS_CAP = 5000
 _ORDERS_CAP = 50_000
+
+#: Потолок догона статусов: зеркало, не дошедшее до терминала за N дней, —
+#: это застывший wb_status задания (синк опрашивает не всё, см.
+#: `orders_service._TRANSIT_STUCK_MAX_DAYS`). Без потолка такие зеркала и их
+#: поставки перечитывались бы каждые 5 минут вечно, монотонно раздувая прогон.
+_CATCHUP_MAX_DAYS = 30
 
 #: Позиция в цепочке «только вперёд». CANCELLED вне цепочки — терминален.
 _STATUS_RANK: dict[str, int] = {
@@ -189,7 +204,30 @@ async def sync_fbs_assembly_mirror(db: AsyncSession, project_id: int) -> int:
     Идемпотентен: создание защищено partial unique `(project_id, fbs_supply_id)`
     (гонка с соседним прогоном → IntegrityError → пропуск), статусы двигаются
     только вперёд, повторный тик без изменений — no-op.
+
+    Песочница: у `assembly_requests` нет метки контура, а зеркало пишет в ОБЩИЙ
+    реестр заявок (номера ASM, списки, слоты) — в sandbox не работаем ВООБЩЕ
+    (ранний выход, канон `writeoff_completed_orders`). `contour_condition` в
+    выборках при этом остаётся: он отсекает sandbox-строки в боевом контуре.
+
+    Гонка расписаний: джоб статусов (5 мин) и джоб поставок (15 мин) зовут синк
+    из одного worker'а и раз в 15 минут пересекаются — Redis-лок (как у
+    трансляции/списания), занят → сосед уже делает эту работу.
     """
+    if is_sandbox_contour():
+        return 0
+    token = await acquire_lock(MIRROR_LOCK_NAME, project_id, ttl=MIRROR_LOCK_TTL_SEC)
+    if token is None:
+        logger.info("fbs_mirror: project=%s пропуск — синк уже идёт", project_id)
+        return 0
+    try:
+        return await _sync_locked(db, project_id)
+    finally:
+        await release_lock(MIRROR_LOCK_NAME, project_id, token)
+
+
+async def _sync_locked(db: AsyncSession, project_id: int) -> int:
+    """Тело синка под локом (см. `sync_fbs_assembly_mirror`)."""
     targets = await _load_targets(db, project_id)
     if not targets:
         return 0
@@ -229,7 +267,14 @@ async def sync_fbs_assembly_mirror(db: AsyncSession, project_id: int) -> int:
                     AssemblyRequest.fbs_supply_id.is_not(None),
                     or_(
                         AssemblyRequest.fbs_supply_id.in_(list(supplies_by_id) or [""]),
-                        AssemblyRequest.status.notin_(list(_TERMINAL)),
+                        # Догон статусов — с потолком возраста: зеркало, не
+                        # дошедшее до терминала за N дней, застыло навсегда
+                        # (см. _CATCHUP_MAX_DAYS) и не должно вечно раздувать
+                        # каждый прогон.
+                        and_(
+                            AssemblyRequest.status.notin_(list(_TERMINAL)),
+                            AssemblyRequest.created_at >= utcnow() - timedelta(days=_CATCHUP_MAX_DAYS),
+                        ),
                     ),
                 )
                 .limit(_MIRRORS_CAP)
@@ -248,11 +293,13 @@ async def sync_fbs_assembly_mirror(db: AsyncSession, project_id: int) -> int:
     if missing_ids:
         extra = (
             await db.execute(
-                select(WbFbsSupply).where(
+                select(WbFbsSupply)
+                .where(
                     WbFbsSupply.project_id == project_id,
                     WbFbsSupply.wb_supply_id.in_(missing_ids),
                     contour_condition(WbFbsSupply.raw),
                 )
+                .limit(_MIRRORS_CAP)
             )
         ).scalars()
         for s in extra:
@@ -280,6 +327,16 @@ async def sync_fbs_assembly_mirror(db: AsyncSession, project_id: int) -> int:
             .limit(_ORDERS_CAP)
         )
     ).all()
+    if len(order_rows) >= _ORDERS_CAP:
+        # Частичный набор заданий = ложные статусы (DELIVERED — терминал!) и
+        # занижённый состав. Лучше пропустить тик с ERROR, чем молча соврать.
+        logger.error(
+            "fbs_mirror: project=%s кап заданий %s достигнут — прогон прерван, "
+            "сузьте окно/капы",
+            project_id,
+            _ORDERS_CAP,
+        )
+        return 0
     orders_by_supply: dict[str, list[Any]] = {}
     for row in order_rows:
         orders_by_supply.setdefault(row.supply_id, []).append(row)
@@ -373,6 +430,16 @@ async def sync_fbs_assembly_mirror(db: AsyncSession, project_id: int) -> int:
         current = str(mirror.status)
         if current in _TERMINAL:
             continue
+        if current not in _STATUS_RANK:
+            # Статус вне цепочки зеркала (PENDING/READY/… — руками он недостижим,
+            # но ранг 0 молча утащил бы заявку НАЗАД в IN_PROGRESS). Не трогаем.
+            logger.warning(
+                "fbs_mirror: project=%s зеркало %s в неожиданном статусе %s — пропуск",
+                project_id,
+                mirror.number,
+                current,
+            )
+            continue
         orders = orders_by_supply.get(supply_id, [])
 
         # Пересборка состава — только пока IN_PROGRESS (после SHIPPED заморожен).
@@ -439,6 +506,9 @@ async def sync_fbs_assembly_mirror(db: AsyncSession, project_id: int) -> int:
         # Списки/аналитика сборки читают заявки с kind=fbs — гасим их кэши.
         await invalidate_cache("reports:assembly_flow")
         await invalidate_cache("reports:assembly_link_anomalies")
+        # Потребность читает SHIPPED-заявки (kind-фильтр) — TTL 300 с без гашения
+        # держал бы фантомный транзит ещё 5 минут после смены статусов зеркал.
+        await invalidate_cache("reports:warehouse_need")
         logger.info(
             "fbs_mirror: project=%s created=%s updated=%s", project_id, created, changed
         )

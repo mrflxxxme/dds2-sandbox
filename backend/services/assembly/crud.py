@@ -1216,6 +1216,17 @@ async def merge_assembly_requests(
     if len(requests) < 2:
         raise ValueError("Нужно ≥2 сборки для объединения")
 
+    # Зеркала FBS сливать нельзя НИКОГДА: их wb_warehouse_name_manual (склад
+    # ПРОДАВЦА) совпадает с именами складов WB, и merge с обычной сборкой дал
+    # бы позициям зеркала резерв и ship-списание — второе к уже сделанному
+    # writeoff_completed_orders. Фронт fbs-строки не выделяет, но эндпоинт
+    # принимает произвольные id — гейт обязан жить здесь.
+    fbs_mirrors = [r.number for r in requests if r.kind == AssemblyKind.FBS.value]
+    if fbs_mirrors:
+        raise ValueError(
+            f"Заявки FBS ведутся автоматически и не объединяются: {', '.join(fbs_mirrors)}"
+        )
+
     # PRE_DISTRIBUTED («зарезервировано под машину в пути») тоже сливаем — это дубли
     # экрана «Распределить машину». Но НЕ смешиваем их с обычными «В сборке»: у
     # PRE_DISTRIBUTED нет реального стока (резерв под машину), слияние с IN_PROGRESS

@@ -26,6 +26,13 @@ PUSH_LOCK_NAME = "push_lock"
 WRITEOFF_LOCK_NAME = "writeoff_lock"
 #: TTL строго больше бюджета джоба статусов (`ORDER_STATUSES_TIMEOUT_SEC` = 300).
 WRITEOFF_LOCK_TTL_SEC = 420
+#: Лок синка учётного зеркала сборки FBS → `wb_fbs:assembly_mirror:{project_id}`.
+#: Точек входа две в одном worker'е: джоб статусов (5 мин) и джоб поставок
+#: (15 мин) — раз в 15 минут пересекаются, и проигравший ловил бы StaleDataError
+#: на пересборке состава (`mirror.items = […]`), роняя весь свой тик в rollback.
+MIRROR_LOCK_NAME = "assembly_mirror"
+#: Синк — чистая работа с БД (без HTTP), 120 с хватает с запасом даже бэкфиллу.
+MIRROR_LOCK_TTL_SEC = 120
 #: TTL лока обязан быть строго БОЛЬШЕ бюджета джоба пуша
 #: (`scheduler/jobs/wb_fbs.py:STOCK_PUSH_TIMEOUT_SEC` = 300 c на проект).
 #: Прежние 180 c протухали ПОСРЕДИ прогона: лок снимался сам, следующий тик

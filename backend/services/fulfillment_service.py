@@ -5901,6 +5901,9 @@ async def _assembly_candidates(
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted == False,
             AssemblyRequest.status != AssemblyStatus.CANCELLED.value,
+            # Зеркала FBS с заявками ФФ не связываются (канон kind=fbs) —
+            # братья _load_match_suggestions/list_unlinked_assemblies уже фильтруют.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
         )
         .order_by(AssemblyRequest.created_at.desc(), AssemblyRequest.id.desc())
         .limit(_LINK_CANDIDATES_LIMIT)
