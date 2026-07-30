@@ -113,6 +113,16 @@ const DELIVERY_SUB_TABS: { key: string; label: string; title?: string }[] = [
 /** Статусы семейства «В доставке»: сама фаза + её под-фильтры. */
 const DELIVERY_FAMILY: readonly string[] = ['complete', ...DELIVERY_SUB_TABS.map(t => t.key)];
 
+/** Фазы отмен — только у них живут сводка отмен и колонка «Штраф ≈». */
+const CANCEL_PHASES: readonly string[] = ['cancel_client', 'cancel_seller'];
+
+/** Допущения оценки штрафов WB — тултип сводки отмен и колонки «Штраф ≈». */
+const CANCEL_PENALTY_ASSUMPTIONS = 'Оценка по правилам WB (верхняя граница): двойная комиссия предмета, '
+    + 'но не выше 50% цены и 10 000 ₽/шт (рейтинг доставки <95%), минимум 10 ₽. '
+    + 'WB считает от розничной цены со скидкой, у нас чаще цена до скидки — оценка выше факта. '
+    + 'Факт — удержания «Невыполненный заказ (отмена продавцом)» из финотчёта WB, '
+    + 'приходят примерно на 5-й день после даты заказа.';
+
 interface Props {
     warehouses: FbsWarehouse[];
     supplyFilter: string;
@@ -446,6 +456,10 @@ export default function OrdersTab({
 
     /** Фазы после передачи поставки — только у них живёт «В пути». */
     const showTransit = DELIVERY_FAMILY.includes(status);
+    /** Фазы отмен — сводка потерь живёт только здесь. */
+    const showCancelSummary = CANCEL_PHASES.includes(status);
+    /** Колонка «Штраф ≈» — только «Наша отмена»: клиентские WB не штрафует. */
+    const showCancelPenalty = status === 'cancel_seller';
 
     /**
      * Кабинетный статус строки: две оси + фаза ЕЁ поставки. `supplier_status
@@ -542,6 +556,23 @@ export default function OrdersTab({
             },
             exportValue: (row: FbsOrder) => num(row.sale_price ?? row.price),
         },
+        // «Штраф ≈» — только «Наша отмена»: у прочих фаз (включая клиентские
+        // отмены — WB их не штрафует) поле всегда пустое, и колонка лишь
+        // съедала бы ширину таблицы (паттерн «В пути»).
+        ...(showCancelPenalty ? [{
+            key: 'penalty_est', label: 'Штраф ≈', align: 'right',
+            headerTitle: CANCEL_PENALTY_ASSUMPTIONS,
+            // Numeric приходит строкой — сортировка и экспорт по числу через num()
+            getValue: (row: FbsOrder) => num(row.penalty_est),
+            render: (_v: unknown, row: FbsOrder) => {
+                // null = нет ставки комиссии предмета — оценка пропущена, не выдумана
+                if (row.penalty_est == null) return <span className="fbs-penalty-dim" title="Нет ставки комиссии предмета в тарифах">—</span>;
+                const p = num(row.penalty_est);
+                if (p === 0) return <span className="fbs-penalty-none">без штрафа</span>;
+                return <span className="fbs-penalty-value">≈{formatNumber(p, 0)} ₽</span>;
+            },
+            exportValue: (row: FbsOrder) => row.penalty_est == null ? '' : num(row.penalty_est),
+        }] as Column[] : []),
         {
             key: 'supplier_status', label: 'Статус',
             // Кабинетный бейдж: обе оси + фаза поставки — включает бывшую
@@ -839,6 +870,62 @@ export default function OrdersTab({
             {actionError && (
                 <div className="glass-card" style={{ padding: 16, marginBottom: 12, color: 'var(--color-danger)' }}>
                     {actionError}
+                </div>
+            )}
+
+            {/* Сводка отмен: потерянная выручка по ВСЕЙ выборке фильтра;
+                у «Нашей отмены» — штраф WB фактом (финотчёт, с лагом ~5 дн)
+                и оценкой по правилам (сразу, верхняя граница). Старый бэк
+                cancel_stats не шлёт — блока просто нет, без ошибок. */}
+            {showCancelSummary && data?.cancel_stats && (
+                <div className="glass-card fbs-cancel-summary" title={CANCEL_PENALTY_ASSUMPTIONS}>
+                    <span>
+                        Потерянная выручка:{' '}
+                        <strong>{formatNumber(Number(data.cancel_stats.revenue), 0)} ₽</strong>
+                        {' '}({formatNumber(data.cancel_stats.orders, 0)} заданий)
+                        {showCancelPenalty && (
+                            <>
+                                {' · '}Штраф WB (факт):{' '}
+                                {data.cancel_stats.fact_scoped_out ? (
+                                    <span className="fbs-penalty-dim" title="У строк финотчёта нет склада — при фильтре по складу факт не сопоставим">
+                                        скрыт фильтром склада
+                                    </span>
+                                ) : (
+                                    <strong className="fbs-penalty-value">
+                                        {formatNumber(Number(data.cancel_stats.penalty_fact), 0)} ₽
+                                    </strong>
+                                )}
+                                {!data.cancel_stats.fact_scoped_out && (
+                                    <> ({formatNumber(data.cancel_stats.penalty_fact_count, 0)} удержаний)</>
+                                )}
+                                {' · '}Оценка по правилам:{' '}
+                                <strong>≈{formatNumber(Number(data.cancel_stats.penalty_est), 0)} ₽</strong>
+                                {' '}({formatNumber(data.cancel_stats.penalty_est_count, 0)} заданий)
+                            </>
+                        )}
+                    </span>
+                    {!showCancelPenalty && (
+                        <span className="fbs-cancel-summary-note">
+                            отмены покупателя WB не штрафует — считаем только потерянную выручку
+                        </span>
+                    )}
+                    {showCancelPenalty && data.cancel_stats.fact_covered_to && (
+                        <span className="fbs-cancel-summary-note">
+                            финотчёт доехал до {formatDate(data.cancel_stats.fact_covered_to)} —
+                            {' '}по более свежим отменам факт ещё не выставлен
+                        </span>
+                    )}
+                    {showCancelPenalty && data.cancel_stats.no_commission_count > 0 && (
+                        <span className="fbs-cancel-summary-note">
+                            у {formatNumber(data.cancel_stats.no_commission_count, 0)} заданий
+                            {' '}нет ставки комиссии — оценка по ним пропущена
+                        </span>
+                    )}
+                    {showCancelPenalty && data.cancel_stats.estimate_truncated && (
+                        <span className="fbs-cancel-summary-note">
+                            оценка неполная: выборка шире лимита расчёта — сузьте период
+                        </span>
+                    )}
                 </div>
             )}
 

@@ -79,7 +79,13 @@ from backend.models.wb_fbs import (
     FBS_WB_DELIVERED_STATUSES,
     WbFbsOrderEvent,
 )
+from backend.services.tariff_service import get_tariff_map
 from backend.services.warehouse_stock_engine import _update_stock
+from backend.services.wb_fbs.cancel_penalty import (
+    build_cancel_stats,
+    estimate_penalty,
+    order_price,
+)
 from backend.services.wb_fbs.client_factory import get_fbs_client
 from backend.services.wb_fbs.contour import contour_condition, is_sandbox_contour, stamp_contour
 from backend.services.wb_fbs.locks import (
@@ -1666,6 +1672,33 @@ async def list_orders(
         )
         for order in orders
     ]
+
+    # Сводка корзины отмен — только на её собственных фильтрах: прочим фазам
+    # лишний агрегат по всей выборке не нужен (это +2 запроса на каждый список).
+    cancel_stats = None
+    if status in (FBS_CANCEL_CLIENT_STATUS, FBS_CANCEL_SELLER_STATUS):
+        is_seller_bucket = status == FBS_CANCEL_SELLER_STATUS
+        cancel_stats = await build_cancel_stats(
+            db,
+            project_id,
+            conditions=conditions,
+            is_seller_bucket=is_seller_bucket,
+            dt_from=dt_from.date() if dt_from is not None else None,
+            dt_to=(dt_to - timedelta(days=1)).date() if dt_to is not None else None,
+            warehouse_scoped=wb_warehouse_id is not None,
+        )
+        if is_seller_bucket:
+            # Итог плашки обязан быть разложим по строкам под ней — иначе
+            # «≈22 000 ₽» нечем проверить и незачем верить.
+            tariff_map = await get_tariff_map(db, project_id)
+            for item, order in zip(items, orders, strict=True):
+                commission = tariff_map.get(order.subject) if order.subject else None
+                item["penalty_est"] = (
+                    estimate_penalty(order_price(order), commission)
+                    if commission is not None
+                    else None
+                )
+
     return {
         "items": items,
         "total": total,
@@ -1676,6 +1709,7 @@ async def list_orders(
         "delivered_count": delivered_count,
         "cancel_client_count": cancel_client_count,
         "cancel_seller_count": cancel_seller_count,
+        "cancel_stats": cancel_stats,
     }
 
 
