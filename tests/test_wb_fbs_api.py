@@ -651,7 +651,10 @@ async def test_warehouse_settings_gate_structured_409_not_422(client, auth_heade
     try:
         resp = await client.patch(url, json=risky, headers=headers)
         assert resp.status_code == 409, f"Ожидался 409, не {resp.status_code}: {resp.text}"
-        detail = resp.json()["detail"]
+        # Глобальный обработчик (backend/exceptions.py) заворачивает dict-detail
+        # в конверт {"error": {..., "payload": <dict>}} — верхнеуровневого
+        # `detail` у этого приложения не бывает; фронт читает error.payload.
+        detail = resp.json()["error"]["payload"]
         assert detail["code"] == "fbs_mirror_above_ledger"
         assert detail["mirror_over_ledger"] == 6
         assert detail["ledger_total"] == 4
