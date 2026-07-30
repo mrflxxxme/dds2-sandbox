@@ -83,6 +83,15 @@ FBS_WB_CANCELLED_STATUSES: tuple[str, ...] = (
     "declined_by_client",  # отказ покупателя до получения
 )
 
+#: Подмножество отмен, где решение принял ПОКУПАТЕЛЬ (канон владельца
+#: 30.07: отмены делятся «клиент отменил / мы отменили»). Всё остальное из
+#: `FBS_WB_CANCELLED_STATUSES` + supplier cancel/cancel_carrier — наша сторона
+#: (продавец / перевозчик).
+FBS_WB_CLIENT_CANCEL_STATUSES: tuple[str, ...] = (
+    "canceled_by_client",
+    "declined_by_client",
+)
+
 #: `wbStatus`, на которых путь заказа ЗАКОНЧИЛСЯ доставкой: товар у покупателя
 #: (или списан в брак). Сам `supplierStatus` навсегда остаётся `complete` и на
 #: вопрос «что ещё в пути» не отвечает — эту ось знает только `wbStatus`.
@@ -121,6 +130,10 @@ FBS_SORTED_STATUS = "sorted"
 FBS_IN_DELIVERY_STUCK_STATUS = "in_delivery_stuck"
 #: «Завершённые» кабинета WB: `complete`, дошедшее до покупателя (sold/defect).
 FBS_DELIVERED_STATUS = "delivered"
+#: Разрез отмен: клиентские (FBS_WB_CLIENT_CANCEL_STATUSES) и наши
+#: (supplier cancel/cancel_carrier + wb canceled без клиентского признака).
+FBS_CANCEL_CLIENT_STATUS = "cancel_client"
+FBS_CANCEL_SELLER_STATUS = "cancel_seller"
 
 
 class FbsSupplyStatus(str, enum.Enum):
