@@ -299,7 +299,9 @@ async def compute_stock_mismatch_cells(
 
     Возвращает ПЛОСКИЙ список ячеек ТОЛЬКО с расхождением (diff != 0), каждая:
     {warehouse_id, provider, barcode, nomenclature_id, article_seller, brand, name,
-     ff_good, ff_logistics, our_quantity, our_defect, diff, synced_at}.
+     ff_good, ff_logistics, ff_fbs, our_quantity, our_defect, diff, synced_at}.
+    ff_good приходит уже ЗА ВЫЧЕТОМ ff_fbs (FBS-отгрузки, которые провайдер не
+    списал) — см. комментарий у вычета ниже.
 
     diff = ff_good − (our_quantity + our_defect для migfull) (>0 — у ФФ больше,
     <0 — у нас больше). Короб сводится к россыпи (qty_good × units_per_box, ключ =
@@ -374,6 +376,7 @@ async def compute_stock_mismatch_cells(
                 "name": None,
                 "ff_good": 0,
                 "ff_logistics": 0,
+                "ff_fbs": 0,
                 "our_quantity": 0,
                 "our_defect": 0,
             }
@@ -426,6 +429,23 @@ async def compute_stock_mismatch_cells(
             tc["ff_good"] += add
             tc["ff_logistics"] += add
 
+    # FBS-вычет ИЗ ff_good (паритет с fulfillment_service.list_stocks): провайдер
+    # остаток под FBS-продажи не снимает (ни один из трёх WMS, сверка 29.07.2026),
+    # мы же списали единицу из ledger'а — без вычета каждая FBS-продажа даёт
+    # ложное «у ФФ больше». База — ff_good уже с досчётом логистики; кап через
+    # min: если провайдер начнёт списывать сам, ff_good не уходит в минус.
+    fbs_shipped = await fulfillment_service._fbs_shipped_multi(db, project_id, ff_wh_list)
+    for wid, by_bc_fbs in fbs_shipped.items():
+        for barcode, shipped in by_bc_fbs.items():
+            fc = cells.get((wid, barcode))
+            if fc is None:
+                continue
+            applied = min(shipped, fc["ff_good"])
+            if applied <= 0:
+                continue
+            fc["ff_good"] -= applied
+            fc["ff_fbs"] += applied
+
     # Резолв article_seller/brand одним запросом (без N+1).
     nom_ids = {c["nomenclature_id"] for c in cells.values() if c["nomenclature_id"]}
     nom_by_id: dict[int, tuple[str | None, str | None]] = {}
@@ -460,6 +480,7 @@ async def compute_stock_mismatch_cells(
                 "name": c["name"],
                 "ff_good": c["ff_good"],
                 "ff_logistics": c["ff_logistics"],
+                "ff_fbs": c["ff_fbs"],
                 "our_quantity": c["our_quantity"],
                 "our_defect": c["our_defect"],
                 "diff": diff,
@@ -497,6 +518,7 @@ async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list
                 "surplus_ff_sku": 0,
                 "surplus_our_qty": 0,
                 "surplus_our_sku": 0,
+                "ff_fbs_qty": 0,
                 "rows": [],
             },
         )
@@ -506,6 +528,9 @@ async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list
         else:
             acc["surplus_our_qty"] += -diff
             acc["surplus_our_sku"] += 1
+        # Сколько шума сняла FBS-поправка (по SKU, ОСТАВШИМСЯ с расхождением;
+        # полностью сошедшиеся ядро уже отсеяло вместе с их ff_fbs).
+        acc["ff_fbs_qty"] += c["ff_fbs"]
         acc["rows"].append(
             {
                 "barcode": c["barcode"],
@@ -513,6 +538,7 @@ async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list
                 "brand": c["brand"],
                 "name": c["name"],
                 "ff_good": c["ff_good"],
+                "ff_fbs": c["ff_fbs"],
                 "our_quantity": c["our_quantity"],
                 "our_defect": c["our_defect"],
                 "diff": diff,
@@ -536,6 +562,7 @@ async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list
                 "surplus_our_qty": acc["surplus_our_qty"],
                 "surplus_our_sku": acc["surplus_our_sku"],
                 "net_diff": acc["surplus_ff_qty"] - acc["surplus_our_qty"],
+                "ff_fbs_qty": acc["ff_fbs_qty"],
                 "sku_total": sku_total,
                 "truncated": sku_total > _STOCK_MISMATCH_SKU_CAP,
                 "synced_at": synced.isoformat() if synced else None,

@@ -59,9 +59,16 @@ from backend.models import (
     FbsSupplierStatus,
     Nomenclature,
     WbFbsOrder,
+    WbFbsSupply,
+    WbFbsWarehouse,
     WbFbsWarehouseLink,
 )
-from backend.models.warehouse import MovementType, StockMovement, WarehouseStock
+from backend.models.fulfillment import FulfillmentStock
+from backend.models.warehouse import MovementType, StockMovement, Warehouse, WarehouseStock
+
+# Прямо из модуля домена: re-export в backend/models/__init__.py у константы
+# зависших пока нет (хребет добавил её только в models/wb_fbs.py).
+from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS
 from backend.services.warehouse_stock_engine import _update_stock
 from backend.services.wb_fbs.client_factory import get_fbs_client
 from backend.services.wb_fbs.contour import contour_condition, is_sandbox_contour, stamp_contour
@@ -101,7 +108,30 @@ _RECENT_DEFAULT_DAYS = 2
 _ORDERS_MAX_PAGES = 50
 
 #: `reference_type` движения склада для FBS-продажи (String(30)).
+#: ⚠️ Значение продублировано в `fulfillment_service._FBS_WRITEOFF_REF_TYPE`
+#: (прямой импорт оттуда дал бы цикл: wb_fbs.stock_service уже импортирует
+#: fulfillment_service) — равенство держит тест-связка в
+#: tests/test_fulfillment_service.py.
 _WRITEOFF_REF_TYPE = "FBS_ORDER"
+
+#: «Зависло в пути на СЦ»: задание передано не меньше этого числа дней назад,
+#: а сортировочный центр так и не принял (`in_delivery_condition`).
+_TRANSIT_STUCK_DAYS = 2
+#: Потолок окна «зависших»: у старых `complete` `wb_status` застывает — синк
+#: статусов опрашивает не больше `_STATUS_MAX_ORDERS` НЕ-терминальных заданий
+#: (см. docstring `warehouse_summary`), и без потолка счётчик копил бы мёртвые
+#: строки, которые WB давно довёз, а зеркало об этом не узнало.
+_TRANSIT_STUCK_MAX_DAYS = 30
+
+#: Cap строк ответа `writeoff_issues` (агрегатов по товару); полный масштаб
+#: проблемы виден по `total_orders`, который считается ДО среза.
+_WRITEOFF_ISSUES_MAX_ROWS = 200
+
+#: Причины незакрытого списания (`FbsWriteoffIssueRow.reason`), в порядке
+#: приоритета классификации: нет карточки → нет привязки склада → нет остатка.
+_WRITEOFF_ISSUE_NO_CARD = "no_card"
+_WRITEOFF_ISSUE_NO_LINK = "no_link"
+_WRITEOFF_ISSUE_NO_STOCK = "no_stock"
 
 #: ISO-4217 рубля. WB отдаёт код числом, колонка — String(8).
 RUB_CURRENCY_CODE = "643"
@@ -169,6 +199,49 @@ def sorted_condition() -> Any:
     return and_(
         effective_status_expr() == FbsSupplierStatus.COMPLETE.value,
         WbFbsOrder.wb_status.in_(FBS_WB_SORTED_STATUSES),
+    )
+
+
+def transit_anchor_expr() -> Any:
+    """Момент ПЕРЕДАЧИ задания в WB — точка отсчёта «сколько дней едет».
+
+    Точнее всего его знает поставка: `scan_dt` (WB отсканировал QR — груз
+    физически уехал) → `closed_at` (поставку закрыли кнопкой «Передать»).
+    Фолбэк — `written_off_at` самого задания: списание из ledger'а происходит
+    в момент передачи, поэтому по строкам без зеркала поставки (старые данные,
+    поставка не синкнулась) метка списания — честное приближение.
+
+    Требует LEFT OUTER JOIN на `WbFbsSupply` по `supply_id` в самом запросе.
+    """
+    return func.coalesce(WbFbsSupply.scan_dt, WbFbsSupply.closed_at, WbFbsOrder.written_off_at)
+
+
+def _supply_join_condition(project_id: int) -> Any:
+    """Условие LEFT OUTER JOIN зеркала поставок к заданиям (1:1 максимум)."""
+    return and_(
+        WbFbsSupply.project_id == project_id,
+        WbFbsSupply.wb_supply_id == WbFbsOrder.supply_id,
+    )
+
+
+def in_delivery_stuck_condition(now: datetime) -> Any:
+    """«Зависло в пути на СЦ»: передано давно, а сортировочный центр не принял.
+
+    Подмножество `in_delivery_condition()` с окном по якорю передачи
+    (`transit_anchor_expr`): якорь не свежее `_TRANSIT_STUCK_DAYS` дней (моложе —
+    штатно едет) и не старше `_TRANSIT_STUCK_MAX_DAYS` (старше — почти наверняка
+    застывший `wb_status`, а не живой груз; см. комментарий у констант).
+    Задание без якоря (нет ни поставки, ни `written_off_at`) зависшим не
+    считается: точку отсчёта взять неоткуда.
+
+    Запрос обязан включать LEFT OUTER JOIN на `WbFbsSupply` (см.
+    `_supply_join_condition`).
+    """
+    anchor = transit_anchor_expr()
+    return and_(
+        in_delivery_condition(),
+        anchor >= now - timedelta(days=_TRANSIT_STUCK_MAX_DAYS),
+        anchor <= now - timedelta(days=_TRANSIT_STUCK_DAYS),
     )
 
 
@@ -984,7 +1057,58 @@ def _money(value: Decimal | None) -> str | None:
     return None if value is None else str(value)
 
 
-def _order_to_dict(order: WbFbsOrder) -> dict[str, Any]:
+def _is_in_delivery_row(order: WbFbsOrder) -> bool:
+    """Python-зеркало `in_delivery_condition()` для ОДНОЙ строки.
+
+    Те же условия, что в SQL: `complete`, WB-отмена не схлопнула задание в
+    `cancel`, и `wb_status` ещё не дорос ни до сортировки, ни до вручения
+    (пустой `wb_status` считаем «в пути» — строки до появления колонки).
+    """
+    if order.supplier_status != FbsSupplierStatus.COMPLETE.value:
+        return False
+    if order.wb_status is None:
+        return True
+    if order.wb_status in FBS_WB_CANCELLED_STATUSES:
+        return False
+    return order.wb_status not in (*FBS_WB_DELIVERED_STATUSES, *FBS_WB_SORTED_STATUSES)
+
+
+async def _supply_anchor_map(
+    db: AsyncSession, project_id: int, supply_ids: set[str]
+) -> dict[str, datetime]:
+    """{wb_supply_id: COALESCE(scan_dt, closed_at)} одним IN-запросом (без N+1)."""
+    ids = sorted(s for s in supply_ids if s)
+    if not ids:
+        return {}
+    result = await db.execute(
+        select(
+            WbFbsSupply.wb_supply_id,
+            func.coalesce(WbFbsSupply.scan_dt, WbFbsSupply.closed_at),
+        ).where(
+            WbFbsSupply.project_id == project_id,
+            WbFbsSupply.wb_supply_id.in_(ids),
+        )
+    )
+    return {supply_id: anchor for supply_id, anchor in result.all() if anchor is not None}
+
+
+def _transit_days(order: WbFbsOrder, anchor_by_supply: dict[str, datetime], now: datetime) -> int | None:
+    """Сколько дней задание едет — только для фазы «в пути», иначе None.
+
+    🔴 Считаем `int(total_seconds() // 86400)`, а НЕ `timedelta.days`: известная
+    грабля проекта — int-усечение `days` опаздывает почти на сутки в сравнениях
+    (learnings). Отрицательное (якорь «в будущем» из-за рассинхрона часов)
+    клампим в 0.
+    """
+    if not _is_in_delivery_row(order):
+        return None
+    anchor = (anchor_by_supply.get(order.supply_id) if order.supply_id else None) or order.written_off_at
+    if anchor is None:
+        return None
+    return max(0, int((now - anchor).total_seconds() // 86400))
+
+
+def _order_to_dict(order: WbFbsOrder, *, transit_days: int | None = None) -> dict[str, Any]:
     """Строка под `FbsOrderOut` (контракт схем)."""
     return {
         "id": order.id,
@@ -1015,6 +1139,7 @@ def _order_to_dict(order: WbFbsOrder) -> dict[str, Any]:
         "comment": order.comment,
         "written_off_at": order.written_off_at,
         "synced_at": order.synced_at,
+        "transit_days": transit_days,
     }
 
 
@@ -1042,6 +1167,13 @@ async def warehouse_summary(
     `_STATUS_MAX_ORDERS` НЕ-терминальных заданий, поэтому у старых `complete`
     `wbStatus` со временем застывает — вне периода они висели бы «в доставке»
     вечно.
+
+    `in_delivery_stuck` — БЕЗ периода (как очередь сборки): пока СЦ не принял,
+    вопросы к нам, и зависшее обязано быть видно независимо от окна. Его
+    собственное окно по якорю передачи (`in_delivery_stuck_condition`) не даёт
+    счётчику копить мёртвые строки с застывшим `wb_status`. Ради якоря запрос
+    несёт LEFT OUTER JOIN на зеркало поставок — 1:1 максимум (`uq_wb_fbs_supply`),
+    счётчики не задваивает.
     """
     base = [WbFbsOrder.project_id == project_id, contour_condition(WbFbsOrder.raw)]
     period: list[Any] = []
@@ -1052,6 +1184,7 @@ async def warehouse_summary(
     if dt_to is not None:
         period.append(WbFbsOrder.created_at_wb < dt_to)
 
+    now = utcnow()
     eff = effective_status_expr()
     in_period = and_(*period) if period else true()
     result = await db.execute(
@@ -1061,7 +1194,10 @@ async def warehouse_summary(
             func.count().filter(eff == FbsSupplierStatus.CONFIRM.value),
             func.count().filter(and_(in_delivery_condition(), in_period)),
             func.count().filter(and_(sorted_condition(), in_period)),
+            func.count().filter(in_delivery_stuck_condition(now)),
         )
+        .select_from(WbFbsOrder)
+        .outerjoin(WbFbsSupply, _supply_join_condition(project_id))
         .where(*base)
         .group_by(WbFbsOrder.wb_warehouse_id)
     )
@@ -1072,11 +1208,13 @@ async def warehouse_summary(
             "confirm": int(row[2] or 0),
             "in_delivery": int(row[3] or 0),
             "sorted": int(row[4] or 0),
+            "in_delivery_stuck": int(row[5] or 0),
         }
         for row in result.all()
     ]
     totals = {
-        key: sum(r[key] for r in rows) for key in ("new", "confirm", "in_delivery", "sorted")
+        key: sum(r[key] for r in rows)
+        for key in ("new", "confirm", "in_delivery", "sorted", "in_delivery_stuck")
     }
     return {
         "date_from": dt_from.date() if dt_from else None,
@@ -1113,18 +1251,31 @@ async def list_orders(
     `status=in_delivery` / `status=sorted` — те же псевдо-статусы в фильтре:
     цифра на карточке склада и выдача по клику обязаны совпадать до штуки.
 
+    `status=in_delivery_stuck` — третий псевдо-статус: «передано ≥ N дней назад,
+    СЦ так и не принял» (`in_delivery_stuck_condition`). 🔴 Этот фильтр (и его
+    счётчик `in_delivery_stuck_count`) ИГНОРИРУЕТ период страницы: зависшее —
+    ОЧЕРЕДЬ проблем, а не история; задание, переданное до начала окна, обязано
+    остаться на виду, пока СЦ его не примет. Собственное окно по якорю передачи
+    (2–30 дней) у фильтра есть всегда — см. комментарий у констант.
+
     Выдача скоуплена по контуру: боевой список не должен показывать задания
     песочницы (и наоборот) — цифры вкладок обязаны совпадать с тем, что
     участвует в остатке и списании.
+
+    `transit_days` в строках считается для фазы «в пути» от якоря передачи
+    (поставки страницы поднимаются одним IN-запросом, без N+1).
     """
     limit = max(1, min(int(limit or 100), _LIST_MAX_LIMIT))
     offset = max(0, int(offset or 0))
+    now = utcnow()
 
-    base = [WbFbsOrder.project_id == project_id, contour_condition(WbFbsOrder.raw)]
+    # scope — фильтры БЕЗ периода (их уважает и вкладка зависших), base — с окном дат.
+    scope = [WbFbsOrder.project_id == project_id, contour_condition(WbFbsOrder.raw)]
     if supply_id:
-        base.append(WbFbsOrder.supply_id == supply_id)
+        scope.append(WbFbsOrder.supply_id == supply_id)
     if wb_warehouse_id:
-        base.append(WbFbsOrder.wb_warehouse_id == wb_warehouse_id)
+        scope.append(WbFbsOrder.wb_warehouse_id == wb_warehouse_id)
+    base = list(scope)
     dt_from = _as_dt_from(date_from)
     if dt_from is not None:
         base.append(WbFbsOrder.created_at_wb >= dt_from)
@@ -1151,8 +1302,26 @@ async def list_orders(
     in_delivery_count = sum(int(row[2] or 0) for row in counts_rows)
     sorted_count = sum(int(row[3] or 0) for row in counts_rows)
 
-    conditions = list(base)
-    if status == FBS_SORTED_STATUS:
+    # Счётчик зависших — БЕЗ периода (см. docstring); джойн поставок нужен ради
+    # якоря передачи и не задваивает строки (1:1 максимум, `uq_wb_fbs_supply`).
+    in_delivery_stuck_count = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(WbFbsOrder)
+                .outerjoin(WbFbsSupply, _supply_join_condition(project_id))
+                .where(*scope, in_delivery_stuck_condition(now))
+            )
+        ).scalar()
+        or 0
+    )
+
+    stuck_filter = status == FBS_IN_DELIVERY_STUCK_STATUS
+    conditions = list(scope) if stuck_filter else list(base)
+    if stuck_filter:
+        conditions.append(in_delivery_stuck_condition(now))
+        total = in_delivery_stuck_count
+    elif status == FBS_SORTED_STATUS:
         conditions.append(sorted_condition())
         total = sorted_count
     elif status == FBS_IN_DELIVERY_STATUS:
@@ -1164,20 +1333,32 @@ async def list_orders(
     else:
         total = sum(status_counts.values())
 
+    items_query = select(WbFbsOrder)
+    if stuck_filter:
+        items_query = items_query.outerjoin(WbFbsSupply, _supply_join_condition(project_id))
     items_result = await db.execute(
-        select(WbFbsOrder)
-        .where(*conditions)
+        items_query.where(*conditions)
         .order_by(WbFbsOrder.created_at_wb.desc().nullslast(), WbFbsOrder.id.desc())
         .limit(limit)
         .offset(offset)
     )
-    items = [_order_to_dict(order) for order in items_result.scalars().all()]
+    orders = list(items_result.scalars().all())
+
+    # transit_days: якоря поставок страницы — одним запросом, без N+1.
+    anchor_by_supply = await _supply_anchor_map(
+        db, project_id, {o.supply_id for o in orders if o.supply_id and _is_in_delivery_row(o)}
+    )
+    items = [
+        _order_to_dict(order, transit_days=_transit_days(order, anchor_by_supply, now))
+        for order in orders
+    ]
     return {
         "items": items,
         "total": total,
         "status_counts": status_counts,
         "in_delivery_count": in_delivery_count,
         "sorted_count": sorted_count,
+        "in_delivery_stuck_count": in_delivery_stuck_count,
     }
 
 
@@ -1310,6 +1491,28 @@ async def cancel_order(db: AsyncSession, project_id: int, wb_order_id: int) -> N
 # ─── Списание проданного в ledger ───────────────────────────────────────────
 
 
+def _pending_writeoff_conditions(project_id: int) -> list[Any]:
+    """«Передано, но не списано»: complete + `written_off_at IS NULL`, текущий контур.
+
+    Общая выборка списания (`_writeoff_locked`) и его диагностики
+    (`writeoff_issues`) — обе стороны обязаны смотреть на одни и те же задания.
+    """
+    return [
+        WbFbsOrder.project_id == project_id,
+        WbFbsOrder.supplier_status == FbsSupplierStatus.COMPLETE.value,
+        WbFbsOrder.written_off_at.is_(None),
+        contour_condition(WbFbsOrder.raw),
+    ]
+
+
+def _active_links_subquery(project_id: int) -> Any:
+    """Подзапрос «склады продавца с активной привязкой» (для IN/NOT IN)."""
+    return select(WbFbsWarehouseLink.wb_warehouse_id).where(
+        WbFbsWarehouseLink.project_id == project_id,
+        WbFbsWarehouseLink.is_active == True,  # noqa: E712 — SQLAlchemy expression
+    )
+
+
 async def _writeoff_context(
     db: AsyncSession, project_id: int, orders: list[WbFbsOrder]
 ) -> tuple[dict[int, list[int]], dict[tuple[int, int], int], dict[tuple[int, int], str]]:
@@ -1400,16 +1603,8 @@ async def _writeoff_locked(db: AsyncSession, project_id: int) -> int:
     # продажи перестают списываться со склада — молча, одним warning'ом в лог.
     # Две причины из трёх постоянные по своей природе: нет карточки товара и
     # нет привязки склада продавца к нашему.
-    linked = select(WbFbsWarehouseLink.wb_warehouse_id).where(
-        WbFbsWarehouseLink.project_id == project_id,
-        WbFbsWarehouseLink.is_active == True,  # noqa: E712 — SQLAlchemy expression
-    )
-    pending = [
-        WbFbsOrder.project_id == project_id,
-        WbFbsOrder.supplier_status == FbsSupplierStatus.COMPLETE.value,
-        WbFbsOrder.written_off_at.is_(None),
-        contour_condition(WbFbsOrder.raw),
-    ]
+    linked = _active_links_subquery(project_id)
+    pending = _pending_writeoff_conditions(project_id)
     writable = [*pending, WbFbsOrder.nomenclature_id.is_not(None), WbFbsOrder.wb_warehouse_id.in_(linked)]
 
     result = await db.execute(
@@ -1504,6 +1699,200 @@ async def _writeoff_locked(db: AsyncSession, project_id: int) -> int:
     return written
 
 
+# ─── Видимость незакрытых списаний ──────────────────────────────────────────
+
+
+async def writeoff_issues(db: AsyncSession, project_id: int) -> dict:
+    """Сводка «передано, но не списано» (`FbsWriteoffIssuesOut`) — агрегат по товару.
+
+    Списание идемпотентно ретраится каждые 5 минут, но пока причина жива,
+    задание молча висит `written_off_at IS NULL`, а единственным следом был
+    warning в логе воркера (прод 29.07: 145 заданий). Ручка делает отказ видимым.
+
+    Причина (`reason`) — по приоритету: `no_card` (нет карточки товара) →
+    `no_link` (склад продавца не привязан к активному нашему; NULL-склад — тоже
+    сюда: `IN (подзапрос)` с NULL не матчится и в списание такое задание не
+    попадает никогда) → `no_stock` (всё привязано, но остатка нет — гвард «не в
+    минус» держит задание в очереди).
+
+    Агрегат по (склад продавца, товар, причина); строк наружу — не больше
+    `_WRITEOFF_ISSUES_MAX_ROWS` (по убыванию `stuck`), полный масштаб — в
+    `total_orders`, он считается ДО среза. Обогащение — батчами, без N+1.
+    `ff_loose` (россыпь зеркала ФФ по привязанным складам) отвечает на вопрос
+    «товар физически есть у провайдера?»: None — зеркала у привязанных складов
+    нет вовсе (сравнивать не с чем), число — сигнал, что наш ledger отстал.
+    """
+    pending = _pending_writeoff_conditions(project_id)
+    linked = _active_links_subquery(project_id)
+
+    reason = case(
+        (WbFbsOrder.nomenclature_id.is_(None), _WRITEOFF_ISSUE_NO_CARD),
+        (
+            or_(
+                WbFbsOrder.wb_warehouse_id.is_(None),
+                WbFbsOrder.wb_warehouse_id.notin_(linked),
+            ),
+            _WRITEOFF_ISSUE_NO_LINK,
+        ),
+        else_=_WRITEOFF_ISSUE_NO_STOCK,
+    ).label("reason")
+
+    total_orders = int(
+        (
+            await db.execute(select(func.count()).select_from(WbFbsOrder).where(*pending))
+        ).scalar()
+        or 0
+    )
+    if not total_orders:
+        return {"total_orders": 0, "rows": []}
+
+    grouped = await db.execute(
+        select(
+            WbFbsOrder.wb_warehouse_id,
+            WbFbsOrder.nomenclature_id,
+            reason,
+            func.count().label("stuck"),
+            func.min(WbFbsOrder.created_at_wb).label("oldest_at"),
+            # Фолбэк для строк без карточки: артикул/ШК из самого задания.
+            func.max(WbFbsOrder.article).label("order_article"),
+            func.max(WbFbsOrder.barcode).label("order_barcode"),
+        )
+        .where(*pending)
+        .group_by(WbFbsOrder.wb_warehouse_id, WbFbsOrder.nomenclature_id, reason)
+        .order_by(func.count().desc(), func.min(WbFbsOrder.created_at_wb).asc().nullslast())
+        .limit(_WRITEOFF_ISSUES_MAX_ROWS)
+    )
+    groups = grouped.all()
+    if not groups:
+        return {"total_orders": total_orders, "rows": []}
+
+    wb_wh_ids = sorted({g.wb_warehouse_id for g in groups if g.wb_warehouse_id})
+    nom_ids = sorted({g.nomenclature_id for g in groups if g.nomenclature_id})
+
+    # Имена складов продавца.
+    wb_wh_names: dict[int, str | None] = {}
+    if wb_wh_ids:
+        names_result = await db.execute(
+            select(WbFbsWarehouse.wb_warehouse_id, WbFbsWarehouse.name).where(
+                WbFbsWarehouse.project_id == project_id,
+                WbFbsWarehouse.wb_warehouse_id.in_(wb_wh_ids),
+            )
+        )
+        wb_wh_names = {int(r[0]): r[1] for r in names_result.all()}
+
+    # Активные привязки (живые склады): {wb_warehouse_id: [(warehouse_id, name)]}.
+    links_by_wb: dict[int, list[tuple[int, str | None]]] = {}
+    if wb_wh_ids:
+        links_result = await db.execute(
+            select(WbFbsWarehouseLink.wb_warehouse_id, WbFbsWarehouseLink.warehouse_id, Warehouse.name)
+            .join(Warehouse, Warehouse.id == WbFbsWarehouseLink.warehouse_id)
+            .where(
+                WbFbsWarehouseLink.project_id == project_id,
+                WbFbsWarehouseLink.is_active == True,  # noqa: E712 — SQLAlchemy expression
+                WbFbsWarehouseLink.wb_warehouse_id.in_(wb_wh_ids),
+                Warehouse.is_deleted == False,  # noqa: E712 — SQLAlchemy expression
+            )
+            .order_by(WbFbsWarehouseLink.id)
+        )
+        for wb_wh_id, warehouse_id, wh_name in links_result.all():
+            links_by_wb.setdefault(int(wb_wh_id), []).append((int(warehouse_id), wh_name))
+
+    all_wh_ids = sorted({wid for pairs in links_by_wb.values() for wid, _ in pairs})
+
+    # Остатки ledger'а по привязанным складам.
+    qty_map: dict[tuple[int, int], tuple[int, int]] = {}
+    if all_wh_ids and nom_ids:
+        stock_result = await db.execute(
+            select(
+                WarehouseStock.warehouse_id,
+                WarehouseStock.nomenclature_id,
+                WarehouseStock.quantity,
+                WarehouseStock.defect_quantity,
+            ).where(
+                WarehouseStock.project_id == project_id,
+                WarehouseStock.warehouse_id.in_(all_wh_ids),
+                WarehouseStock.nomenclature_id.in_(nom_ids),
+            )
+        )
+        for wid, nid, qty, defect in stock_result.all():
+            qty_map[(int(wid), int(nid))] = (int(qty or 0), int(defect or 0))
+
+    # Зеркало ФФ: у каких привязанных складов оно вообще есть + россыпь по товару.
+    mirror_wh: set[int] = set()
+    loose_map: dict[tuple[int, int], int] = {}
+    if all_wh_ids:
+        mirror_result = await db.execute(
+            select(FulfillmentStock.warehouse_id)
+            .where(
+                FulfillmentStock.project_id == project_id,
+                FulfillmentStock.warehouse_id.in_(all_wh_ids),
+            )
+            .distinct()
+        )
+        mirror_wh = {int(r[0]) for r in mirror_result.all()}
+    if mirror_wh and nom_ids:
+        loose_result = await db.execute(
+            select(
+                FulfillmentStock.warehouse_id,
+                FulfillmentStock.nomenclature_id,
+                func.sum(FulfillmentStock.qty_good * FulfillmentStock.units_per_box),
+            )
+            .where(
+                FulfillmentStock.project_id == project_id,
+                FulfillmentStock.warehouse_id.in_(sorted(mirror_wh)),
+                FulfillmentStock.nomenclature_id.in_(nom_ids),
+                FulfillmentStock.base_barcode.is_(None),  # только россыпь
+            )
+            .group_by(FulfillmentStock.warehouse_id, FulfillmentStock.nomenclature_id)
+        )
+        for wid, nid, pieces in loose_result.all():
+            loose_map[(int(wid), int(nid))] = int(pieces or 0)
+
+    # Карточки товара: артикул/ШК.
+    nom_info: dict[int, tuple[str | None, str | None]] = {}
+    if nom_ids:
+        nom_result = await db.execute(
+            select(Nomenclature.id, Nomenclature.article_seller, Nomenclature.barcode).where(
+                Nomenclature.project_id == project_id,
+                Nomenclature.id.in_(nom_ids),
+            )
+        )
+        nom_info = {int(r[0]): (r[1], r[2]) for r in nom_result.all()}
+
+    rows: list[dict[str, Any]] = []
+    for g in groups:
+        pairs = links_by_wb.get(g.wb_warehouse_id or 0, [])
+        first_wh_id, first_wh_name = pairs[0] if pairs else (None, None)
+        our_qty = our_defect = 0
+        ff_loose: int | None = None
+        if g.nomenclature_id is not None and pairs:
+            for wid, _name in pairs:
+                q, d = qty_map.get((wid, g.nomenclature_id), (0, 0))
+                our_qty += q
+                our_defect += d
+            if any(wid in mirror_wh for wid, _name in pairs):
+                ff_loose = sum(loose_map.get((wid, g.nomenclature_id), 0) for wid, _name in pairs)
+        article, barcode = nom_info.get(g.nomenclature_id or 0, (None, None))
+        rows.append(
+            {
+                "wb_warehouse_id": g.wb_warehouse_id,
+                "wb_warehouse_name": wb_wh_names.get(g.wb_warehouse_id or 0),
+                "warehouse_id": first_wh_id,
+                "warehouse_name": first_wh_name,
+                "nomenclature_id": g.nomenclature_id,
+                "article": article or g.order_article,
+                "barcode": barcode or g.order_barcode,
+                "stuck": int(g.stuck or 0),
+                "oldest_at": g.oldest_at,
+                "our_qty": our_qty,
+                "our_defect": our_defect,
+                "ff_loose": ff_loose,
+                "reason": g.reason,
+            }
+        )
+    return {"total_orders": total_orders, "rows": rows}
+
+
 __all__ = [
     "FbsOrderError",
     "backfill_orders_history",
@@ -1514,4 +1903,5 @@ __all__ = [
     "sync_order_statuses",
     "sync_orders_recent",
     "writeoff_completed_orders",
+    "writeoff_issues",
 ]

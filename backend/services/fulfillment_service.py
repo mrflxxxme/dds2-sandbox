@@ -70,7 +70,7 @@ from backend.models.assembly import (
     AssemblyStatus,
     AssemblyStatusHistory,
 )
-from backend.models.warehouse import StockTransfer, StockTransferItem, TransferStatus
+from backend.models.warehouse import StockMovement, StockTransfer, StockTransferItem, TransferStatus
 from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.assembly import AssemblyItemCreate, AssemblyRequestCreate
 from backend.schemas.fulfillment import FfBulkCreateRequestPayload, FfCreateFormResponse, FfCreateRequestPayload
@@ -2687,6 +2687,58 @@ async def ff_boxed_by_nomenclature(
     return out
 
 
+#: `reference_type` движений склада по FBS-продажам. Значение обязано совпадать
+#: с `services/wb_fbs/orders_service._WRITEOFF_REF_TYPE` — прямой импорт оттуда
+#: дал бы цикл (wb_fbs.stock_service уже импортирует fulfillment_service),
+#: поэтому константа продублирована, а равенство держит тест-связка
+#: tests/test_fulfillment_service.py::test_fbs_ref_type_matches_orders_service.
+_FBS_WRITEOFF_REF_TYPE = "FBS_ORDER"
+
+
+async def _fbs_shipped_multi(
+    db: AsyncSession, project_id: int, warehouse_ids: list[int]
+) -> dict[int, dict[str, int]]:
+    """{warehouse_id: {barcode: units}} — нетто отгружено по FBS с наших складов.
+
+    Ни один из трёх WMS-провайдеров не снимает свой остаток под FBS-продажи
+    (сверка на проде 29.07.2026): мы списали единицу из ledger'а, а ff_good
+    зеркала не шелохнулся — и каждая FBS-продажа читается как ложное «у ФФ
+    больше». Этот агрегат — сколько ВЫЧЕСТЬ из ff_good (знак обратный
+    `_logistics_in_transit_*`: там досчитываем К ff_good).
+
+    Нетто по движениям `reference_type = 'FBS_ORDER'`: OUTBOUND списания
+    отрицательные, INBOUND-сторно отмен положительные — `-SUM(quantity)`
+    схлопывает их сам. Значения ≤ 0 (всё сторнировано) отбрасываются.
+    """
+    if not warehouse_ids:
+        return {}
+    result = await db.execute(
+        select(
+            StockMovement.warehouse_id,
+            StockMovement.barcode,
+            (-func.sum(StockMovement.quantity)).label("units"),
+        )
+        .where(
+            StockMovement.project_id == project_id,
+            StockMovement.reference_type == _FBS_WRITEOFF_REF_TYPE,
+            StockMovement.warehouse_id.in_(warehouse_ids),
+        )
+        .group_by(StockMovement.warehouse_id, StockMovement.barcode)
+    )
+    out: dict[int, dict[str, int]] = {}
+    for wid, barcode, units in result.all():
+        units = int(units or 0)
+        if units > 0 and barcode:
+            out.setdefault(wid, {})[barcode] = units
+    return out
+
+
+async def _fbs_shipped_by_barcode(db: AsyncSession, project_id: int, warehouse_id: int) -> dict[str, int]:
+    """{barcode: units} FBS-вычета одного склада (см. `_fbs_shipped_multi`)."""
+    multi = await _fbs_shipped_multi(db, project_id, [warehouse_id])
+    return multi.get(warehouse_id, {})
+
+
 # Сборка ещё «наша» (сток у нас на складе, ship_request не списал) — пред-отгрузочные
 # статусы. SHIPPED и далее (наш сток уже списан) сюда не входят.
 _PRESHIP_ASSEMBLY_STATUSES = (
@@ -2768,6 +2820,10 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     резерв (stock_locked) делится на «Собрано» (ready, capped под резерв) + «Брак ФФ»
     (остаток). diff сверяет ИТОГИ: ff_good − (our_quantity + our_defect). Сортировка
     diff desc, затем barcode.
+
+    ff_good отдаётся с двумя поправками: досчёт логистики (`ff_logistics`, К
+    ff_good) и FBS-вычет (`ff_fbs`, ИЗ ff_good, capped по ff_good) — diff
+    считается от уже поправленного ff_good и остаётся честным сам.
     """
     result = await db.execute(
         select(FulfillmentStock)
@@ -2844,6 +2900,7 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
             "ff_box_units": 0,  # из них пришло коробами (в штуках россыпи)
             "ff_box_count": 0,  # сколько коробов годного
             "ff_logistics": 0,  # досчитано к ff_good: товар в стадии списания логистики, ещё на складе ФФ
+            "ff_fbs": 0,  # вычтено из ff_good: отгружено по FBS у нас, провайдер не списал
             "our_quantity": 0,
             "our_defect": 0,
             "diff": 0,
@@ -2934,6 +2991,24 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
                 irow["ff_inbound_locked"] += take
                 irow["ff_defect"] -= take
 
+    # FBS-вычет из ff_good: провайдер выбытие под FBS-продажи не отражает
+    # (ни один из трёх WMS, сверка 29.07.2026) — без вычета каждая FBS-продажа
+    # читается как ложное «у ФФ больше». База вычета — ff_good УЖЕ с досчётом
+    # логистики. КАП через min обязателен: если провайдер когда-нибудь начнёт
+    # списывать сам, ff_good не должен уходить в минус (тогда вычет станет
+    # двойным учётом — кап его сам и погасит).
+    fbs_shipped = await _fbs_shipped_by_barcode(db, project_id, warehouse_id)
+    for barcode, shipped in fbs_shipped.items():
+        frow = rows.get(barcode)
+        if frow is None:
+            # Ни зеркала ФФ, ни нашего остатка по этому ШК — вычитать не из чего.
+            continue
+        applied = min(shipped, frow["ff_good"])
+        if applied <= 0:
+            continue
+        frow["ff_fbs"] += applied
+        frow["ff_good"] -= applied
+
     for row in rows.values():
         if is_migfull:
             # ff_good (stock_actual) включает брак → сравниваем с нашим ИТОГОМ,
@@ -2951,6 +3026,7 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         "ff_defect": sum(r["ff_defect"] for r in out_rows),
         "ff_box_units": sum(r["ff_box_units"] for r in out_rows),
         "ff_logistics": sum(r["ff_logistics"] for r in out_rows),
+        "ff_fbs": sum(r["ff_fbs"] for r in out_rows),
         "our_quantity": sum(r["our_quantity"] for r in out_rows),
         "diff": sum(r["diff"] for r in out_rows),
         "unmatched": sum(1 for k in ff_keys if rows[k]["nomenclature_id"] is None),

@@ -36,6 +36,9 @@ from backend.integrations.wb_fbs_api import (
     resolve_base_url,
 )
 from backend.models import Project, User
+
+# Прямо из модуля домена: re-export константы в backend/models/__init__.py нет.
+from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS
 from backend.project_context import get_current_project
 from backend.schemas.wb_fbs import (
     ALLOWED_ORDER_STATUS_FILTERS,
@@ -72,6 +75,7 @@ from backend.schemas.wb_fbs import (
     FbsWarehouseSummaryOut,
     FbsWarehouseRename,
     FbsWarehouseSettingsUpdate,
+    FbsWriteoffIssuesOut,
 )
 from backend.services.wb_fbs import (
     orders_service,
@@ -282,9 +286,17 @@ async def update_warehouse_settings(
     Тумблер, источник остатка, буфер, потолок на SKU, режим склада
     (`observe` / `translate`) и гейт по FBO (`fbo_max_qty`: отдаём в FBS,
     только пока на складах WB осталось не больше этого; `-1` — снять гейт).
+
+    Пара «translate + ff_mirror» при зеркале ФФ выше учёта гейтится сервисом:
+    409 с цифрами разрыва; `force=true` в payload'е применяет как есть.
     """
     with _fbs_errors():
-        return await warehouse_service.update_settings(db, project.id, wb_warehouse_id, payload)
+        try:
+            return await warehouse_service.update_settings(db, project.id, wb_warehouse_id, payload)
+        except warehouse_service.FbsMirrorAboveLedger as e:
+            # Конфликт состояния склада (зеркало обещает больше учёта), а не
+            # ошибка ввода: 409, как у гардов сверки выше.
+            raise HTTPException(409, str(e)) from e
 
 
 # ─── Привязки наших складов ──────────────────────────────────────────────────
@@ -581,12 +593,19 @@ async def orders_warehouse_summary(
         )
 
 
+#: Псевдо-статус «зависло в пути на СЦ» валиден в фильтре списка заданий.
+#: В `ALLOWED_ORDER_STATUS_FILTERS` (замороженный контракт схем) его нет —
+#: расширяем список на уровне роутера.
+_ORDER_STATUS_FILTERS = [*ALLOWED_ORDER_STATUS_FILTERS, FBS_IN_DELIVERY_STUCK_STATUS]
+
+
 @router.get("/orders", response_model=FbsOrderListOut)
 async def list_orders(
     status: str | None = Query(
         None,
         description="supplier_status: new/confirm/complete/cancel/cancel_carrier "
-        "либо псевдо-статус in_delivery (переданные и ещё не доставленные)",
+        "либо псевдо-статусы in_delivery (переданные и ещё не доставленные) / "
+        "sorted / in_delivery_stuck (зависшие в пути — период игнорируется)",
     ),
     supply_id: str | None = Query(None, max_length=50),
     wb_warehouse_id: int | None = Query(None, ge=1),
@@ -598,8 +617,8 @@ async def list_orders(
     db: AsyncSession = Depends(get_db),
 ):
     """Список сборочных заданий из нашего зеркала + счётчики по статусам."""
-    if status is not None and status not in ALLOWED_ORDER_STATUS_FILTERS:
-        raise HTTPException(422, f"status должен быть одним из: {ALLOWED_ORDER_STATUS_FILTERS}")
+    if status is not None and status not in _ORDER_STATUS_FILTERS:
+        raise HTTPException(422, f"status должен быть одним из: {_ORDER_STATUS_FILTERS}")
     if date_from and date_to and date_from > date_to:
         raise HTTPException(422, "date_from позже date_to")
     with _fbs_errors():
@@ -635,6 +654,22 @@ async def orders_stats(
             date_to=date_to,
             wb_warehouse_id=wb_warehouse_id,
         )
+
+
+@router.get("/orders/writeoff-issues", response_model=FbsWriteoffIssuesOut)
+async def orders_writeoff_issues(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Незакрытые списания: задания `complete`, которые НЕЧЕМ списать со склада.
+
+    Агрегат по товару с причиной (`no_card` / `no_link` / `no_stock`) и
+    остатками привязанных складов — раньше отказ был виден только warning'ом
+    в логе воркера. Читает наше зеркало, в WB не ходит; путь статический —
+    объявлен до path-параметров.
+    """
+    with _fbs_errors():
+        return await orders_service.writeoff_issues(db, project.id)
 
 
 @router.post("/orders/sync", response_model=FbsActionOut, dependencies=[Depends(rate_limit_write)])
