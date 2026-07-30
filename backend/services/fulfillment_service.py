@@ -4925,6 +4925,235 @@ async def _match_repack_pairs(
     return matched
 
 
+# Окно поиска кандидатов для РУЧНОЙ связки пары (дни, в обе стороны) — шире
+# авто-окна: человек связывает и «расползшиеся» по датам вскрытия.
+_REPACK_MANUAL_WINDOW_DAYS = 14
+_REPACK_MANUAL_CANDIDATES_LIMIT = 20
+
+
+def _repack_units_lenient(
+    guid_qty: dict[str, int], resolver: dict[str, tuple[str, str, int]]
+) -> tuple[dict[str, int], int, bool]:
+    """(comp по base_barcode, Σ штук, все ли guid'ы разрешились) — мягкая версия
+    `_repack_units_by_barcode` для РУЧНОЙ выдачи кандидатов: неразрешённый guid
+    НЕ выкидывает документ, а считается по сырому qty с units=1 (в comp такой
+    строки нет — пересечение по ней честно нулевое)."""
+    comp: dict[str, int] = {}
+    total = 0
+    resolved_all = True
+    for guid, qty in guid_qty.items():
+        resolved = resolver.get(guid)
+        if resolved is None:
+            resolved_all = False
+            total += qty
+            continue
+        _kind, base_barcode, units = resolved
+        comp[base_barcode] = comp.get(base_barcode, 0) + qty * units
+        total += qty * units
+    return comp, total, resolved_all
+
+
+async def get_repack_candidates(
+    db: AsyncSession, project_id: int, warehouse_id: int, return_id: int
+) -> dict:
+    """Кандидаты-поступления для РУЧНОЙ связки пары «вскрытие коробов»
+    (FfRepackCandidatesOut shape).
+
+    Авто-матчер (`_match_repack_pairs`) помечает пару только при ТОЧНОМ
+    равенстве состава; на живых вскрытиях ФФ пересчитывает фактически (кейс
+    PVB-0000068 ↔ PVB-0000124: пересечение 98.4%, 10 позиций из 90 разошлись) —
+    решает человек, а overlap_pct/units_sum дают ему основание. Окно дат шире
+    авто-окна (±14 дней), короб-требование к возврату НЕ предъявляется
+    (require_box=False — человек сам решает, вскрытие это или нет).
+    ValueError — возврат не найден / не kind=return.
+    """
+    ret = await _get_request(db, project_id, warehouse_id, return_id)
+    if not ret:
+        raise ValueError("Возврат не найден на этом складе")
+    if ret.kind != FfRequestKind.RETURN.value:
+        raise ValueError("Кандидаты пары «вскрытия» доступны только для возврата (kind=return)")
+
+    window = timedelta(days=_REPACK_MANUAL_WINDOW_DAYS)
+    q = (
+        select(FulfillmentRequest)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.provider == ret.provider,
+            FulfillmentRequest.kind == FfRequestKind.INBOUND.value,
+            FulfillmentRequest.archived == False,  # canceled зеркалится в archived
+            FulfillmentRequest.repack_return_id.is_(None),
+            FulfillmentRequest.repack_matched_at.is_(None),
+            # связанные с нашими документами — реальный приход, не переупаковка
+            FulfillmentRequest.inbound_receipt_id.is_(None),
+            FulfillmentRequest.stock_transfer_id.is_(None),
+            FulfillmentRequest.external_created_at.is_not(None),
+        )
+        .limit(_MIRROR_SELECT_LIMIT)
+    )
+    if ret.external_created_at is not None:
+        q = q.where(
+            FulfillmentRequest.external_created_at.between(
+                ret.external_created_at - window, ret.external_created_at + window
+            )
+        )
+    rows = list((await db.execute(q)).scalars().all())
+    ret_date = ret.external_created_at
+    if ret_date is not None:
+        # external_created_at не-NULL по выборке; `or ret_date` — для mypy
+        rows.sort(key=lambda r: (abs((r.external_created_at or ret_date) - ret_date), r.id))
+    else:
+        rows.sort(key=lambda r: r.id)
+    rows = rows[:_REPACK_MANUAL_CANDIDATES_LIMIT]
+
+    # Резолвер ШК: зеркало остатков + оверрайды; недостающие guid'ы добираем
+    # живыми карточками (как авто-матчер), focus ТОЛЬКО на этом возврате и его
+    # кандидатах — cap добора не выедается чужой историей.
+    ret_guid_qty = _repack_guid_qty(ret.raw)
+    all_guids: set[str] = set(ret_guid_qty)
+    for row in rows:
+        all_guids.update(_repack_guid_qty(row.raw))
+    resolver = await _repack_guid_resolver(db, project_id, warehouse_id, all_guids)
+    missing = {g for g in all_guids if g not in resolver}
+    if missing:
+        client = await _try_migfull_client(db, project_id, warehouse_id)
+        if client is not None:
+            fetched: dict[str, tuple[str, int]] = {}
+            await _migfull_resolve_detail_barcodes(client, missing, fetched)
+            for guid, (base_barcode, units) in fetched.items():
+                resolver[guid] = ("box", base_barcode, units) if units > 1 else ("loose", base_barcode, 1)
+
+    ret_comp = _repack_units_by_barcode(ret_guid_qty, resolver, require_box=False)
+    return_units = sum(ret_comp.values()) if ret_comp else None
+
+    candidates: list[dict] = []
+    for row in rows:
+        comp, units_sum, resolved_all = _repack_units_lenient(_repack_guid_qty(row.raw), resolver)
+        exact = bool(ret_comp) and resolved_all and comp == ret_comp
+        overlap_pct = 0.0
+        if ret_comp:
+            common = sum(min(qty, comp.get(bc, 0)) for bc, qty in ret_comp.items())
+            denom = max(return_units or 0, units_sum)
+            if denom:
+                overlap_pct = round(common / denom * 100, 1)
+        candidates.append(
+            {
+                "id": row.id,
+                "number": row.number,
+                "external_created_at": row.external_created_at,
+                "status": row.status,
+                "units_sum": units_sum,
+                "overlap_pct": overlap_pct,
+                "exact": exact,
+            }
+        )
+    candidates.sort(key=lambda c: (not c["exact"], -c["overlap_pct"]))
+
+    return {
+        "return_id": ret.id,
+        "return_number": ret.number,
+        "return_units": return_units,
+        "candidates": candidates,
+    }
+
+
+async def link_repack_pair(
+    db: AsyncSession, project_id: int, warehouse_id: int, return_id: int, submission_id: int
+) -> dict:
+    """РУЧНАЯ связка пары «вскрытие коробов»: возврат ↔ поступление.
+
+    Для кейсов, где авто-матчер бессилен (состав разошёлся при фактическом
+    пересчёте ФФ) — решение принимает человек. Помечает обе стороны
+    (repack_matched_at; repack_return_id — у поступления), commit внутри.
+    ValueError — любой из документов не найден / чужой kind / уже в паре /
+    поступление связано с нашими документами / отменён. Возвращает обновлённый
+    возврат (FfRequestRow shape с номером пары).
+    """
+    ret = await _get_request(db, project_id, warehouse_id, return_id)
+    if not ret:
+        raise ValueError("Возврат не найден на этом складе")
+    if ret.kind != FfRequestKind.RETURN.value:
+        raise ValueError("Связать парой можно только возврат (kind=return)")
+    sub = await _get_request(db, project_id, warehouse_id, submission_id)
+    if not sub:
+        raise ValueError("Поступление не найдено на этом складе")
+    if sub.kind != FfRequestKind.INBOUND.value:
+        raise ValueError("Парой возврата может быть только поступление (kind=inbound)")
+    if ret.repack_matched_at is not None:
+        raise ValueError("Возврат уже помечен парой «вскрытия» — сначала снимите связь")
+    if sub.repack_return_id is not None or sub.repack_matched_at is not None:
+        raise ValueError("Поступление уже помечено парой «вскрытия» другого возврата")
+    if sub.inbound_receipt_id is not None or sub.stock_transfer_id is not None:
+        raise ValueError(
+            "Поступление связано с нашим документом (приёмка/перемещение) — это реальный "
+            "приход, а не переупаковка; сначала снимите связь"
+        )
+    if ret.archived:
+        raise ValueError("Возврат отменён/архивирован у провайдера — пару не связываем")
+    if sub.archived:
+        raise ValueError("Поступление отменено/архивировано у провайдера — пару не связываем")
+
+    now = utcnow()
+    sub.repack_return_id = ret.id
+    sub.repack_matched_at = now
+    ret.repack_matched_at = now
+    await db.commit()
+    # Пара исключает поступление из «связей и расхождений» — гасим тот же кэш,
+    # что и link_request.
+    await invalidate_cache("reports:assembly_link_anomalies")
+    logger.info(
+        "FF repack: РУЧНАЯ пара «вскрытие коробов» %s ↔ %s (проект %d)",
+        ret.number or ret.external_id,
+        sub.number or sub.external_id,
+        project_id,
+    )
+    pair_map = await _repack_pair_numbers(db, project_id, [ret])
+    return _request_to_dict(ret, repack_pair_map=pair_map)
+
+
+async def unlink_repack_pair(
+    db: AsyncSession, project_id: int, warehouse_id: int, return_id: int
+) -> dict:
+    """Снять пару «вскрытия коробов» с возврата (и его поступления-пары).
+
+    Обратная операция к link_repack_pair (и к авто-матчу): снимает
+    repack_matched_at с обеих сторон и repack_return_id с поступления, commit
+    внутри. ValueError — возврат не найден / не помечен парой.
+    """
+    ret = await _get_request(db, project_id, warehouse_id, return_id)
+    if not ret:
+        raise ValueError("Возврат не найден на этом складе")
+    if ret.kind != FfRequestKind.RETURN.value:
+        raise ValueError("Снять пару можно только с возврата (kind=return)")
+    if ret.repack_matched_at is None:
+        raise ValueError("Возврат не помечен парой «вскрытия» — снимать нечего")
+
+    sub_result = await db.execute(
+        select(FulfillmentRequest)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.repack_return_id == ret.id,
+        )
+        # инвариант — ровно одно поступление на возврат; limit — страховка
+        .limit(20)
+    )
+    subs = sub_result.scalars().all()
+    for sub in subs:
+        sub.repack_return_id = None
+        sub.repack_matched_at = None
+    ret.repack_matched_at = None
+    await db.commit()
+    await invalidate_cache("reports:assembly_link_anomalies")
+    logger.info(
+        "FF repack: пара «вскрытие коробов» снята с возврата %s (%d поступлений, проект %d)",
+        ret.number or ret.external_id,
+        len(subs),
+        project_id,
+    )
+    return _request_to_dict(ret)
+
+
 async def _collect_transfer_fact_candidates(
     db: AsyncSession, project_id: int, warehouse_id: int, provider: str
 ) -> list[tuple[int, int, str, str | None, bool]]:

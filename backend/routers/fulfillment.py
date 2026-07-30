@@ -37,6 +37,8 @@ from backend.schemas.fulfillment import (
     FfNomenclatureOption,
     FfOverviewResponse,
     FfPushAssemblyResult,
+    FfRepackCandidatesOut,
+    FfRepackLinkIn,
     FfRequestDetail,
     FfRequestRow,
     FfStatusEvent,
@@ -530,6 +532,70 @@ async def unlink_request(
     if row is None:
         raise HTTPException(404, "ФФ-заявка не найдена")
     return row
+
+
+@wh_router.get(
+    "/requests/{ff_request_id}/repack-candidates",
+    response_model=FfRepackCandidatesOut,
+)
+async def repack_candidates(
+    warehouse_id: int,
+    ff_request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Кандидаты-поступления для РУЧНОЙ связки пары «вскрытие коробов».
+
+    Для возвратов, где авто-матчер бессилен (ФФ пересчитал состав фактически) —
+    кандидаты с % пересечения состава, решение принимает человек.
+    """
+    try:
+        return await fulfillment_service.get_repack_candidates(
+            db, project.id, warehouse_id, ff_request_id
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@wh_router.post(
+    "/requests/{ff_request_id}/repack-link",
+    response_model=FfRequestRow,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def link_repack_pair(
+    warehouse_id: int,
+    ff_request_id: int,
+    payload: FfRepackLinkIn,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """РУЧНАЯ связка пары «вскрытие коробов»: возврат ↔ поступление россыпью."""
+    try:
+        return await fulfillment_service.link_repack_pair(
+            db, project.id, warehouse_id, ff_request_id, payload.submission_id
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@wh_router.delete(
+    "/requests/{ff_request_id}/repack-link",
+    response_model=FfRequestRow,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def unlink_repack_pair(
+    warehouse_id: int,
+    ff_request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Снять пару «вскрытия коробов» с возврата (и его поступления-пары)."""
+    try:
+        return await fulfillment_service.unlink_repack_pair(
+            db, project.id, warehouse_id, ff_request_id
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 # Статический префикс — раньше параметризованного (защита от матча

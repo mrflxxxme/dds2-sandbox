@@ -5509,3 +5509,216 @@ async def test_list_requests_repack_enrichment(db_session, project, warehouse):
     # kind=return фильтруется параметром kind
     only_returns = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, kind="return")
     assert {r["id"] for r in only_returns} == {ret.id, old_unpaired.id, fresh_unpaired.id, canceled.id}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Ручная связка пары «вскрытие коробов» (repack-candidates / repack-link)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_repack_candidates_ranking_and_filters(db_session, project, warehouse):
+    """exact-кандидат первый (даже если дальше по дате), неточный — с посчитанным
+    overlap_pct; связанное с нашим документом / уже спаренное / вне окна ±14 дней
+    поступления — не кандидаты; неразрешённый guid НЕ выкидывает кандидата."""
+    box_guid, loose_guid, _base = await _mk_repack_sku(db_session, project, warehouse, 10)
+    d = date(2026, 7, 30)
+    receipt = InboundReceipt(
+        project_id=project.id, warehouse_id=warehouse.id, number=f"IN-{_uid()[:6]}", status="EXPECTED"
+    )
+    db_session.add(receipt)
+    await db_session.commit()
+
+    ret = await _mk_repack_req(
+        db_session, project, warehouse, kind="return",
+        lines=[_mig_line(box_guid, 5)], created=d,  # 5 коробов × 10 = 50 шт
+    )
+    exact_inb = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound",
+        lines=[_mig_line(loose_guid, 50)], created=d + timedelta(days=2),
+    )
+    partial = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound",
+        lines=[_mig_line(loose_guid, 45)], created=d,  # пересечение 45/50 = 90.0%
+    )
+    unresolved = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound",
+        lines=[_mig_line(f"unknown-{_uid()}", 7)], created=d,  # guid без ШК: units=1
+    )
+    linked = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound",
+        lines=[_mig_line(loose_guid, 50)], created=d, inbound_receipt_id=receipt.id,
+    )
+    other_ret = await _mk_repack_req(db_session, project, warehouse, kind="return", lines=[], created=d)
+    paired = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound",
+        lines=[_mig_line(loose_guid, 50)], created=d,
+        repack_return_id=other_ret.id, repack_matched_at=utcnow(),
+    )
+    late = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound",
+        lines=[_mig_line(loose_guid, 50)], created=d + timedelta(days=15),  # вне ±14
+    )
+
+    out = await fulfillment_service.get_repack_candidates(db_session, project.id, warehouse.id, ret.id)
+    assert out["return_id"] == ret.id
+    assert out["return_number"] == ret.number
+    assert out["return_units"] == 50
+    ids = [c["id"] for c in out["candidates"]]
+    assert linked.id not in ids and paired.id not in ids and late.id not in ids
+    assert ids == [exact_inb.id, partial.id, unresolved.id]
+    exact_row, partial_row, unresolved_row = out["candidates"]
+    assert exact_row["exact"] is True
+    assert exact_row["overlap_pct"] == 100.0
+    assert exact_row["units_sum"] == 50
+    assert partial_row["exact"] is False
+    assert partial_row["overlap_pct"] == 90.0
+    assert partial_row["units_sum"] == 45
+    assert unresolved_row["exact"] is False
+    assert unresolved_row["units_sum"] == 7  # сырое qty с units=1
+    assert unresolved_row["overlap_pct"] == 0
+
+    # kind=inbound кандидатов не получает — только возврат
+    with pytest.raises(ValueError, match="возврат"):
+        await fulfillment_service.get_repack_candidates(db_session, project.id, warehouse.id, exact_inb.id)
+    # несуществующая заявка
+    with pytest.raises(ValueError, match="не найден"):
+        await fulfillment_service.get_repack_candidates(db_session, project.id, warehouse.id, 999_999_999)
+
+
+@pytest.mark.asyncio
+async def test_repack_candidates_unresolved_return_units_none(db_session, project, warehouse):
+    """Состав возврата не разрешился в ШК → return_units=None, overlap у всех 0."""
+    _box_guid, loose_guid, _base = await _mk_repack_sku(db_session, project, warehouse, 10)
+    d = date(2026, 7, 30)
+    ret = await _mk_repack_req(
+        db_session, project, warehouse, kind="return",
+        lines=[_mig_line(f"unknown-{_uid()}", 3)], created=d,
+    )
+    inb = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound",
+        lines=[_mig_line(loose_guid, 30)], created=d,
+    )
+
+    out = await fulfillment_service.get_repack_candidates(db_session, project.id, warehouse.id, ret.id)
+    assert out["return_units"] is None
+    row = next(c for c in out["candidates"] if c["id"] == inb.id)
+    assert row["exact"] is False and row["overlap_pct"] == 0 and row["units_sum"] == 30
+
+
+@pytest.mark.asyncio
+async def test_repack_manual_link_success_and_double_link_guards(db_session, project, warehouse):
+    """Успешная ручная связка помечает обе стороны; повторная связка любой из
+    сторон — ValueError."""
+    d = date(2026, 7, 30)
+    ret = await _mk_repack_req(db_session, project, warehouse, kind="return", lines=[], created=d)
+    inb = await _mk_repack_req(db_session, project, warehouse, kind="inbound", lines=[], created=d)
+
+    row = await fulfillment_service.link_repack_pair(db_session, project.id, warehouse.id, ret.id, inb.id)
+    await db_session.refresh(ret)
+    await db_session.refresh(inb)
+    assert inb.repack_return_id == ret.id
+    assert inb.repack_matched_at is not None and ret.repack_matched_at is not None
+    assert row["id"] == ret.id
+    assert row["repack_pair_number"] == inb.number  # номер пары — сразу в ответе
+
+    # возврат уже в паре
+    inb2 = await _mk_repack_req(db_session, project, warehouse, kind="inbound", lines=[], created=d)
+    with pytest.raises(ValueError, match="уже помечен"):
+        await fulfillment_service.link_repack_pair(db_session, project.id, warehouse.id, ret.id, inb2.id)
+    # поступление уже в паре
+    ret2 = await _mk_repack_req(db_session, project, warehouse, kind="return", lines=[], created=d)
+    with pytest.raises(ValueError, match="уже помечено"):
+        await fulfillment_service.link_repack_pair(db_session, project.id, warehouse.id, ret2.id, inb.id)
+
+
+@pytest.mark.asyncio
+async def test_repack_manual_link_kind_warehouse_and_linked_guards(db_session, project, warehouse):
+    """Чужой склад / чужой kind / поступление с нашим документом / отменённые —
+    ValueError, ничего не помечается."""
+    d = date(2026, 7, 30)
+    other_wh = Warehouse(project_id=project.id, name=f"FF-{_uid()}", warehouse_type="FULFILLMENT")
+    db_session.add(other_wh)
+    await db_session.commit()
+    receipt = InboundReceipt(
+        project_id=project.id, warehouse_id=warehouse.id, number=f"IN-{_uid()[:6]}", status="EXPECTED"
+    )
+    db_session.add(receipt)
+    await db_session.commit()
+
+    ret = await _mk_repack_req(db_session, project, warehouse, kind="return", lines=[], created=d)
+    inb = await _mk_repack_req(db_session, project, warehouse, kind="inbound", lines=[], created=d)
+    inb_other = await _mk_repack_req(db_session, project, other_wh, kind="inbound", lines=[], created=d)
+
+    # поступление с чужого склада не видно в скоупе склада возврата
+    with pytest.raises(ValueError, match="не найдено"):
+        await fulfillment_service.link_repack_pair(db_session, project.id, warehouse.id, ret.id, inb_other.id)
+    # kind перепутан: в роли возврата — поступление и наоборот
+    with pytest.raises(ValueError, match="возврат"):
+        await fulfillment_service.link_repack_pair(db_session, project.id, warehouse.id, inb.id, ret.id)
+    ret2 = await _mk_repack_req(db_session, project, warehouse, kind="return", lines=[], created=d)
+    with pytest.raises(ValueError, match="поступление"):
+        await fulfillment_service.link_repack_pair(db_session, project.id, warehouse.id, ret.id, ret2.id)
+    # поступление связано с нашей приёмкой — реальный приход
+    linked = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound", lines=[], created=d,
+        inbound_receipt_id=receipt.id,
+    )
+    with pytest.raises(ValueError, match="нашим документом"):
+        await fulfillment_service.link_repack_pair(db_session, project.id, warehouse.id, ret.id, linked.id)
+    # отменённое (archived) поступление
+    canceled = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound", lines=[], created=d, archived=True
+    )
+    with pytest.raises(ValueError, match="отменен"):
+        await fulfillment_service.link_repack_pair(db_session, project.id, warehouse.id, ret.id, canceled.id)
+
+    await db_session.refresh(ret)
+    await db_session.refresh(inb)
+    assert ret.repack_matched_at is None and inb.repack_return_id is None
+
+
+@pytest.mark.asyncio
+async def test_repack_manual_unlink_clears_both_sides(db_session, project, warehouse):
+    """unlink снимает пометку с обеих сторон; unlink непомеченного — ValueError."""
+    d = date(2026, 7, 30)
+    ret = await _mk_repack_req(db_session, project, warehouse, kind="return", lines=[], created=d)
+    inb = await _mk_repack_req(db_session, project, warehouse, kind="inbound", lines=[], created=d)
+    await fulfillment_service.link_repack_pair(db_session, project.id, warehouse.id, ret.id, inb.id)
+
+    row = await fulfillment_service.unlink_repack_pair(db_session, project.id, warehouse.id, ret.id)
+    await db_session.refresh(ret)
+    await db_session.refresh(inb)
+    assert ret.repack_matched_at is None
+    assert inb.repack_return_id is None and inb.repack_matched_at is None
+    assert row["id"] == ret.id and row["repack_pair_number"] is None
+
+    # повторный unlink — уже нечего снимать
+    with pytest.raises(ValueError, match="не помечен"):
+        await fulfillment_service.unlink_repack_pair(db_session, project.id, warehouse.id, ret.id)
+    # unlink поступления (не возврата) — ValueError
+    with pytest.raises(ValueError, match="возврат"):
+        await fulfillment_service.unlink_repack_pair(db_session, project.id, warehouse.id, inb.id)
+
+
+@pytest.mark.asyncio
+async def test_repack_matcher_respects_manual_pair(db_session, project, warehouse):
+    """Авто-матчер не перематчивает вручную связанную пару (обе стороны помечены),
+    даже когда состав совпадает точно."""
+    box_guid, loose_guid, _base = await _mk_repack_sku(db_session, project, warehouse, 10)
+    d = date(2026, 7, 30)
+    ret = await _mk_repack_req(
+        db_session, project, warehouse, kind="return", lines=[_mig_line(box_guid, 2)], created=d
+    )
+    inb = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound", lines=[_mig_line(loose_guid, 20)], created=d
+    )
+    await fulfillment_service.link_repack_pair(db_session, project.id, warehouse.id, ret.id, inb.id)
+    manual_ts = inb.repack_matched_at
+
+    assert await fulfillment_service._match_repack_pairs(db_session, project.id, warehouse.id) == 0
+    await db_session.commit()  # commit — на вызывающем (контракт матчера)
+    await db_session.refresh(ret)
+    await db_session.refresh(inb)
+    assert inb.repack_return_id == ret.id
+    assert inb.repack_matched_at == manual_ts  # ручная пометка не перезаписана
