@@ -5406,6 +5406,37 @@ async def test_repack_link_guards(db_session, project, warehouse):
 
 
 @pytest.mark.asyncio
+async def test_return_detail_renders_from_raw_without_live_lines(
+    db_session, project, warehouse
+):
+    """Деталка kind=return строится из raw.incoming_lines БЕЗ похода в API.
+
+    Отдельного lines-ресурса у /returns нет, а до фикса ветка «else» деталки
+    ходила в submissions/{guid}/lines с guid'ом ВОЗВРАТА: migfull отвечает 500
+    «No query results for model [Submission]», и пять ретраев открывали circuit
+    breaker на 120 с (прод-кейс PVB-0000068, 30.07). Тест работает без
+    integration key вовсе — приёмочная ветка на этом падала бы «не подключён».
+    """
+    pg = _mig_guid(991)
+    ret = await _mk_repack_req(
+        db_session, project, warehouse, kind="return",
+        lines=[_mig_line(pg, 3, name="Ковер короб 16 шт.")],
+        created=date(2026, 7, 30),
+    )
+
+    detail = await fulfillment_service.get_request_detail(
+        db_session, project.id, warehouse.id, ret.id
+    )
+
+    assert detail["kind"] == "return"
+    products = detail.get("products") or []
+    assert len(products) == 1
+    # Состав из raw: 3 строки заявленного, факта нет.
+    assert products[0]["qty"] == 3
+    assert products[0]["accepted_qty"] == 0
+
+
+@pytest.mark.asyncio
 async def test_return_not_in_assembled_by_guid(db_session, project, warehouse):
     """kind=return не попадает в «Собрано» (учёт резерва идёт только по kind=assembly)."""
     guid = f"g-{_uid()}"

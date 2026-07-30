@@ -5718,6 +5718,19 @@ async def get_request_detail(
             # но его карточка может нести ШК короба → дотягиваем живьём, как для приёмки.
             # Без ключа (disconnect) деталка работает из зеркала+raw как раньше.
             mig_client = await _try_migfull_client(db, project_id, warehouse_id)
+        elif req.kind == FfRequestKind.RETURN.value:
+            # Возврат: строки ВСТРОЕНЫ в списочный метод (`/returns` →
+            # incoming_lines в raw) — отдельного lines-ресурса нет, а поход в
+            # submissions/{guid}/lines с guid'ом возврата бьёт чужой ресурс:
+            # migfull отвечает 500 «No query results for model [Submission]»,
+            # и пять ретраев открывали circuit breaker на 120 с (кейс деталки
+            # PVB-0000068, 30.07). Рендерим из raw, ШК добираем best-effort.
+            mig_products = _migfull_products_from_lines(
+                _migfull_line_rows(raw.get("incoming_lines")),
+                [],
+                fact_field="accepted_qty",
+            )
+            mig_client = await _try_migfull_client(db, project_id, warehouse_id)
         else:
             # Приёмки: состава в списке нет — ЖИВЫЕ lines/incoming + received
             key = await get_integration(db, project_id, warehouse_id)
