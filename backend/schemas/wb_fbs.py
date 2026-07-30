@@ -11,7 +11,11 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from backend.models.wb_fbs import FBS_IN_DELIVERY_STATUS, FBS_SORTED_STATUS
+from backend.models.wb_fbs import (
+    FBS_IN_DELIVERY_STATUS,
+    FBS_IN_DELIVERY_STUCK_STATUS,
+    FBS_SORTED_STATUS,
+)
 
 # ─── Allowed enum values ─────────────────────────────────────────────────────
 
@@ -19,12 +23,14 @@ ALLOWED_STOCK_SOURCES = ["ledger", "ff_mirror", "min_of_both"]
 ALLOWED_WAREHOUSE_MODES = ["observe", "translate"]
 ALLOWED_FBS_MODES = ["safe", "sandbox", "prod"]
 ALLOWED_SUPPLIER_STATUSES = ["new", "confirm", "complete", "cancel", "cancel_carrier"]
-#: То же + псевдо-статус «ещё в доставке» (`complete` минус доставленное) —
-#: он валиден в фильтре списка заданий, но значением `supplierStatus` не является.
+#: То же + псевдо-статусы фаз доставки — валидны в фильтре списка заданий,
+#: но значениями `supplierStatus` не являются (`in_delivery` — ещё едет,
+#: `sorted` — принято СЦ, `in_delivery_stuck` — передано давно, СЦ не принял).
 ALLOWED_ORDER_STATUS_FILTERS = [
     *ALLOWED_SUPPLIER_STATUSES,
     FBS_IN_DELIVERY_STATUS,
     FBS_SORTED_STATUS,
+    FBS_IN_DELIVERY_STUCK_STATUS,
 ]
 ALLOWED_STICKER_TYPES = ["svg", "zplv", "zplh", "png"]
 #: Производные состояния поставки (см. `models.wb_fbs.supply_status`) — своего
