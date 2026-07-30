@@ -533,9 +533,16 @@ export default function OrdersTab({
         },
         {
             key: 'sale_price', label: 'Цена, ₽', align: 'right',
-            headerTitle: 'salePrice задания (WB отдаёт в копейках — приведено к рублям)',
-            render: (v: number | string | null) => v == null ? '—' : formatNumber(num(v)),
-            exportValue: (row: FbsOrder) => num(row.sale_price),
+            headerTitle: 'Цена задания: salePrice (со скидкой покупателя), если WB его прислал, иначе price',
+            // Канон бэкенд-статистики: coalesce(sale_price, price) — salePrice
+            // WB шлёт единицам заказов, price заполнен у всех (тот же фикс, что
+            // в FbsOrdersCard и SupplyOrdersPanel).
+            getValue: (row: FbsOrder) => num(row.sale_price ?? row.price),
+            render: (_v: unknown, row: FbsOrder) => {
+                const price = row.sale_price ?? row.price;
+                return price == null ? '—' : formatNumber(num(price));
+            },
+            exportValue: (row: FbsOrder) => num(row.sale_price ?? row.price),
         },
         {
             key: 'supplier_status', label: 'Статус',
