@@ -8,7 +8,8 @@
       - "exact": скан витрины с матчем по нашему nmID (WB не фильтрует по nmID).
   • подсветку «наша карточка» (nmID ∈ нашей номенклатуры) на любом объявлении.
 
-Протухание сессии WB → mark_wb_portal_expired + доменная CardExchangeError (роутер → 400).
+Сессия — ОТДЕЛЬНЫЙ слот `wb_exchange_session` (не сессия поставок): провизионится и
+протухает независимо. Протухание → mark_wb_exchange_expired + CardExchangeError (роутер → 400).
 """
 
 from __future__ import annotations
@@ -131,7 +132,7 @@ def _next_cursor(ads: list[dict], sort_field: str) -> dict | None:
 
 async def list_showcase(db: AsyncSession, project_id: int, q: ShowcaseQuery) -> dict:
     """Одна страница витрины (или полный скан в режиме 'exact')."""
-    client = await integrations_service.get_wb_portal_client(db, project_id)
+    client = await integrations_service.get_wb_exchange_client(db, project_id)
     try:
         our_nm = await _our_nm_ids(db, project_id)
 
@@ -162,7 +163,9 @@ async def list_showcase(db: AsyncSession, project_id: int, q: ShowcaseQuery) -> 
         sort = {"field": q.sort_field, "order": q.sort_order}
 
         if q.our_mode == "exact":
-            return await _scan_exact(client, wb_filter, sort, q.search, our_nm)
+            # Диагностику справочника не теряем: exact может идти вместе с root_categories.
+            return {**await _scan_exact(client, wb_filter, sort, q.search, our_nm),
+                    "unmatched_subjects": unmatched}
 
         cursor = None
         if q.cursor:
@@ -177,8 +180,10 @@ async def list_showcase(db: AsyncSession, project_id: int, q: ShowcaseQuery) -> 
             "unmatched_subjects": unmatched,
         }
     except WbSessionExpired as e:
-        await integrations_service.mark_wb_portal_expired(db, project_id)
-        raise CardExchangeError("Сессия WB-кабинета истекла. Обновите доступ WB в настройках.") from e
+        await integrations_service.mark_wb_exchange_expired(db, project_id)
+        raise CardExchangeError(
+            "Сессия WB для биржи истекла. Вставьте свежий доступ в разделе «Биржа карточек»."
+        ) from e
     except WbPortalError as e:
         raise CardExchangeError(f"WB отклонил запрос биржи: {e}") from e
     finally:
@@ -238,12 +243,14 @@ async def _cart_call(
     db: AsyncSession, project_id: int, coro_factory: Callable[[WbPortalClient], Awaitable[_T]]
 ) -> _T:
     """Обёртка вызова корзины: клиент + маппинг ошибок сессии/портала."""
-    client = await integrations_service.get_wb_portal_client(db, project_id)
+    client = await integrations_service.get_wb_exchange_client(db, project_id)
     try:
         return await coro_factory(client)
     except WbSessionExpired as e:
-        await integrations_service.mark_wb_portal_expired(db, project_id)
-        raise CardExchangeError("Сессия WB-кабинета истекла. Обновите доступ WB в настройках.") from e
+        await integrations_service.mark_wb_exchange_expired(db, project_id)
+        raise CardExchangeError(
+            "Сессия WB для биржи истекла. Вставьте свежий доступ в разделе «Биржа карточек»."
+        ) from e
     except WbPortalError as e:
         raise CardExchangeError(f"WB отклонил операцию с корзиной: {e}") from e
     finally:

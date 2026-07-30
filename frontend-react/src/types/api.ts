@@ -8756,3 +8756,8 @@ export interface ShowcaseQueryPayload {
 export interface CartActionResult {
     ok: boolean;
 }
+
+export interface ExchangeSessionStatus {
+    status: 'ACTIVE' | 'EXPIRED' | 'NONE';
+    updated_at?: string | null;
+}

@@ -6,6 +6,8 @@ import type { ShowcaseAd, ShowcaseResponse } from '@/types/api';
 vi.mock('@/components/PageGuard', () => ({ default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 vi.mock('@/lib/api', () => ({
     api: {
+        getCardExchangeSessionStatus: vi.fn(),
+        setCardExchangeSession: vi.fn(),
         getCardExchangeCategories: vi.fn(),
         getCardExchangeShowcase: vi.fn(),
         addCardToCart: vi.fn(),
@@ -19,6 +21,8 @@ import { api } from '@/lib/api';
 const getShowcase = vi.mocked(api.getCardExchangeShowcase);
 const getCategories = vi.mocked(api.getCardExchangeCategories);
 const addToCart = vi.mocked(api.addCardToCart);
+const getSession = vi.mocked(api.getCardExchangeSessionStatus);
+const setSession = vi.mocked(api.setCardExchangeSession);
 
 function makeAd(over: Partial<ShowcaseAd> = {}): ShowcaseAd {
     return {
@@ -39,6 +43,10 @@ describe('Страница «Биржа карточек»', () => {
         getCategories.mockResolvedValue([{ category: 'Автоаксессуары', subject_count: 5 }]);
         addToCart.mockReset();
         addToCart.mockResolvedValue({ ok: true });
+        getSession.mockReset();
+        getSession.mockResolvedValue({ status: 'ACTIVE', updated_at: '2026-07-30T00:00:00' });
+        setSession.mockReset();
+        setSession.mockResolvedValue({ status: 'ACTIVE', updated_at: '2026-07-30T00:00:00' });
     });
 
     it('loading — пока запрос витрины не ответил', () => {
@@ -76,6 +84,32 @@ describe('Страница «Биржа карточек»', () => {
         fireEvent.click(btn);
         await waitFor(() => expect(addToCart).toHaveBeenCalledWith(1));
         await screen.findByRole('button', { name: 'Удалить из корзины' });
+    });
+
+    it('нет сессии биржи — форма доступа, витрина не запрашивается', async () => {
+        getSession.mockResolvedValue({ status: 'NONE' });
+        getShowcase.mockResolvedValue(makeResp());
+        render(<CardExchangePage />);
+        await screen.findByText(/Доступ к бирже не задан/);
+        expect(screen.getByPlaceholderText('authorizev3 …')).toBeInTheDocument();
+        expect(getShowcase).not.toHaveBeenCalled();
+    });
+
+    it('истёкшая сессия — просит свежий токен', async () => {
+        getSession.mockResolvedValue({ status: 'EXPIRED' });
+        render(<CardExchangePage />);
+        await screen.findByText(/Доступ к бирже истёк/);
+    });
+
+    it('сохранение доступа — шлёт токен и грузит витрину', async () => {
+        getSession.mockResolvedValue({ status: 'NONE' });
+        getShowcase.mockResolvedValue(makeResp());
+        render(<CardExchangePage />);
+        const input = await screen.findByPlaceholderText('authorizev3 …');
+        fireEvent.change(input, { target: { value: 'tok123' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Сохранить доступ' }));
+        await waitFor(() => expect(setSession).toHaveBeenCalledWith('tok123'));
+        await screen.findByText('Тестовая карточка', { exact: false });
     });
 
     it('«наша» карточка помечена бейджем и мы её видим', async () => {

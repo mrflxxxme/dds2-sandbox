@@ -29,9 +29,12 @@ def _mapping() -> dict[str, list[str]]:
 
 
 def list_root_categories() -> list[dict]:
-    """Корневые категории для селектора фильтра: [{"category", "subjectCount"}] по имени."""
+    """Корневые категории для селектора фильтра: [{"category", "subject_count"}] по имени.
+
+    Ключи — snake_case: роутер собирает из них RootCategory напрямую (`RootCategory(**c)`).
+    """
     m = _mapping()
-    return [{"category": c, "subjectCount": len(m[c])} for c in m]
+    return [{"category": c, "subject_count": len(m[c])} for c in m]
 
 
 def subjects_for_category(category: str) -> list[str]:

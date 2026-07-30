@@ -94,3 +94,15 @@ class CartDelete(BaseModel):
 
 class CartActionResult(BaseModel):
     ok: bool
+
+
+# ─── сессия биржи (отдельный слот от сессии поставок) ─────────────────────
+
+
+class ExchangeSessionStatus(BaseModel):
+    status: str  # ACTIVE | EXPIRED | NONE
+    updated_at: str | None = None
+
+
+class ExchangeSessionSet(BaseModel):
+    authorizev3: str

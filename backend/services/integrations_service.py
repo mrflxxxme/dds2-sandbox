@@ -432,6 +432,115 @@ async def get_wb_portal_status(db: AsyncSession, project_id: int) -> dict:
     return {"status": status, "updated_at": (key.config or {}).get("updated_at")}
 
 
+# ─── WB Exchange Session (биржа карточек) ─────────────────────────────────────
+# ОТДЕЛЬНЫЙ слот от wb_portal_session: биржа провизионится и протухает независимо,
+# чтобы обновление доступа к бирже не трогало критичную сессию поставок (и наоборот).
+# Может быть токеном как того же кабинета, так и другого продавца.
+
+WB_EXCHANGE_SERVICE = "wb_exchange_session"
+WB_EXCHANGE_LABEL = "WB Exchange Session"
+
+
+async def set_wb_exchange_session(db: AsyncSession, project_id: int, authorizev3: str) -> dict:
+    """Завести/обновить сессию кабинета для биржи карточек (см. set_wb_portal_session)."""
+    from backend.integrations.wb_portal_client import WbPortalClient, WbPortalError
+
+    authorizev3 = authorizev3.strip()
+    if not authorizev3:
+        raise ValueError("Пустой токен")
+
+    client = WbPortalClient(authorizev3)
+    try:
+        await client.check_session()
+    except WbPortalError as e:
+        raise ValueError(f"Токен недействителен или WB недоступен: {e}") from e
+
+    # Ищем ВКЛЮЧАЯ soft-deleted (unique-слот занят даже у удалённой строки).
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_EXCHANGE_SERVICE,
+            IntegrationKey.label == WB_EXCHANGE_LABEL,
+        )
+    )
+    key = result.scalar_one_or_none()
+    encrypted = _encrypt(authorizev3)
+    if key:
+        if key.is_deleted:
+            key.restore()
+        key.encrypted_key = encrypted
+        key.is_active = True
+        key.config = {"status": "ACTIVE", "updated_at": utcnow().isoformat()}
+    else:
+        key = IntegrationKey(
+            project_id=project_id,
+            service=WB_EXCHANGE_SERVICE,
+            label=WB_EXCHANGE_LABEL,
+            encrypted_key=encrypted,
+            is_active=True,
+            config={"status": "ACTIVE", "updated_at": utcnow().isoformat()},
+        )
+        db.add(key)
+    await db.commit()
+    await db.refresh(key)
+    return {"status": "ACTIVE", "updated_at": (key.config or {}).get("updated_at")}
+
+
+async def get_wb_exchange_client(db: AsyncSession, project_id: int) -> "WbPortalClient":
+    """Клиент биржи из её собственной сессии. Raises ValueError, если не задана."""
+    from backend.integrations.wb_portal_client import WbPortalClient
+
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_EXCHANGE_SERVICE,
+            IntegrationKey.is_active.is_(True),
+            IntegrationKey.is_deleted.is_(False),
+        )
+    )
+    key = result.scalar_one_or_none()
+    if not key:
+        raise ValueError(
+            "Сессия WB для биржи карточек не задана. Вставьте доступ в разделе «Биржа карточек»."
+        )
+    return WbPortalClient(_decrypt(key.encrypted_key))
+
+
+async def mark_wb_exchange_expired(db: AsyncSession, project_id: int) -> None:
+    """Пометить сессию биржи EXPIRED (после 401) — UI попросит свежий токен."""
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_EXCHANGE_SERVICE,
+            IntegrationKey.is_deleted.is_(False),
+        )
+    )
+    key = result.scalar_one_or_none()
+    if key:
+        key.is_active = False
+        key.config = {**(key.config or {}), "status": "EXPIRED", "expired_at": utcnow().isoformat()}
+        await db.commit()
+
+
+async def get_wb_exchange_status(db: AsyncSession, project_id: int) -> dict:
+    """Статус сессии биржи для UI: ACTIVE / EXPIRED / NONE (см. get_wb_portal_status)."""
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_EXCHANGE_SERVICE,
+            IntegrationKey.is_deleted.is_(False),
+        )
+    )
+    key = result.scalar_one_or_none()
+    if not key:
+        return {"status": "NONE"}
+    # Источник истины — is_active (см. комментарий в get_wb_portal_status).
+    return {
+        "status": "ACTIVE" if key.is_active else "EXPIRED",
+        "updated_at": (key.config or {}).get("updated_at"),
+    }
+
+
 async def sync_wb_sales(
     db: AsyncSession,
     project_id: int,

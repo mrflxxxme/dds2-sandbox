@@ -17,15 +17,43 @@ from backend.schemas.card_exchange import (
     CartActionResult,
     CartAdd,
     CartDelete,
+    ExchangeSessionSet,
+    ExchangeSessionStatus,
     RootCategory,
     ShowcaseQuery,
     ShowcaseResponse,
 )
+from backend.services import integrations_service
 from backend.services.card_exchange import showcase as svc
 from backend.services.card_exchange.showcase import CardExchangeError
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/card-exchange", tags=["Card Exchange"])
+
+
+@router.get("/session/status", response_model=ExchangeSessionStatus)
+async def session_status(
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+) -> ExchangeSessionStatus:
+    """Статус собственной сессии биржи: ACTIVE / EXPIRED / NONE."""
+    state = await integrations_service.get_wb_exchange_status(db, project.id)
+    return ExchangeSessionStatus(**state)
+
+
+@router.post("/session", response_model=ExchangeSessionStatus)
+async def session_set(
+    body: ExchangeSessionSet,
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+    _: None = Depends(rate_limit_write),
+) -> ExchangeSessionStatus:
+    """Завести/обновить сессию биржи (отдельный слот от сессии поставок)."""
+    try:
+        state = await integrations_service.set_wb_exchange_session(db, project.id, body.authorizev3)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return ExchangeSessionStatus(**state)
 
 
 @router.get("/categories", response_model=list[RootCategory])

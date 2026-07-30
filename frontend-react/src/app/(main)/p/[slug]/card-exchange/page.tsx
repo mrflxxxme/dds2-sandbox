@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import PageHeader from '@/components/PageHeader';
 import PageGuard from '@/components/PageGuard';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import type {
     CardExchangeOurMode,
+    ExchangeSessionStatus,
     RootCategory,
     ShowcaseAd,
     ShowcaseCursor,
@@ -38,6 +39,12 @@ function money(v: number | null): string {
 }
 
 export default function CardExchangePage() {
+    // Собственная сессия биржи (отдельный слот от сессии поставок).
+    const [session, setSession] = useState<ExchangeSessionStatus | null>(null);
+    const [tokenInput, setTokenInput] = useState('');
+    const [savingToken, setSavingToken] = useState(false);
+    const [tokenError, setTokenError] = useState<string | null>(null);
+
     const [categories, setCategories] = useState<RootCategory[]>([]);
     const [ads, setAds] = useState<ShowcaseAd[]>([]);
     const [cursor, setCursor] = useState<ShowcaseCursor | null>(null);
@@ -67,18 +74,44 @@ export default function CardExchangePage() {
     }, [searchInput]);
 
     useEffect(() => {
+        api.getCardExchangeSessionStatus()
+            .then(setSession)
+            .catch(() => setSession({ status: 'NONE' }));
         api.getCardExchangeCategories()
             .then(setCategories)
-            .catch(() => { /* справочник не критичен для витрины */ });
+            .catch((e) => setActionError(e instanceof Error ? e.message : 'Не удалось загрузить справочник категорий'));
     }, []);
+
+    const sessionOk = session?.status === 'ACTIVE';
+
+    const saveToken = async () => {
+        setTokenError(null);
+        setSavingToken(true);
+        try {
+            const st = await api.setCardExchangeSession(tokenInput.trim());
+            setSession(st);
+            setTokenInput('');
+            void load(true);
+        } catch (e) {
+            setTokenError(e instanceof Error ? e.message : 'Не удалось сохранить доступ');
+        } finally {
+            setSavingToken(false);
+        }
+    };
 
     const categoryOptions = useMemo(
         () => categories.map((c) => ({ value: c.category, label: `${c.category} (${c.subject_count})` })),
         [categories],
     );
 
+    // Сквозной id запроса: применяем ТОЛЬКО ответ последнего. Смена фильтров и debounce
+    // поиска (а в dev — двойной монтаж StrictMode) держат несколько запросов в полёте,
+    // и медленный ранний ответ иначе перетирает свежий (см. learnings.md).
+    const reqIdRef = useRef(0);
+
     const load = useCallback(async (reset: boolean) => {
         const [sortField, sortOrder] = sort.split(':');
+        const myReq = ++reqIdRef.current;
         if (reset) { setLoading(true); setError(null); } else { setLoadingMore(true); }
         try {
             const res = await api.getCardExchangeShowcase({
@@ -90,6 +123,7 @@ export default function CardExchangePage() {
                 sort_order: sortOrder,
                 cursor: reset ? null : cursor,
             });
+            if (myReq !== reqIdRef.current) return;  // устаревший ответ — игнорируем
             setAds((prev) => (reset ? res.ads : [...prev, ...res.ads]));
             setCursor(res.next_cursor);
             setHasMore(res.has_more);
@@ -99,23 +133,27 @@ export default function CardExchangePage() {
                     ? `Просканировано страниц: ${res.scanned_pages}${res.scan_truncated ? ' (упёрлись в лимит — показаны не все)' : ''}`
                     : null,
             );
-            if (reset) {
-                // синхронизируем локальную корзину с состоянием карточек
-                setCart(new Set(res.ads.filter((a) => a.has_in_cart).map((a) => a.ad_id)));
-            }
+            // Корзину синхронизируем и при догрузке: иначе уже лежащие в корзине карточки
+            // следующих страниц покажут «Добавить» и клик уйдёт в повторный add.
+            const inCartIds = res.ads.filter((a) => a.has_in_cart).map((a) => a.ad_id);
+            setCart((prev) => (reset ? new Set(inCartIds) : new Set([...prev, ...inCartIds])));
         } catch (e) {
+            if (myReq !== reqIdRef.current) return;
             if (reset) setError(e instanceof Error ? e.message : 'Не удалось загрузить биржу');
             else setActionError(e instanceof Error ? e.message : 'Не удалось догрузить');
         } finally {
-            if (reset) setLoading(false); else setLoadingMore(false);
+            if (myReq === reqIdRef.current) {
+                if (reset) setLoading(false); else setLoadingMore(false);
+            }
         }
     }, [search, rootCategory, ourMode, inStockOnly, sort, cursor]);
 
-    // перезагрузка страницы 1 при смене любого фильтра
+    // перезагрузка страницы 1 при смене любого фильтра; без активной сессии витрину не зовём
     useEffect(() => {
+        if (!sessionOk) return;
         void load(true);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [search, rootCategory, ourMode, inStockOnly, sort]);
+    }, [search, rootCategory, ourMode, inStockOnly, sort, sessionOk]);
 
     const toggleCart = async (ad: ShowcaseAd) => {
         setActionError(null);
@@ -143,6 +181,37 @@ export default function CardExchangePage() {
                 subtitle="Перенос готовых карточек WB (с отзывами и рейтингом). Просмотр, фильтры по категориям и нашим товарам, сбор в корзину."
             />
 
+            {/* Доступ к бирже — отдельная сессия WB, независимая от сессии поставок */}
+            {session && session.status !== 'ACTIVE' && (
+                <div className="glass-card" style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 14, color: 'var(--color-text)', marginBottom: 8 }}>
+                        {session.status === 'EXPIRED'
+                            ? 'Доступ к бирже истёк. Вставьте свежий authorizev3.'
+                            : 'Доступ к бирже не задан. Вставьте authorizev3 из кабинета WB (DevTools).'}
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                        <input
+                            value={tokenInput}
+                            onChange={(e) => setTokenInput(e.target.value)}
+                            placeholder="authorizev3 …"
+                            style={{ flex: '1 1 320px', minWidth: 240, background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '8px 12px', fontSize: 13, color: 'var(--color-text)' }}
+                        />
+                        <button className="btn btn-sm btn-primary" onClick={() => void saveToken()} disabled={savingToken || !tokenInput.trim()}>
+                            {savingToken ? 'Проверка…' : 'Сохранить доступ'}
+                        </button>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--color-muted)', marginTop: 8 }}>
+                        Сессия биржи хранится отдельно от сессии поставок — её обновление не затрагивает поставки.
+                    </div>
+                    {tokenError && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginTop: 8 }}>{tokenError}</div>}
+                </div>
+            )}
+
+            {!session && (
+                <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-muted)', padding: 32 }}>Загрузка…</div>
+            )}
+
+            {sessionOk && (<>
             {/* Панель фильтров */}
             <div className="glass-card" style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', marginBottom: 16 }}>
                 <input
@@ -259,6 +328,7 @@ export default function CardExchangePage() {
                     )}
                 </>
             )}
+            </>)}
         </PageGuard>
     );
 }

@@ -82,10 +82,11 @@ def _ad(ad_id, nm_id, *, title="t", price=1000, rating=4.5, count=10, subject_ok
 
 @pytest.fixture
 def patch_client(monkeypatch):
+    """Подменяет клиент СОБСТВЕННОЙ сессии биржи (не сессии поставок)."""
     def _apply(client):
         async def fake_get(db, project_id):
             return client
-        monkeypatch.setattr(integrations_service, "get_wb_portal_client", fake_get)
+        monkeypatch.setattr(integrations_service, "get_wb_exchange_client", fake_get)
         return client
     return _apply
 
@@ -111,9 +112,21 @@ async def _add_nomenclature(db, project_id, *, barcode, nm_id, subject):
 def test_categories_loaded():
     cats = cat_ref.list_root_categories()
     assert len(cats) == 96
-    assert sum(c["subjectCount"] for c in cats) == 7424
+    assert sum(c["subject_count"] for c in cats) == 7424
     names = {c["category"] for c in cats}
     assert "Автоаксессуары и дополнительное оборудование" in names
+
+
+def test_categories_match_response_schema():
+    """Ключи сервиса обязаны собираться в RootCategory — роутер делает RootCategory(**c).
+
+    Ловит рассинхрон имён (был баг: сервис отдавал camelCase subjectCount → 500 на /categories).
+    """
+    from backend.schemas.card_exchange import RootCategory
+
+    items = [RootCategory(**c) for c in cat_ref.list_root_categories()]
+    assert len(items) == 96
+    assert all(i.subject_count > 0 for i in items)
 
 
 def test_subjects_for_category():
@@ -207,7 +220,7 @@ async def test_showcase_session_expired_marks_and_raises(db_session, project, pa
     async def fake_mark(db, pid):
         marked["pid"] = pid
 
-    monkeypatch.setattr(integrations_service, "mark_wb_portal_expired", fake_mark)
+    monkeypatch.setattr(integrations_service, "mark_wb_exchange_expired", fake_mark)
     patch_client(FakeClient(expired=True))
     with pytest.raises(svc.CardExchangeError):
         await svc.list_showcase(db_session, project.id, ShowcaseQuery())
@@ -235,3 +248,54 @@ async def test_cart_get(db_session, project, patch_client):
     patch_client(FakeClient())
     cart = await svc.get_cart(db_session, project.id)
     assert "suppliers" in cart
+
+
+# ─── сессия биржи: отдельный слот ────────────────────────────────────────────
+
+
+async def test_exchange_session_is_separate_slot(db_session, project):
+    """Сессия биржи хранится отдельно от сессии поставок и не видна через неё."""
+    from backend.models.integrations import IntegrationKey
+    from backend.utils.crypto import encrypt
+
+    db_session.add(
+        IntegrationKey(
+            project_id=project.id,
+            service=integrations_service.WB_EXCHANGE_SERVICE,
+            label=integrations_service.WB_EXCHANGE_LABEL,
+            encrypted_key=encrypt("exchange-token"),
+            is_active=True,
+            config={"status": "ACTIVE"},
+        )
+    )
+    await db_session.commit()
+
+    assert (await integrations_service.get_wb_exchange_status(db_session, project.id))["status"] == "ACTIVE"
+    # слот поставок при этом пуст — сессии независимы
+    assert (await integrations_service.get_wb_portal_status(db_session, project.id))["status"] == "NONE"
+    client = await integrations_service.get_wb_exchange_client(db_session, project.id)
+    assert client.authorizev3 == "exchange-token"
+
+
+async def test_exchange_session_absent_raises(db_session, project):
+    with pytest.raises(ValueError, match="Биржа карточек"):
+        await integrations_service.get_wb_exchange_client(db_session, project.id)
+
+
+async def test_exchange_session_expired_status(db_session, project):
+    from backend.models.integrations import IntegrationKey
+    from backend.utils.crypto import encrypt
+
+    db_session.add(
+        IntegrationKey(
+            project_id=project.id,
+            service=integrations_service.WB_EXCHANGE_SERVICE,
+            label=integrations_service.WB_EXCHANGE_LABEL,
+            encrypted_key=encrypt("t"),
+            is_active=True,
+            config={"status": "ACTIVE"},
+        )
+    )
+    await db_session.commit()
+    await integrations_service.mark_wb_exchange_expired(db_session, project.id)
+    assert (await integrations_service.get_wb_exchange_status(db_session, project.id))["status"] == "EXPIRED"

@@ -1,6 +1,7 @@
 import { ApiClient } from './client';
 import type {
     CartActionResult,
+    ExchangeSessionStatus,
     RootCategory,
     ShowcaseQueryPayload,
     ShowcaseResponse,
@@ -10,6 +11,12 @@ import type {
  *  project_id проставляется клиентом автоматически (X-Project-Id). */
 export function addCardExchangeMethods(api: ApiClient) {
     return {
+        getCardExchangeSessionStatus() {
+            return api.request<ExchangeSessionStatus>('GET', '/api/v1/card-exchange/session/status');
+        },
+        setCardExchangeSession(authorizev3: string) {
+            return api.request<ExchangeSessionStatus>('POST', '/api/v1/card-exchange/session', { authorizev3 });
+        },
         getCardExchangeCategories() {
             return api.request<RootCategory[]>('GET', '/api/v1/card-exchange/categories');
         },
