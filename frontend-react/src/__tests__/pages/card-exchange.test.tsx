@@ -195,14 +195,16 @@ describe('Страница «Биржа карточек»', () => {
         }));
     });
 
-    it('«Точно наши» — отдельная кнопка вне фильтров, шлёт our_mode', async () => {
+    it('селектор слева — наши категории; выбор уходит в root_categories', async () => {
         getShowcase.mockResolvedValue(makeResp());
         render(<CardExchangePage />);
         await screen.findByText('Тестовая карточка', { exact: false });
-        fireEvent.click(screen.getByRole('button', { name: 'Точно наши' }));
-        await waitFor(() => expect(getShowcase.mock.calls.at(-1)?.[0]).toMatchObject({ our_mode: 'exact' }));
-        fireEvent.click(screen.getByRole('button', { name: 'Вся биржа' }));
-        await waitFor(() => expect(getShowcase.mock.calls.at(-1)?.[0]).toMatchObject({ our_mode: null }));
+        fireEvent.click(screen.getByRole('button', { name: /Категория: все/ }));
+        // в селекторе только наши категории
+        expect(await screen.findByText('Автоаксессуары (12)')).toBeInTheDocument();
+        expect(screen.queryByText('Красота')).toBeNull();
+        fireEvent.click(screen.getByText('Автоаксессуары (12)'));
+        await waitFor(() => expect(getShowcase.mock.calls.at(-1)?.[0]).toMatchObject({ root_categories: ['Автоаксессуары'] }));
     });
 
     it('счётчик корзины — ссылка в корзину биржи WB (когда что-то добавлено)', async () => {
