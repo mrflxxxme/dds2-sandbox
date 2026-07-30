@@ -114,14 +114,21 @@ export const ORDER_PHASE_LABEL: Record<string, string> = {
     delivered: 'Завершённые',
     cancel: 'Отменено',
     cancel_carrier: 'Отменено перевозчиком',
+    // Разрез отмен (канон 30.07): чипы вкладки — два, по стороне решения.
+    cancel_client: 'Отмена клиента',
+    cancel_seller: 'Наша отмена',
 };
 
 // ─── Зависшие в пути на СЦ ──────────────────────────────────────────────────
 
-/** С какого дня «в пути» считаем задержкой (совпадает с порогом бэка). */
-export const TRANSIT_WARN_DAYS = 2;
+/**
+ * С какого дня «в пути» считаем задержкой (совпадает с порогом бэка —
+ * `_TRANSIT_STUCK_DAYS`). Канон владельца 30.07: СУТКИ от скана QR поставки
+ * без приёмки СЦ — уже зависание.
+ */
+export const TRANSIT_WARN_DAYS = 1;
 /** С какого дня задержка — уже ЧП: товар передали, а СЦ так и не принял. */
-export const TRANSIT_DANGER_DAYS = 4;
+export const TRANSIT_DANGER_DAYS = 3;
 /**
  * Потолок окна «зависло» (совпадает с бэком): у старых `complete` wb_status
  * застывает (синк опрашивает не всё), и дальше этого срока «N дн в пути» —
@@ -162,6 +169,23 @@ export function daysSince(iso: string | null | undefined, now: number = Date.now
     return Math.max(0, Math.floor((now - ts) / 86_400_000));
 }
 
+/**
+ * «Заказ завис ПОСЛЕ скана» — общий предикат подсветки строк в фазе
+ * «Ждёт сортировки» (три списка заданий, канон 30.07): с момента скана QR
+ * поставки прошло ≥ TRANSIT_WARN_DAYS (сутки), а СЦ заказ так и не принял.
+ *
+ * Считаем от scan-якоря миллисекундами, а НЕ от `transit_days` бэка: тот
+ * отдаёт ЦЕЛЫЕ сутки и зажёгся бы почти на день позже. За потолком
+ * TRANSIT_STALE_DAYS не подсвечиваем — там застывший статус старого задания,
+ * не живой груз (симметрично чипу «Зависли в пути» и `transitDaysColor`).
+ */
+export function isStuckAfterScan(scanIso: string | null | undefined, now: number = Date.now()): boolean {
+    const ts = parseUtcMs(scanIso);
+    if (ts == null) return false;
+    const elapsed = now - ts;
+    return elapsed >= TRANSIT_WARN_DAYS * 86_400_000 && elapsed <= TRANSIT_STALE_DAYS * 86_400_000;
+}
+
 /** Порог «заказ ждёт подозрительно долго» (WB ещё не отсканировал), часов. */
 export const ORDER_AGE_WARN_HOURS = 12;
 /** Порог «заказ ЗАВИС» — сутки без скана WB (сборка + передача + приёмка СЦ). */
@@ -169,6 +193,13 @@ export const ORDER_AGE_DANGER_HOURS = 24;
 
 /** `wbStatus`, означающие отмену заказа (обе оси схлопнуты фронтом одинаково с бэком). */
 const WB_CANCEL_STATUSES: readonly string[] = ['canceled', 'canceled_by_client', 'declined_by_client'];
+
+/**
+ * Подмножество отмен, где решение принял ПОКУПАТЕЛЬ (зеркало
+ * `FBS_WB_CLIENT_CANCEL_STATUSES` бэка, канон 30.07): всё остальное
+ * отменённое — наша сторона (продавец / перевозчик / wb canceled).
+ */
+export const WB_CLIENT_CANCEL_STATUSES: readonly string[] = ['canceled_by_client', 'declined_by_client'];
 
 /**
  * Статус задания В ТЕРМИНАХ КАБИНЕТА WB (решение владельца 30.07: «надо то же
@@ -180,7 +211,8 @@ const WB_CANCEL_STATUSES: readonly string[] = ['canceled', 'canceled_by_client',
  */
 export type FbsCabinetStatusKey =
     | 'new' | 'assembling' | 'ship_goods' | 'awaiting_sort'
-    | 'sorted' | 'ready_for_pickup' | 'postponed' | 'sold' | 'defect' | 'cancelled';
+    | 'sorted' | 'ready_for_pickup' | 'postponed' | 'sold' | 'defect'
+    | 'cancelled' | 'cancelled_client' | 'cancelled_seller' | 'cancelled_carrier';
 
 export const CABINET_STATUS_LABEL: Record<FbsCabinetStatusKey, { label: string; badge: string }> = {
     new: { label: 'Новое', badge: 'badge-info' },
@@ -192,6 +224,12 @@ export const CABINET_STATUS_LABEL: Record<FbsCabinetStatusKey, { label: string; 
     postponed: { label: 'Отложенная доставка', badge: 'badge-secondary' },
     sold: { label: 'Получено покупателем', badge: 'badge-success' },
     defect: { label: 'Брак', badge: 'badge-danger' },
+    // Разрез отмен (канон 30.07): бейдж строки называет сторону решения.
+    cancelled_client: { label: 'Отменён клиентом', badge: 'badge-secondary' },
+    cancelled_seller: { label: 'Отменён нами', badge: 'badge-secondary' },
+    cancelled_carrier: { label: 'Отменён перевозчиком', badge: 'badge-secondary' },
+    // Легаси-ключ: `cabinetOrderStatus` его больше не возвращает, но старые
+    // консьюмеры словаря не должны падать на промахе.
     cancelled: { label: 'Отменено', badge: 'badge-secondary' },
 };
 
@@ -205,7 +243,13 @@ export function cabinetOrderStatus(
     supplyScanned: boolean,
 ): FbsCabinetStatusKey {
     if ((supplierStatus && TERMINAL_STATUSES.includes(supplierStatus))
-        || (wbStatus && WB_CANCEL_STATUSES.includes(wbStatus))) return 'cancelled';
+        || (wbStatus && WB_CANCEL_STATUSES.includes(wbStatus))) {
+        // Сторона решения (зеркало cancel_client/cancel_seller бэка): клиентский
+        // wbStatus главнее — отказ покупателя случается и при supplier cancel.
+        if (wbStatus && WB_CLIENT_CANCEL_STATUSES.includes(wbStatus)) return 'cancelled_client';
+        if (supplierStatus === 'cancel_carrier') return 'cancelled_carrier';
+        return 'cancelled_seller';
+    }
     if (wbStatus === 'sold') return 'sold';
     if (wbStatus === 'defect') return 'defect';
     if (wbStatus === 'sorted') return 'sorted';

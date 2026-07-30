@@ -42,6 +42,7 @@ import {
     durationSinceLabel,
     fetchStickersChunked,
     hoursAgoLabel,
+    isStuckAfterScan,
     num,
     orderAgeColor,
     selectStickerIds,
@@ -66,9 +67,11 @@ const STICKER_WARN_LIMIT = 500;
  * Фазовые чипы — как вкладки кабинета WB (`ORDER_PHASE_LABEL`). Счётчик
  * «В доставке» считается честно: complete_total − delivered_count —
  * `complete` включает и доставленное, и прежний ярлык «Переданы в WB»
- * зелёным бейджем врал про неотсканированные поставки. «Отменено» суммирует
- * cancel + cancel_carrier (фильтр по клику — cancel: отмены перевозчиком
- * редки, отдельного чипа не заслуживают).
+ * зелёным бейджем врал про неотсканированные поставки. Отмены — ДВА чипа
+ * (канон 30.07): «Отмена клиента» (canceled_by_client / declined_by_client)
+ * и «Наша отмена» (продавец / перевозчик / wb canceled) — счётчики
+ * cancel_client_count / cancel_seller_count, их сумма равна прежнему
+ * cancel + cancel_carrier.
  */
 const PHASE_TABS: { key: string; label: string; title?: string }[] = [
     { key: '', label: 'Все' },
@@ -80,7 +83,16 @@ const PHASE_TABS: { key: string; label: string; title?: string }[] = [
         title: 'Поставка закрыта у нас, покупатель ещё не получил — от «Отгрузите товар» до «Готово к выдаче»',
     },
     { key: 'delivered', label: ORDER_PHASE_LABEL.delivered, title: 'Получено покупателем или брак' },
-    { key: 'cancel', label: ORDER_PHASE_LABEL.cancel, title: 'Отменённые — включая отмены перевозчиком' },
+    {
+        key: 'cancel_client',
+        label: ORDER_PHASE_LABEL.cancel_client,
+        title: 'Покупатель отменил или отказался от заказа',
+    },
+    {
+        key: 'cancel_seller',
+        label: ORDER_PHASE_LABEL.cancel_seller,
+        title: 'Отменено нашей стороной: продавцом, перевозчиком или WB',
+    },
 ];
 
 /**
@@ -677,9 +689,11 @@ export default function OrdersTab({
                         ? data ? Math.max(0, (counts.complete ?? 0) - (data.delivered_count ?? 0)) : undefined
                         : t.key === 'delivered'
                             ? data?.delivered_count
-                            : t.key === 'cancel'
-                                ? data ? (counts.cancel ?? 0) + (counts.cancel_carrier ?? 0) : undefined
-                                : counts[t.key];
+                            : t.key === 'cancel_client'
+                                ? data?.cancel_client_count
+                                : t.key === 'cancel_seller'
+                                    ? data?.cancel_seller_count
+                                    : counts[t.key];
                     // Родительский чип «В доставке» подсвечен и под её под-фильтрами.
                     const active = t.key === 'complete'
                         ? DELIVERY_FAMILY.includes(status)
@@ -923,9 +937,12 @@ export default function OrdersTab({
                         exportName="FBS_задания"
                         enableSorting
                         enablePagination={false}
-                        // Подсветка зависших: WB не отсканировал ≥ суток — наша зона.
+                        // Подсветка зависших: WB не отсканировал ≥ суток (наша зона)
+                        // ИЛИ отсканировал, а СЦ ≥ суток не принимает («Ждёт
+                        // сортировки» — канон 30.07, от scan-якоря поставки).
                         rowClassName={(o: FbsOrder) =>
                             orderAgeColor(o.created_at_wb, cabOf(o), now) === 'var(--color-danger)'
+                            || (cabOf(o) === 'awaiting_sort' && isStuckAfterScan(o.supply_scan_dt, now))
                                 ? 'fbs-row-stuck'
                                 : ''}
                     />

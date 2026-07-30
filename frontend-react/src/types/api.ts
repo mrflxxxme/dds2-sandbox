@@ -8545,6 +8545,12 @@ export interface FbsOrderListResponse {
    * История, не очередь — окно периода применяется как к прочим фазам доставки.
    */
   delivered_count: number;
+  /**
+   * Разрез отмен (канон 30.07): клиент отменил / отменили мы (продавец или
+   * перевозчик). Сумма равна cancel + cancel_carrier из status_counts.
+   */
+  cancel_client_count: number;
+  cancel_seller_count: number;
 }
 
 /** Очередь одного склада продавца по фазам жизни задания. */

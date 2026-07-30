@@ -608,6 +608,80 @@ async def test_wb_declined_order_is_not_counted_as_new(db_session, env, monkeypa
     assert rows[9501].supplier_status == FbsSupplierStatus.NEW.value
 
 
+# ─── Разрез отмен: cancel_client / cancel_seller (канон 30.07) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_cancel_split_buckets_and_sum_invariant(db_session, env):
+    """Отменённые делятся на две корзины: «клиент отменил» / «отменили мы».
+
+    Клиент — `wbStatus` из `FBS_WB_CLIENT_CANCEL_STATUSES` (canceled_by_client /
+    declined_by_client), чей бы `supplierStatus` ни стоял. Мы — всё прочее
+    отменённое: supplier cancel с пустым wb (SQL-NULL не должен выкидывать
+    строку из разбиения), cancel_carrier, wb canceled. Сумма корзин равна
+    счётчику отмен эффективного статуса — разбиение точное.
+    """
+    # Клиент: WB-отмена покупателем; supplier застыл в new (отказ до сборки).
+    await _seed_order(db_session, env.project_id, 9950, wb_status="canceled_by_client")
+    await _seed_order(db_session, env.project_id, 9951, wb_status="declined_by_client")
+    # Мы: отмена продавцом, ось WB пустая (NULL).
+    await _seed_order(
+        db_session, env.project_id, 9952,
+        supplier_status=FbsSupplierStatus.CANCEL.value, wb_status=None,
+    )
+    # Мы: отмена перевозчиком; wb canceled — не клиентский код.
+    await _seed_order(
+        db_session, env.project_id, 9953,
+        supplier_status=FbsSupplierStatus.CANCEL_CARRIER.value, wb_status="canceled",
+    )
+    # Живое — ни в одну корзину.
+    await _seed_order(db_session, env.project_id, 9954)
+
+    listed = await orders_service.list_orders(db_session, env.project_id)
+    assert listed["cancel_client_count"] == 2
+    assert listed["cancel_seller_count"] == 2
+    # Инвариант разбиения: client + seller == cancel + cancel_carrier.
+    cancels = (
+        listed["status_counts"].get(FbsSupplierStatus.CANCEL.value, 0)
+        + listed["status_counts"].get(FbsSupplierStatus.CANCEL_CARRIER.value, 0)
+    )
+    assert listed["cancel_client_count"] + listed["cancel_seller_count"] == cancels == 4
+
+
+@pytest.mark.asyncio
+async def test_cancel_split_status_filters(db_session, env):
+    """`status=cancel_client|cancel_seller` — фильтры выдачи, зеркальные счётчикам."""
+    from backend.models.wb_fbs import FBS_CANCEL_CLIENT_STATUS, FBS_CANCEL_SELLER_STATUS
+
+    await _seed_order(db_session, env.project_id, 9960, wb_status="canceled_by_client")
+    # Клиентский wb-код при supplier cancel — решение всё равно принял покупатель.
+    await _seed_order(
+        db_session, env.project_id, 9961,
+        supplier_status=FbsSupplierStatus.CANCEL.value, wb_status="declined_by_client",
+    )
+    await _seed_order(
+        db_session, env.project_id, 9962,
+        supplier_status=FbsSupplierStatus.CANCEL.value, wb_status=None,
+    )
+    await _seed_order(
+        db_session, env.project_id, 9963,
+        supplier_status=FbsSupplierStatus.CANCEL_CARRIER.value, wb_status="canceled",
+    )
+    await _seed_order(db_session, env.project_id, 9964)  # живое
+
+    client_page = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_CANCEL_CLIENT_STATUS
+    )
+    assert client_page["total"] == 2
+    assert {o["wb_order_id"] for o in client_page["items"]} == {9960, 9961}
+
+    seller_page = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_CANCEL_SELLER_STATUS
+    )
+    assert seller_page["total"] == 2
+    assert {o["wb_order_id"] for o in seller_page["items"]} == {9962, 9963}
+
+
 @pytest.mark.asyncio
 async def test_revenue_uses_converted_price_for_foreign_currency(db_session, env, monkeypatch):
     """Заказ в чужой валюте входит в выручку по `convertedPrice`, а не по `price`.
@@ -1488,20 +1562,24 @@ async def test_transit_days_anchor_priority_and_fallback(db_session, env):
 
 @pytest.mark.asyncio
 async def test_stuck_filter_window_and_counter(db_session, env):
-    """Зависло = передано 2–30 дней назад, СЦ не принял; вне окна — не зависло."""
+    """Зависло = передано 1–30 дней назад, СЦ не принял; вне окна — не зависло.
+
+    Порог — СУТКИ от скана QR (канон владельца 30.07): отвезли, а СЦ за день
+    так и не принял конкретный заказ — уже зависание.
+    """
     from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS
     from backend.utils.time import utcnow
 
     now = utcnow()
     done = FbsSupplierStatus.COMPLETE.value
-    await _seed_supply(db_session, env.project_id, "WB-GI-S1", scan_dt=now - timedelta(days=1))
+    await _seed_supply(db_session, env.project_id, "WB-GI-S1", scan_dt=now - timedelta(hours=12))
     await _seed_supply(db_session, env.project_id, "WB-GI-S2", scan_dt=now - timedelta(days=3))
     await _seed_supply(db_session, env.project_id, "WB-GI-S3", scan_dt=now - timedelta(days=40))
-    # Моложе порога (1 день) — штатно едет.
+    # Моложе порога (полсуток < 1 дня) — штатно едет.
     await _seed_order(
         db_session, env.project_id, 9810, supplier_status=done, wb_status=None, supply_id="WB-GI-S1"
     )
-    # В окне 2–30 дней — зависло.
+    # В окне 1–30 дней — зависло.
     await _seed_order(
         db_session, env.project_id, 9811, supplier_status=done, wb_status=None, supply_id="WB-GI-S2"
     )
@@ -1623,8 +1701,8 @@ async def test_warehouse_summary_counts_stuck_without_period(db_session, env):
         supply_id="WB-GI-W1",
         created_at_wb=now - timedelta(days=20),
     )
-    # Свежее «едет» (вчера) — в периоде, но НЕ зависло.
-    await _seed_supply(db_session, env.project_id, "WB-GI-W2", scan_dt=now - timedelta(days=1))
+    # Свежее «едет» (полсуток < порога-суток) — в периоде, но НЕ зависло.
+    await _seed_supply(db_session, env.project_id, "WB-GI-W2", scan_dt=now - timedelta(hours=12))
     await _seed_order(
         db_session,
         env.project_id,
