@@ -501,6 +501,30 @@ class FbsOrderOut(BaseModel):
     #: waiting» читалась как противоречие: закрыто у нас ≠ сдано WB.
     supply_done: bool | None = None
     supply_scan_dt: datetime | None = None
+    #: Оценка штрафа WB за отмену (≈, см. FbsCancelStats) — только у строк
+    #: корзин отмен; 0 = отмена без штрафа (обычный отказ покупателя).
+    penalty_est: Decimal | None = None
+
+
+class FbsCancelStats(BaseModel):
+    """Сводка корзины отмен (`status=cancel_client|cancel_seller`) по ВСЕЙ
+    выборке фильтра: потерянная выручка + ОЦЕНКА штрафа WB.
+
+    Оценка (≈), не бухгалтерия: тир рейтинга доставки зашит константой
+    (<95% — кабинет владельца 94,92%), «порог по обороту» из правил WB не
+    применяется (формулы в правилах нет), момент отмены для коэффициента
+    срока — журнал переходов, для истории — приближение по updated_at.
+    Клиентская отмена штрафуется ТОЛЬКО «из-за задержки продавца» (эвристика:
+    отмена после 120 ч без сортировки) — обычный отказ покупателя без штрафа.
+    """
+
+    revenue: Decimal = Decimal(0)
+    penalty_est: Decimal = Decimal(0)
+    #: Сколько заданий корзины реально штрафуемы (у клиентских отмен без
+    #: задержки штраф 0 — цифра объясняет, почему penalty_est меньше ожиданий).
+    penalized_count: int = 0
+    #: Заданий без ставки комиссии в `wb_tariffs` (штраф по ним — дефолт-ставка).
+    no_commission_count: int = 0
 
 
 class FbsOrderListOut(BaseModel):
@@ -524,6 +548,9 @@ class FbsOrderListOut(BaseModel):
     #: перевозчик). Сумма равна счётчику отмен эффективного статуса.
     cancel_client_count: int = 0
     cancel_seller_count: int = 0
+    #: Сводка выручки/штрафа корзины отмен — ТОЛЬКО при фильтре
+    #: status=cancel_client|cancel_seller (лишний агрегат прочим фазам не нужен).
+    cancel_stats: FbsCancelStats | None = None
 
 
 class FbsWarehouseQueueRow(BaseModel):
