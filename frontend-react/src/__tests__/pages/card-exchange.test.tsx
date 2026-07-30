@@ -10,6 +10,10 @@ vi.mock('@/lib/api', () => ({
         setCardExchangeSession: vi.fn(),
         useCardExchangeSessionFromSupply: vi.fn(),
         getCardExchangeCategories: vi.fn(),
+        getCardExchangeBrands: vi.fn(),
+        getCardExchangeSuppliers: vi.fn(),
+        getCardExchangeSubjects: vi.fn(),
+        getCardExchangeCounters: vi.fn(),
         getCardExchangeShowcase: vi.fn(),
         addCardToCart: vi.fn(),
         deleteCardsFromCart: vi.fn(),
@@ -43,7 +47,14 @@ describe('Страница «Биржа карточек»', () => {
     beforeEach(() => {
         getShowcase.mockReset();
         getCategories.mockReset();
-        getCategories.mockResolvedValue([{ category: 'Автоаксессуары', subject_count: 5 }]);
+        getCategories.mockResolvedValue([
+            { category: 'Автоаксессуары', subject_count: 249, is_ours: true, our_count: 12 },
+            { category: 'Красота', subject_count: 316, is_ours: false, our_count: 0 },
+        ]);
+        vi.mocked(api.getCardExchangeBrands).mockResolvedValue(['AUTOPROFI', 'CARFORT']);
+        vi.mocked(api.getCardExchangeSuppliers).mockResolvedValue([{ id: 1, name: 'ИП Смирнов' }]);
+        vi.mocked(api.getCardExchangeSubjects).mockResolvedValue([{ id: 100, name: 'Компрессоры автомобильные' }]);
+        vi.mocked(api.getCardExchangeCounters).mockResolvedValue({ showcase: 10916 });
         addToCart.mockReset();
         addToCart.mockResolvedValue({ ok: true });
         getSession.mockReset();
@@ -153,5 +164,14 @@ describe('Страница «Биржа карточек»', () => {
         render(<CardExchangePage />);
         await screen.findByText('Тестовая карточка', { exact: false });
         expect(screen.queryByText(/Подходит к наш/)).toBeNull();
+    });
+
+    it('в фильтре категорий — только наши категории', async () => {
+        getShowcase.mockResolvedValue(makeResp());
+        render(<CardExchangePage />);
+        await screen.findByText('Тестовая карточка', { exact: false });
+        fireEvent.click(screen.getByRole('button', { name: /Категория/ }));
+        expect(await screen.findByText('Автоаксессуары (12)')).toBeInTheDocument();
+        expect(screen.queryByText(/^Красота/)).toBeNull();  // не наша — в фильтре не показываем
     });
 });

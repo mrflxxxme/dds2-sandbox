@@ -18,6 +18,9 @@ class RootCategory(BaseModel):
 
     category: str
     subject_count: int
+    # Есть ли в этой категории НАШИ товары (и сколько артикулов) — фильтр показывает свои.
+    is_ours: bool = False
+    our_count: int = 0
 
 
 # ─── витрина ──────────────────────────────────────────────────────────────
@@ -69,6 +72,14 @@ class ShowcaseResponse(BaseModel):
     scan_truncated: bool = False
 
 
+class RatingRange(BaseModel):
+    """Фильтр рейтинга биржи. ВНИМАНИЕ: WB принимает ТОЛЬКО {"min","max"} —
+    число даёт 400, а {"from","to"} молча игнорируется (проверено на живом WB)."""
+
+    min: float = 0
+    max: float = 5
+
+
 class ShowcaseQuery(BaseModel):
     """Запрос витрины. root_categories/our_mode резолвятся в subjectIDs фильтра WB."""
 
@@ -76,9 +87,12 @@ class ShowcaseQuery(BaseModel):
     root_categories: list[str] | None = None
     # None — не фильтровать по нам; "categories" — предметы наших товаров; "exact" — только наши nmID.
     our_mode: str | None = None
+    # Явно выбранные предметы WB (фильтр «Предмет» на бирже). Комбинируется с
+    # root_categories ПЕРЕСЕЧЕНИЕМ — как AND между фильтрами на самой бирже.
+    subject_ids: list[int] | None = None
     brands: list[str] | None = None
     supplier_ids: list[int] | None = None
-    rating: float | None = None
+    rating: RatingRange | None = None
     has_stocks: bool | None = None
     sort_field: str = "feedbacksCount"  # feedbacksCount | rating | totalPrice
     sort_order: str = "desc"  # asc | desc

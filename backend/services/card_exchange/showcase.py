@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.integrations.wb_portal_client import (
@@ -60,9 +60,32 @@ class CardExchangeError(Exception):
 # ─── справочники ──────────────────────────────────────────────────────────
 
 
-def list_root_categories() -> list[dict]:
-    """Корневые категории для селектора фильтра (из статического справочника)."""
-    return cat_ref.list_root_categories()
+async def list_root_categories(db: AsyncSession, project_id: int) -> list[dict]:
+    """Корневые категории для селектора + сколько НАШИХ артикулов в каждой.
+
+    В фильтре менеджеру нужны прежде всего свои категории, поэтому отдаём признак
+    `is_ours` и `our_count` — фронт показывает наши, а не все 96 подряд.
+    """
+    rows = await db.execute(
+        select(Nomenclature.subject, func.count(func.distinct(Nomenclature.article_wb)))
+        .where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.subject.isnot(None),
+            Nomenclature.article_wb.isnot(None),
+        )
+        .group_by(Nomenclature.subject)
+        .limit(10_000)
+    )
+    per_category: dict[str, int] = {}
+    for subject, count in rows.fetchall():
+        cat = cat_ref.root_category_for_subject(subject or "")
+        if cat:
+            per_category[cat] = per_category.get(cat, 0) + int(count or 0)
+    out = []
+    for c in cat_ref.list_root_categories():
+        our = per_category.get(c["category"], 0)
+        out.append({**c, "is_ours": our > 0, "our_count": our})
+    return out
 
 
 # ─── наши данные из кабинета ───────────────────────────────────────────────
@@ -216,16 +239,21 @@ async def list_showcase(db: AsyncSession, project_id: int, q: ShowcaseQuery) -> 
             if q.our_mode == "categories":
                 names.extend(sorted(await _our_subjects(db, project_id)))
             subject_ids, unmatched = _resolve_names(names, name_to_id)
+            if q.subject_ids:  # явный выбор предметов сужает набор из категорий (AND)
+                chosen = set(q.subject_ids)
+                subject_ids = sorted(set(subject_ids) & chosen)
             if not subject_ids:
                 # Намеренный фильтр по категориям, но ни один предмет не сматчился —
                 # пустая витрина (НЕ шлём subjectIDs=[] в WB, где это может значить «без фильтра»).
                 return {"ads": [], "next_cursor": None, "has_more": False, "unmatched_subjects": unmatched}
 
         wb_filter = {
-            "subjectIDs": subject_ids,
+            # Без фильтра по категориям берём предметы как есть (если выбраны).
+            "subjectIDs": subject_ids if subject_ids is not None else (q.subject_ids or None),
             "brands": q.brands,
             "supplierIDs": q.supplier_ids,
-            "rating": q.rating,
+            # WB принимает ТОЛЬКО {"min","max"} (число → 400, {"from","to"} игнорируется).
+            "rating": {"min": q.rating.min, "max": q.rating.max} if q.rating else None,
             "hasStocks": q.has_stocks,
         }
         sort = {"field": q.sort_field, "order": q.sort_order}
@@ -304,6 +332,44 @@ def _resolve_names(names: list[str], name_to_id: dict[str, int]) -> tuple[list[i
         sid = name_to_id.get(name)
         (ids.add(sid) if sid is not None else unmatched.add(name))
     return sorted(ids), sorted(unmatched)
+
+
+async def get_counters(db: AsyncSession, project_id: int) -> dict:
+    """Счётчики биржи (всего объявлений) — для пагинации."""
+    return await _ref_call(db, project_id, lambda c: c.exc_counters())
+
+
+async def list_brands(db: AsyncSession, project_id: int) -> list[str]:
+    """Справочник брендов биржи (для фильтра)."""
+    return await _ref_call(db, project_id, lambda c: c.showcase_brands())
+
+
+async def list_suppliers(db: AsyncSession, project_id: int) -> list[dict]:
+    """Справочник продавцов биржи (для фильтра): [{"id","name"}]."""
+    return await _ref_call(db, project_id, lambda c: c.showcase_suppliers())
+
+
+async def list_subjects(db: AsyncSession, project_id: int) -> list[dict]:
+    """Справочник предметов биржи (для фильтра): [{"id","name"}]."""
+    return await _ref_call(db, project_id, lambda c: c.showcase_subjects())
+
+
+async def _ref_call(
+    db: AsyncSession, project_id: int, coro_factory: Callable[[WbPortalClient], Awaitable[_T]]
+) -> _T:
+    """Справочник биржи: клиент + единый маппинг ошибок сессии/портала."""
+    client = await integrations_service.get_wb_exchange_client(db, project_id)
+    try:
+        return await coro_factory(client)
+    except WbSessionExpired as e:
+        await integrations_service.mark_wb_exchange_expired(db, project_id)
+        raise CardExchangeError(
+            "Сессия WB для биржи истекла. Вставьте свежий доступ в разделе «Биржа карточек»."
+        ) from e
+    except WbPortalError as e:
+        raise CardExchangeError(f"WB отклонил запрос справочника: {e}") from e
+    finally:
+        await client.aclose()
 
 
 # ─── корзина ───────────────────────────────────────────────────────────────
