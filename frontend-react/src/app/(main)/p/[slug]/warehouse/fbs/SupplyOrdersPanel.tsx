@@ -194,7 +194,11 @@ export default function SupplyOrdersPanel({
                                 <th style={{ textAlign: 'right' }}>Цена, ₽</th>
                                 <th>Статус</th>
                                 <th title="Сколько заказ едет с передачи поставки, пока СЦ не принял">В пути</th>
-                                <th>Срок</th>
+                                {/* «Срок» = обязательная дата доставки WB (ddate) — есть у
+                                    единиц заказов; пустую колонку не показываем. */}
+                                {items.some(o => o.ddate) && (
+                                    <th title="Обязательная дата доставки от WB — есть только у заказов с выбранной датой">Срок</th>
+                                )}
                             </tr>
                         </thead>
                         <tbody>
@@ -250,7 +254,11 @@ export default function SupplyOrdersPanel({
                                         </div>
                                     </td>
                                     <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                        {o.sale_price == null ? '—' : formatNumber(num(o.sale_price))}
+                                        {/* Канон статистики: coalesce(sale_price, price) — salePrice
+                                            WB шлёт единицам, price есть у всех. */}
+                                        {(o.sale_price ?? o.price) == null
+                                            ? '—'
+                                            : formatNumber(num(o.sale_price ?? o.price))}
                                     </td>
                                     <td>
                                         {/* Статусы кабинета WB: «Отгрузите товар» / «Ждёт сортировки» /
@@ -274,7 +282,9 @@ export default function SupplyOrdersPanel({
                                                 ? '—'
                                                 : formatNumber(o.transit_days, 0)}
                                     </td>
-                                    <td>{o.ddate ? formatDate(o.ddate) : '—'}</td>
+                                    {items.some(x => x.ddate) && (
+                                        <td>{o.ddate ? formatDate(o.ddate) : '—'}</td>
+                                    )}
                                 </tr>
                                 );
                             })}

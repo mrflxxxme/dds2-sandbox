@@ -130,13 +130,19 @@ export default function FbsOrdersCard({
         },
         {
             key: 'sale_price', label: 'Цена, ₽', align: 'right',
-            getValue: (o: FbsOrder) => num(o.sale_price),
+            // Канон бэкенд-статистики: coalesce(sale_price, price). salePrice WB
+            // шлёт единицам заказов (скидка покупателя) — колонка по нему одному
+            // стояла в прочерках при заполненном price у всех заданий.
+            getValue: (o: FbsOrder) => num(o.sale_price ?? o.price),
             sortingFn: 'basic',
-            render: (_v, o: FbsOrder) => (
-                <span style={{ whiteSpace: 'nowrap' }}>
-                    {o.sale_price == null ? '—' : formatNumber(num(o.sale_price))}
-                </span>
-            ),
+            render: (_v, o: FbsOrder) => {
+                const price = o.sale_price ?? o.price;
+                return (
+                    <span style={{ whiteSpace: 'nowrap' }}>
+                        {price == null ? '—' : formatNumber(num(price))}
+                    </span>
+                );
+            },
         },
         {
             key: '_status', label: 'Статус',
@@ -173,11 +179,15 @@ export default function FbsOrdersCard({
                 );
             },
         },
-        {
+        // «Срок» — обязательная дата доставки от WB (`ddate`): бывает только у
+        // заказов с выбранной покупателем датой / КГТ-слотом. У остальных её
+        // нет — пустую колонку не показываем, чтобы не плодить прочерки.
+        ...(items.some(o => o.ddate) ? [{
             key: 'ddate', label: 'Срок',
-            render: (_v, o: FbsOrder) => o.ddate ? formatDate(o.ddate) : '—',
-        },
-    ], [cabOf, now, scanDt]);
+            headerTitle: 'Обязательная дата доставки от WB — есть только у заказов с выбранной датой',
+            render: (_v: unknown, o: FbsOrder) => o.ddate ? formatDate(o.ddate) : '—',
+        } satisfies Column] : []),
+    ], [cabOf, now, scanDt, items]);
 
     return (
         <div className="glass-card" style={{ padding: 24, marginBottom: 24 }}>
