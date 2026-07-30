@@ -11,6 +11,7 @@ import MigfullModal from './MigfullModal';
 import PalletLayoutTab from './PalletLayoutTab';
 import WbSupplyPanel from './WbSupplyPanel';
 import FfExpectedCostCard from './FfExpectedCostCard';
+import FbsOrdersCard from './FbsOrdersCard';
 import type { Column } from '@/components/DataTable';
 import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyPickupCostHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply, WbSupplyState, WbSupplySyncStatus } from '@/types/api';
 import { assemblyKindOf } from '@/lib/assembly-kind';
@@ -1240,8 +1241,15 @@ export default function AssemblyDetailPage() {
                 </div>
             </div>
 
-            {/* Ожидаемая стоимость услуг ФФ + доп-услуги (тарифы склада) */}
-            <FfExpectedCostCard assemblyId={id} warehouseId={assembly.warehouse_id} slug={slug} />
+            {/* Ожидаемая стоимость услуг ФФ + доп-услуги (тарифы склада).
+                У зеркала FBS не показываем: сборку ведёт сам ФФ, тарификация
+                FBS-работ — отдельная фича (пока не в биллинге). */}
+            {!isFbs && <FfExpectedCostCard assemblyId={id} warehouseId={assembly.warehouse_id} slug={slug} />}
+
+            {/* Наполнение зеркала FBS — задания поставки, как на экране поставки
+                в разделе FBS: когда поступил заказ (+«N ч назад»), товар, цена,
+                статус. FBO-таблица позиций (короба/«на складе») тут не о том. */}
+            {isFbs && assembly.fbs_supply_id && <FbsOrdersCard fbsSupplyId={assembly.fbs_supply_id} />}
 
             {/* Цепочка попыток отгрузки (отгрузил → не приняли → вернул → переотгрузил) */}
             {attempts.length > 0 && (
@@ -1400,8 +1408,10 @@ export default function AssemblyDetailPage() {
             {/* Расхождение наполнения с ФФ — отдельным блоком (без клика) */}
             {assembly.ff_mismatch === true && <FfMismatchBlock assemblyId={assembly.id} />}
 
-            {/* Items table */}
-            {(() => {
+            {/* Items table — FBO-наполнение (короба/кратность/на складе).
+                У зеркала FBS его заменяет FbsOrdersCard выше; агрегат позиций
+                оставляем только как фолбэк, когда поставка ещё не связана. */}
+            {(!isFbs || !assembly.fbs_supply_id) && (() => {
                 // Доп. поля: _ppb (кратность по баркоду) и boxes (⌈шт/K⌉ — для Excel).
                 const itemsData = (assembly.items || []).map(it => {
                     const k = ppbByBarcode.get(it.barcode) || 0;

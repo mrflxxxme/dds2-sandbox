@@ -130,14 +130,37 @@ export function transitDaysColor(days: number | null | undefined): string | null
  * Полных дней с момента `iso` до сейчас (0 — сегодня, отрицательное время не
  * бывает — будущие даты читаем как «сегодня»). Для подписи «N дн назад».
  */
-export function daysSince(iso: string | null | undefined, now: number = Date.now()): number | null {
+export function parseUtcMs(iso: string | null | undefined): number | null {
     if (!iso) return null;
     // Бэк шлёт naive-UTC без 'Z' — Date.parse прочитал бы такое как ЛОКАЛЬНОЕ
     // время и завысил возраст на часовой пояс (паттерн warehouse/[id]/page.tsx).
     const raw = iso.endsWith('Z') || /[+-]\d\d:\d\d$/.test(iso) ? iso : iso + 'Z';
     const ts = Date.parse(raw);
-    if (!Number.isFinite(ts)) return null;
+    return Number.isFinite(ts) ? ts : null;
+}
+
+export function daysSince(iso: string | null | undefined, now: number = Date.now()): number | null {
+    const ts = parseUtcMs(iso);
+    if (ts == null) return null;
     return Math.max(0, Math.floor((now - ts) / 86_400_000));
+}
+
+/**
+ * «Сколько прошло» в стиле кабинета WB: «5 ч 53 мин назад» / «12 мин назад» /
+ * «3 дн 4 ч назад». Для подписи под временем поступления задания — сборщику
+ * важнее возраст заказа, чем абсолютная дата.
+ */
+export function hoursAgoLabel(iso: string | null | undefined, now: number = Date.now()): string | null {
+    const ts = parseUtcMs(iso);
+    if (ts == null) return null;
+    const totalMin = Math.max(0, Math.floor((now - ts) / 60_000));
+    if (totalMin < 1) return 'только что';
+    if (totalMin < 60) return `${totalMin} мин назад`;
+    const days = Math.floor(totalMin / 1440);
+    const hours = Math.floor((totalMin % 1440) / 60);
+    const mins = totalMin % 60;
+    if (days >= 1) return hours > 0 ? `${days} дн ${hours} ч назад` : `${days} дн назад`;
+    return mins > 0 ? `${hours} ч ${mins} мин назад` : `${hours} ч назад`;
 }
 
 export const WB_STATUS_LABEL: Record<string, string> = {

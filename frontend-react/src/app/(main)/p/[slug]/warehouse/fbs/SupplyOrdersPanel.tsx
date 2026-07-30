@@ -14,8 +14,10 @@ import { wbProductUrl } from '@/lib/wbMedia';
 import type { FbsOrder, FbsStickerType, FbsSupply } from '@/types/api';
 import {
     SupplierStatusBadge,
+    WB_STATUS_LABEL,
     deliverStickers,
     fetchStickersChunked,
+    hoursAgoLabel,
     isActiveOrder,
     isStickerReady,
     num,
@@ -195,6 +197,13 @@ export default function SupplyOrdersPanel({
                                         <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                                             {o.created_at_wb ? formatDateTime(o.created_at_wb) : '—'}
                                         </div>
+                                        {/* Возраст заказа — как в кабинете WB («5 ч 53 мин назад»):
+                                            сборщику важнее, сколько заказ ЖДЁТ, чем календарная дата. */}
+                                        {o.created_at_wb && (
+                                            <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
+                                                {hoursAgoLabel(o.created_at_wb)}
+                                            </div>
+                                        )}
                                     </td>
                                     <td>
                                         {/* Фото — самый быстрый способ понять, ТО ЛИ собирают:
@@ -224,7 +233,16 @@ export default function SupplyOrdersPanel({
                                     <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                         {o.sale_price == null ? '—' : formatNumber(num(o.sale_price))}
                                     </td>
-                                    <td><SupplierStatusBadge status={o.supplier_status} /></td>
+                                    <td>
+                                        <SupplierStatusBadge status={o.supplier_status} />
+                                        {/* Ось WB детальнее supplier_status: «Готово к выдаче» и
+                                            «Отсортировано» видны только здесь. */}
+                                        {o.wb_status && WB_STATUS_LABEL[o.wb_status] && (
+                                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
+                                                {WB_STATUS_LABEL[o.wb_status]}
+                                            </div>
+                                        )}
+                                    </td>
                                     <td>{o.ddate ? formatDate(o.ddate) : '—'}</td>
                                 </tr>
                             ))}
