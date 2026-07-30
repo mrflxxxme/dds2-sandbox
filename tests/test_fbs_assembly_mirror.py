@@ -826,3 +826,35 @@ class TestReviewFixInvariants:
         rows = await get_unified_stock_summary(db_session, project.id)
         transit = {r.get("barcode"): r.get("in_transit", 0) for r in rows}
         assert transit.get(nom.barcode, 0) == 0, "зеркало не должно давать in_transit"
+
+
+class TestSupplyPhaseWithoutScan:
+    """WB не отдал scanDt (СЦ принял без скана QR) — фаза выводится из заданий."""
+
+    async def test_delivered_mirror_lifts_to_ship_to_in_delivery(self, db_session, project, wh, nom):
+        wb_wh = await _mk_fbs_wh(db_session, project.id, wh.id)
+        # done=true, scan_dt пуст: тройка сказала бы «Отгрузите поставку».
+        supply_id = await _mk_supply(db_session, project.id, done=True)
+        await _mk_order(
+            db_session, project.id, wb_wh, supply_id, nom,
+            supplier_status="complete", wb_status="sold",
+        )
+        await sync_fbs_assembly_mirror(db_session, project.id)
+        mirror = await _mirror_of(db_session, project.id, supply_id)
+        assert mirror is not None
+        assert mirror.status == AssemblyStatus.DELIVERED.value
+
+        from backend.services.assembly.crud import _fbs_supply_status_value
+
+        sup = (
+            await db_session.execute(
+                select(WbFbsSupply).where(
+                    WbFbsSupply.project_id == project.id,
+                    WbFbsSupply.wb_supply_id == supply_id,
+                )
+            )
+        ).scalar_one()
+        # Живой кейс WB-GI-258027541: задания прошли СЦ при пустом scanDt.
+        assert _fbs_supply_status_value(sup, mirror.status) == "in_delivery"
+        # Не-доставленное зеркало фазу не поднимает — тройка честна как есть.
+        assert _fbs_supply_status_value(sup, AssemblyStatus.SHIPPED.value) == "to_ship"
