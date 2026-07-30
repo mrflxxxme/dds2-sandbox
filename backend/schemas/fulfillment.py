@@ -223,6 +223,44 @@ class FfMatchRow(BaseModel):
     diff: int = 0  # ff_qty - our_qty
 
 
+class FfRepackCandidate(BaseModel):
+    """Кандидат-поступление для РУЧНОЙ связки пары «вскрытие коробов».
+
+    Авто-матчер помечает пару только при ТОЧНОМ равенстве состава; на живых
+    вскрытиях ФФ часто пересчитывает фактически (кейс PVB-0000068↔124:
+    пересечение 98.4%, 10 позиций из 90 разошлись) — тогда решает человек,
+    а цифры ниже дают ему основание.
+    """
+
+    id: int
+    number: str | None = None
+    external_created_at: date | None = None
+    status: str | None = None
+    #: Σ штук россыпи по составу поступления (для сравнения с возвратом).
+    units_sum: int = 0
+    #: Пересечение состава с возвратом, % от большей стороны (0–100).
+    overlap_pct: float = 0
+    #: Состав совпал точно — такой кандидат авто-матчер пометил бы сам.
+    exact: bool = False
+
+
+class FfRepackCandidatesOut(BaseModel):
+    """GET /requests/{id}/repack-candidates — кандидаты пары для возврата."""
+
+    return_id: int
+    return_number: str | None = None
+    #: Σ штук россыпи возврата (короба × кратность + россыпь); None — состав
+    #: не разрешился в ШК (нет карты кратности).
+    return_units: int | None = None
+    candidates: list[FfRepackCandidate] = Field(default_factory=list)
+
+
+class FfRepackLinkIn(BaseModel):
+    """POST /requests/{id}/repack-link — связать возврат с поступлением-парой."""
+
+    submission_id: int
+
+
 class FfRequestMatch(BaseModel):
     """Итог сверки состава ФФ-заявки со связанным нашим документом."""
 
