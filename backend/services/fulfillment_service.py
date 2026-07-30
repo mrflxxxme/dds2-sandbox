@@ -823,7 +823,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     # учётных путей (авто-ACCEPT, transfer-fact, резерв «в приёмке», привязки)
     # поступление исключается guard'ами ниже по файлу.
     if provider == "migfull":
-        await _match_repack_pairs(db, project_id, warehouse_id)
+        await _match_repack_pairs(db, project_id, warehouse_id, client=mig_client)
     linked_result = await db.execute(
         select(FulfillmentRequest)
         .where(
@@ -4626,6 +4626,10 @@ _REPACK_DATE_WINDOW_DAYS = 3
 _REPACK_WARN_OVERLAP = 0.8
 # Подсказка-tiebreaker: notes обоих документов пары обычно содержат эти маркеры.
 _REPACK_NOTES_HINT_RE = re.compile(r"ФБС|ВСКРЫТ", re.IGNORECASE)
+# Live-добор ШК карточками — только для возвратов свежее этого (дни): вскрытие
+# оформляется парой в моменте, а исторические непарные возвраты гоняли бы одни
+# и те же карточки каждым синком и выедали cap добора.
+_REPACK_LIVE_RESOLVE_DAYS = 14
 
 
 def _repack_notes_hint(raw: dict | None) -> bool:
@@ -4730,7 +4734,13 @@ def _repack_units_by_barcode(
     return out or None
 
 
-async def _match_repack_pairs(db: AsyncSession, project_id: int, warehouse_id: int) -> int:
+async def _match_repack_pairs(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    *,
+    client: MigfullClient | None = None,
+) -> int:
     """Авто-детекция пар «вскрытие коробов»: возврат коробов ↔ поступление россыпью.
 
     Кандидаты-возвраты: kind=return, не canceled, без repack_matched_at, ВСЕ
@@ -4785,10 +4795,59 @@ async def _match_repack_pairs(db: AsyncSession, project_id: int, warehouse_id: i
     if not inbounds:
         return 0
 
+    window = timedelta(days=_REPACK_DATE_WINDOW_DAYS)
     all_guids: set[str] = set()
     for req in [*returns, *inbounds]:
         all_guids.update(_repack_guid_qty(req.raw))
     resolver = await _repack_guid_resolver(db, project_id, warehouse_id, all_guids)
+
+    # Курица-и-яйцо вскрытия: штучных SKU поступления ещё НЕТ в зеркале
+    # остатков — россыпь появится только после проведения этого же поступления
+    # (живой кейс PVB-0000133: все 6 guid'ов без ШК). Дотягиваем недостающие
+    # guid'ы живыми карточками товара — тем же механизмом, что деталка приёмки
+    # (cap и устойчивость к 429 внутри). Добор СУЖЕН до СВЕЖИХ документов
+    # (возвраты последних _REPACK_LIVE_RESOLVE_DAYS дней ± окно пары): вскрытие
+    # оформляется парой в моменте, а по всей истории нерезолвленных guid'ов
+    # сотни — общий cap съедали старые документы («95 skipped», шестёрка
+    # PVB-0000133 не попадала в первую сотню), и без среза свежести те же
+    # карточки перетягивались бы КАЖДЫМ синком впустую. Кэш не пишем: после
+    # проведения поступления россыпь попадёт в зеркало и добор сам исчезнет.
+    live_cutoff = utcnow().date() - timedelta(days=_REPACK_LIVE_RESOLVE_DAYS)
+    fresh_returns = [
+        r
+        for r in returns
+        if r.external_created_at is not None and r.external_created_at >= live_cutoff
+    ]
+    fresh_ret_dates = [r.external_created_at for r in fresh_returns]
+
+    def _in_fresh_window(d: date | None) -> bool:
+        return d is not None and any(abs(d - rd) <= window for rd in fresh_ret_dates)
+
+    # Правдоподобие ДО похода в API: у поступления-пары сумма штук равна сумме
+    # штук россыпи возврата (короба × кратность). Без этого среза cap добора
+    # выедали большие поставки, случившиеся в том же окне (29.07 — приёмки на
+    # 4 707 и 1 217 шт при паре на 398).
+    ret_unit_totals: set[int] = set()
+    for req in fresh_returns:
+        comp = _repack_units_by_barcode(_repack_guid_qty(req.raw), resolver, boxes_only=True)
+        if comp:
+            ret_unit_totals.add(sum(comp.values()))
+
+    focus_guids: set[str] = set()
+    for req in fresh_returns:
+        focus_guids.update(_repack_guid_qty(req.raw))
+    for req in inbounds:
+        if not _in_fresh_window(req.external_created_at):
+            continue
+        if sum(_repack_guid_qty(req.raw).values()) not in ret_unit_totals:
+            continue
+        focus_guids.update(_repack_guid_qty(req.raw))
+    missing = {g for g in focus_guids if g not in resolver}
+    if missing and client is not None:
+        fetched: dict[str, tuple[str, int]] = {}
+        await _migfull_resolve_detail_barcodes(client, missing, fetched)
+        for guid, (base_barcode, units) in fetched.items():
+            resolver[guid] = ("box", base_barcode, units) if units > 1 else ("loose", base_barcode, 1)
 
     inbound_comp: dict[int, dict[str, int]] = {}
     for inb in inbounds:
@@ -4799,7 +4858,6 @@ async def _match_repack_pairs(db: AsyncSession, project_id: int, warehouse_id: i
 
     matched = 0
     now = utcnow()
-    window = timedelta(days=_REPACK_DATE_WINDOW_DAYS)
     for ret in returns:
         ret_comp = _repack_units_by_barcode(_repack_guid_qty(ret.raw), resolver, boxes_only=True)
         if not ret_comp or ret.external_created_at is None:
