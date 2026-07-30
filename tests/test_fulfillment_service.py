@@ -3544,11 +3544,44 @@ def _mock_mig_connection(monkeypatch, ok=True):
     monkeypatch.setattr(MigfullClient, "test_connection", fake_test_connection)
 
 
+def _mig_return(
+    guid,
+    status="uploaded",
+    reference="PVB-0000069",
+    ret_date="2026-07-30",
+    notes="ВОЗВРАТ ДЛЯ ФБС",
+    incoming_lines=None,
+    created="2026-07-30T08:00:00.000000Z",
+):
+    """migfull /returns row — строки состава ВСТРОЕНЫ в список."""
+    lines = incoming_lines or []
+    return {
+        "guid": guid,
+        "reference": reference,
+        "return_date": ret_date,
+        "notes": notes,
+        "client_comment": None,
+        "status": status,
+        "external_id": None,
+        "processed_at": None,
+        "processed_by": None,
+        "created_at": created,
+        "updated_at": created,
+        "updated_web_at": created,
+        "incoming_lines_count": len(lines),
+        "outgoing_lines_count": 0,
+        "incoming_lines": lines,
+        "outgoing_lines": [],
+        "processor": None,
+    }
+
+
 def _mock_mig_fetches(
     monkeypatch,
     products=(),
     shipments=(),
     submissions=(),
+    returns=(),
     product_details=None,
     submission_lines=None,
     calls=None,
@@ -3571,6 +3604,9 @@ def _mock_mig_fetches(
     async def fake_submissions(self):
         return list(submissions)
 
+    async def fake_returns(self):
+        return list(returns)
+
     async def fake_product(self, guid):
         counters["product"] += 1
         return (product_details or {}).get(guid, {})
@@ -3582,6 +3618,7 @@ def _mock_mig_fetches(
     monkeypatch.setattr(MigfullClient, "fetch_all_products", fake_products)
     monkeypatch.setattr(MigfullClient, "fetch_shipments", fake_shipments)
     monkeypatch.setattr(MigfullClient, "fetch_submissions", fake_submissions)
+    monkeypatch.setattr(MigfullClient, "fetch_returns", fake_returns)
     monkeypatch.setattr(MigfullClient, "fetch_product", fake_product)
     monkeypatch.setattr(MigfullClient, "fetch_submission_lines", fake_submission_lines)
 
@@ -4992,3 +5029,435 @@ class TestCollectTransferFactCandidates:
             (target.id, "pvb-1", True),
             (processing.id, "pvb-3", False),
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Возвраты migfull + пара «вскрытие коробов» (возврат коробов ↔ поступление россыпью)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+async def _mk_repack_sku(db_session, project, warehouse, units):
+    """Короб + россыпь одного SKU в зеркале остатков → (box_guid, loose_guid, base_barcode)."""
+    base = f"B-{_uid()}"
+    box_guid, loose_guid = f"bg-{_uid()}", f"lg-{_uid()}"
+    db_session.add_all(
+        [
+            FulfillmentStock(
+                project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+                barcode=f"X-{_uid()}", base_barcode=base, units_per_box=units,
+                external_product_id=box_guid, qty_good=0, qty_reserve=0, qty_defect=0, qty_nominal=0,
+            ),
+            FulfillmentStock(
+                project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+                barcode=base, units_per_box=1,
+                external_product_id=loose_guid, qty_good=0, qty_reserve=0, qty_defect=0, qty_nominal=0,
+            ),
+        ]
+    )
+    await db_session.commit()
+    return box_guid, loose_guid, base
+
+
+async def _mk_repack_req(
+    db_session, project, warehouse, *, kind, lines, created,
+    number=None, archived=False, completed=False, notes="ДЛЯ ФБС",
+    inbound_receipt_id=None, repack_return_id=None, repack_matched_at=None,
+):
+    """FF-заявка зеркала migfull с составом в raw (incoming_lines)."""
+    req = FulfillmentRequest(
+        project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+        external_id=f"g-{_uid()}", kind=kind, number=number or f"PVB-{_uid()[:7]}",
+        stage_code="uploaded", archived=archived, is_completed=completed,
+        external_created_at=created,
+        raw={"incoming_lines": lines, "notes": notes},
+        inbound_receipt_id=inbound_receipt_id,
+        repack_return_id=repack_return_id, repack_matched_at=repack_matched_at,
+    )
+    db_session.add(req)
+    await db_session.commit()
+    return req
+
+
+@pytest.mark.asyncio
+async def test_sync_migfull_returns_mirrored_and_idempotent(
+    db_session, project, warehouse, connected_mig_key, monkeypatch
+):
+    """Возврат из /returns зеркалится (kind=return, «Возврат», стадия из status,
+    total_qty = Σ строк incoming, строки в raw); повторный синк не дублирует."""
+    rg, pg = _mig_guid(701), _mig_guid(702)
+    ret = _mig_return(
+        rg, reference="PVB-0000069",
+        incoming_lines=[_mig_line(pg, 1), _mig_line(pg, 5)],
+    )
+    _mock_mig_fetches(monkeypatch, returns=[ret])
+
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    rows = (
+        await db_session.execute(
+            select(FulfillmentRequest).where(
+                FulfillmentRequest.project_id == project.id,
+                FulfillmentRequest.kind == "return",
+            )
+        )
+    ).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.external_id == rg
+    assert row.number == "PVB-0000069"
+    assert row.type_name == "Возврат"
+    assert row.stage_code == "uploaded"
+    assert row.status == "Загружен"
+    assert row.total_qty == 6
+    assert row.archived is False and row.is_completed is False
+    assert row.external_created_at == date(2026, 7, 30)
+    assert (row.raw or {}).get("incoming_lines")  # состав в raw — для матчера/деталки
+
+
+@pytest.mark.asyncio
+async def test_repack_matcher_exact_pair_and_idempotent(db_session, project, warehouse):
+    """Кейс PVB-69↔133: коробá 1,3,5,5,5,2 × units_per_box → штуки поступления
+    72,48,90,90,80,18. Точная пара помечается на обоих; повторный прогон — 0."""
+    box_qtys = [1, 3, 5, 5, 5, 2]
+    units = [72, 16, 18, 18, 16, 9]
+    skus = [await _mk_repack_sku(db_session, project, warehouse, u) for u in units]
+
+    d = date(2026, 7, 30)
+    ret = await _mk_repack_req(
+        db_session, project, warehouse, kind="return", number="PVB-0000069",
+        lines=[_mig_line(sku[0], q) for sku, q in zip(skus, box_qtys)],
+        created=d, notes="ВОЗВРАТ ДЛЯ ФБС",
+    )
+    inb = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound", number="PVB-0000133",
+        lines=[_mig_line(sku[1], q * u) for sku, q, u in zip(skus, box_qtys, units)],
+        created=d, notes="ПОСТУПЛЕНИЕ ДЛЯ ФБС",
+    )
+
+    matched = await fulfillment_service._match_repack_pairs(db_session, project.id, warehouse.id)
+    assert matched == 1
+    await db_session.commit()
+    await db_session.refresh(ret)
+    await db_session.refresh(inb)
+    assert inb.repack_return_id == ret.id
+    assert inb.repack_matched_at is not None
+    assert ret.repack_matched_at is not None
+    assert ret.repack_return_id is None  # id пары — только у поступления
+
+    # Идемпотентность: помеченные не перематчиваются
+    assert await fulfillment_service._match_repack_pairs(db_session, project.id, warehouse.id) == 0
+
+
+@pytest.mark.asyncio
+async def test_repack_matcher_qty_mismatch_warns_not_marks(db_session, project, warehouse, caplog):
+    """Расхождение штук (пересечение >80%) — warning в лог, пара НЕ помечается."""
+    import logging as _logging
+
+    box_guid, loose_guid, _base = await _mk_repack_sku(db_session, project, warehouse, 20)
+    d = date(2026, 7, 30)
+    ret = await _mk_repack_req(
+        db_session, project, warehouse, kind="return",
+        lines=[_mig_line(box_guid, 5)], created=d,  # 100 шт
+    )
+    inb = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound",
+        lines=[_mig_line(loose_guid, 90)], created=d,  # 90 шт (90%)
+    )
+
+    with caplog.at_level(_logging.WARNING, logger="dds.fulfillment"):
+        assert await fulfillment_service._match_repack_pairs(db_session, project.id, warehouse.id) == 0
+    assert any("пара НЕ помечена" in r.message for r in caplog.records)
+    await db_session.refresh(inb)
+    await db_session.refresh(ret)
+    assert inb.repack_return_id is None
+    assert ret.repack_matched_at is None and inb.repack_matched_at is None
+
+
+@pytest.mark.asyncio
+async def test_repack_matcher_skips_linked_and_out_of_window(db_session, project, warehouse):
+    """Поступление с нашим документом (inbound_receipt_id) и поступление вне окна
+    ±3 дня — не кандидаты, даже при точном равенстве состава."""
+    box_guid, loose_guid, _base = await _mk_repack_sku(db_session, project, warehouse, 10)
+    d = date(2026, 7, 30)
+    receipt = InboundReceipt(
+        project_id=project.id, warehouse_id=warehouse.id, number=f"IN-{_uid()[:6]}", status="EXPECTED"
+    )
+    db_session.add(receipt)
+    await db_session.commit()
+
+    ret = await _mk_repack_req(
+        db_session, project, warehouse, kind="return", lines=[_mig_line(box_guid, 2)], created=d
+    )
+    linked = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound",
+        lines=[_mig_line(loose_guid, 20)], created=d, inbound_receipt_id=receipt.id,
+    )
+    late = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound",
+        lines=[_mig_line(loose_guid, 20)], created=d + timedelta(days=5),
+    )
+
+    assert await fulfillment_service._match_repack_pairs(db_session, project.id, warehouse.id) == 0
+    for req in (ret, linked, late):
+        await db_session.refresh(req)
+    assert linked.repack_return_id is None and late.repack_return_id is None
+    assert ret.repack_matched_at is None
+
+
+@pytest.mark.asyncio
+async def test_repack_matcher_requires_all_box_lines(db_session, project, warehouse):
+    """Возврат со строкой-россыпью — возможно, РЕАЛЬНЫЙ возврат: не матчим."""
+    box_guid, loose_guid, _base = await _mk_repack_sku(db_session, project, warehouse, 10)
+    d = date(2026, 7, 30)
+    ret = await _mk_repack_req(
+        db_session, project, warehouse, kind="return",
+        lines=[_mig_line(box_guid, 2), _mig_line(loose_guid, 5)], created=d,  # 20 + 5 россыпью
+    )
+    inb = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound",
+        lines=[_mig_line(loose_guid, 25)], created=d,
+    )
+
+    assert await fulfillment_service._match_repack_pairs(db_session, project.id, warehouse.id) == 0
+    await db_session.refresh(inb)
+    await db_session.refresh(ret)
+    assert inb.repack_return_id is None and ret.repack_matched_at is None
+
+
+@pytest.mark.asyncio
+async def test_sync_migfull_repack_pair_via_sync(db_session, project, warehouse, connected_mig_key, monkeypatch):
+    """Интеграционно: синк зеркалит возврат и приёмку (строки приёмки — в raw
+    через enrich) и сам помечает пару «вскрытия» в той же транзакции."""
+    box_bc = "12043160330575"
+    base_bc = fulfillment_service._itf14_to_ean13(box_bc)
+    assert base_bc is not None
+    pb, pl, rg, sg = _mig_guid(801), _mig_guid(802), _mig_guid(803), _mig_guid(804)
+
+    _mock_mig_fetches(
+        monkeypatch,
+        products=[
+            _mig_product(pb, name="Ковер короб 16 шт.", actual=5),
+            _mig_product(pl, name="Ковер россыпь", actual=10),
+        ],
+        product_details={
+            pb: {"barcodes": [{"value": box_bc, "is_primary": True}]},
+            pl: {"barcodes": [{"value": base_bc, "is_primary": True}]},
+        },
+        submissions=[
+            _mig_submission(sg, status="processing", reference="PVB-0000133", sub_date="2026-07-30")
+        ],
+        submission_lines={(sg, "incoming"): [_mig_line(pl, 48, name="Ковер россыпь")]},
+        returns=[
+            _mig_return(
+                rg, reference="PVB-0000069", ret_date="2026-07-30",
+                incoming_lines=[_mig_line(pb, 3, name="Ковер короб 16 шт.")],  # 3 × 16 = 48
+            )
+        ],
+    )
+
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    ret_row = (
+        await db_session.execute(
+            select(FulfillmentRequest).where(
+                FulfillmentRequest.project_id == project.id, FulfillmentRequest.external_id == rg
+            )
+        )
+    ).scalar_one()
+    inb_row = (
+        await db_session.execute(
+            select(FulfillmentRequest).where(
+                FulfillmentRequest.project_id == project.id, FulfillmentRequest.external_id == sg
+            )
+        )
+    ).scalar_one()
+    assert (inb_row.raw or {}).get("incoming_lines")  # enrich сложил состав в raw
+    assert inb_row.repack_return_id == ret_row.id
+    assert inb_row.repack_matched_at is not None and ret_row.repack_matched_at is not None
+
+
+@pytest.mark.asyncio
+async def test_inbound_locked_excludes_repack_receipt(db_session, project, warehouse):
+    """Приёмка, привязанная к repack-поступлению, ИСКЛЮЧЕНА из резерва «в приёмке»
+    (иначе штуки вскрытия повисли бы в резерве и занизили FBS-отдачу)."""
+    bc_repack, bc_normal = f"BC-{_uid()}", f"BC-{_uid()}"
+    nom_repack = await _make_nomenclature(db_session, project.id, bc_repack)
+    nom_normal = await _make_nomenclature(db_session, project.id, bc_normal)
+    d = date(2026, 7, 30)
+
+    receipts = {}
+    for key in ("repack", "normal"):
+        receipt = InboundReceipt(
+            project_id=project.id, warehouse_id=warehouse.id, number=f"IN-{_uid()[:6]}", status="EXPECTED"
+        )
+        db_session.add(receipt)
+        await db_session.commit()
+        await db_session.refresh(receipt)
+        receipts[key] = receipt
+    db_session.add_all(
+        [
+            InboundReceiptItem(
+                project_id=project.id, receipt_id=receipts["repack"].id,
+                nomenclature_id=nom_repack.id, barcode=bc_repack, expected_qty=398,
+            ),
+            InboundReceiptItem(
+                project_id=project.id, receipt_id=receipts["normal"].id,
+                nomenclature_id=nom_normal.id, barcode=bc_normal, expected_qty=30,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    ret = await _mk_repack_req(db_session, project, warehouse, kind="return", lines=[], created=d)
+    await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound", lines=[], created=d,
+        inbound_receipt_id=receipts["repack"].id, repack_return_id=ret.id, repack_matched_at=utcnow(),
+    )
+
+    locked = await fulfillment_service._migfull_inbound_locked_by_barcode(
+        db_session, project.id, warehouse.id
+    )
+    assert bc_repack not in locked  # repack-приёмка исключена
+    assert locked.get(bc_normal) == 30  # обычная — считается
+
+
+@pytest.mark.asyncio
+async def test_accept_and_transfer_fact_guards_skip_repack(db_session, project, warehouse):
+    """Авто-ACCEPT приёмок и transfer-fact пропускают repack-поступления
+    (страховка от будущей ручной привязки)."""
+    d = date(2026, 7, 30)
+    receipt = InboundReceipt(
+        project_id=project.id, warehouse_id=warehouse.id, number=f"IN-{_uid()[:6]}", status="EXPECTED"
+    )
+    db_session.add(receipt)
+    await db_session.commit()
+    await db_session.refresh(receipt)
+
+    ret = await _mk_repack_req(db_session, project, warehouse, kind="return", lines=[], created=d)
+    repack_inb = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound", lines=[], created=d, completed=True,
+        inbound_receipt_id=receipt.id, repack_return_id=ret.id, repack_matched_at=utcnow(),
+    )
+    assert (
+        await fulfillment_service._collect_inbound_accept_candidates(db_session, project.id, [repack_inb])
+        == []
+    )
+    # Контроль: без repack-пометки та же заявка — кандидат
+    repack_inb.repack_return_id = None
+    assert await fulfillment_service._collect_inbound_accept_candidates(
+        db_session, project.id, [repack_inb]
+    ) == [receipt.id]
+    repack_inb.repack_return_id = ret.id
+
+    from backend.models.warehouse import StockTransfer
+
+    tr = StockTransfer(
+        project_id=project.id, from_warehouse_id=warehouse.id,
+        to_warehouse_id=warehouse.id, number=f"TR-R-{project.id}", status="IN_TRANSIT",
+    )
+    db_session.add(tr)
+    await db_session.commit()
+    repack_inb.stock_transfer_id = tr.id
+    repack_inb.inbound_receipt_id = None
+    await db_session.commit()
+
+    rows = await fulfillment_service._collect_transfer_fact_candidates(
+        db_session, project.id, warehouse.id, "migfull"
+    )
+    assert repack_inb.id not in {r[0] for r in rows}
+
+
+@pytest.mark.asyncio
+async def test_repack_link_guards(db_session, project, warehouse):
+    """kind=return не привязывается вовсе; repack-поступлению кандидаты/линк не предлагаются."""
+    d = date(2026, 7, 30)
+    receipt = InboundReceipt(
+        project_id=project.id, warehouse_id=warehouse.id, number=f"IN-{_uid()[:6]}", status="EXPECTED"
+    )
+    db_session.add(receipt)
+    await db_session.commit()
+    await db_session.refresh(receipt)
+
+    ret = await _mk_repack_req(db_session, project, warehouse, kind="return", lines=[], created=d)
+    repack_inb = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound", lines=[], created=d,
+        repack_return_id=ret.id, repack_matched_at=utcnow(),
+    )
+
+    with pytest.raises(ValueError, match="Возврат"):
+        await fulfillment_service.link_request(
+            db_session, project.id, ret.id, inbound_receipt_id=receipt.id
+        )
+    with pytest.raises(ValueError, match="вскрытия"):
+        await fulfillment_service.link_request(
+            db_session, project.id, repack_inb.id, inbound_receipt_id=receipt.id
+        )
+    with pytest.raises(ValueError):
+        await fulfillment_service.get_link_candidates(db_session, project.id, warehouse.id, ret.id)
+    with pytest.raises(ValueError, match="вскрытия"):
+        await fulfillment_service.get_link_candidates(
+            db_session, project.id, warehouse.id, repack_inb.id
+        )
+    # Связи не появились
+    await db_session.refresh(ret)
+    await db_session.refresh(repack_inb)
+    assert ret.inbound_receipt_id is None and repack_inb.inbound_receipt_id is None
+
+
+@pytest.mark.asyncio
+async def test_return_not_in_assembled_by_guid(db_session, project, warehouse):
+    """kind=return не попадает в «Собрано» (учёт резерва идёт только по kind=assembly)."""
+    guid = f"g-{_uid()}"
+    req = FulfillmentRequest(
+        project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+        external_id=f"r-{_uid()}", kind="return", stage_code="uploaded",
+        raw={"planned_lines": [{"product_guid": guid, "quantity": 7}]},
+    )
+    db_session.add(req)
+    await db_session.commit()
+
+    assembled = await fulfillment_service._migfull_assembled_by_guid(db_session, project.id, warehouse.id)
+    assert guid not in assembled
+
+
+@pytest.mark.asyncio
+async def test_list_requests_repack_enrichment(db_session, project, warehouse):
+    """Выдача: repack_pair_number зеркально у обеих сторон пары; repack_unpaired —
+    только у kind=return старше 3 дней без пары и не отменённого."""
+    today = utcnow().date()
+    ret = await _mk_repack_req(
+        db_session, project, warehouse, kind="return", number="PVB-R-1", lines=[],
+        created=today - timedelta(days=1), repack_matched_at=utcnow(),
+    )
+    inb = await _mk_repack_req(
+        db_session, project, warehouse, kind="inbound", number="PVB-I-1", lines=[],
+        created=today - timedelta(days=1), repack_return_id=ret.id, repack_matched_at=utcnow(),
+    )
+    old_unpaired = await _mk_repack_req(
+        db_session, project, warehouse, kind="return", number="PVB-R-OLD", lines=[],
+        created=today - timedelta(days=10),
+    )
+    fresh_unpaired = await _mk_repack_req(
+        db_session, project, warehouse, kind="return", number="PVB-R-NEW", lines=[],
+        created=today,
+    )
+    canceled = await _mk_repack_req(
+        db_session, project, warehouse, kind="return", number="PVB-R-CANC", lines=[],
+        created=today - timedelta(days=10), archived=True,
+    )
+
+    rows = {r["id"]: r for r in await fulfillment_service.list_requests(db_session, project.id, warehouse.id)}
+    assert rows[inb.id]["repack_return_id"] == ret.id
+    assert rows[inb.id]["repack_pair_number"] == "PVB-R-1"
+    assert rows[inb.id]["repack_unpaired"] is False
+    assert rows[ret.id]["repack_pair_number"] == "PVB-I-1"
+    assert rows[ret.id]["repack_unpaired"] is False
+    assert rows[old_unpaired.id]["repack_unpaired"] is True
+    assert rows[old_unpaired.id]["repack_pair_number"] is None
+    assert rows[fresh_unpaired.id]["repack_unpaired"] is False
+    assert rows[canceled.id]["repack_unpaired"] is False
+
+    # kind=return фильтруется параметром kind
+    only_returns = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, kind="return")
+    assert {r["id"] for r in only_returns} == {ret.id, old_unpaired.id, fresh_unpaired.id, canceled.id}

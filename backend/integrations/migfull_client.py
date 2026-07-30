@@ -212,6 +212,13 @@ class MigfullClient:
         return await self._fetch_paginated("submissions")
 
     @retry_with_backoff(max_retries=3)
+    async def fetch_returns(self) -> list[dict]:
+        """Все возвраты со склада ФФ: reference, статус, notes; строки состава
+        (incoming_lines/outgoing_lines) ВСТРОЕНЫ в список — отдельного
+        /returns/{guid}/lines может не существовать, на него не полагаемся."""
+        return await self._fetch_paginated("returns")
+
+    @retry_with_backoff(max_retries=3)
     async def fetch_shipment_lines(self, guid: str, line_type: str) -> list[dict]:
         """Строки отгрузки: line_type = planned | shipped; product вложен в строку."""
         return await self._fetch_paginated(

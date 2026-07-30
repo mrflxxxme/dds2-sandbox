@@ -255,7 +255,7 @@ async def list_requests(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Зеркало заявок ФФ (kind: assembly | inbound | other; show_archived — вид «Архив»)."""
+    """Зеркало заявок ФФ (kind: assembly | inbound | return | other; show_archived — вид «Архив»)."""
     return await fulfillment_service.list_requests(db, project.id, warehouse_id, kind, show_archived=show_archived)
 
 

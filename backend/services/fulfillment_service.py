@@ -732,6 +732,28 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         )
         barcode_by_guid = {guid: barcode for guid, barcode in bc_result.all() if guid and barcode}
 
+    # migfull: приёмки, у которых в зеркальном raw ещё нет состава (incoming_lines)
+    # — разовый бэкфилл строк в _enrich_migfull_submissions: матчеру пары
+    # «вскрытия коробов» нужен состав и у закрытых поступлений, синканных до фичи
+    mig_lines_missing: set[str] = set()
+    if provider == "migfull":
+        lm_result = await db.execute(
+            select(FulfillmentRequest.external_id)
+            .where(
+                FulfillmentRequest.project_id == project_id,
+                FulfillmentRequest.warehouse_id == warehouse_id,
+                FulfillmentRequest.provider == "migfull",
+                FulfillmentRequest.kind == FfRequestKind.INBOUND.value,
+                FulfillmentRequest.archived == False,
+                or_(
+                    FulfillmentRequest.raw.is_(None),
+                    ~FulfillmentRequest.raw.has_key("incoming_lines"),
+                ),
+            )
+            .limit(_MIRROR_SELECT_LIMIT)
+        )
+        mig_lines_missing = {ext for (ext,) in lm_result.all()}
+
     # migfull: ручные сопоставления короб→россыпь (override побеждает авто-вывод)
     box_overrides: dict[str, tuple[str, int]] = {}
     if provider == "migfull":
@@ -759,7 +781,11 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             stock_items = [_normalize_migfull_stock(p, barcode_by_guid, box_overrides) for p in products]
             request_rows = [_normalize_migfull_shipment(r) for r in await mig_client.fetch_shipments()]
             request_rows += [_normalize_migfull_submission(r) for r in await mig_client.fetch_submissions()]
-            await _enrich_migfull_submissions(mig_client, request_rows, mirror_enrichment)
+            # Возвраты: строки ВСТРОЕНЫ в список — доп. HTTP на состав не нужен
+            request_rows += [_normalize_migfull_return(r) for r in await mig_client.fetch_returns()]
+            await _enrich_migfull_submissions(
+                mig_client, request_rows, mirror_enrichment, lines_missing=mig_lines_missing
+            )
         else:
             wms_client = WmsCelicomClient(api_base, token, project_id=project_id)
             stock_items = [_normalize_wms_stock(i) for i in await wms_client.fetch_all_items()]
@@ -790,6 +816,14 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     # Авто-READY связанных сборок: flush, чтобы пере-SELECT зеркала видел
     # свежие стадии после UPSERT (новые INSERT'ы — тоже)
     await db.flush()
+
+    # migfull: авто-детекция пары «вскрытие коробов» (возврат коробов ↔
+    # поступление россыпью) — в ТОЙ ЖЕ транзакции, что и upsert зеркала.
+    # Помеченная пара — внутренняя переупаковка ФФ: сток не двигается, из
+    # учётных путей (авто-ACCEPT, transfer-fact, резерв «в приёмке», привязки)
+    # поступление исключается guard'ами ниже по файлу.
+    if provider == "migfull":
+        await _match_repack_pairs(db, project_id, warehouse_id)
     linked_result = await db.execute(
         select(FulfillmentRequest)
         .where(
@@ -1554,19 +1588,66 @@ def _normalize_migfull_submission(row: dict) -> dict:
     }
 
 
+# Статусы возврата migfull (слаг → человекочитаемая стадия). Жизненный цикл
+# предположительно как у shipments: uploaded → … → closed; canceled.
+_MIGFULL_RETURN_STAGE_TITLES = {"uploaded": "Загружен", "closed": "Закрыт", "canceled": "Отменён"}
+
+
+def _normalize_migfull_return(row: dict) -> dict:
+    """migfull /returns row → нормализованная заявка kind=return.
+
+    Строки состава ВСТРОЕНЫ в список (incoming_lines) и остаются в raw —
+    по ним работают матчер пары «вскрытия коробов» и деталка. total_qty =
+    Σ quantity строк incoming (у коробовых SKU — В КОРОБАХ, как отдаёт ФФ;
+    пересчёт в штуки — забота матчера/деталки). reference (PVB-…) коллизирует
+    с нумерацией приёмок/отгрузок — это РАЗНЫЕ нумерации, уникальность
+    только по guid (external_id).
+    """
+    status = str(row.get("status") or "")
+    title = row.get("status_display") or _MIGFULL_RETURN_STAGE_TITLES.get(status) or status or None
+    total = min(
+        sum(
+            _safe_int(line.get("quantity"))
+            for line in _migfull_line_rows(row.get("incoming_lines"))
+            if not _is_migfull_service_item(line.get("product") or {})
+        ),
+        _QTY_MAX,
+    )
+    return {
+        "external_id": str(row.get("guid") or ""),
+        "kind": FfRequestKind.RETURN.value,
+        "number": row.get("reference") or None,
+        "type_id": None,
+        "type_name": "Возврат",
+        "status": title,
+        "stage_code": status or None,  # uploaded → … → closed; canceled
+        "stage_title": title,
+        "is_completed": status == "closed",
+        "archived": status == "canceled",
+        "expired": False,
+        "total_qty": total or None,
+        "dest_warehouse": None,
+        "external_created_at": _parse_date(row.get("return_date") or row.get("created_at")),
+        "raw": row,
+    }
+
+
 async def _enrich_migfull_submissions(
     client: MigfullClient,
     rows: list[dict],
     mirror: dict[str, tuple[int | None, str | None]],
+    lines_missing: set[str] | frozenset[str] = frozenset(),
 ) -> None:
     """Обогатить inbound-строки заявленным количеством из lines/incoming in-place.
 
     Активным приёмкам lines нужны каждый синк (заявленное меняется),
-    закрытым — разовый бэкфилл, пока в зеркале total_qty IS NULL. Отменённые
-    не бэкфиллим: их пустые lines давали бы вечный NULL → пере-fetch каждый
-    синк и голодание cap'а. Служебные позиции («ФФ грузовое место») в тотал
-    не входят. Cap _ENRICH_DETAIL_CAP; ошибки обогащения синк НЕ валят:
-    429/circuit — стоп, прочее — пропуск.
+    закрытым — разовый бэкфилл, пока в зеркале total_qty IS NULL ЛИБО в raw
+    ещё нет состава (lines_missing — external_id таких строк): состав
+    (incoming_lines) складывается в raw для матчера пары «вскрытия коробов»
+    и офлайн-деталки. Отменённые не бэкфиллим: их пустые lines давали бы
+    вечный NULL → пере-fetch каждый синк и голодание cap'а. Служебные позиции
+    («ФФ грузовое место») в тотал не входят. Cap _ENRICH_DETAIL_CAP; ошибки
+    обогащения синк НЕ валят: 429/circuit — стоп, прочее — пропуск.
     """
     active_targets: list[dict] = []
     backfill_targets: list[dict] = []
@@ -1575,7 +1656,9 @@ async def _enrich_migfull_submissions(
             continue
         if not row.get("archived") and not row.get("is_completed"):
             active_targets.append(row)
-        elif not row.get("archived") and mirror.get(row["external_id"], (None, None))[0] is None:
+        elif not row.get("archived") and (
+            mirror.get(row["external_id"], (None, None))[0] is None or row["external_id"] in lines_missing
+        ):
             backfill_targets.append(row)
 
     targets = active_targets + backfill_targets  # при cap'е бэкфилл жертвуем первым
@@ -1606,6 +1689,11 @@ async def _enrich_migfull_submissions(
         )
         # 0/пусто = «нет данных»: не затираем прежнее значение нулём
         row["total_qty"] = total or None
+        # Состав — в raw (сырые строки, служебные НЕ фильтруем — фильтр на
+        # читателях): матчер пары «вскрытия коробов» и деталка работают без HTTP
+        raw = row.get("raw")
+        if isinstance(raw, dict):
+            raw["incoming_lines"] = [line for line in lines if isinstance(line, dict)]
 
 
 async def _enrich_skladbot_requests(
@@ -2376,6 +2464,10 @@ async def _collect_inbound_accept_candidates(
         req.inbound_receipt_id
         for req in ff_requests
         if req.inbound_receipt_id is not None
+        # repack-поступление (пара «вскрытия коробов») — внутренняя переупаковка
+        # ФФ, сток НЕ постим. Обычно не привязано к приёмке вовсе (кандидатом не
+        # станет) — guard страхует от будущей ручной привязки.
+        and req.repack_return_id is None
         and _inbound_accept_signal(req.provider, req.stage_code, req.stage_title, req.is_completed)
     }
     if not receipt_ids:
@@ -2506,7 +2598,18 @@ async def _migfull_inbound_locked_by_barcode(
     физически на складе, но не «собран» ни в одну отгрузку, поэтому без поправки
     он падает в «Брак» (поймано на Алмазной мозаике машины V-0032: резерв=весь
     остаток, заявок 0, а это приход). Позиции в наших EXPECTED-приёмках = входящий
-    залоченный товар — выносим его из «Брака» в бакет «В приёмке»."""
+    залоченный товар — выносим его из «Брака» в бакет «В приёмке».
+
+    Приёмки, привязанные к repack-поступлению (пара «вскрытия коробов»,
+    repack_return_id), ИСКЛЮЧЕНЫ: такая «приёмка» — внутренняя переупаковка ФФ,
+    товар не приходит извне; иначе её штуки повисли бы в резерве «в приёмке» и
+    занизили FBS-отдачу. Обычно repack-поступление к приёмке не привязано вовсе
+    (в расчёт не попадает) — guard страхует от будущей ручной привязки."""
+    repack_linked = exists().where(
+        FulfillmentRequest.project_id == project_id,
+        FulfillmentRequest.inbound_receipt_id == InboundReceipt.id,
+        FulfillmentRequest.repack_return_id.is_not(None),
+    )
     result = await db.execute(
         select(Nomenclature.barcode, func.sum(InboundReceiptItem.expected_qty))
         .join(InboundReceiptItem, InboundReceiptItem.nomenclature_id == Nomenclature.id)
@@ -2516,6 +2619,7 @@ async def _migfull_inbound_locked_by_barcode(
             InboundReceipt.warehouse_id == warehouse_id,
             InboundReceipt.status == "EXPECTED",
             Nomenclature.project_id == project_id,
+            ~repack_linked,
         )
         .group_by(Nomenclature.barcode)
     )
@@ -3377,6 +3481,64 @@ async def _box_pack_row(db: AsyncSession, project_id: int, warehouse_id: int, bo
 # ─── Requests view + linking ─────────────────────────────────────────────────
 
 
+def _repack_unpaired(req: FulfillmentRequest) -> bool:
+    """kind=return без пары «вскрытия» дольше окна матчера — возможно, РЕАЛЬНЫЙ
+    возврат товара (подсветка в UI). Отменённые и свежие (пара ещё может
+    приехать следующим синком) не подсвечиваем; без даты возраст неизвестен."""
+    if req.kind != FfRequestKind.RETURN.value or req.archived or req.repack_matched_at is not None:
+        return False
+    if req.external_created_at is None:
+        return False
+    return (utcnow().date() - req.external_created_at) > timedelta(days=_REPACK_DATE_WINDOW_DAYS)
+
+
+async def _repack_pair_numbers(
+    db: AsyncSession, project_id: int, requests: list[FulfillmentRequest]
+) -> dict[int, str]:
+    """{ff_request_id: номер парного документа «вскрытия»} — одним batch-запросом.
+
+    Для поступления пара — возврат (id = repack_return_id), для возврата —
+    поступление (его repack_return_id указывает на возврат). Номер пары может
+    отсутствовать у провайдера — фолбэк на external_id (guid).
+    """
+    return_ids_of_inbounds = {r.repack_return_id for r in requests if r.repack_return_id is not None}
+    matched_return_ids = {
+        r.id for r in requests if r.kind == FfRequestKind.RETURN.value and r.repack_matched_at is not None
+    }
+    conds = []
+    if return_ids_of_inbounds:
+        conds.append(FulfillmentRequest.id.in_(return_ids_of_inbounds))
+    if matched_return_ids:
+        conds.append(FulfillmentRequest.repack_return_id.in_(matched_return_ids))
+    if not conds:
+        return {}
+    result = await db.execute(
+        select(
+            FulfillmentRequest.id,
+            FulfillmentRequest.number,
+            FulfillmentRequest.external_id,
+            FulfillmentRequest.repack_return_id,
+        )
+        .where(FulfillmentRequest.project_id == project_id, or_(*conds))
+        .limit(_MIRROR_SELECT_LIMIT)
+    )
+    number_by_return_id: dict[int, str] = {}  # {id возврата: номер возврата}
+    pair_by_return_id: dict[int, str] = {}  # {id возврата: номер поступления-пары}
+    for row_id, number, external_id, repack_return_id in result.all():
+        label = number or external_id
+        if repack_return_id is not None:
+            pair_by_return_id[repack_return_id] = label
+        else:
+            number_by_return_id[row_id] = label
+    out: dict[int, str] = {}
+    for r in requests:
+        if r.repack_return_id is not None and r.repack_return_id in number_by_return_id:
+            out[r.id] = number_by_return_id[r.repack_return_id]  # поступление → номер возврата
+        elif r.id in pair_by_return_id:
+            out[r.id] = pair_by_return_id[r.id]  # возврат → номер поступления
+    return out
+
+
 def _request_to_dict(
     req: FulfillmentRequest,
     assembly_map: dict | None = None,
@@ -3384,6 +3546,7 @@ def _request_to_dict(
     units_map: dict | None = None,
     mismatch_map: dict | None = None,
     transfer_map: dict | None = None,
+    repack_pair_map: dict | None = None,
 ) -> dict:
     """FulfillmentRequest → FfRequestRow-shaped dict с обогащением связи.
 
@@ -3393,6 +3556,8 @@ def _request_to_dict(
     документа с заявкой(ами) ФФ (см. compute_doc_ff_mismatch). Для перемещений
     расхождение не считается — `compute_doc_ff_mismatch` знает только два типа
     документов, и `linked_mismatch` у такой связи остаётся `None` («не считали»).
+    repack_pair_map[req.id] — номер парного документа «вскрытия коробов»
+    (см. _repack_pair_numbers).
     """
     linked_number = linked_status = None
     linked_mismatch: bool | None = None
@@ -3438,6 +3603,9 @@ def _request_to_dict(
         "linked_number": linked_number,
         "linked_status": linked_status,
         "linked_mismatch": linked_mismatch,
+        "repack_return_id": req.repack_return_id,
+        "repack_pair_number": (repack_pair_map or {}).get(req.id),
+        "repack_unpaired": _repack_unpaired(req),
     }
 
 
@@ -3512,9 +3680,12 @@ async def list_requests(
 
     units_map = await _migfull_units_by_request(db, project_id, warehouse_id, requests)
     mismatch_map = await compute_doc_ff_mismatch(db, project_id, assembly_ids, inbound_ids)
+    repack_pair_map = await _repack_pair_numbers(db, project_id, requests)
 
     return [
-        _request_to_dict(r, assembly_map, inbound_map, units_map, mismatch_map, transfer_map)
+        _request_to_dict(
+            r, assembly_map, inbound_map, units_map, mismatch_map, transfer_map, repack_pair_map
+        )
         for r in requests
     ]
 
@@ -4445,6 +4616,235 @@ async def _migfull_guid_barcodes(
     return out
 
 
+# ─── Пара «вскрытие коробов» (возврат коробов ↔ поступление россыпью) ────────
+
+# Окно поиска поступления-пары вокруг даты возврата (дни, в обе стороны) —
+# и порог «возврат без пары давно» для подсветки repack_unpaired в выдаче.
+_REPACK_DATE_WINDOW_DAYS = 3
+# Пересечение штук, начиная с которого немэтч логируем warning (кандидат
+# похож, но не бьётся точно — вероятно, ФФ вскрыл не всё / ошибся строкой).
+_REPACK_WARN_OVERLAP = 0.8
+# Подсказка-tiebreaker: notes обоих документов пары обычно содержат эти маркеры.
+_REPACK_NOTES_HINT_RE = re.compile(r"ФБС|ВСКРЫТ", re.IGNORECASE)
+
+
+def _repack_notes_hint(raw: dict | None) -> bool:
+    """notes/client_comment содержат маркер «ФБС»/«ВСКРЫТ» (подсказка, не условие)."""
+    raw = raw or {}
+    text_blob = " ".join(str(raw.get(k) or "") for k in ("notes", "client_comment"))
+    return bool(_REPACK_NOTES_HINT_RE.search(text_blob))
+
+
+def _repack_guid_qty(raw: dict | None) -> dict[str, int]:
+    """{product_guid: Σ quantity} строк incoming документа (служебные позиции — мимо)."""
+    out: dict[str, int] = {}
+    for line in _migfull_line_rows((raw or {}).get("incoming_lines")):
+        product = line.get("product") if isinstance(line.get("product"), dict) else {}
+        if _is_migfull_service_item(product or {}):
+            continue
+        guid = str(line.get("product_guid") or (product or {}).get("guid") or "")
+        qty = _safe_int(line.get("quantity"))
+        if guid and qty > 0:
+            out[guid] = out.get(guid, 0) + qty
+    return out
+
+
+async def _repack_guid_resolver(
+    db: AsyncSession, project_id: int, warehouse_id: int, guids: set[str]
+) -> dict[str, tuple[str, str, int]]:
+    """{guid: (kind, base_barcode, units)}; kind = "box" | "loose".
+
+    Короб распознаём в приоритете: ручной FulfillmentBoxOverride (по ШК) →
+    зеркало остатков (base_barcode + units_per_box>1) → авто-вывод
+    _migfull_box_pack (ITF14 + «короб N шт.» — имя берёт вызывающий из строки).
+    ШК guid'а: ручной FulfillmentGuidBarcode → зеркало остатков. Неразрешённые
+    guid'ы в карту не попадают (документ с ними не матчится).
+    """
+    guids = {g for g in guids if g}
+    if not guids:
+        return {}
+    stock_result = await db.execute(
+        select(
+            FulfillmentStock.external_product_id,
+            FulfillmentStock.barcode,
+            FulfillmentStock.base_barcode,
+            FulfillmentStock.units_per_box,
+            FulfillmentStock.name,
+        ).where(
+            FulfillmentStock.project_id == project_id,
+            FulfillmentStock.warehouse_id == warehouse_id,
+            FulfillmentStock.external_product_id.in_(list(guids)),
+        )
+    )
+    stock_by_guid = {
+        guid: (barcode, base_barcode, int(units or 1), name)
+        for guid, barcode, base_barcode, units, name in stock_result.all()
+        if guid and barcode
+    }
+    box_overrides = await _load_box_overrides(db, project_id, warehouse_id)
+    guid_overrides = await _load_guid_barcode_overrides(db, project_id, warehouse_id)
+
+    out: dict[str, tuple[str, str, int]] = {}
+    for guid in guids:
+        stock = stock_by_guid.get(guid)
+        barcode = guid_overrides.get(guid) or (stock[0] if stock else "")
+        if not barcode:
+            continue
+        override = box_overrides.get(barcode)
+        if override:
+            out[guid] = ("box", override[0], override[1])
+            continue
+        if stock and stock[0] == barcode and stock[1] and stock[2] > 1:
+            out[guid] = ("box", stock[1], stock[2])
+            continue
+        pack = _migfull_box_pack(barcode, stock[3] if stock else None)
+        if pack:
+            out[guid] = ("box", pack[0], pack[1])
+        else:
+            out[guid] = ("loose", barcode, 1)
+    return out
+
+
+def _repack_units_by_barcode(
+    guid_qty: dict[str, int],
+    resolver: dict[str, tuple[str, str, int]],
+    *,
+    boxes_only: bool,
+) -> dict[str, int] | None:
+    """Схлопнуть {guid: qty} в {base_barcode: штук россыпи}; None — не годится.
+
+    boxes_only=True (возврат): ВСЕ строки обязаны резолвиться в короб-SKU —
+    иначе это не «вскрытие», а возможно РЕАЛЬНЫЙ возврат (не трогаем).
+    boxes_only=False (поступление): достаточно, чтобы все строки резолвились
+    (россыпь как есть, короб — в штуки россыпи).
+    """
+    out: dict[str, int] = {}
+    for guid, qty in guid_qty.items():
+        resolved = resolver.get(guid)
+        if resolved is None:
+            return None
+        kind, base_barcode, units = resolved
+        if boxes_only and kind != "box":
+            return None
+        out[base_barcode] = out.get(base_barcode, 0) + qty * units
+    return out or None
+
+
+async def _match_repack_pairs(db: AsyncSession, project_id: int, warehouse_id: int) -> int:
+    """Авто-детекция пар «вскрытие коробов»: возврат коробов ↔ поступление россыпью.
+
+    Кандидаты-возвраты: kind=return, не canceled, без repack_matched_at, ВСЕ
+    строки — короб-SKU. Кандидаты-поступления: kind=inbound, не canceled, не
+    связанные с нашими документами (inbound_receipt_id/stock_transfer_id пусты),
+    без пары, в окне ±_REPACK_DATE_WINDOW_DAYS от даты возврата. ПАРА — когда
+    мультимножества штук россыпи РАВНЫ (тот же набор base_barcode, точное
+    равенство штук); при нескольких точных кандидатах — tiebreaker notes
+    («ФБС»/«ВСКРЫТ»), затем ближайшая дата. Пересечение >80% без равенства —
+    warning в лог, БЕЗ пометки. Идемпотентно: помеченные не перематчиваются,
+    один возврат ↔ одно поступление. Наш сток (WarehouseStock/StockMovement)
+    не трогается нигде — зеркало в сток не пишет (инвариант домена).
+    Возвращает число распознанных пар. Commit — на вызывающем (та же
+    транзакция, что и upsert зеркала).
+    """
+    returns_result = await db.execute(
+        select(FulfillmentRequest)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.provider == "migfull",
+            FulfillmentRequest.kind == FfRequestKind.RETURN.value,
+            FulfillmentRequest.archived == False,
+            FulfillmentRequest.repack_matched_at.is_(None),
+        )
+        .order_by(FulfillmentRequest.external_created_at.asc().nullslast(), FulfillmentRequest.id.asc())
+        .limit(_MIRROR_SELECT_LIMIT)
+    )
+    returns = [r for r in returns_result.scalars().all() if _repack_guid_qty(r.raw)]
+    if not returns:
+        return 0
+
+    inbound_result = await db.execute(
+        select(FulfillmentRequest)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.provider == "migfull",
+            FulfillmentRequest.kind == FfRequestKind.INBOUND.value,
+            FulfillmentRequest.archived == False,
+            FulfillmentRequest.repack_return_id.is_(None),
+            FulfillmentRequest.repack_matched_at.is_(None),
+            # НЕ связанные с нашими документами: приёмка/перемещение — это
+            # реальный приход, а не внутренняя переупаковка ФФ
+            FulfillmentRequest.inbound_receipt_id.is_(None),
+            FulfillmentRequest.stock_transfer_id.is_(None),
+            FulfillmentRequest.external_created_at.is_not(None),
+        )
+        .limit(_MIRROR_SELECT_LIMIT)
+    )
+    inbounds = [r for r in inbound_result.scalars().all() if _repack_guid_qty(r.raw)]
+    if not inbounds:
+        return 0
+
+    all_guids: set[str] = set()
+    for req in [*returns, *inbounds]:
+        all_guids.update(_repack_guid_qty(req.raw))
+    resolver = await _repack_guid_resolver(db, project_id, warehouse_id, all_guids)
+
+    inbound_comp: dict[int, dict[str, int]] = {}
+    for inb in inbounds:
+        comp = _repack_units_by_barcode(_repack_guid_qty(inb.raw), resolver, boxes_only=False)
+        if comp:
+            inbound_comp[inb.id] = comp
+    inbound_pool = {inb.id: inb for inb in inbounds if inb.id in inbound_comp}
+
+    matched = 0
+    now = utcnow()
+    window = timedelta(days=_REPACK_DATE_WINDOW_DAYS)
+    for ret in returns:
+        ret_comp = _repack_units_by_barcode(_repack_guid_qty(ret.raw), resolver, boxes_only=True)
+        if not ret_comp or ret.external_created_at is None:
+            continue
+        ret_total = sum(ret_comp.values())
+        exact: list[tuple[bool, timedelta, int, FulfillmentRequest]] = []
+        for inb in inbound_pool.values():
+            assert inb.external_created_at is not None  # отфильтровано выборкой
+            date_diff = abs(inb.external_created_at - ret.external_created_at)
+            if date_diff > window:
+                continue
+            comp = inbound_comp[inb.id]
+            if comp == ret_comp:
+                exact.append((not _repack_notes_hint(inb.raw), date_diff, inb.id, inb))
+                continue
+            inb_total = sum(comp.values())
+            common = sum(min(q, comp.get(bc, 0)) for bc, q in ret_comp.items())
+            denom = max(ret_total, inb_total)
+            if denom and common / denom > _REPACK_WARN_OVERLAP:
+                logger.warning(
+                    "FF repack: возврат %s ≈ поступление %s (пересечение %d/%d шт), но точного "
+                    "равенства нет — пара НЕ помечена",
+                    ret.number or ret.external_id,
+                    inb.number or inb.external_id,
+                    common,
+                    denom,
+                )
+        if not exact:
+            continue
+        exact.sort(key=lambda t: (t[0], t[1], t[2]))
+        pair = exact[0][3]
+        pair.repack_return_id = ret.id
+        pair.repack_matched_at = now
+        ret.repack_matched_at = now
+        inbound_pool.pop(pair.id, None)
+        matched += 1
+        logger.info(
+            "FF repack: пара «вскрытие коробов» %s ↔ %s (%d шт россыпи)",
+            ret.number or ret.external_id,
+            pair.number or pair.external_id,
+            ret_total,
+        )
+    return matched
+
+
 async def _collect_transfer_fact_candidates(
     db: AsyncSession, project_id: int, warehouse_id: int, provider: str
 ) -> list[tuple[int, int, str, str | None, bool]]:
@@ -4484,6 +4884,11 @@ async def _collect_transfer_fact_candidates(
             ),
             FulfillmentRequest.local_archived == False,  # noqa: E712
             FulfillmentRequest.transfer_fact_applied_at.is_(None),
+            # repack-поступление (пара «вскрытия коробов») факт на перемещение
+            # не постит: это внутренняя переупаковка ФФ, не наш переезд.
+            # Требование stock_transfer_id уже отсекает (пара не привязана) —
+            # guard страхует от будущей ручной привязки.
+            FulfillmentRequest.repack_return_id.is_(None),
             StockTransfer.project_id == project_id,
             StockTransfer.status == TransferStatus.IN_TRANSIT,
             StockTransfer.is_deleted == False,  # noqa: E712
@@ -5467,6 +5872,12 @@ async def link_request(
     req = result.scalar_one_or_none()
     if not req:
         return None
+    if req.kind == FfRequestKind.RETURN.value:
+        raise ValueError("Возврат ФФ не привязывается к нашим документам")
+    if req.repack_return_id is not None:
+        raise ValueError(
+            "Поступление — пара «вскрытия коробов» (внутренняя переупаковка ФФ), привязка не нужна"
+        )
 
     assembly_map: dict[int, tuple] = {}
     inbound_map: dict[int, tuple] = {}
@@ -6079,8 +6490,14 @@ async def get_link_candidates(
     req = await _get_request(db, project_id, warehouse_id, ff_request_id)
     if not req:
         return None
+    # kind=return сюда не проходит (не в списке ниже): возврат к нашим
+    # документам не привязывается — «вскрытие коробов» матчится автоматически.
     if req.kind not in (FfRequestKind.ASSEMBLY.value, FfRequestKind.INBOUND.value):
         raise ValueError("Подбор кандидатов доступен только для заявок типа «сборка» и «приёмка»")
+    if req.repack_return_id is not None:
+        raise ValueError(
+            "Поступление — пара «вскрытия коробов» (внутренняя переупаковка ФФ), привязка не нужна"
+        )
 
     kind = req.kind
     ff_number = req.number or req.external_id
