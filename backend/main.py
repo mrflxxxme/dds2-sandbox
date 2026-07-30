@@ -27,6 +27,7 @@ from backend.routers import (
     assembly_drafts,
     assembly_wb,
     auth,
+    card_exchange,
     cost,
     counterparty,
     fbo_supplies,
@@ -596,6 +597,12 @@ app.include_router(
     assembly_wb.router,
     prefix="/api/v1",
     tags=["Assembly WB"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    card_exchange.router,
+    prefix="/api/v1",
+    tags=["Card Exchange"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

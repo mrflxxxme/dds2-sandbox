@@ -49,6 +49,9 @@ logger = structlog.get_logger("dds.wb_portal")
 SUPPLY_BASE = "https://seller-supply.wildberries.ru"
 AUTH_BASE = "https://seller.wildberries.ru"
 CMP_BASE = "https://cmp.wildberries.ru"  # кабинет рекламы (стата кампаний) — GET, authorizev3
+# Биржа карточек товаров (card-exchange showcase) — REST (НЕ JSON-RPC), тот же host,
+# та же авторизация authorizev3+cookie. Проксируем витрину/справочник/корзину в DDS2.
+EXC_PREFIX = "/ns/exc-api/monetization/api/v1"
 ROOT_VERSION = "v1.100.0"
 TIMEOUT = 30
 
@@ -365,6 +368,65 @@ class WbPortalClient:
                 }
             )
         return out
+
+    # ─── биржа карточек товаров (card-exchange showcase) ──────────────────
+    # REST на seller.wildberries.ru/ns/exc-api/... (НЕ JSON-RPC): тело POST —
+    # это сам объект фильтра, ответ обёрнут в {"data":..., "error":bool, "errorText"}.
+    # Авторизация — authorizev3 + cookie (как supply); wb-seller-lk exc-api не требует,
+    # но _raw_post его подмешивает безвредно и ретраит 401 (см. _raw_post).
+
+    async def showcase_subjects(self) -> list[dict]:
+        """Справочник предметов биржи: [{"id": int, "name": str, "category": str}].
+
+        WB отдаёт ПЛОСКИЙ список без группировки (`category` пустой) — корневые
+        категории даёт наш справочник card_exchange_categories, матчим по `name`.
+        """
+        data = await self._raw_get(AUTH_BASE, EXC_PREFIX + "/showcase/subjects", {})
+        subjects = (data.get("data") or {}).get("subjects") if isinstance(data, dict) else None
+        return subjects if isinstance(subjects, list) else []
+
+    async def showcase_ads(
+        self,
+        *,
+        search: str | None = None,
+        filter: dict | None = None,
+        sort: dict | None = None,
+        cursor: dict | None = None,
+    ) -> dict:
+        """Витрина объявлений биржи (одна страница, курсорная пагинация).
+
+        filter: {"subjectIDs": [int]|None, "brands": [str]|None, "supplierIDs": [int]|None,
+                 "rating": float|None, "hasStocks": bool|None}
+        sort:   {"field": "feedbacksCount"|..., "order": "asc"|"desc"}
+        cursor: None (первая страница) | {"lastAdID": int, "lastValue": <знач. поля сортировки>}
+        Возвращает объект `data`: {"ads": [{adID, nmID, imtID, meta{title,brand,supplierName,
+        imtCount,stockQty,photo,contactCountries,isKiz}, totalPrice, feedbacks{rating,count},
+        hasInCart, isCardOwner}]}.
+        """
+        body = {
+            "search": search,
+            "filter": filter
+            or {"subjectIDs": None, "brands": None, "supplierIDs": None, "rating": None, "hasStocks": None},
+            "sort": sort or {"field": "feedbacksCount", "order": "desc"},
+            "cursor": cursor,
+        }
+        data = await self._raw_post(AUTH_BASE + EXC_PREFIX + "/showcase/ads", body)
+        return (data.get("data") or {}) if isinstance(data, dict) else {}
+
+    async def exc_cart_get(self) -> dict:
+        """Корзина биржи (группировка по продавцам): data{suppliers:[...], flags{...}}."""
+        data = await self._raw_get(AUTH_BASE, EXC_PREFIX + "/cart", {})
+        return (data.get("data") or {}) if isinstance(data, dict) else {}
+
+    async def exc_cart_add(self, ad_id: int) -> bool:
+        """Добавить объявление в корзину биржи. POST /cart/add {"adID": int} → data:true."""
+        data = await self._raw_post(AUTH_BASE + EXC_PREFIX + "/cart/add", {"adID": ad_id})
+        return bool(data.get("data")) if isinstance(data, dict) else False
+
+    async def exc_cart_delete(self, ad_ids: list[int]) -> bool:
+        """Убрать объявления из корзины. POST /cart/delete {"adIDs": [int]} → data:true."""
+        data = await self._raw_post(AUTH_BASE + EXC_PREFIX + "/cart/delete", {"adIDs": ad_ids})
+        return bool(data.get("data")) if isinstance(data, dict) else False
 
     # ─── шаг 1-4: черновик → преордер ─────────────────────────────────────
 
