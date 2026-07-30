@@ -71,8 +71,11 @@ from backend.models.fulfillment import FulfillmentStock
 from backend.models.warehouse import MovementType, StockMovement, Warehouse, WarehouseStock
 
 from backend.models.wb_fbs import (
+    FBS_CANCEL_CLIENT_STATUS,
+    FBS_CANCEL_SELLER_STATUS,
     FBS_DELIVERED_STATUS,
     FBS_IN_DELIVERY_STUCK_STATUS,
+    FBS_WB_CLIENT_CANCEL_STATUSES,
     FBS_WB_DELIVERED_STATUSES,
     WbFbsOrderEvent,
 )
@@ -122,8 +125,10 @@ _ORDERS_MAX_PAGES = 50
 _WRITEOFF_REF_TYPE = "FBS_ORDER"
 
 #: «Зависло в пути на СЦ»: задание передано не меньше этого числа дней назад,
-#: а сортировочный центр так и не принял (`in_delivery_condition`).
-_TRANSIT_STUCK_DAYS = 2
+#: а сортировочный центр так и не принял (`in_delivery_condition`). Канон
+#: владельца 30.07: СУТКИ от скана QR поставки — уже зависание, его
+#: подсвечиваем и считаем.
+_TRANSIT_STUCK_DAYS = 1
 #: Потолок окна «зависших»: у старых `complete` `wb_status` застывает — синк
 #: статусов опрашивает не больше `_STATUS_MAX_ORDERS` НЕ-терминальных заданий
 #: (см. docstring `warehouse_summary`), и без потолка счётчик копил бы мёртвые
@@ -235,6 +240,46 @@ def delivered_condition() -> Any:
     return and_(
         effective_status_expr() == FbsSupplierStatus.COMPLETE.value,
         WbFbsOrder.wb_status.in_(FBS_WB_DELIVERED_STATUSES),
+    )
+
+
+def cancelled_condition() -> Any:
+    """«Задание эффективно отменено» — любой стороной (обратное `alive_condition`).
+
+    Покрывает обе оси: терминальный `supplierStatus` (cancel / cancel_carrier)
+    и WB-отмену, схлопнутую `effective_status_expr()` в `cancel`.
+    """
+    return effective_status_expr().in_(FBS_TERMINAL_STATUSES)
+
+
+def cancel_client_condition() -> Any:
+    """Отмена ПОКУПАТЕЛЯ (канон 30.07): эффективно отменено И `wbStatus` клиентский.
+
+    Клиентские коды — `FBS_WB_CLIENT_CANCEL_STATUSES` (canceled_by_client /
+    declined_by_client): решение принял покупатель, чей бы `supplierStatus`
+    ни стоял (отказ до сборки оставляет `new` навсегда).
+    """
+    return and_(
+        cancelled_condition(),
+        WbFbsOrder.wb_status.in_(FBS_WB_CLIENT_CANCEL_STATUSES),
+    )
+
+
+def cancel_seller_condition() -> Any:
+    """«Отменили мы» (продавец / перевозчик / wb canceled) — всё отменённое, что не клиент.
+
+    Дополнение `cancel_client_condition()` внутри отменённых: supplier
+    cancel / cancel_carrier с НЕ-клиентским `wbStatus` (включая NULL — SQL-NULL
+    в `notin_` дал бы NULL и молча выкинул строку, поэтому ветка `is_(None)`
+    обязательна) и wb `canceled` без клиентского признака. Пара условий
+    образует точное разбиение: client + seller == счётчик отмен.
+    """
+    return and_(
+        cancelled_condition(),
+        or_(
+            WbFbsOrder.wb_status.is_(None),
+            WbFbsOrder.wb_status.notin_(FBS_WB_CLIENT_CANCEL_STATUSES),
+        ),
     )
 
 
@@ -1486,12 +1531,20 @@ async def list_orders(
     счётчик `in_delivery_stuck_count`) ИГНОРИРУЕТ период страницы: зависшее —
     ОЧЕРЕДЬ проблем, а не история; задание, переданное до начала окна, обязано
     остаться на виду, пока СЦ его не примет. Собственное окно по якорю передачи
-    (2–30 дней) у фильтра есть всегда — см. комментарий у констант.
+    (1–30 дней) у фильтра есть всегда — см. комментарий у констант.
 
     `status=delivered` / `delivered_count` — «Завершённые» кабинета WB:
     `complete`, дошедшее до покупателя (`FBS_WB_DELIVERED_STATUSES` — sold/
     defect). Это ИСТОРИЯ, а не очередь, поэтому окно периода уважается —
     симметрично `sorted`.
+
+    `status=cancel_client` / `status=cancel_seller` — разрез отмен (канон
+    30.07): клиентские `wbStatus` (`cancel_client_condition`) против «отменили
+    мы» — продавец / перевозчик / wb canceled (`cancel_seller_condition`).
+    Счётчики `cancel_client_count` / `cancel_seller_count` считаются в том же
+    запросе, что и `status_counts` (окно периода уважается симметрично
+    счётчику отмен), и образуют точное разбиение: их сумма равна
+    `cancel + cancel_carrier` из `status_counts`.
 
     Каждая строка выдачи несёт фазу СВОЕЙ поставки (`supply_done` /
     `supply_scan_dt`): `supplier_status='complete'` значит лишь «поставка
@@ -1534,6 +1587,8 @@ async def list_orders(
             func.count().filter(in_delivery_condition()),
             func.count().filter(sorted_condition()),
             func.count().filter(delivered_condition()),
+            func.count().filter(cancel_client_condition()),
+            func.count().filter(cancel_seller_condition()),
         )
         .where(*base)
         .group_by(eff_status)
@@ -1543,6 +1598,8 @@ async def list_orders(
     in_delivery_count = sum(int(row[2] or 0) for row in counts_rows)
     sorted_count = sum(int(row[3] or 0) for row in counts_rows)
     delivered_count = sum(int(row[4] or 0) for row in counts_rows)
+    cancel_client_count = sum(int(row[5] or 0) for row in counts_rows)
+    cancel_seller_count = sum(int(row[6] or 0) for row in counts_rows)
 
     # Счётчик зависших — БЕЗ периода (см. docstring); джойн поставок нужен ради
     # якоря передачи и не задваивает строки (1:1 максимум, `uq_wb_fbs_supply`).
@@ -1572,6 +1629,12 @@ async def list_orders(
     elif status == FBS_IN_DELIVERY_STATUS:
         conditions.append(in_delivery_condition())
         total = in_delivery_count
+    elif status == FBS_CANCEL_CLIENT_STATUS:
+        conditions.append(cancel_client_condition())
+        total = cancel_client_count
+    elif status == FBS_CANCEL_SELLER_STATUS:
+        conditions.append(cancel_seller_condition())
+        total = cancel_seller_count
     elif status:
         conditions.append(effective_status_expr() == status)
         total = status_counts.get(status, 0)
@@ -1611,6 +1674,8 @@ async def list_orders(
         "sorted_count": sorted_count,
         "in_delivery_stuck_count": in_delivery_stuck_count,
         "delivered_count": delivered_count,
+        "cancel_client_count": cancel_client_count,
+        "cancel_seller_count": cancel_seller_count,
     }
 
 

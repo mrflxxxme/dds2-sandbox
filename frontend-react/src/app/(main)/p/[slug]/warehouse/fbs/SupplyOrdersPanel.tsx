@@ -23,6 +23,7 @@ import {
     hoursAgoLabel,
     isActiveOrder,
     isStickerReady,
+    isStuckAfterScan,
     num,
     orderAgeColor,
     transitDaysColor,
@@ -209,9 +210,11 @@ export default function SupplyOrdersPanel({
                                     o.supplier_status, o.wb_status, !!supply.done, !!supply.scan_dt,
                                 );
                                 const ageColor = orderAgeColor(o.created_at_wb, cab, now);
-                                // Подсветка — ТОЛЬКО пока WB не отсканировал (после
-                                // скана QR вопросы к логистике WB) и ждём ≥ суток.
-                                const stuck = ageColor === 'var(--color-danger)';
+                                // Подсветка: WB не отсканировал ≥ суток (наша зона)
+                                // ИЛИ отсканировал, а СЦ ≥ суток не принимает
+                                // («Ждёт сортировки» — канон 30.07, от scan-якоря).
+                                const stuck = ageColor === 'var(--color-danger)'
+                                    || (cab === 'awaiting_sort' && isStuckAfterScan(supply.scan_dt, now));
                                 return (
                                 <tr key={o.wb_order_id} className={stuck ? 'fbs-row-stuck' : undefined}>
                                     <td>

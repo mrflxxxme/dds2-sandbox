@@ -62,6 +62,15 @@ describe('timelineLabel — резолв префиксных кодов', () =>
         expect(timelineLabel('supplier:new')).toBe(SUPPLIER_STATUS_LABEL.new);
         expect(timelineLabel('supplier:confirm')).toBe('На сборке');
         expect(timelineLabel('supplier:complete')).toBe('В доставке');
+        // Терминальные тоже резолвятся (разрез отмен в таймлайне): отмена
+        // перевозчиком не должна вылезать машинным кодом.
+        expect(timelineLabel('supplier:cancel')).toBe('Отменено');
+        expect(timelineLabel('supplier:cancel_carrier')).toBe('Отменено перевозчиком');
+    });
+
+    it('wb:<клиентская отмена> резолвится словами покупателя', () => {
+        expect(timelineLabel('wb:canceled_by_client')).toBe('Отмена покупателем');
+        expect(timelineLabel('wb:declined_by_client')).toBe('Отказ покупателя');
     });
 
     it('неизвестный код любого вида показываем как есть, а не «—»', () => {
