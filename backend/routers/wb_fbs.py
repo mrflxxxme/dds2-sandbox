@@ -36,9 +36,6 @@ from backend.integrations.wb_fbs_api import (
     resolve_base_url,
 )
 from backend.models import Project, User
-
-# Прямо из модуля домена: re-export константы в backend/models/__init__.py нет.
-from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS
 from backend.project_context import get_current_project
 from backend.schemas.wb_fbs import (
     ALLOWED_ORDER_STATUS_FILTERS,
@@ -593,10 +590,9 @@ async def orders_warehouse_summary(
         )
 
 
-#: Псевдо-статус «зависло в пути на СЦ» валиден в фильтре списка заданий.
-#: В `ALLOWED_ORDER_STATUS_FILTERS` (замороженный контракт схем) его нет —
-#: расширяем список на уровне роутера.
-_ORDER_STATUS_FILTERS = [*ALLOWED_ORDER_STATUS_FILTERS, FBS_IN_DELIVERY_STUCK_STATUS]
+#: Валидные значения фильтра статуса — контракт схем, включая псевдо-статусы
+#: фаз доставки (`in_delivery_stuck` добавлен туда же).
+_ORDER_STATUS_FILTERS = ALLOWED_ORDER_STATUS_FILTERS
 
 
 @router.get("/orders", response_model=FbsOrderListOut)

@@ -66,8 +66,6 @@ from backend.models import (
 from backend.models.fulfillment import FulfillmentStock
 from backend.models.warehouse import MovementType, StockMovement, Warehouse, WarehouseStock
 
-# Прямо из модуля домена: re-export в backend/models/__init__.py у константы
-# зависших пока нет (хребет добавил её только в models/wb_fbs.py).
 from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS
 from backend.services.warehouse_stock_engine import _update_stock
 from backend.services.wb_fbs.client_factory import get_fbs_client
