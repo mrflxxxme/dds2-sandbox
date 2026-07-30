@@ -1402,12 +1402,18 @@ export default function AssemblyListPage() {
             exportValue: itemsQty,
         },
         {
-            key: 'created_at', label: 'Создана',
-            render: (_v, row: AssemblyRequest) => formatDateTime(row.created_at),
-            exportValue: (row: AssemblyRequest) => row.created_at,
+            key: 'fbs_supply_created_at', label: 'Создана',
+            headerTitle: 'Когда поставка создана в кабинете WB (дата нашей учётной записи — внутренняя, зеркала создаются задним числом)',
+            // Дата ПОСТАВКИ в WB, не нашей записи: джоб/бэкфилл создаёт зеркала
+            // задним числом, и «передана раньше созданной» читалось парадоксом.
+            render: (_v, row: AssemblyRequest) => row.fbs_supply_created_at
+                ? formatDateTime(row.fbs_supply_created_at)
+                : '—',
+            exportValue: (row: AssemblyRequest) => row.fbs_supply_created_at || '',
         },
         {
             key: 'shipped_at', label: 'Передана',
+            headerTitle: 'Момент передачи поставки в WB (скан QR либо закрытие)',
             render: (_v, row: AssemblyRequest) => row.shipped_at ? formatDateTime(row.shipped_at) : '—',
             exportValue: (row: AssemblyRequest) => row.shipped_at || '',
         },

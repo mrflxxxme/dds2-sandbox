@@ -300,6 +300,11 @@ class AssemblyRequestResponse(BaseModel):
     #: Момент скана QR поставки на приёмке WB — граница «наша зона / зона WB»:
     #: до скана задания «Отгрузите товар» (подсвечиваем зависшие), после — WB.
     fbs_scan_dt: datetime | None = None
+    #: Когда поставка СОЗДАНА в кабинете WB (created_at_wb) — колонка «Создана»
+    #: у kind=fbs. Собственный created_at зеркала — внутренняя учётная дата:
+    #: джоб/бэкфилл создаёт записи задним числом, и «передана раньше созданной»
+    #: читалось как парадокс (прод-вопрос 30.07).
+    fbs_supply_created_at: datetime | None = None
     wb_fbo_supply_id: int | None = None
     wb_supply_name: str | None = None  # wb_fbo_supplies.name
     wb_warehouse_name: str | None = None  # wb_fbo_supplies.warehouse_name (WB destination)

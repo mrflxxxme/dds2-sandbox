@@ -2075,6 +2075,12 @@ export interface AssemblyRequest {
    * до скана задания «Отгрузите товар» (подсвечиваем зависшие), после — WB.
    */
   fbs_scan_dt?: string | null;
+  /**
+   * Когда поставка СОЗДАНА в кабинете WB — колонка «Создана» у kind=fbs.
+   * Собственный created_at зеркала — внутренняя дата (джоб создаёт записи
+   * задним числом): по ней «передана раньше созданной» читалось парадоксом.
+   */
+  fbs_supply_created_at?: string | null;
   wb_fbo_supply_id: number | null;
   wb_supply_name?: string;
   wb_warehouse_name?: string;

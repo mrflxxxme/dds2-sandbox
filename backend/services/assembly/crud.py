@@ -626,6 +626,7 @@ async def _build_response(
         "fbs_supply_id": request.fbs_supply_id,
         "fbs_supply_status": _fbs_supply_status_value(fbs_supply, str(request.status)),
         "fbs_scan_dt": fbs_supply.scan_dt if fbs_supply is not None else None,
+        "fbs_supply_created_at": fbs_supply.created_at_wb if fbs_supply is not None else None,
         "wb_fbo_supply_id": request.wb_fbo_supply_id,
         "wb_supply_name": request.wb_fbo_supply.name if request.wb_fbo_supply else None,
         "wb_warehouse_name": request.wb_fbo_supply.warehouse_name if request.wb_fbo_supply else None,
