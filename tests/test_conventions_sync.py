@@ -181,6 +181,19 @@ def _find_frontend_page_keys() -> set[str]:
     return set(re.findall(r"key:\s*'([^']+)'", block))
 
 
+def _find_sidebar_page_keys() -> set[str]:
+    """Extract pageKey values from the main-app sidebar navigation."""
+    layout = FRONTEND / "src" / "app" / "(main)" / "p" / "[slug]" / "layout.tsx"
+    if not layout.exists():
+        pytest.skip("frontend-react вне контекста backend-CI — гард выполняется в полном дереве")
+    return set(re.findall(r"pageKey:\s*'([^']+)'", layout.read_text()))
+
+
+# `vibecoding` гейтится не каталогом страниц, а строкой в `vibe_authors`
+# (см. backend/MAP.md) — ключа в ALL_PAGES у него нет намеренно.
+SIDEBAR_KEYS_OUTSIDE_CATALOG = {"vibecoding"}
+
+
 class TestRbacPageKeySync:
     def test_frontend_page_keys_are_known_to_backend(self):
         """Every permission checkbox key must be in backend ALL_PAGES.
@@ -197,4 +210,39 @@ class TestRbacPageKeySync:
             f"Frontend team-page permission keys missing from backend ALL_PAGES: {unknown}. "
             f"Add them to ALL_PAGES (and the matching SECTION_PAGES group) in backend/rbac.py, "
             f"else update_member_role() returns 400 and 'Сохранить' silently fails."
+        )
+
+    def test_backend_pages_have_a_frontend_checkbox(self):
+        """У каждого раздела бэкенда должна быть галочка в «Команде».
+
+        Без неё владелец физически не может выдать доступ: страница есть в
+        ALL_PAGES, гейт `require_role(page=...)` её проверяет, а отметить нечем
+        (так «Сырые данные» и AI-чат были недоступны никому, кроме admin).
+        """
+        from backend.rbac import ALL_PAGES
+
+        frontend_keys = _find_frontend_page_keys()
+        missing = set(ALL_PAGES) - frontend_keys
+        assert not missing, (
+            f"Разделы бэкенда без чекбокса в team/page.tsx: {missing}. "
+            f"Добавь их в SECTION_PAGES фронта, иначе выдать доступ editor/viewer невозможно."
+        )
+
+    def test_sidebar_page_keys_are_in_the_catalog(self):
+        """Ключ из меню обязан быть в ALL_PAGES.
+
+        `canAccess(key)` для editor/viewer — это `pages.includes(key)`, а в
+        `pages` не может попасть ключ вне ALL_PAGES (роутер режет такие 400).
+        Ключ вне каталога = раздел, невидимый для editor/viewer НАВСЕГДА и
+        невыдаваемый ничем — так были спрятаны «Склады», «Замеры», «Отзывы».
+        """
+        from backend.rbac import ALL_PAGES
+
+        sidebar_keys = _find_sidebar_page_keys()
+        assert sidebar_keys, "Скан pageKey в layout.tsx ничего не нашёл — regex сломан?"
+        orphans = sidebar_keys - set(ALL_PAGES) - SIDEBAR_KEYS_OUTSIDE_CATALOG
+        assert not orphans, (
+            f"pageKey из меню вне каталога ALL_PAGES: {orphans}. "
+            f"Добавь ключ в ALL_PAGES + PAGE_ADDED_AT + SECTION_PAGES (backend/rbac.py) "
+            f"и чекбокс в team/page.tsx, иначе раздел не увидит ни один editor/viewer."
         )

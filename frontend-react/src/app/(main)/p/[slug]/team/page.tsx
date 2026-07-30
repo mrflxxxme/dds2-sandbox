@@ -23,6 +23,7 @@ const SECTION_PAGES: Record<string, { key: string; label: string }[]> = {
         { key: 'salary', label: 'Зарплата' },
     ],
     'Склад': [
+        { key: 'warehouse', label: 'Склады и возвраты ПВЗ' },
         { key: 'assembly', label: 'Заявки на сборку' },
         { key: 'assembly-analytics', label: 'Анализ сборки' },
         { key: 'logistics', label: 'Лист логиста' },
@@ -30,6 +31,7 @@ const SECTION_PAGES: Record<string, { key: string; label: string }[]> = {
         { key: 'stocks', label: 'Остатки WB' },
         { key: 'fbs', label: 'FBS Wildberries' },
         { key: 'stock-analytics', label: 'Аналитика остатков' },
+        { key: 'measurements', label: 'Замеры' },
         { key: 'barcode-labels', label: 'Генератор ШК' },
     ],
     'Поставки': [
@@ -41,6 +43,7 @@ const SECTION_PAGES: Record<string, { key: string; label: string }[]> = {
     ],
     'Продажи': [
         { key: 'funnel', label: 'Воронка/Реклама' },
+        { key: 'reviews', label: 'Отзывы' },
         { key: 'ads-manager', label: 'Управление рекламой' },
         { key: 'ab-tests', label: 'АБ-тесты фото' },
         { key: 'trends', label: 'Тренды' },
@@ -48,12 +51,20 @@ const SECTION_PAGES: Record<string, { key: string; label: string }[]> = {
         { key: 'plan-fact', label: 'План-Факт' },
         { key: 'geography', label: 'География заказов' },
     ],
+    'ИИ': [
+        { key: 'ai-chat', label: 'AI-ассистент' },
+    ],
     'Настройки': [
         { key: 'monitoring', label: 'Мониторинг' },
+        { key: 'raw-data', label: 'Сырые данные' },
         { key: 'project-settings', label: 'Настройки' },
         { key: 'team', label: 'Команда' },
     ],
 };
+
+// Разделы, которые бэкенд никогда не выдаёт по наследству (backend/rbac.py,
+// PAGES_NEVER_INHERITED) — только явной галочкой владельца.
+const NEVER_INHERITED = new Set(['salary', 'raw-data', 'project-settings', 'team']);
 
 const ROLE_BADGE_STYLES: Record<string, { bg: string; border: string; color: string }> = {
     owner:  { bg: 'rgba(139,92,246,0.12)',  border: 'rgba(139,92,246,0.3)',  color: '#a78bfa' },
@@ -97,8 +108,16 @@ interface RoleEditModalProps {
 
 function RoleEditModal({ member, onClose, onSave }: RoleEditModalProps) {
     const [role, setRole] = useState(member.role);
-    const [selectedPages, setSelectedPages] = useState<Set<string>>(new Set(member.pages || []));
+    // У owner/admin `pages` — это весь каталог (доступ динамический), поэтому при
+    // понижении роли до редактора начинаем с чистого листа, а не выдаём разом все
+    // разделы, включая «только вручную» (зарплата, сырые данные, админка).
+    const [selectedPages, setSelectedPages] = useState<Set<string>>(
+        member.role === 'editor' || member.role === 'viewer' ? new Set(member.pages || []) : new Set()
+    );
     const [saving, setSaving] = useState(false);
+    // Разделы, появившиеся после настройки доступа и выданные автоматически:
+    // галочка уже стоит, но владельцу стоит знать, что это не его решение.
+    const inherited = new Set(member.pages_inherited || []);
 
     const togglePage = (key: string) => {
         setSelectedPages(prev => {
@@ -156,6 +175,13 @@ function RoleEditModal({ member, onClose, onSave }: RoleEditModalProps) {
                 {showPages && (
                     <div style={{ marginBottom: 16 }}>
                         <label className="form-label" style={{ marginBottom: 8, display: 'block' }}>Доступные разделы</label>
+                        {inherited.size > 0 && (
+                            <p style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 8 }}>
+                                Разделы с пометкой «новый» появились после настройки доступа и выданы
+                                автоматически — секция участнику уже открыта. Снимите галочку и сохраните,
+                                если доступ не нужен.
+                            </p>
+                        )}
                         {Object.entries(SECTION_PAGES).map(([section, pages]) => {
                             const sectionKeys = pages.map(p => p.key);
                             const allChecked = sectionKeys.every(k => selectedPages.has(k));
@@ -190,6 +216,14 @@ function RoleEditModal({ member, onClose, onSave }: RoleEditModalProps) {
                                                     style={{ accentColor: '#8b5cf6' }}
                                                 />
                                                 {page.label}
+                                                {inherited.has(page.key) && (
+                                                    <span className="badge badge-info">новый</span>
+                                                )}
+                                                {NEVER_INHERITED.has(page.key) && (
+                                                    <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
+                                                        только вручную
+                                                    </span>
+                                                )}
                                             </label>
                                         ))}
                                     </div>

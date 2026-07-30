@@ -42,6 +42,8 @@ export interface ProjectMember {
   telegram_username?: string;
   role: 'owner' | 'admin' | 'editor' | 'viewer';
   pages: string[];
+  /** Подмножество pages, выданное автоматически: раздел появился после настройки доступа. */
+  pages_inherited?: string[];
   joined_at: string;
 }
 

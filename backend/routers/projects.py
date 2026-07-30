@@ -16,7 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.auth import get_current_user
 from backend.database import get_db
 from backend.models import Project, ProjectInvite, ProjectMember, User
-from backend.rbac import ALL_PAGES, ROLE_HIERARCHY, get_effective_pages, parse_pages
+from backend.rbac import (
+    ALL_PAGES,
+    ROLE_HIERARCHY,
+    get_effective_pages,
+    inherited_pages,
+    parse_pages,
+)
 from backend.utils.rate_limit import rate_limit_write
 from backend.utils.time import utcnow
 
@@ -54,6 +60,9 @@ class ProjectMemberResponse(BaseModel):
     telegram_username: str | None = None
     role: str = "editor"
     pages: list[str] = []
+    # Подмножество `pages`, доставшееся по наследству (раздел появился после
+    # настройки доступа) — «Команда» подсвечивает его владельцу.
+    pages_inherited: list[str] = []
     joined_at: datetime
 
 
@@ -219,6 +228,12 @@ async def list_members(
         .where(ProjectMember.project_id == project.id, ProjectMember.is_deleted == False)  # noqa: E712
         .order_by(ProjectMember.joined_at)
     )
+    rows = result.all()
+    # Разбивку «что выдано, а что доехало наследованием» показываем только тем,
+    # кто правит доступы: остальным это карта чужих прав, а не их работа.
+    # Роль запрашивающего берём из уже загруженных строк — он тоже участник.
+    actor_role = next((m.role for m, u in rows if u.id == user.id), None)
+    show_inherited = actor_role in ("owner", "admin")
     return [
         {
             "id": m.id,
@@ -229,10 +244,13 @@ async def list_members(
             "last_name": u.last_name,
             "telegram_username": u.telegram_username,
             "role": m.role,
-            "pages": get_effective_pages(m.role, m.pages),
+            "pages": get_effective_pages(m.role, m.pages, m.pages_updated_at),
+            "pages_inherited": inherited_pages(parse_pages(m.pages), m.pages_updated_at)
+            if show_inherited and m.role in ("editor", "viewer")
+            else [],
             "joined_at": m.joined_at,
         }
-        for m, u in result.all()
+        for m, u in rows
     ]
 
 
@@ -350,6 +368,9 @@ async def update_member_role(
 
     target_member.role = body.role
     target_member.pages = json.dumps(body.pages) if body.pages else None
+    # Явная настройка = новый водяной знак каталога: снятые сейчас галочки больше
+    # не вернутся наследованием, а разделы, которые появятся позже, — доедут.
+    target_member.pages_updated_at = utcnow()
     await db.commit()
 
     logger.info(
@@ -362,7 +383,7 @@ async def update_member_role(
         "updated": True,
         "user_id": user_id,
         "role": body.role,
-        "pages": get_effective_pages(body.role, target_member.pages),
+        "pages": get_effective_pages(body.role, target_member.pages, target_member.pages_updated_at),
     }
 
 
@@ -476,7 +497,7 @@ async def get_my_permissions(
 
     return {
         "role": member.role,
-        "pages": get_effective_pages(member.role, member.pages),
+        "pages": get_effective_pages(member.role, member.pages, member.pages_updated_at),
         "is_owner": member.role == "owner",
     }
 
@@ -631,6 +652,10 @@ async def accept_invite(
         existing.restore()
         existing.role = invite.role
         existing.pages = invite.pages
+        # Знак — момент СОЗДАНИЯ инвайта, а не акцепта: набор галочек владелец
+        # выбрал тогда, и раздел, вышедший внутри недельного окна инвайта, не
+        # должен читаться как «владелец его не дал».
+        existing.pages_updated_at = invite.created_at
     else:
         # Brand-new member.
         member = ProjectMember(
@@ -638,6 +663,7 @@ async def accept_invite(
             user_id=user.id,
             role=invite.role,
             pages=invite.pages,
+            pages_updated_at=invite.created_at,
         )
         db.add(member)
 

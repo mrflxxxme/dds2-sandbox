@@ -52,6 +52,7 @@ from backend.models.mixins import SoftDeleteMixin
 | Мониторинг и health | `services/monitoring_service.py`, `health_check_service.py` |
 | География заказов | `services/order_geography_service.py` |
 | Вайбкодинг (телеметрия репозитория) | `services/vibe_service.py`, `routers/vibe.py`, `models/vibe.py` — БЕЗ `project_id` намеренно; доступ по строке в `vibe_authors`, ингест зовёт CI по SSH (не HTTP) |
+| Доступы по разделам (RBAC) | `rbac.py`: `ALL_PAGES` (каталог) + `PAGE_ADDED_AT` (дата появления ключа) + `SECTION_PAGES` + `PAGES_NEVER_INHERITED`. owner/admin получают каталог динамически; editor/viewer — снимок `ProjectMember.pages` ПЛЮС наследование (`inherited_pages`): раздел, добавленный позже `ProjectMember.pages_updated_at`, выдаётся сам внутри уже открытой секции. **Новая страница = ключ в `ALL_PAGES` + дата в `PAGE_ADDED_AT` + чекбокс в `frontend-react/src/app/(main)/p/[slug]/team/page.tsx`** — иначе раздел не доедет до команды (гарды: `tests/test_conventions_sync.py`, `tests/test_rbac_page_inheritance.py`) |
 
 ## Ключевые модели
 | Модель | Файл | Назначение |

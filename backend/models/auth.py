@@ -65,6 +65,9 @@ class ProjectMember(Base, SoftDeleteMixin):
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     role: Mapped[str] = mapped_column(String(20), default="editor", server_default="editor", nullable=False)
     pages: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: ["assembly","funnel",...]
+    # Когда `pages` выставляли явно — водяной знак каталога страниц: разделы,
+    # добавленные позже, наследуются по секции (backend/rbac.inherited_pages).
+    pages_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     project: Mapped["Project"] = relationship(back_populates="members")
