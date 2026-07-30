@@ -44,6 +44,7 @@ import {
     transitDaysColor,
 } from './fbsShared';
 import WriteoffIssuesPanel from './WriteoffIssuesPanel';
+import OrderTimelineModal from './OrderTimelineModal';
 import OrdersWarehouseSummary from './OrdersWarehouseSummary';
 import OrdersStats, { isoDaysAgo as statsIsoDaysAgo, todayIso as statsTodayIso } from './OrdersStats';
 import SupplyPlanModal, { WB_PLAN_LIMIT } from './SupplyPlanModal';
@@ -126,6 +127,8 @@ export default function OrdersTab({
     const [busy, setBusy] = useState(false);
     const [stickerModal, setStickerModal] = useState(false);
     const [supplyModal, setSupplyModal] = useState(false);
+    /** Задание, чью историю статусов смотрим (модалка «Статус заказа»). */
+    const [timelineOrder, setTimelineOrder] = useState<FbsOrder | null>(null);
     /** Пересчитать сводку по складам после синка / раскладки по поставкам. */
     const [summaryKey, setSummaryKey] = useState(0);
     /**
@@ -482,7 +485,16 @@ export default function OrdersTab({
         },
         {
             key: 'supplier_status', label: 'Статус',
-            render: (v: string) => <SupplierStatusBadge status={v} />,
+            // Клик по бейджу — модалка «Статус заказа» с историей переходов
+            render: (v: string, row: FbsOrder) => (
+                <span
+                    style={{ cursor: 'pointer' }}
+                    title="История статусов"
+                    onClick={e => { e.stopPropagation(); setTimelineOrder(row); }}
+                >
+                    <SupplierStatusBadge status={v} />
+                </span>
+            ),
         },
         {
             key: 'wb_status', label: 'Статус WB',
@@ -851,6 +863,15 @@ export default function OrdersTab({
                     selectedCount={selectedIds.length}
                     onClose={() => setStickerModal(false)}
                     onDone={(msg) => { setStickerModal(false); onToast(msg); }}
+                />
+            )}
+
+            {timelineOrder && (
+                <OrderTimelineModal
+                    wbOrderId={timelineOrder.wb_order_id}
+                    article={timelineOrder.article}
+                    nmId={timelineOrder.nm_id}
+                    onClose={() => setTimelineOrder(null)}
                 />
             )}
 

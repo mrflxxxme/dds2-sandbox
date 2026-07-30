@@ -10,6 +10,7 @@ import type {
     FbsOrderBackfillResult,
     FbsOrderListResponse,
     FbsOrderStats,
+    FbsOrderTimeline,
     FbsWarehouseSummary,
     FbsOverrideSetPayload,
     FbsReconcileApplyPayload,
@@ -190,6 +191,14 @@ export function addFbsMethods(api: ApiClient) {
         },
         cancelFbsOrder(wbOrderId: number) {
             return api.request<FbsActionResult>('PATCH', `/api/v1/fbs/orders/${wbOrderId}/cancel`);
+        },
+        /**
+         * История статусов задания — таймлайн «Статус заказа», как в кабинете
+         * WB. События уже отсортированы бэкендом DESC (свежее сверху); ярлыки
+         * по кодам рисует фронт (`timelineLabel` в fbsShared).
+         */
+        getFbsOrderTimeline(wbOrderId: number) {
+            return api.request<FbsOrderTimeline>('GET', `/api/v1/fbs/orders/${wbOrderId}/timeline`);
         },
 
         // ─── Поставки ────────────────────────────────────────────────────────
