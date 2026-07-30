@@ -31,7 +31,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.cache import invalidate_cache
+from backend.cache import get_redis, invalidate_cache
 from backend.integrations.migfull_client import MigfullApiError, MigfullClient, normalize_tenant_guid
 from backend.integrations.resilience import CircuitOpenError, RateLimitError
 from backend.integrations.skladbot_client import (
@@ -1410,8 +1410,29 @@ async def _migfull_resolve_detail_barcodes(
     короб (ITF14 + «короб N шт.») сводим к россыпи так же, как остатки. Cap
     `_ENRICH_DETAIL_CAP`; ошибки деталку НЕ валят: 429/circuit — стоп, прочее —
     пропуск товара (останется без ШК, как и было).
+
+    Результат кэшируется в Redis на 7 дней (`ff:guidbc:*`): ШК карточки почти
+    неизменен, а живой добор дорог (~0.4 с/карточка) — без кэша модалка
+    кандидатов пары и матчер добирали ОДНИ И ТЕ ЖЕ карточки при каждом
+    открытии/синке и висели до минуты. Смена ШК у ФФ доедет после протухания;
+    недоступный Redis добор не ломает.
     """
     missing = [g for g in guids if g and g not in guid_barcodes]
+    r = await get_redis()
+    pid = client.project_id or 0
+    if r is not None and missing:
+        try:
+            cached_vals = await r.mget([f"ff:guidbc:{pid}:{g}" for g in missing])
+            still: list[str] = []
+            for g, val in zip(missing, cached_vals, strict=True):
+                bc, _, units_s = str(val or "").partition("|")
+                if bc:
+                    guid_barcodes[g] = (bc, _safe_int(units_s) or 1)
+                else:
+                    still.append(g)
+            missing = still
+        except Exception as e:  # noqa: BLE001 — кэш не роняет добор
+            logger.warning("Fulfillment migfull: guidbc cache read failed (%s)", e)
     if len(missing) > _ENRICH_DETAIL_CAP:
         logger.warning(
             "Fulfillment migfull: detail barcode resolve cap %d exceeded, %d skipped",
@@ -1433,6 +1454,12 @@ async def _migfull_resolve_detail_barcodes(
             continue
         pack = _migfull_box_pack(barcode, detail.get("name"))
         guid_barcodes[guid] = pack or (barcode, 1)
+        if r is not None:
+            try:
+                bc, units = guid_barcodes[guid]
+                await r.set(f"ff:guidbc:{pid}:{guid}", f"{bc}|{units}", ex=7 * 86400)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Fulfillment migfull: guidbc cache write failed (%s)", e)
 
 
 async def _try_migfull_client(db: AsyncSession, project_id: int, warehouse_id: int) -> MigfullClient | None:
@@ -5014,17 +5041,42 @@ async def get_repack_candidates(
     for row in rows:
         all_guids.update(_repack_guid_qty(row.raw))
     resolver = await _repack_guid_resolver(db, project_id, warehouse_id, all_guids)
-    missing = {g for g in all_guids if g not in resolver}
-    if missing:
+
+    def _apply_fetched(fetched: dict[str, tuple[str, int]]) -> None:
+        for guid, (base_barcode, units) in fetched.items():
+            resolver[guid] = ("box", base_barcode, units) if units > 1 else ("loose", base_barcode, 1)
+
+    # Живой добор дорогой (карточка ≈ 0.4 с, cap 100): сначала ШК самого
+    # ВОЗВРАТА, затем — только ПРАВДОПОДОБНЫХ кандидатов (Σ штук по мягкому
+    # расчёту в 0.5–1.5× от возврата). Неправдоподобным (соседние большие
+    # поставки) хватает мягкого расчёта — их % и так ~0, а без среза модалка
+    # висела «Загрузка…» до минуты, добирая карточки чужих приёмок.
+    client = None
+    ret_missing = {g for g in ret_guid_qty if g not in resolver}
+    if ret_missing:
         client = await _try_migfull_client(db, project_id, warehouse_id)
         if client is not None:
             fetched: dict[str, tuple[str, int]] = {}
-            await _migfull_resolve_detail_barcodes(client, missing, fetched)
-            for guid, (base_barcode, units) in fetched.items():
-                resolver[guid] = ("box", base_barcode, units) if units > 1 else ("loose", base_barcode, 1)
+            await _migfull_resolve_detail_barcodes(client, ret_missing, fetched)
+            _apply_fetched(fetched)
 
     ret_comp = _repack_units_by_barcode(ret_guid_qty, resolver, require_box=False)
     return_units = sum(ret_comp.values()) if ret_comp else None
+
+    cand_missing: set[str] = set()
+    if return_units:
+        for row in rows:
+            guid_qty = _repack_guid_qty(row.raw)
+            _comp, units_sum, _ok = _repack_units_lenient(guid_qty, resolver)
+            if 0.5 * return_units <= units_sum <= 1.5 * return_units:
+                cand_missing.update(g for g in guid_qty if g not in resolver)
+    if cand_missing:
+        if client is None:
+            client = await _try_migfull_client(db, project_id, warehouse_id)
+        if client is not None:
+            fetched2: dict[str, tuple[str, int]] = {}
+            await _migfull_resolve_detail_barcodes(client, cand_missing, fetched2)
+            _apply_fetched(fetched2)
 
     candidates: list[dict] = []
     for row in rows:

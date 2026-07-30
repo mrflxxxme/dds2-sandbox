@@ -2740,8 +2740,18 @@ function FfSyncTab({ warehouseId }: { warehouseId: number }) {
 
 /* Бейджи «вскрытие коробов» (migfull, «Натали»): вскрытие оформляется парой документов
    «Возврат» (короба) + «Поступление» (россыпь) — сток не двигается, это переупаковка. */
+/**
+ * Строка в паре «вскрытия»: у ПОСТУПЛЕНИЯ заполнен repack_return_id, у
+ * ВОЗВРАТА — только зеркальный repack_pair_number (само поле пары живёт на
+ * стороне поступления). Проверка одного repack_return_id теряла бейдж и
+ * оставляла кнопку «Связать вскрытие» на уже связанном возврате.
+ */
+function ffRepackPaired(row: FfRequestRow): boolean {
+    return row.repack_return_id != null || !!row.repack_pair_number;
+}
+
 function ffRepackBadge(row: FfRequestRow, kind: FfRequestKind) {
-    if (row.repack_return_id != null) {
+    if (ffRepackPaired(row)) {
         const pair = row.repack_pair_number || '—';
         const title = kind === 'return'
             ? `Пара к поступлению ${pair}`
@@ -2975,7 +2985,7 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                     <span>{v || row.status || '—'}</span>
                     {ffStageBadge(row)}
                     {ffRepackBadge(row, kind)}
-                    {row.repack_return_id != null && (
+                    {ffRepackPaired(row) && (
                         <button
                             className="btn btn-sm btn-secondary"
                             title="Разорвать пару «вскрытие коробов»"
@@ -3057,7 +3067,7 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                                 Связать
                             </button>
                         )}
-                        {kind === 'return' && row.repack_return_id == null && (
+                        {kind === 'return' && !ffRepackPaired(row) && (
                             <button
                                 className="btn btn-sm btn-secondary"
                                 title="Подобрать поступление-пару «вскрытие коробов» (ФФ вскрыл короба под FBS)"
