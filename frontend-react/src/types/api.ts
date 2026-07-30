@@ -8697,3 +8697,70 @@ export interface FbsMatrix {
   wb_stock_known: boolean;
   trend_days: number;
 }
+
+// ─── Биржа карточек товаров (card-exchange showcase) ──────────────────────
+export interface RootCategory {
+    category: string;
+    subject_count: number;
+}
+
+export interface ShowcaseAd {
+    ad_id: number;
+    nm_id: number | null;
+    imt_id: number | null;
+    title: string | null;
+    brand: string | null;
+    supplier_name: string | null;
+    imt_count: number | null;
+    stock_qty: number | null;
+    photo: string | null;
+    contact_countries: string[] | null;
+    is_kiz: boolean;
+    total_price: number | null;
+    rating: number;
+    feedbacks_count: number;
+    has_in_cart: boolean;
+    is_card_owner: boolean;
+    is_ours: boolean;
+    categories: string[];
+    our_categories: string[];
+}
+
+export interface ShowcaseCursor {
+    last_ad_id: number;
+    last_value: number;
+}
+
+export interface ShowcaseResponse {
+    ads: ShowcaseAd[];
+    next_cursor: ShowcaseCursor | null;
+    has_more: boolean;
+    unmatched_subjects: string[];
+    scanned_pages?: number | null;
+    scan_truncated?: boolean;
+}
+
+export type CardExchangeOurMode = 'categories' | 'exact';
+
+export interface ShowcaseQueryPayload {
+    search?: string | null;
+    root_categories?: string[] | null;
+    our_mode?: CardExchangeOurMode | null;
+    brands?: string[] | null;
+    supplier_ids?: number[] | null;
+    rating?: number | null;
+    has_stocks?: boolean | null;
+    sort_field?: string;
+    sort_order?: string;
+    cursor?: ShowcaseCursor | null;
+}
+
+export interface CartActionResult {
+    ok: boolean;
+}
+
+export interface ExchangeSessionStatus {
+    status: 'ACTIVE' | 'EXPIRED' | 'NONE';
+    updated_at?: string | null;
+    supplier_id?: string | null;
+}

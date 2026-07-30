@@ -3,6 +3,7 @@ Service: integrations — business logic for integration keys and WB sync.
 Extracted from routers/integrations.py to keep router as thin HTTP layer.
 """
 
+import json
 import logging
 from datetime import date, timedelta
 from decimal import Decimal
@@ -430,6 +431,251 @@ async def get_wb_portal_status(db: AsyncSession, project_id: int) -> dict:
     # config) → перебивать им флаг нельзя, иначе UI зелёный поверх мёртвой сессии.
     status = "ACTIVE" if key.is_active else "EXPIRED"
     return {"status": status, "updated_at": (key.config or {}).get("updated_at")}
+
+
+# ─── WB Exchange Session (биржа карточек) ─────────────────────────────────────
+# ОТДЕЛЬНЫЙ слот от wb_portal_session: биржа провизионится и протухает независимо,
+# чтобы обновление доступа к бирже не трогало критичную сессию поставок (и наоборот).
+# Может быть токеном как того же кабинета, так и другого продавца.
+
+WB_EXCHANGE_SERVICE = "wb_exchange_session"
+WB_EXCHANGE_LABEL = "WB Exchange Session"
+
+
+def _normalize_exchange_input(raw: str) -> tuple[str, str | None]:
+    """Привести доступ к бирже к каноничному бандлу и определить продавца.
+
+    Менеджер логинится в кабинет НУЖНОГО продавца и приносит доступ оттуда, поэтому
+    вход принимаем в любом виде, а продавца определяем сами (кука `x-supplier-id`):
+      • JSON-бандл {"authorizev3": "...", "cookies": [{name,value},...]}
+      • JSON-бандл, где cookies — строка "a=b; c=d" (как document.cookie)
+      • голый authorizev3 (без cookie; WB его, скорее всего, отклонит — см. вызывающий код)
+
+    Возвращает (json-бандл строкой, supplier_id | None). Значения токена/cookie никуда
+    не логируются. Дубли cookie схлопываем по имени (последняя выигрывает) — иначе
+    cookie-jar клиента получает конфликтующие пары (__zzatw-wb приходит дважды).
+    """
+    from backend.integrations.wb_portal_client import ROOT_VERSION
+
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("Пустой доступ")
+
+    data: dict = {}
+    if raw.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError) as e:
+            raise ValueError("Доступ не разобрался как JSON — скопируйте его целиком") from e
+        if not isinstance(parsed, dict):
+            raise ValueError("Ожидался объект с полями authorizev3 и cookies")
+        data = parsed
+    else:
+        data = {"authorizev3": raw, "cookies": []}
+
+    token = str(data.get("authorizev3") or data.get("AuthorizeV3") or "").strip()
+    if not token:
+        raise ValueError("В доступе нет authorizev3")
+
+    raw_cookies = data.get("cookies") or []
+    pairs: list[tuple[str, str]] = []
+    if isinstance(raw_cookies, str):
+        for chunk in raw_cookies.split(";"):
+            if "=" in chunk:
+                name, _, value = chunk.strip().partition("=")
+                pairs.append((name.strip(), value))
+    elif isinstance(raw_cookies, list):
+        for c in raw_cookies:
+            if isinstance(c, dict) and c.get("name"):
+                pairs.append((str(c["name"]), str(c.get("value", ""))))
+
+    by_name: dict[str, str] = {}
+    for name, value in pairs:
+        by_name[name] = value
+
+    supplier_id = (by_name.get("x-supplier-id") or by_name.get("x-supplier-id-external") or "").strip()
+
+    bundle = {
+        "authorizev3": token,
+        "cookies": [
+            {"name": n, "value": v, "domain": ".wildberries.ru", "path": "/"} for n, v in by_name.items()
+        ],
+        "root_version": str(data.get("root_version") or ROOT_VERSION),
+    }
+    return json.dumps(bundle), (supplier_id or None)
+
+
+async def set_wb_exchange_session(db: AsyncSession, project_id: int, authorizev3: str) -> dict:
+    """Завести/обновить доступ к бирже карточек.
+
+    Принимает JSON-бандл {"authorizev3": ..., "cookies": [...]} ИЛИ голый authorizev3.
+    ВАЖНО: exc-api отвечает 401 на голый токен без анти-бот-cookie (проверено на живом
+    WB: тот же токен с cookie → 200, без cookie → 401), поэтому бандл — рабочий вариант,
+    а голый токен принимаем только если он реально проходит проверку.
+
+    Валидируем ВЫЗОВОМ САМОЙ БИРЖИ (showcase/subjects), а не supply-auth/token: у биржи
+    свой контур, и check_session() ходит в supply — он бы врал про пригодность доступа.
+    """
+    from backend.integrations.wb_portal_client import WbPortalClient, WbPortalError
+
+    session_json, supplier_id = _normalize_exchange_input(authorizev3)
+
+    client = WbPortalClient(session_json)
+    try:
+        subjects = await client.showcase_subjects()
+        if not subjects:
+            raise ValueError("WB не отдал справочник биржи — доступ принят, но данных нет")
+    except WbPortalError as e:
+        raise ValueError(
+            f"Доступ не подошёл (WB ответил отказом): {e}. "
+            "Нужен полный доступ с cookie — одного authorizev3 бирже недостаточно."
+        ) from e
+    finally:
+        await client.aclose()
+
+    # Ищем ВКЛЮЧАЯ soft-deleted (unique-слот занят даже у удалённой строки).
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_EXCHANGE_SERVICE,
+            IntegrationKey.label == WB_EXCHANGE_LABEL,
+        )
+    )
+    key = result.scalar_one_or_none()
+    encrypted = _encrypt(session_json)
+    # supplier_id — кабинет, под которым менеджер собрал доступ. Храним, чтобы в UI было
+    # видно, чей это кабинет, и смена продавца не проходила незамеченной.
+    config = {"status": "ACTIVE", "updated_at": utcnow().isoformat(), "supplier_id": supplier_id}
+    if key:
+        if key.is_deleted:
+            key.restore()
+        key.encrypted_key = encrypted
+        key.is_active = True
+        key.config = config
+    else:
+        key = IntegrationKey(
+            project_id=project_id,
+            service=WB_EXCHANGE_SERVICE,
+            label=WB_EXCHANGE_LABEL,
+            encrypted_key=encrypted,
+            is_active=True,
+            config=config,
+        )
+        db.add(key)
+    await db.commit()
+    await db.refresh(key)
+    cfg = key.config or {}
+    return {"status": "ACTIVE", "updated_at": cfg.get("updated_at"), "supplier_id": cfg.get("supplier_id")}
+
+
+async def copy_supply_session_to_exchange(db: AsyncSession, project_id: int) -> dict:
+    """Скопировать уже настроенный доступ поставок (wb_portal_session) в слот биржи.
+
+    Чтобы не заставлять пользователя добывать токен и cookie руками, когда рабочий
+    доступ WB в системе уже есть. Копируем ЗАШИФРОВАННОЕ значение как есть (не
+    расшифровываем), слоты остаются независимыми: последующее протухание одного не
+    трогает другой.
+    """
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_PORTAL_SERVICE,
+            IntegrationKey.is_active.is_(True),
+            IntegrationKey.is_deleted.is_(False),
+        )
+    )
+    src = result.scalar_one_or_none()
+    if not src:
+        raise ValueError(
+            "В системе нет активного доступа WB для поставок — скопировать нечего. "
+            "Вставьте доступ к бирже вручную."
+        )
+
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_EXCHANGE_SERVICE,
+            IntegrationKey.label == WB_EXCHANGE_LABEL,
+        )
+    )
+    key = result.scalar_one_or_none()
+    config = {"status": "ACTIVE", "updated_at": utcnow().isoformat(), "source": "supply"}
+    if key:
+        if key.is_deleted:
+            key.restore()
+        key.encrypted_key = src.encrypted_key
+        key.is_active = True
+        key.config = config
+    else:
+        db.add(
+            IntegrationKey(
+                project_id=project_id,
+                service=WB_EXCHANGE_SERVICE,
+                label=WB_EXCHANGE_LABEL,
+                encrypted_key=src.encrypted_key,
+                is_active=True,
+                config=config,
+            )
+        )
+    await db.commit()
+    return {"status": "ACTIVE", "updated_at": config["updated_at"]}
+
+
+async def get_wb_exchange_client(db: AsyncSession, project_id: int) -> "WbPortalClient":
+    """Клиент биржи из её собственной сессии. Raises ValueError, если не задана."""
+    from backend.integrations.wb_portal_client import WbPortalClient
+
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_EXCHANGE_SERVICE,
+            IntegrationKey.is_active.is_(True),
+            IntegrationKey.is_deleted.is_(False),
+        )
+    )
+    key = result.scalar_one_or_none()
+    if not key:
+        raise ValueError(
+            "Сессия WB для биржи карточек не задана. Вставьте доступ в разделе «Биржа карточек»."
+        )
+    return WbPortalClient(_decrypt(key.encrypted_key))
+
+
+async def mark_wb_exchange_expired(db: AsyncSession, project_id: int) -> None:
+    """Пометить сессию биржи EXPIRED (после 401) — UI попросит свежий токен."""
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_EXCHANGE_SERVICE,
+            IntegrationKey.is_deleted.is_(False),
+        )
+    )
+    key = result.scalar_one_or_none()
+    if key:
+        key.is_active = False
+        key.config = {**(key.config or {}), "status": "EXPIRED", "expired_at": utcnow().isoformat()}
+        await db.commit()
+
+
+async def get_wb_exchange_status(db: AsyncSession, project_id: int) -> dict:
+    """Статус сессии биржи для UI: ACTIVE / EXPIRED / NONE (см. get_wb_portal_status)."""
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_EXCHANGE_SERVICE,
+            IntegrationKey.is_deleted.is_(False),
+        )
+    )
+    key = result.scalar_one_or_none()
+    if not key:
+        return {"status": "NONE"}
+    # Источник истины — is_active (см. комментарий в get_wb_portal_status).
+    cfg = key.config or {}
+    return {
+        "status": "ACTIVE" if key.is_active else "EXPIRED",
+        "updated_at": cfg.get("updated_at"),
+        "supplier_id": cfg.get("supplier_id"),
+    }
 
 
 async def sync_wb_sales(
