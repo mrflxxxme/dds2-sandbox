@@ -18,6 +18,7 @@ from sqlalchemy.orm import aliased, selectinload
 from backend.cache import invalidate_cache
 from backend.models.assembly import (
     AssemblyDraft,
+    AssemblyKind,
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,
@@ -234,6 +235,9 @@ async def _validate_available_for_assembly(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted.is_(False),
+            # kind=fbs резерв не держит — его держат открытые FBS-задания
+            # (второе слагаемое ниже); включить = задвоить вычет.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.status.in_(_RESERVING_STATUSES),
             AssemblyRequestItem.nomenclature_id.in_(nom_ids),
         )
@@ -286,6 +290,8 @@ async def _validate_available_for_assembly(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted.is_(False),
+            # Зеркало reserved_q выше: kind=fbs резерв не держит.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.status.in_(_RESERVING_STATUSES),
             AssemblyRequestItem.nomenclature_id.in_(deficit_nom_ids),
         )
@@ -577,6 +583,8 @@ async def _build_response(
         "warehouse_name": request.warehouse.name if request.warehouse else None,
         "number": request.number,
         "status": request.status,
+        "kind": request.kind,
+        "fbs_supply_id": request.fbs_supply_id,
         "wb_fbo_supply_id": request.wb_fbo_supply_id,
         "wb_supply_name": request.wb_fbo_supply.name if request.wb_fbo_supply else None,
         "wb_warehouse_name": request.wb_fbo_supply.warehouse_name if request.wb_fbo_supply else None,
@@ -892,6 +900,7 @@ async def list_assembly_requests(
     joint_only: bool = False,
     source: str | None = None,
     source_vehicle_id: int | None = None,
+    kind: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[AssemblyRequest], int]:
@@ -918,12 +927,18 @@ async def list_assembly_requests(
 
     source_vehicle_id: точечный фильтр «заявки ЭТОЙ машины» (уточняет
     source="pre_dist"; сам по себе тоже работает).
+
+    kind: "fbo" — операционные заявки логиста; "fbs" — учётные зеркала поставок
+    FBS (ведёт джоб); None — все. Валидация значения — на роутере
+    (ALLOWED_ASSEMBLY_KINDS → 422).
     """
     base = select(AssemblyRequest).where(
         AssemblyRequest.project_id == project_id,
         AssemblyRequest.is_deleted == False,  # noqa: E712
     )
 
+    if kind is not None:
+        base = base.where(AssemblyRequest.kind == kind)
     if warehouse_id is not None:
         base = base.where(AssemblyRequest.warehouse_id == warehouse_id)
     if counterparty_id is not None:

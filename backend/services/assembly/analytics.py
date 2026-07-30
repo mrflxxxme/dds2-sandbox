@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached, invalidate_cache
 from backend.models.assembly import (
+    AssemblyKind,
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,
@@ -1516,6 +1517,10 @@ async def get_assembly_flow_analytics(
     scope_filters = [
         AssemblyRequest.project_id == project_id,
         AssemblyRequest.is_deleted == False,  # noqa: E712
+        # kind=fbs — учётные зеркала поставок FBS: их статусы двигает джоб по фазе
+        # поставки, в метрики потока (длительности этапов) и аномалии (stuck_*,
+        # shipped_not_accepted — до сортировки СЦ проходят недели) они не входят.
+        AssemblyRequest.kind != AssemblyKind.FBS.value,
     ]
     if warehouse_ids:
         scope_filters.append(AssemblyRequest.warehouse_id.in_(warehouse_ids))

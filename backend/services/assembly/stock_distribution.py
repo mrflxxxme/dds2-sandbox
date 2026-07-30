@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
 from backend.models.assembly import (
+    AssemblyKind,
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,
@@ -145,6 +146,9 @@ async def _compute_distribution_cells(
         AssemblyRequest.project_id == project_id,
         AssemblyRequest.is_deleted == False,  # noqa: E712
         AssemblyRequest.status.in_(_PIPELINE_STATUSES),
+        # kind=fbs — учётное зеркало FBS: его товар уже посчитан бакетом ff_stock
+        # (и уезжает покупателям, а не на склады WB) — в пайплайн не входит.
+        AssemblyRequest.kind != AssemblyKind.FBS.value,
     ]
     if warehouse_ids:
         pipe_filters.append(AssemblyRequest.warehouse_id.in_(warehouse_ids))

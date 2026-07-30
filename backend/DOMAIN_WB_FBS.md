@@ -49,7 +49,7 @@ FBS = Fulfillment by Seller: товар лежит на НАШЕМ складе,
 ## Таблицы
 | Модель | Назначение | Ключ / constraint |
 |--------|------------|-------------------|
-| `WbFbsWarehouse` | склад продавца в кабинете WB + НАШИ настройки трансляции (`is_active`, `mode`, `stock_source`, буферы, `max_qty_per_sku`, `fbo_max_qty`) | `(project_id, wb_warehouse_id)` |
+| `WbFbsWarehouse` | склад продавца в кабинете WB + НАШИ настройки трансляции (`is_active`, `mode`, `stock_source`, буферы, `max_qty_per_sku`, `fbo_max_qty`, `auto_assembly`) | `(project_id, wb_warehouse_id)` |
 | `WbFbsWarehouseLink` | привязка «склад WB ← наш склад» | `(project_id, wb_warehouse_id, warehouse_id)` + partial unique `(project_id, warehouse_id) WHERE is_active` |
 | `WbFbsStockOverride` | ручное количество по КОНКРЕТНОМУ товару на КОНКРЕТНОМ складе продавца: одна колонка `qty` (0 = не отдавать, >0 = потолок) | `(project_id, wb_warehouse_id, nomenclature_id)` |
 | `WbFbsStockState` | последнее переданное состояние остатка по `(склад WB, chrtId)`: `qty_sent` / `qty_confirmed` | `(project_id, wb_warehouse_id, chrt_id)` |
@@ -114,6 +114,18 @@ upsert-ятся синком. `WbFbsStockOverride` тоже без SoftDelete н
   распределении остатка между привязками. PATCH отбивается ДО записи (не сохранить половину);
   `force=true` применяет как есть. `min_of_both` не гейтится — минимум не обещает больше учёта по
   построению. Тесты — `tests/test_wb_fbs_settings_gate.py`.
+
+### Авто-учёт сборки FBS (`auto_assembly` → заявки kind=fbs)
+`WbFbsWarehouse.auto_assembly` — тумблер «WMS этого склада сам заводит свои заявки по FBS-заказам,
+зеркаль их у нас учётными заявками на сборку». Джоб `services/wb_fbs/assembly_mirror.py`
+(`sync_fbs_assembly_mirror`) зовётся из джоба поставок (15 мин, после `sync_supplies`) и из джоба
+статусов (5 мин, после `writeoff_completed_orders` — статусы заявок догоняют статусы заданий без
+отдельного расписания). Одна поставка `WB-GI-…` = максимум одна заявка
+`AssemblyRequest(kind=fbs, fbs_supply_id)`; склад заявки — первый живой привязанный наш склад;
+только боевой контур (`contour_condition`); окно создания 14 дней. Зеркало НЕ резервирует и НЕ
+списывает сток (резерв — открытые задания, списание — только `writeoff_completed_orders`),
+ручные переходы — 422. Полная семантика — [DOMAIN_ASSEMBLY.md](DOMAIN_ASSEMBLY.md) «Заявки
+kind=fbs». Тесты — `tests/test_fbs_assembly_mirror.py`.
 
 ### Формула FBS-остатка (прямое направление: наш склад → WB)
 Считается в `services/wb_fbs/stock_service.py` для пары «наш склад × номенклатура», затем
@@ -543,7 +555,7 @@ available(наш склад, номенклатура) = max(0, quantity − res
 | POST | `/warehouses/sync` | ✓ | `warehouse_service.sync_warehouses` |
 | POST | `/warehouses` | ✓ | создать склад продавца В WB |
 | PUT | `/warehouses/{wb_warehouse_id}` | ✓ | переименовать (смена офиса — раз в сутки) |
-| PATCH | `/warehouses/{wb_warehouse_id}/settings` | ✓ | НАШИ настройки: `is_active`, `mode`, `stock_source`, буферы, `max_qty_per_sku`, `fbo_max_qty` (`-1` = снять гейт) |
+| PATCH | `/warehouses/{wb_warehouse_id}/settings` | ✓ | НАШИ настройки: `is_active`, `mode`, `stock_source`, буферы, `max_qty_per_sku`, `fbo_max_qty` (`-1` = снять гейт), `auto_assembly` (учётное зеркало сборки; под 409-гейт translate+ff_mirror НЕ попадает) |
 | POST | `/links` | ✓ | привязать наш склад |
 | DELETE | `/links/{link_id}` | ✓ | отвязать |
 | GET | `/stock/preview?wb_warehouse_id=` | | `stock_service.preview_stock` — строки с полной расшифровкой (`override_qty`, `fbo_qty`, `blocked_reason`) |
@@ -736,7 +748,10 @@ available(наш склад, номенклатура) = max(0, quantity − res
   `contour` (метка песочницы в зеркале заданий). Отдельного `rules_service` больше нет.
 - `backend/routers/wb_fbs.py` — endpoints с префиксом `/fbs`; page-ключ RBAC — `fbs`.
 - `backend/scheduler/jobs/wb_fbs.py` — пуш остатков, синк заданий (очередь `/orders/new` + догон
-  периодного окна) / статусов / поставок / складов.
+  периодного окна) / статусов / поставок / складов; после поставок и статусов — догон учётного
+  зеркала сборки (`assembly_mirror.sync_fbs_assembly_mirror`, best-effort).
+- `backend/services/wb_fbs/assembly_mirror.py` — учётные заявки сборки kind=fbs из поставок FBS
+  (склады с `auto_assembly=true`).
 - `backend/services/warehouse_stock_engine.py:get_open_fbs_reserved` +
   `backend/services/assembly/crud.py:_validate_available_for_assembly` — обратный гейт.
 - `tests/test_wb_fbs_assembly_gate.py` — тесты обратного гейта и инварианта совместимости.

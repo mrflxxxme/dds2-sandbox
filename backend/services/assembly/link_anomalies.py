@@ -21,7 +21,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
-from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+from backend.models.assembly import AssemblyKind, AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.assembly_wb import AssemblyWbSupply, WbSupplySyncStatus
 from backend.models.auth import Project
 from backend.models.cost import Nomenclature
@@ -219,6 +219,9 @@ async def _assemblies_without_ff(db: AsyncSession, project_id: int, warehouse_id
         AssemblyRequest.project_id == project_id,
         AssemblyRequest.is_deleted == False,  # noqa: E712
         AssemblyRequest.status.in_(_UNLINKED_STATUSES),
+        # kind=fbs — учётное зеркало: ФФ-привязки у него нет ПО ПОСТРОЕНИЮ,
+        # в аномалию «сборка без ФФ» не попадает.
+        AssemblyRequest.kind != AssemblyKind.FBS.value,
         AssemblyRequest.warehouse_id.in_(ff_warehouse_ids),
     ]
     if warehouse_ids:

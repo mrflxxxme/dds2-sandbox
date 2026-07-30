@@ -22,6 +22,7 @@ from sqlalchemy.orm import load_only
 
 from backend.cache import invalidate_cache
 from backend.models.assembly import (
+    AssemblyKind,
     AssemblyDraft,
     AssemblyRequest,
     AssemblyRequestItem,
@@ -1852,6 +1853,9 @@ async def _clamp_to_ff_capacity(
             AssemblyRequestItem.project_id == project_id,
             AssemblyRequest.is_deleted == False,  # noqa: E712 — SQLAlchemy expression
             AssemblyRequest.status.in_([s.value for s in _FF_CAPACITY_ACTIVE_STATUSES]),
+            # kind=fbs — учётное зеркало FBS: сток не держит (его держат открытые
+            # FBS-задания), в вычет «в сборке» не входит.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.warehouse_id.in_(ff_ids),
             AssemblyRequestItem.barcode.in_(barcodes),
         )

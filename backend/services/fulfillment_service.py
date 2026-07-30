@@ -65,6 +65,7 @@ from backend.models import (
     WarehouseStock,
 )
 from backend.models.assembly import (
+    AssemblyKind,
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,
@@ -1996,6 +1997,9 @@ async def _mark_linked_assemblies_ready(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.id.in_(list(ready_by_assembly)),
             AssemblyRequest.is_deleted == False,
+            # kind=fbs — учётное зеркало: статусы двигает ТОЛЬКО джоб fbs_mirror
+            # (страховка: ФФ-привязки у зеркала нет по построению).
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.status == AssemblyStatus.IN_PROGRESS.value,
         )
         # row-lock: ручной переход/линк в параллельной транзакции не должен
@@ -2178,6 +2182,8 @@ async def build_ff_board_text(db: AsyncSession, project_id: int, warehouse_id: i
         AssemblyRequest.is_deleted == False,
         Warehouse.is_deleted == False,
         AssemblyRequest.status.in_(_BOARD_STATUSES),
+        # kind=fbs — зеркало сборки, которую ФФ ведёт сам: на доску оператору не выводим.
+        AssemblyRequest.kind != AssemblyKind.FBS.value,
     ]
     if warehouse_id is not None:
         conditions.append(AssemblyRequest.warehouse_id == warehouse_id)
@@ -2428,6 +2434,8 @@ async def _collect_assembly_ship_candidates(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.id.in_(shipped_ids),
             AssemblyRequest.is_deleted == False,
+            # kind=fbs исключён — авто-шип списал бы сток, который спишет writeoff.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.status.in_(
                 [AssemblyStatus.VEHICLE_ASSIGNED.value, AssemblyStatus.READY.value]
             ),
@@ -3895,6 +3903,8 @@ async def _load_match_suggestions(
             AssemblyRequest.warehouse_id.in_({r.warehouse_id for r in targets}),
             AssemblyRequest.is_deleted == False,
             AssemblyRequest.status.in_(_SUGGEST_CANDIDATE_STATUSES),
+            # kind=fbs не связывается с заявками ФФ (учётное зеркало без ФФ-цикла).
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.id.not_in(linked_subq),
         )
         .limit(_SUGGEST_CANDIDATES_LIMIT)
@@ -4150,6 +4160,8 @@ async def list_unlinked_assemblies(
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted == False,
             AssemblyRequest.status.in_(_UNLINKED_ASSEMBLY_STATUSES),
+            # kind=fbs не предлагаем к связыванию с заявками ФФ.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             ~linked,
         )
         .order_by(AssemblyRequest.created_at.desc(), AssemblyRequest.id.desc())

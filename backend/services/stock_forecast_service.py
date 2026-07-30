@@ -378,6 +378,7 @@ async def _load_in_assembly_with_eta(
     т.к. ready_date уже учитывает время сборки).
     """
     from backend.models.assembly import (
+        AssemblyKind,
         AssemblyRequest,
         AssemblyRequestItem,
         AssemblyStatus,
@@ -407,6 +408,8 @@ async def _load_in_assembly_with_eta(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
             AssemblyRequest.status.in_(in_progress_statuses),
+            # kind=fbs — учётное зеркало FBS: не приедет на склад WB (FBO-пайплайн).
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             Nomenclature.article_wb.isnot(None),
         )
     )
@@ -446,6 +449,7 @@ async def _load_in_transit(db: AsyncSession, project_id: int) -> dict[int, list[
     Links AssemblyRequestItem (nomenclature_id) → Nomenclature (article_wb = nm_id).
     """
     from backend.models.assembly import (
+        AssemblyKind,
         AssemblyRequest,
         AssemblyRequestItem,
         AssemblyStatus,
@@ -471,6 +475,8 @@ async def _load_in_transit(db: AsyncSession, project_id: int) -> dict[int, list[
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
             AssemblyRequest.status.in_(active_statuses),
+            # kind=fbs — учётное зеркало FBS: не транзит на склад WB.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             Nomenclature.article_wb.isnot(None),
         )
     )
