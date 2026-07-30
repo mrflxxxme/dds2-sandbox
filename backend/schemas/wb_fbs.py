@@ -12,6 +12,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.models.wb_fbs import (
+    FBS_DELIVERED_STATUS,
     FBS_IN_DELIVERY_STATUS,
     FBS_IN_DELIVERY_STUCK_STATUS,
     FBS_SORTED_STATUS,
@@ -31,6 +32,7 @@ ALLOWED_ORDER_STATUS_FILTERS = [
     FBS_IN_DELIVERY_STATUS,
     FBS_SORTED_STATUS,
     FBS_IN_DELIVERY_STUCK_STATUS,
+    FBS_DELIVERED_STATUS,
 ]
 ALLOWED_STICKER_TYPES = ["svg", "zplv", "zplh", "png"]
 #: Коды причин «не списано» — контракт с фронтом (словарь WRITEOFF_REASON_LABEL
@@ -506,6 +508,9 @@ class FbsOrderListOut(BaseModel):
     #: ограничено сверху (см. сервис): у старых `complete` wb_status застывает
     #: (синк опрашивает не всё), и без потолка счётчик копил бы мёртвые строки.
     in_delivery_stuck_count: int = 0
+    #: «Завершённые» кабинета WB: complete, дошедшее до покупателя (sold/defect).
+    #: Окно периода применяется как к прочим фазам доставки.
+    delivered_count: int = 0
 
 
 class FbsWarehouseQueueRow(BaseModel):

@@ -409,6 +409,11 @@ class AssemblyRequestResponse(BaseModel):
 class AssemblyListResponse(BaseModel):
     items: list[AssemblyRequestResponse]
     total: int
+    #: Счётчики по СТАТУСАМ для фазовых вкладок (кабинет WB: «На сборке» /
+    #: «В доставке» / «Завершённые»): считаются при kind=fbs по ТЕМ ЖЕ фильтрам,
+    #: что и список, НО без статус-фильтра — цифра вкладки не зависит от того,
+    #: какая вкладка открыта. У kind=fbo пустой dict (вкладок фаз там нет).
+    status_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class BulkStatusResult(BaseModel):
