@@ -33,8 +33,8 @@ const SORT_OPTIONS: { value: string; label: string }[] = [
 
 const OUR_MODES: { key: '' | CardExchangeOurMode; label: string; hint: string }[] = [
     { key: '', label: 'Вся биржа', hint: 'Все объявления биржи' },
-    { key: 'categories', label: 'Корневые категории', hint: 'Объявления в предметах наших товаров' },
-    { key: 'exact', label: 'Предмет', hint: 'Наши артикулы на бирже (скан выдачи)' },
+    { key: 'categories', label: 'Корневые категории', hint: 'Объявления в корневых категориях наших товаров' },
+    { key: 'exact', label: 'Предмет', hint: 'Наши артикулы на бирже — поиск по всей выдаче' },
 ];
 
 const VIEW_TABS: { key: 'grid' | 'list'; label: string }[] = [
