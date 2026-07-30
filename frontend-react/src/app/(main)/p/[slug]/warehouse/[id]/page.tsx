@@ -2971,16 +2971,19 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
         // смешивает короба и штуки (603 «кол-во» = 600 коробов + 3 шт) и
         // читалось как штуки. Живой прогресс приёмки живёт в «Стадии».
         {
-            key: 'total_qty', label: 'Кол-во', align: 'right',
+            key: 'total_qty', label: 'Кол-во, шт', align: 'right',
+            // Единый канон: главное число — ВСЕГДА штуки (пересчёт коробов, когда
+            // есть карта кратности), «· N кор.» — подпись. Сырые кол-ва смешивали
+            // короба со штуками («заявлен 1» = 1 короб) — сравнивать нельзя было.
             render: (v: number | null, row: FfRequestRow) => {
-                const units = row.total_qty_units;
-                const main = kind === 'return' && units != null
+                const units = kind === 'assembly' ? null : row.total_qty_units;
+                const main = units != null
                     ? formatNumber(units, 0)
                     : v == null ? '—' : formatNumber(v, 0);
                 return (
                     <span style={{ whiteSpace: 'nowrap' }}>
                         <span>{main}</span>
-                        {kind === 'return' && row.total_boxes != null && (
+                        {kind !== 'assembly' && row.total_boxes != null && (
                             <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                                 {' '}· {formatNumber(row.total_boxes, 0)} кор.
                             </span>
@@ -2989,7 +2992,7 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 );
             },
             exportValue: (row: FfRequestRow) =>
-                (kind === 'return' ? row.total_qty_units ?? row.total_qty : row.total_qty) ?? '',
+                (kind === 'assembly' ? row.total_qty : row.total_qty_units ?? row.total_qty) ?? '',
         } as Column,
         // Кол-во в штуках россыпи (пересчёт коробов) — только сборка и только когда есть (Натали/migfull)
         ...(kind === 'assembly' && hasUnits ? [{
@@ -3003,19 +3006,33 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span>{v || row.status || '—'}</span>
                     {ffStageBadge(row)}
-                    {/* Живой факт приёмки Натали (received-строки, тянет синк):
-                        только когда реально начали принимать — «принято 0» на
-                        каждой активной строке было бы шумом. */}
-                    {kind === 'inbound' && !row.is_completed && (row.accepted_qty ?? 0) > 0 && (
-                        <span
-                            className="badge badge-success"
-                            style={{ fontSize: 11, padding: '2px 8px' }}
-                            title="Принято фактически — живой прогресс приёмки ФФ, обновляется синхронизацией"
-                        >
-                            принято {formatNumber(row.accepted_qty as number, 0)}
-                            {row.total_qty ? ` из ${formatNumber(row.total_qty, 0)}` : ''}
-                        </span>
-                    )}
+                    {/* Живой факт приёмки Натали (received-строки, тянет синк) —
+                        В ШТУКАХ, как и заявленное. Три состояния: частично (info),
+                        всё (success), сверх заявки (warning). «Принято 0» не
+                        показываем — шум на каждой активной строке. */}
+                    {kind === 'inbound' && !row.is_completed && (row.accepted_qty ?? 0) > 0 && (() => {
+                        const acc = row.accepted_qty as number;
+                        const planned = row.total_qty_units ?? row.total_qty;
+                        const over = planned != null && acc > planned;
+                        const full = planned != null && acc === planned;
+                        const badge = over ? 'badge-warning' : full ? 'badge-success' : 'badge-info';
+                        const label = planned == null
+                            ? `принято ${formatNumber(acc, 0)}`
+                            : over
+                                ? `принято ${formatNumber(acc, 0)} из ${formatNumber(planned, 0)} — сверх заявки`
+                                : full
+                                    ? `принято всё · ${formatNumber(acc, 0)}`
+                                    : `принято ${formatNumber(acc, 0)} из ${formatNumber(planned, 0)}`;
+                        return (
+                            <span
+                                className={`badge ${badge}`}
+                                style={{ fontSize: 11, padding: '2px 8px' }}
+                                title="Принято фактически (в штуках) — живой прогресс приёмки ФФ, обновляется синхронизацией"
+                            >
+                                {label}
+                            </span>
+                        );
+                    })()}
                     {ffRepackBadge(row, kind)}
                     {ffRepackPaired(row) && (
                         <button
