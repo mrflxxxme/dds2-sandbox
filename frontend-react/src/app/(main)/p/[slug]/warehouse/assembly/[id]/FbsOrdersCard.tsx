@@ -21,6 +21,7 @@ import {
     cabinetOrderStatus,
     durationSinceLabel,
     hoursAgoLabel,
+    isStuckAfterScan,
     num,
     orderAgeColor,
     parseUtcMs,
@@ -218,9 +219,12 @@ export default function FbsOrdersCard({
                     exportName={`FBS_${fbsSupplyId}`}
                     enableSorting
                     enablePagination={false}
-                    // Подсветка зависших: WB не отсканировал ≥ суток — наша зона.
+                    // Подсветка зависших: WB не отсканировал ≥ суток (наша зона)
+                    // ИЛИ отсканировал, а СЦ ≥ суток не принимает («Ждёт
+                    // сортировки» — канон 30.07, от scan-якоря поставки).
                     rowClassName={(o: FbsOrder) =>
                         orderAgeColor(o.created_at_wb, cabOf(o), now) === 'var(--color-danger)'
+                        || (cabOf(o) === 'awaiting_sort' && isStuckAfterScan(scanDt, now))
                             ? 'fbs-row-stuck'
                             : ''}
                 />

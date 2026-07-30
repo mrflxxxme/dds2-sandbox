@@ -28,6 +28,7 @@ import {
     daysSince,
     durationSinceLabel,
     hoursAgoLabel,
+    isStuckAfterScan,
     orderAgeColor,
     transitDaysColor,
     writeoffReasonLabel,
@@ -88,6 +89,7 @@ describe('ORDER_PHASE_LABEL (фазовые чипы вкладки «Заказ
     const ALLOWED_ORDER_STATUS_FILTERS = [
         'new', 'confirm', 'complete', 'cancel', 'cancel_carrier',
         'in_delivery', 'sorted', 'in_delivery_stuck', 'delivered',
+        'cancel_client', 'cancel_seller',
     ];
 
     it('каждый ключ словаря — валидный фильтр бэка', () => {
@@ -103,6 +105,11 @@ describe('ORDER_PHASE_LABEL (фазовые чипы вкладки «Заказ
         // «Переданы в WB» ушёл: complete читается как фаза кабинета.
         expect(ORDER_PHASE_LABEL.complete).toBe('В доставке');
         expect(ORDER_PHASE_LABEL.cancel).toBe('Отменено');
+    });
+
+    it('разрез отмен (канон 30.07): два чипа со стороной решения', () => {
+        expect(ORDER_PHASE_LABEL.cancel_client).toBe('Отмена клиента');
+        expect(ORDER_PHASE_LABEL.cancel_seller).toBe('Наша отмена');
     });
 
     it('под-фильтры «В доставке» — тоже валидные фильтры (второй ряд чипов)', () => {
@@ -207,15 +214,25 @@ describe('cabinetOrderStatus (статусы кабинета WB — канон 
         expect(cabinetOrderStatus('complete', 'defect', true, true)).toBe('defect');
     });
 
-    it('отмены с обеих осей → cancelled', () => {
-        expect(cabinetOrderStatus('cancel', 'canceled', true, true)).toBe('cancelled');
-        expect(cabinetOrderStatus('new', 'declined_by_client', false, false)).toBe('cancelled');
+    it('отмены с обеих осей → cancelled_* со стороной решения (канон 30.07)', () => {
+        // Клиентский wbStatus главнее любого supplierStatus.
+        expect(cabinetOrderStatus('new', 'declined_by_client', false, false)).toBe('cancelled_client');
+        expect(cabinetOrderStatus('new', 'canceled_by_client', false, false)).toBe('cancelled_client');
+        expect(cabinetOrderStatus('cancel', 'declined_by_client', true, true)).toBe('cancelled_client');
+        // Перевозчик — отдельный бейдж.
+        expect(cabinetOrderStatus('cancel_carrier', 'canceled', true, true)).toBe('cancelled_carrier');
+        expect(cabinetOrderStatus('cancel_carrier', null, true, true)).toBe('cancelled_carrier');
+        // Всё прочее отменённое — наша сторона.
+        expect(cabinetOrderStatus('cancel', 'canceled', true, true)).toBe('cancelled_seller');
+        expect(cabinetOrderStatus('cancel', null, false, false)).toBe('cancelled_seller');
+        expect(cabinetOrderStatus('complete', 'canceled', true, true)).toBe('cancelled_seller');
     });
 
     it('у каждого ключа есть ярлык и бейдж (контракт словаря)', () => {
         const keys: FbsCabinetStatusKey[] = [
             'new', 'assembling', 'ship_goods', 'awaiting_sort', 'sorted',
             'ready_for_pickup', 'postponed', 'sold', 'defect', 'cancelled',
+            'cancelled_client', 'cancelled_seller', 'cancelled_carrier',
         ];
         for (const k of keys) {
             expect(CABINET_STATUS_LABEL[k].label.length, `ключ ${k}`).toBeGreaterThan(2);
@@ -224,6 +241,40 @@ describe('cabinetOrderStatus (статусы кабинета WB — канон 
         expect(CABINET_STATUS_LABEL.ship_goods.label).toBe('Отгрузите товар');
         expect(CABINET_STATUS_LABEL.awaiting_sort.label).toBe('Ждёт сортировки');
         expect(CABINET_STATUS_LABEL.sorted.label).toBe('Отсортировано');
+        expect(CABINET_STATUS_LABEL.cancelled_client.label).toBe('Отменён клиентом');
+        expect(CABINET_STATUS_LABEL.cancelled_seller.label).toBe('Отменён нами');
+        expect(CABINET_STATUS_LABEL.cancelled_carrier.label).toBe('Отменён перевозчиком');
+    });
+});
+
+describe('isStuckAfterScan (подсветка «Ждёт сортировки» ≥ суток от скана)', () => {
+    const now = Date.parse('2026-07-30T12:00:00Z');
+    const DAY = 86_400_000;
+
+    it('порог — ровно TRANSIT_WARN_DAYS (сутки) от scan-якоря', () => {
+        expect(isStuckAfterScan('2026-07-30T00:00:00Z', now)).toBe(false); // 12 ч — едет штатно
+        expect(isStuckAfterScan(new Date(now - TRANSIT_WARN_DAYS * DAY).toISOString(), now)).toBe(true);
+        expect(isStuckAfterScan('2026-07-27T12:00:00Z', now)).toBe(true); // 3 дн
+    });
+
+    it('за потолком окна (TRANSIT_STALE_DAYS) — не подсвечиваем: застывший статус', () => {
+        expect(isStuckAfterScan(new Date(now - TRANSIT_STALE_DAYS * DAY).toISOString(), now)).toBe(true);
+        expect(isStuckAfterScan(new Date(now - (TRANSIT_STALE_DAYS + 1) * DAY).toISOString(), now)).toBe(false);
+    });
+
+    it('без scan-якоря — false: точки отсчёта нет', () => {
+        expect(isStuckAfterScan(null, now)).toBe(false);
+        expect(isStuckAfterScan(undefined, now)).toBe(false);
+        expect(isStuckAfterScan('не дата', now)).toBe(false);
+    });
+
+    it('naive-UTC без Z читается как UTC (parseUtcMs, не Date.parse-локаль)', () => {
+        expect(isStuckAfterScan('2026-07-27T12:00:00', now))
+            .toBe(isStuckAfterScan('2026-07-27T12:00:00Z', now));
+    });
+
+    it('канон 30.07: порог — 1 сутки', () => {
+        expect(TRANSIT_WARN_DAYS).toBe(1);
     });
 });
 

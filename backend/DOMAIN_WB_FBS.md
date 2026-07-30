@@ -467,12 +467,25 @@ available(наш склад, номенклатура) = max(0, quantity − res
 - **Псевдо-статус `in_delivery_stuck` — «зависло в пути на СЦ»** (`FBS_IN_DELIVERY_STUCK_STATUS`,
   `in_delivery_stuck_condition`): подмножество `in_delivery`, чей якорь передачи
   (`COALESCE(supply.scan_dt, supply.closed_at, order.written_off_at)`, LEFT JOIN поставки по
-  `supply_id`) старше `_TRANSIT_STUCK_DAYS` (2 дн), но не старше `_TRANSIT_STUCK_MAX_DAYS` (30 дн —
+  `supply_id`) старше `_TRANSIT_STUCK_DAYS` (1 сутки от скана QR — канон владельца 30.07: СЦ за
+  день не принял конкретный заказ = зависание), но не старше `_TRANSIT_STUCK_MAX_DAYS` (30 дн —
   потолок против застывшего `wbStatus` у заданий, выпавших из окна опроса `_STATUS_MAX_ORDERS`).
   🔴 Фильтр и счётчики (`in_delivery_stuck_count` списка, `in_delivery_stuck` карточки склада)
   ИГНОРИРУЮТ период страницы: зависшее — очередь проблем, не история. Строки фазы «едет» несут
   `transit_days` — дни от того же якоря, `int(total_seconds() // 86400)`, НЕ `timedelta.days`
   (грабля int-усечения); якоря поставок страницы поднимаются одним IN-запросом.
+- **Разрез отмен — псевдо-статусы `cancel_client` / `cancel_seller`** (канон владельца 30.07,
+  `FBS_CANCEL_CLIENT_STATUS` / `FBS_CANCEL_SELLER_STATUS`, `cancel_client_condition` /
+  `cancel_seller_condition`): эффективно отменённое (`effective_status_expr ∈ FBS_TERMINAL`)
+  делится по стороне решения. Клиент — `wb_status ∈ FBS_WB_CLIENT_CANCEL_STATUSES`
+  (canceled_by_client / declined_by_client), чей бы `supplierStatus` ни стоял; мы — всё прочее
+  отменённое (supplier cancel / cancel_carrier с не-клиентским wb, wb canceled; NULL-`wb_status`
+  ловится веткой `IS NULL` — SQL-NULL в `NOT IN` молча выкинул бы строку из разбиения). Счётчики
+  `cancel_client_count` / `cancel_seller_count` считаются в одном запросе со `status_counts`
+  (окно периода уважается симметрично счётчику отмен) и дают точное разбиение:
+  client + seller == cancel + cancel_carrier (закреплено тестом). Фронт: два чипа
+  «Отмена клиента» / «Наша отмена» вместо одного «Отменено»; бейдж строки —
+  `cancelled_client/seller/carrier` («Отменён клиентом / нами / перевозчиком»).
 - **`GET /orders/writeoff-issues` — видимость незакрытых списаний** (`writeoff_issues`,
   `@cached("fbs:orders", ttl=60)` с дискриминатором `kind` в ключе — иначе ключ совпадал бы с
   `warehouse_summary`): агрегат «complete без `written_off_at`» по (склад продавца, товар,
@@ -599,7 +612,7 @@ available(наш склад, номенклатура) = max(0, quantity − res
 | GET | `/stock/pushes` | | журнал прогонов |
 | GET | `/stock/reconcile` | | первичная сверка «захват»: что стоит в кабинете против нашего расчёта |
 | POST | `/stock/reconcile` | ✓ | применить сверку (обнулить чужое / выровнять базу дельты) |
-| GET | `/orders` | | `orders_service.list_orders`; `status` принимает и псевдо-статусы `in_delivery` / `sorted` / `in_delivery_stuck` / `delivered` |
+| GET | `/orders` | | `orders_service.list_orders`; `status` принимает и псевдо-статусы `in_delivery` / `sorted` / `in_delivery_stuck` / `delivered` / `cancel_client` / `cancel_seller` |
 | GET | `/orders/stats` | | `orders_stats.orders_stats` — выручка за период, разрезы (бренд/предмет/под-категория/статус/дни) и доля в объёме воронки |
 | GET | `/orders/writeoff-issues` | | `orders_service.writeoff_issues` — задания `complete`, которые нечем списать: причина + остатки привязанных складов |
 | POST | `/orders/sync` | ✓ | `orders_service.sync_new_orders` — только очередь `/orders/new` |
