@@ -63,6 +63,9 @@ function Segmented<T extends string>({ tabs, value, onChange }: {
     );
 }
 
+/** Корзина биржи в кабинете WB — там и оформляется перенос выбранных карточек. */
+const WB_CART_URL = 'https://seller.wildberries.ru/card-exchange/cart';
+
 const money = (v: number | null) => (v == null ? '—' : `${formatNumber(Number(v), 0)} ₽`);
 
 /** Фото объявления. Берём НЕ meta.photo (внешний CDN WB — режется CSP `img-src 'self'`),
@@ -164,8 +167,9 @@ export default function CardExchangePage() {
     const [search, setSearch] = useState('');
     const [searchInput, setSearchInput] = useState('');
     const [sort, setSort] = useState('feedbacksCount:desc');
-    const [rootCategory, setRootCategory] = useState('');
     const [view, setView] = useState<'grid' | 'list'>('grid');
+    // Быстрый выбор одной НАШЕЙ категории — отдельным селектором слева.
+    const [rootCategory, setRootCategory] = useState('');
     // Фильтры как на бирже WB: предмет, бренд, продавец, рейтинг, остатки.
     const [brandsRef, setBrandsRef] = useState<string[]>([]);
     const [suppliersRef, setSuppliersRef] = useState<ExchangeSupplier[]>([]);
@@ -213,19 +217,25 @@ export default function CardExchangePage() {
     const demo = !!session && !sessionOk && IS_DEV;
     const showUi = sessionOk || demo;
 
-    // В фильтре показываем НАШИ категории (где есть наши товары) — их единицы, а не 96.
-    // Если наших нет (пустая номенклатура) — показываем все, иначе фильтр был бы пустым.
-    const categoryOptions = useMemo(() => {
-        const ours = categories.filter(c => c.is_ours);
-        const list = ours.length ? ours : categories;
-        return list
+    /** Для селектора слева — только НАШИ категории (где есть свои товары). */
+    const ourCategoryOptions = useMemo(() => (
+        categories
+            .filter(c => c.is_ours)
+            .slice()
+            .sort((a, b) => (b.our_count ?? 0) - (a.our_count ?? 0) || a.category.localeCompare(b.category, 'ru'))
+            .map(c => ({ value: c.category, label: `${c.category} (${c.our_count})` }))
+    ), [categories]);
+
+    // В фильтре — ВСЕ корневые категории справочника; наши подняты наверх с числом.
+    const categoryOptions = useMemo(() => (
+        categories
             .slice()
             .sort((a, b) => (b.our_count ?? 0) - (a.our_count ?? 0) || a.category.localeCompare(b.category, 'ru'))
             .map(c => ({
                 value: c.category,
                 label: c.our_count ? `${c.category} (${c.our_count})` : c.category,
-            }));
-    }, [categories]);
+            }))
+    ), [categories]);
 
     // Сквозной id запроса: применяем ТОЛЬКО ответ последнего (смена фильтров, debounce,
     // двойной монтаж StrictMode держат несколько запросов в полёте).
@@ -238,7 +248,11 @@ export default function CardExchangePage() {
         try {
             const res = await api.getCardExchangeShowcase({
                 search: search.trim() || null,
-                root_categories: rootCategory ? [rootCategory] : null,
+                // Селектор слева и мультивыбор в фильтрах объединяются.
+                root_categories: (() => {
+                    const all = [...new Set([...(rootCategory ? [rootCategory] : []), ...filters.rootCategories])];
+                    return all.length ? all : null;
+                })(),
                 subject_ids: filters.subjectIds.length ? filters.subjectIds.map(Number) : null,
                 brands: filters.brands.length ? filters.brands : null,
                 supplier_ids: filters.supplierIds.length ? filters.supplierIds.map(Number) : null,
@@ -376,12 +390,12 @@ export default function CardExchangePage() {
                 {showUi && (<>
                     {/* Фильтры — в одну строку, как в «Управлении рекламой» */}
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-                        <SearchSelect value={rootCategory} onChange={setRootCategory} options={categoryOptions}
+                        <SearchSelect value={rootCategory} onChange={setRootCategory} options={ourCategoryOptions}
                             placeholder="Категория: все" allLabel="Все категории" maxWidth={280} />
                         <SearchSelect value={sort} onChange={setSort} options={SORT_OPTIONS}
                             placeholder="Больше отзывов" allLabel="Больше отзывов" maxWidth={220} />
                         <Segmented tabs={VIEW_TABS} value={view} onChange={setView} />
-                        <FiltersPanel value={filters} onApply={setFilters}
+                        <FiltersPanel value={filters} onApply={setFilters} categories={categoryOptions}
                             subjects={subjectsRef} brands={brandsRef} suppliers={suppliersRef} />
                     </div>
 
@@ -392,7 +406,14 @@ export default function CardExchangePage() {
                             style={{ flex: '1 1 280px', maxWidth: 380, background: 'var(--color-bg-input)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '7px 12px', fontSize: 13, color: 'var(--color-text)' }} />
                         <span style={{ marginLeft: 'auto', fontSize: 12.5, color: 'var(--color-text-muted)' }}>
                             {session?.supplier_id && <>Кабинет: {session.supplier_id} · </>}
-                            Показано: {formatNumber(visibleAds.length, 0)} · В корзине: {formatNumber(cart.size, 0)}
+                            Показано: {formatNumber(visibleAds.length, 0)} ·{' '}
+                            {cart.size > 0 ? (
+                                <a href={WB_CART_URL} target="_blank" rel="noopener noreferrer"
+                                    title="Открыть корзину биржи в кабинете WB — там оформляется перенос"
+                                    style={{ color: 'var(--color-accent)', fontWeight: 600 }}>
+                                    В корзине: {formatNumber(cart.size, 0)} ↗
+                                </a>
+                            ) : <>В корзине: 0</>}
                         </span>
                     </div>
 

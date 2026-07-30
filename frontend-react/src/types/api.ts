@@ -8752,6 +8752,8 @@ export interface ExchangeSupplier {
 export interface ExchangeSubject {
     id: number;
     name: string;
+    /** Корневая категория предмета из справочника — UI отмечает её при выборе предмета. */
+    root_category?: string | null;
 }
 
 /** ВНИМАНИЕ: WB принимает рейтинг только как {min,max} (число → 400). */

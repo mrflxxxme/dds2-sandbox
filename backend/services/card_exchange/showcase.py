@@ -350,8 +350,21 @@ async def list_suppliers(db: AsyncSession, project_id: int) -> list[dict]:
 
 
 async def list_subjects(db: AsyncSession, project_id: int) -> list[dict]:
-    """Справочник предметов биржи (для фильтра): [{"id","name"}]."""
-    return await _ref_call(db, project_id, lambda c: c.showcase_subjects())
+    """Предметы биржи + корневая категория каждого: [{"id","name","root_category"}].
+
+    Категорию проставляем из справочника Дениса, чтобы UI мог сам отмечать корневую
+    категорию при выборе предмета (у WB такой связи в справочнике нет — поле пустое).
+    """
+    subjects = await _ref_call(db, project_id, lambda c: c.showcase_subjects())
+    return [
+        {
+            "id": s.get("id"),
+            "name": s.get("name"),
+            "root_category": cat_ref.root_category_for_subject(s.get("name") or ""),
+        }
+        for s in subjects
+        if s.get("id") is not None
+    ]
 
 
 async def _ref_call(
