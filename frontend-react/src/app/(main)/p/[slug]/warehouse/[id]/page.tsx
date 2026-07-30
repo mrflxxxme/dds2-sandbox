@@ -41,20 +41,21 @@ type WarehouseTab = 'all' | 'receipts' | 'shipments' | 'assemblies' | 'transfers
 const WAREHOUSE_TABS: WarehouseTab[] = ['all', 'receipts', 'shipments', 'assemblies', 'transfers', 'stock', 'defects', 'delivery', 'requisites', 'fulfillment', 'ffbilling'];
 
 // Под-вкладки раздела «Фулфилмент» — вложенная навигация внутри одной вкладки.
-type FfSubTab = 'stocks' | 'boxes' | 'assembly' | 'inbound' | 'history' | 'sync';
+type FfSubTab = 'stocks' | 'boxes' | 'assembly' | 'inbound' | 'return' | 'history' | 'sync';
 // boxes (сопоставление короб→россыпь) — только для migfull («Натали»); фильтруется по провайдеру.
 const FF_SUB_TABS: { key: FfSubTab; label: string; migfullOnly?: boolean }[] = [
     { key: 'stocks', label: 'Остатки' },
     { key: 'boxes', label: 'Сопоставление', migfullOnly: true },
     { key: 'assembly', label: 'Сборка' },
     { key: 'inbound', label: 'Приёмки' },
+    { key: 'return', label: 'Возвраты' },
     { key: 'history', label: 'История' },
     { key: 'sync', label: 'Синхронизация' },
 ];
 // Старые deep-ссылки ?tab=ff-* → раздел «Фулфилмент» + нужная под-вкладка (back-compat).
 const FF_TAB_ALIASES: Record<string, FfSubTab> = {
     'ff-stocks': 'stocks', 'ff-boxes': 'boxes', 'ff-assembly': 'assembly', 'ff-inbound': 'inbound',
-    'ff-history': 'history', 'ff-sync': 'sync',
+    'ff-return': 'return', 'ff-history': 'history', 'ff-sync': 'sync',
 };
 
 export default function WarehouseDetailPage() {
@@ -1981,6 +1982,7 @@ function FulfillmentTabs({
             {activeSub === 'boxes' && <FfBoxPacksTab warehouseId={warehouseId} />}
             {activeSub === 'assembly' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="assembly" />}
             {activeSub === 'inbound' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="inbound" />}
+            {activeSub === 'return' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="return" />}
             {activeSub === 'history' && <FfHistoryTab warehouseId={warehouseId} slug={slug} />}
             {activeSub === 'sync' && <FfSyncTab warehouseId={warehouseId} />}
         </>
@@ -2736,6 +2738,34 @@ function FfSyncTab({ warehouseId }: { warehouseId: number }) {
 
 /* ─── Tabs: ФФ сборка / ФФ приёмки ──────────────────────────────────────── */
 
+/* Бейджи «вскрытие коробов» (migfull, «Натали»): вскрытие оформляется парой документов
+   «Возврат» (короба) + «Поступление» (россыпь) — сток не двигается, это переупаковка. */
+function ffRepackBadge(row: FfRequestRow, kind: FfRequestKind) {
+    if (row.repack_return_id != null) {
+        const pair = row.repack_pair_number || '—';
+        const title = kind === 'return'
+            ? `Пара к поступлению ${pair}`
+            : `Пара к возврату ${pair}: ФФ вскрыл короба под FBS — сток не двигается, это переупаковка`;
+        return (
+            <span className="badge badge-info" style={{ fontSize: 11, padding: '2px 8px' }} title={title}>
+                Вскрытие коробов
+            </span>
+        );
+    }
+    if (kind === 'return' && row.repack_unpaired) {
+        return (
+            <span
+                className="badge badge-warning"
+                style={{ fontSize: 11, padding: '2px 8px' }}
+                title="Поступления-пары нет — возможно, реальный возврат товара со склада ФФ. Проверьте и оформите приход вручную, если товар едет к вам"
+            >
+                Без пары
+            </span>
+        );
+    }
+    return null;
+}
+
 function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug: string; kind: FfRequestKind }) {
     const [rows, setRows] = useState<FfRequestRow[]>([]);
     const [loading, setLoading] = useState(true);
@@ -2897,31 +2927,35 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             render: (v: string | null) => (v ? formatDate(v) : '—'),
         },
         { key: 'type_name', label: 'Тип', render: (v: string | null) => v || '—' },
-        // Только для сборки: склад отгрузки МП и заявленное кол-во (из деталки skladbot)
+        // Только для сборки: склад отгрузки МП (из деталки skladbot)
         ...(kind === 'assembly' ? [
             {
                 key: 'dest_warehouse', label: 'Склад отгрузки',
                 render: (v: string | null) => v || '—',
                 exportValue: (row: FfRequestRow) => row.dest_warehouse || '',
             } as Column,
+        ] : []),
+        // Заявленное кол-во: сборка и возвраты (у приёмок его нет)
+        ...(kind === 'assembly' || kind === 'return' ? [
             {
                 key: 'total_qty', label: 'Кол-во товаров', align: 'right',
                 render: (v: number | null) => (v == null ? '—' : formatNumber(v, 0)),
                 exportValue: (row: FfRequestRow) => row.total_qty ?? '',
             } as Column,
-            // Кол-во в штуках россыпи (пересчёт коробов) — только когда есть (Натали/migfull)
-            ...(hasUnits ? [{
-                key: 'total_qty_units', label: 'Кол-во (шт)', align: 'right',
-                render: (v: number | null) => (v == null ? '—' : formatNumber(v, 0)),
-                exportValue: (row: FfRequestRow) => row.total_qty_units ?? '',
-            } as Column] : []),
         ] : []),
+        // Кол-во в штуках россыпи (пересчёт коробов) — только сборка и только когда есть (Натали/migfull)
+        ...(kind === 'assembly' && hasUnits ? [{
+            key: 'total_qty_units', label: 'Кол-во (шт)', align: 'right',
+            render: (v: number | null) => (v == null ? '—' : formatNumber(v, 0)),
+            exportValue: (row: FfRequestRow) => row.total_qty_units ?? '',
+        } as Column] : []),
         {
             key: 'stage_title', label: 'Стадия',
             render: (v: string | null, row: FfRequestRow) => (
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span>{v || row.status || '—'}</span>
                     {ffStageBadge(row)}
+                    {ffRepackBadge(row, kind)}
                 </span>
             ),
             exportValue: (row: FfRequestRow) => row.stage_title || row.status || '',
@@ -3155,9 +3189,11 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                         ? 'Архив пуст'
                         : (kind === 'assembly'
                             ? 'Нет заявок на сборку — выполните синхронизацию во вкладке «Реквизиты»'
-                            : 'Нет заявок на приёмку — выполните синхронизацию во вкладке «Реквизиты»'))}
-                emptyIcon={showArchived ? '🗄️' : (kind === 'assembly' ? '🧰' : '📥')}
-                exportName={kind === 'assembly' ? 'ff_assembly_requests' : 'ff_inbound_requests'}
+                            : (kind === 'return'
+                                ? 'Нет возвратов — выполните синхронизацию во вкладке «Реквизиты»'
+                                : 'Нет заявок на приёмку — выполните синхронизацию во вкладке «Реквизиты»')))}
+                emptyIcon={showArchived ? '🗄️' : (kind === 'assembly' ? '🧰' : (kind === 'return' ? '↩️' : '📥'))}
+                exportName={kind === 'assembly' ? 'ff_assembly_requests' : (kind === 'return' ? 'ff_return_requests' : 'ff_inbound_requests')}
             />
 
             {toast && <Toast message={toast} onClose={() => setToast('')} />}

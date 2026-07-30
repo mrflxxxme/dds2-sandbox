@@ -6264,7 +6264,7 @@ export interface FfNomenclatureOption {
   subject: string | null;
 }
 
-export type FfRequestKind = 'assembly' | 'inbound';
+export type FfRequestKind = 'assembly' | 'inbound' | 'return';
 
 /** Нормализованный высокоуровневый статус ФФ-заявки (бэкенд: _ff_status_code) */
 export type FfStatusCode = 'assembling' | 'ready' | 'shipped' | 'expected' | 'accepted' | 'archived' | 'expired';
@@ -6273,7 +6273,7 @@ export interface FfRequestRow {
   id: number;
   external_id: string;
   number: string | null;
-  kind: 'assembly' | 'inbound' | 'other';
+  kind: 'assembly' | 'inbound' | 'return' | 'other';
   type_name: string | null;
   status: string | null;
   stage_code: string | null;
@@ -6300,6 +6300,12 @@ export interface FfRequestRow {
   linked_status: string | null;
   /** состав нашего документа расходится с заявкой(ами) ФФ (true — расхождение, null — неизвестно) */
   linked_mismatch?: boolean | null;
+  /** Вскрытие коробов (migfull): id заявки-пары — у поступления это пара-возврат, у возврата пара-поступление */
+  repack_return_id?: number | null;
+  /** Номер заявки-пары по вскрытию коробов (для подписи бейджа) */
+  repack_pair_number?: string | null;
+  /** Возврат без пары-поступления — возможно, реальный возврат товара со склада ФФ */
+  repack_unpaired?: boolean;
   /** Локальный архив (наша пометка, не статус провайдера) */
   local_archived: boolean;
   local_archived_at: string | null;
@@ -6311,7 +6317,7 @@ export interface FfStatusEvent {
   fulfillment_request_id: number;
   external_id: string;
   number: string | null;
-  kind: 'assembly' | 'inbound' | 'other';
+  kind: 'assembly' | 'inbound' | 'return' | 'other';
   provider: string;
   /** created — заявка впервые появилась; changed — статус/стадия изменились */
   event_type: 'created' | 'changed';
@@ -8341,6 +8347,90 @@ export interface FbsOrderStats {
   by_subject: FbsOrderStatRow[];
   by_subcategory: FbsOrderStatRow[];
   funnel: FbsOrderStatsFunnel;
+}
+
+/** Точность вехи: точные даты WB/наших операций против журнала переходов. */
+export type FbsStagePrecision = 'exact' | 'approx';
+
+/** Зона ответственности этапа: до сортировки — наша, после — логистики WB. */
+export type FbsStageZone = 'us' | 'wb' | 'total';
+
+/** Шаг динамики. Подбирается бэкендом по длине периода, если не задан. */
+export type FbsStageBucket = 'day' | 'week' | 'month';
+
+/**
+ * Этап пути задания за период.
+ *
+ * `count` — сколько заданий реально ЗАМЕРЕНО. Ноль при `precision: 'approx'`
+ * значит «истории ещё нет» (журнал переходов начинается с момента наполнения),
+ * а НЕ «этап проходит мгновенно» — подпись обязана это различать.
+ */
+export interface FbsStageRow {
+  key: string;
+  title: string;
+  zone: FbsStageZone;
+  precision: FbsStagePrecision;
+  /** Сводный этап перекрывает соседние — складывать с обычными нельзя. */
+  summary: boolean;
+  hint: string;
+  count: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+  avg_hours: number | null;
+  min_hours: number | null;
+  max_hours: number | null;
+  /** Замеры, выброшенные как недостоверные (обратный порядок вех / потолок). */
+  dropped: number;
+}
+
+/** Этап × склад продавца, с которого собирают. */
+export interface FbsStageWarehouseRow {
+  stage: string;
+  wb_warehouse_id?: number | null;
+  warehouse_name: string;
+  count: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+  avg_hours: number | null;
+}
+
+/** Точка динамики: этап × бакет даты ЗАВЕРШЕНИЯ этапа (МСК). */
+export interface FbsStageDynamicsRow {
+  stage: string;
+  bucket: string;
+  count: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+  avg_hours: number | null;
+}
+
+/** Что висит на этапе прямо сейчас. Период на этот блок не влияет. */
+export interface FbsStageQueueRow {
+  phase: string;
+  title: string;
+  count: number;
+  median_age_hours: number | null;
+  max_age_hours: number | null;
+}
+
+/** Покрытие журнала переходов — подпись под этапами точности `approx`. */
+export interface FbsStageJournal {
+  events: number;
+  since?: string | null;
+  orders: number;
+}
+
+/** Аналитика этапов FBS: длительности, разрез по складам, динамика, очередь. */
+export interface FbsStageAnalytics {
+  date_from: string;
+  date_to: string;
+  bucket: FbsStageBucket;
+  wb_warehouse_id?: number | null;
+  stages: FbsStageRow[];
+  by_warehouse: FbsStageWarehouseRow[];
+  dynamics: FbsStageDynamicsRow[];
+  queue: FbsStageQueueRow[];
+  journal: FbsStageJournal;
 }
 
 /**
