@@ -5,6 +5,7 @@ import type { ExchangeSubject, ExchangeSupplier } from '@/types/api';
 
 /** Значения фильтров биржи (то, что уходит в запрос). */
 export interface ExchangeFilters {
+    rootCategories: string[];   // корневые категории из справочника (наши)
     subjectIds: string[];
     brands: string[];
     supplierIds: string[];
@@ -13,18 +14,19 @@ export interface ExchangeFilters {
 }
 
 export const EMPTY_FILTERS: ExchangeFilters = {
-    subjectIds: [], brands: [], supplierIds: [], ratingMin: '', stock: '',
+    rootCategories: [], subjectIds: [], brands: [], supplierIds: [], ratingMin: '', stock: '',
 };
 
 /** Сколько разделов реально задано — для счётчика на кнопке. */
 export function countActive(f: ExchangeFilters): number {
-    return (f.subjectIds.length ? 1 : 0) + (f.brands.length ? 1 : 0) + (f.supplierIds.length ? 1 : 0)
+    return (f.rootCategories.length ? 1 : 0) + (f.subjectIds.length ? 1 : 0) + (f.brands.length ? 1 : 0) + (f.supplierIds.length ? 1 : 0)
         + (f.ratingMin ? 1 : 0) + (f.stock ? 1 : 0);
 }
 
-type SectionKey = 'subject' | 'brand' | 'rating' | 'supplier' | 'stock';
+type SectionKey = 'category' | 'subject' | 'brand' | 'rating' | 'supplier' | 'stock';
 
 const SECTIONS: { key: SectionKey; label: string }[] = [
+    { key: 'category', label: 'Корневая категория' },
     { key: 'subject', label: 'Предмет' },
     { key: 'brand', label: 'Бренд' },
     { key: 'rating', label: 'Рейтинг' },
@@ -71,15 +73,16 @@ function CheckList({ options, values, onToggle }: {
  * Правки копятся в ЧЕРНОВИКЕ и уходят наружу только по «Применить» — иначе каждый
  * чекбокс дёргал бы биржу отдельным запросом.
  */
-export default function FiltersPanel({ value, onApply, subjects, brands, suppliers }: {
+export default function FiltersPanel({ value, onApply, categories, subjects, brands, suppliers }: {
     value: ExchangeFilters;
     onApply: (f: ExchangeFilters) => void;
+    categories: { value: string; label: string }[];
     subjects: ExchangeSubject[];
     brands: string[];
     suppliers: ExchangeSupplier[];
 }) {
     const [open, setOpen] = useState(false);
-    const [section, setSection] = useState<SectionKey>('subject');
+    const [section, setSection] = useState<SectionKey>('category');
     const [draft, setDraft] = useState<ExchangeFilters>(value);
 
     // При каждом открытии черновик = применённые значения (отменённые правки не залипают).
@@ -87,6 +90,7 @@ export default function FiltersPanel({ value, onApply, subjects, brands, supplie
 
     const activeCount = countActive(value);
     const hasDot: Record<SectionKey, boolean> = {
+        category: draft.rootCategories.length > 0,
         subject: draft.subjectIds.length > 0,
         brand: draft.brands.length > 0,
         rating: !!draft.ratingMin,
@@ -94,7 +98,7 @@ export default function FiltersPanel({ value, onApply, subjects, brands, supplie
         stock: !!draft.stock,
     };
 
-    const toggle = (key: 'subjectIds' | 'brands' | 'supplierIds', v: string) => {
+    const toggle = (key: 'rootCategories' | 'subjectIds' | 'brands' | 'supplierIds', v: string) => {
         setDraft(d => ({
             ...d,
             [key]: d[key].includes(v) ? d[key].filter(x => x !== v) : [...d[key], v],
@@ -125,9 +129,12 @@ export default function FiltersPanel({ value, onApply, subjects, brands, supplie
                     border: '1px solid #e5e7eb', borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
                     width: 620, maxWidth: '90vw', overflow: 'hidden', display: 'flex', flexDirection: 'column',
                 }}>
-                    <div style={{ display: 'flex', minHeight: 320 }}>
+                    {/* Высота ЗАФИКСИРОВАНА: иначе длинный чеклист (1280 предметов) растягивает
+                        панель и тянет за собой всю страницу — внутренний overflow не срабатывает,
+                        пока родитель может расти. */}
+                    <div style={{ display: 'flex', height: 380, maxHeight: '60vh', minHeight: 0 }}>
                         {/* Разделы */}
-                        <div style={{ width: 180, borderRight: '1px solid #f3f4f6', padding: 8, flexShrink: 0 }}>
+                        <div style={{ width: 180, borderRight: '1px solid #f3f4f6', padding: 8, flexShrink: 0, overflowY: 'auto' }}>
                             {SECTIONS.map(sec => (
                                 <button key={sec.key} type="button" onClick={() => setSection(sec.key)}
                                     style={{
@@ -145,7 +152,11 @@ export default function FiltersPanel({ value, onApply, subjects, brands, supplie
                         </div>
 
                         {/* Содержимое раздела */}
-                        <div style={{ flex: 1, padding: 12, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+                        <div style={{ flex: 1, padding: 12, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                            {section === 'category' && (
+                                <CheckList values={draft.rootCategories} onToggle={v => toggle('rootCategories', v)}
+                                    options={categories} />
+                            )}
                             {section === 'subject' && (
                                 <CheckList values={draft.subjectIds} onToggle={v => toggle('subjectIds', v)}
                                     options={subjects.map(s => ({ value: String(s.id), label: s.name }))} />
@@ -159,7 +170,7 @@ export default function FiltersPanel({ value, onApply, subjects, brands, supplie
                                     options={suppliers.map(s => ({ value: String(s.id), label: s.name }))} />
                             )}
                             {section === 'rating' && (
-                                <div>
+                                <div style={{ overflowY: 'auto' }}>
                                     <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 10 }}>
                                         Рейтинг не ниже
                                     </div>

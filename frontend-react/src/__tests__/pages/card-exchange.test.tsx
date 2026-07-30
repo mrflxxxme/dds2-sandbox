@@ -170,7 +170,8 @@ describe('Страница «Биржа карточек»', () => {
         getShowcase.mockResolvedValue(makeResp());
         render(<CardExchangePage />);
         await screen.findByText('Тестовая карточка', { exact: false });
-        fireEvent.click(screen.getByRole('button', { name: /Категория/ }));
+        fireEvent.click(screen.getByRole('button', { name: /Фильтры/ }));
+        fireEvent.click(await screen.findByRole('button', { name: 'Корневая категория' }));
         expect(await screen.findByText('Автоаксессуары (12)')).toBeInTheDocument();
         expect(screen.queryByText(/^Красота/)).toBeNull();  // не наша — в фильтре не показываем
     });

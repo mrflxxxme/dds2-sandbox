@@ -164,7 +164,6 @@ export default function CardExchangePage() {
     const [search, setSearch] = useState('');
     const [searchInput, setSearchInput] = useState('');
     const [sort, setSort] = useState('feedbacksCount:desc');
-    const [rootCategory, setRootCategory] = useState('');
     const [view, setView] = useState<'grid' | 'list'>('grid');
     // Фильтры как на бирже WB: предмет, бренд, продавец, рейтинг, остатки.
     const [brandsRef, setBrandsRef] = useState<string[]>([]);
@@ -238,7 +237,7 @@ export default function CardExchangePage() {
         try {
             const res = await api.getCardExchangeShowcase({
                 search: search.trim() || null,
-                root_categories: rootCategory ? [rootCategory] : null,
+                root_categories: filters.rootCategories.length ? filters.rootCategories : null,
                 subject_ids: filters.subjectIds.length ? filters.subjectIds.map(Number) : null,
                 brands: filters.brands.length ? filters.brands : null,
                 supplier_ids: filters.supplierIds.length ? filters.supplierIds.map(Number) : null,
@@ -269,7 +268,7 @@ export default function CardExchangePage() {
         } finally {
             if (myReq === reqIdRef.current) setLoading(false);
         }
-    }, [search, rootCategory, filters, sort, cursors]);
+    }, [search, filters, sort, cursors]);
 
     /** Смена фильтра/сортировки — всегда с первой страницы (курсоры старой выдачи не годятся). */
     const reload = useCallback(() => {
@@ -278,13 +277,13 @@ export default function CardExchangePage() {
         setPage(0);
         void load(0);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [search, rootCategory, filters, sort]);
+    }, [search, filters, sort]);
 
     useEffect(() => {
         if (!sessionOk) return;
         reload();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [search, rootCategory, filters, sort, sessionOk]);
+    }, [search, filters, sort, sessionOk]);
 
     const toggleCart = async (ad: ShowcaseAd) => {
         setActionError(null);
@@ -376,12 +375,10 @@ export default function CardExchangePage() {
                 {showUi && (<>
                     {/* Фильтры — в одну строку, как в «Управлении рекламой» */}
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-                        <SearchSelect value={rootCategory} onChange={setRootCategory} options={categoryOptions}
-                            placeholder="Категория: все" allLabel="Все категории" maxWidth={280} />
                         <SearchSelect value={sort} onChange={setSort} options={SORT_OPTIONS}
                             placeholder="Больше отзывов" allLabel="Больше отзывов" maxWidth={220} />
                         <Segmented tabs={VIEW_TABS} value={view} onChange={setView} />
-                        <FiltersPanel value={filters} onApply={setFilters}
+                        <FiltersPanel value={filters} onApply={setFilters} categories={categoryOptions}
                             subjects={subjectsRef} brands={brandsRef} suppliers={suppliersRef} />
                     </div>
 
