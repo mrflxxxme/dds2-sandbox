@@ -105,6 +105,21 @@ export default function FiltersPanel({ value, onApply, categories, subjects, bra
         }));
     };
 
+    /** Выбор предмета подтягивает его корневую категорию (снятие категорию не трогает —
+     *  её мог выбрать сам пользователь или другой предмет из той же категории). */
+    const toggleSubject = (id: string) => {
+        setDraft(d => {
+            const on = d.subjectIds.includes(id);
+            const subjectIds = on ? d.subjectIds.filter(x => x !== id) : [...d.subjectIds, id];
+            let rootCategories = d.rootCategories;
+            if (!on) {
+                const cat = subjects.find(s => String(s.id) === id)?.root_category;
+                if (cat && !rootCategories.includes(cat)) rootCategories = [...rootCategories, cat];
+            }
+            return { ...d, subjectIds, rootCategories };
+        });
+    };
+
     const apply = () => { onApply(draft); setOpen(false); };
     const reset = () => { setDraft(EMPTY_FILTERS); onApply(EMPTY_FILTERS); setOpen(false); };
 
@@ -158,7 +173,7 @@ export default function FiltersPanel({ value, onApply, categories, subjects, bra
                                     options={categories} />
                             )}
                             {section === 'subject' && (
-                                <CheckList values={draft.subjectIds} onToggle={v => toggle('subjectIds', v)}
+                                <CheckList values={draft.subjectIds} onToggle={toggleSubject}
                                     options={subjects.map(s => ({ value: String(s.id), label: s.name }))} />
                             )}
                             {section === 'brand' && (

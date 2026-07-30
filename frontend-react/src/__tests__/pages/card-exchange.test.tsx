@@ -53,7 +53,9 @@ describe('Страница «Биржа карточек»', () => {
         ]);
         vi.mocked(api.getCardExchangeBrands).mockResolvedValue(['AUTOPROFI', 'CARFORT']);
         vi.mocked(api.getCardExchangeSuppliers).mockResolvedValue([{ id: 1, name: 'ИП Смирнов' }]);
-        vi.mocked(api.getCardExchangeSubjects).mockResolvedValue([{ id: 100, name: 'Компрессоры автомобильные' }]);
+        vi.mocked(api.getCardExchangeSubjects).mockResolvedValue([
+            { id: 100, name: 'Компрессоры автомобильные', root_category: 'Автоаксессуары' },
+        ]);
         vi.mocked(api.getCardExchangeCounters).mockResolvedValue({ showcase: 10916 });
         addToCart.mockReset();
         addToCart.mockResolvedValue({ ok: true });
@@ -174,5 +176,21 @@ describe('Страница «Биржа карточек»', () => {
         fireEvent.click(await screen.findByRole('button', { name: 'Корневая категория' }));
         expect(await screen.findByText('Автоаксессуары (12)')).toBeInTheDocument();
         expect(screen.queryByText(/^Красота/)).toBeNull();  // не наша — в фильтре не показываем
+    });
+
+    it('выбор предмета сам отмечает его корневую категорию', async () => {
+        getShowcase.mockResolvedValue(makeResp());
+        render(<CardExchangePage />);
+        await screen.findByText('Тестовая карточка', { exact: false });
+        fireEvent.click(screen.getByRole('button', { name: /Фильтры/ }));
+        fireEvent.click(await screen.findByRole('button', { name: 'Предмет' }));
+        fireEvent.click(await screen.findByLabelText('Компрессоры автомобильные'));
+        // категория подтянулась автоматически
+        fireEvent.click(screen.getByRole('button', { name: /Корневая категория/ }));
+        expect((await screen.findByLabelText('Автоаксессуары (12)')) as HTMLInputElement).toBeChecked();
+        fireEvent.click(screen.getByRole('button', { name: 'Применить' }));
+        await waitFor(() => expect(getShowcase.mock.calls.at(-1)?.[0]).toMatchObject({
+            subject_ids: [100], root_categories: ['Автоаксессуары'],
+        }));
     });
 });
