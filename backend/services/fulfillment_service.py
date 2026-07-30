@@ -1596,21 +1596,33 @@ _MIGFULL_RETURN_STAGE_TITLES = {"uploaded": "Загружен", "closed": "За�
 def _normalize_migfull_return(row: dict) -> dict:
     """migfull /returns row → нормализованная заявка kind=return.
 
-    Строки состава ВСТРОЕНЫ в список (incoming_lines) и остаются в raw —
-    по ним работают матчер пары «вскрытия коробов» и деталка. total_qty =
-    Σ quantity строк incoming (у коробовых SKU — В КОРОБАХ, как отдаёт ФФ;
-    пересчёт в штуки — забота матчера/деталки). reference (PVB-…) коллизирует
-    с нумерацией приёмок/отгрузок — это РАЗНЫЕ нумерации, уникальность
-    только по guid (external_id).
+    Строки состава ВСТРОЕНЫ в список и остаются в raw — по ним работают матчер
+    пары «вскрытия коробов» и деталка. У возврата ДВА вида строк:
+    `incoming_lines` — заявленный состав, `outgoing_lines` — фактически
+    обработанное. Возвраты, заведённые оператором ФФ сразу «по факту»
+    (историческая серия PVB-000001342…2067), несут ТОЛЬКО outgoing — без
+    фолбэка они выглядели пустыми («Провайдер не вернул состав», total_qty
+    NULL). total_qty = Σ quantity заявленного, фолбэк — факт (у коробовых
+    SKU — В КОРОБАХ, как отдаёт ФФ; пересчёт в штуки — забота
+    матчера/деталки). reference (PVB-…) коллизирует с нумерацией
+    приёмок/отгрузок — это РАЗНЫЕ нумерации, уникальность только по guid
+    (external_id).
     """
     status = str(row.get("status") or "")
     title = row.get("status_display") or _MIGFULL_RETURN_STAGE_TITLES.get(status) or status or None
-    total = min(
-        sum(
+
+    def _lines_total(field: str, *, with_service: bool = False) -> int:
+        return sum(
             _safe_int(line.get("quantity"))
-            for line in _migfull_line_rows(row.get("incoming_lines"))
-            if not _is_migfull_service_item(line.get("product") or {})
-        ),
+            for line in _migfull_line_rows(row.get(field))
+            if with_service or not _is_migfull_service_item(line.get("product") or {})
+        )
+
+    # Последний фолбэк — грузоместа (возврат брака «мешками» несёт только их).
+    total = min(
+        _lines_total("incoming_lines")
+        or _lines_total("outgoing_lines")
+        or _lines_total("outgoing_lines", with_service=True),
         _QTY_MAX,
     )
     return {
@@ -4506,12 +4518,16 @@ def _migfull_products_from_lines(
     fact_lines: list[dict],
     *,
     fact_field: str,
+    include_service_items: bool = False,
 ) -> list[dict]:
     """Строки заявки migfull → позиции по товарам (ключ — product_guid).
 
     base_lines — заявленное (planned/incoming) → qty; fact_lines — факт
     (shipped → delivery_qty / received → accepted_qty), брак received
-    (is_defective) → defect_qty. Служебные позиции отфильтрованы.
+    (is_defective) → defect_qty. Служебные позиции отфильтрованы —
+    КРОМЕ include_service_items=True (возвраты: исторические возвраты брака
+    состоят ТОЛЬКО из грузомест «мешок ПП … (выявленный брак)», и без них
+    деталка выглядела пустой, как будто провайдер не вернул состав).
     """
     by_guid: dict[str, dict] = {}
 
@@ -4519,7 +4535,7 @@ def _migfull_products_from_lines(
         product = line.get("product")
         if not isinstance(product, dict):
             product = {}
-        if _is_migfull_service_item(product):
+        if _is_migfull_service_item(product) and not include_service_items:
             return None
         guid = str(line.get("product_guid") or product.get("guid") or "")
         if not guid:
@@ -5719,16 +5735,23 @@ async def get_request_detail(
             # Без ключа (disconnect) деталка работает из зеркала+raw как раньше.
             mig_client = await _try_migfull_client(db, project_id, warehouse_id)
         elif req.kind == FfRequestKind.RETURN.value:
-            # Возврат: строки ВСТРОЕНЫ в списочный метод (`/returns` →
-            # incoming_lines в raw) — отдельного lines-ресурса нет, а поход в
-            # submissions/{guid}/lines с guid'ом возврата бьёт чужой ресурс:
-            # migfull отвечает 500 «No query results for model [Submission]»,
-            # и пять ретраев открывали circuit breaker на 120 с (кейс деталки
-            # PVB-0000068, 30.07). Рендерим из raw, ШК добираем best-effort.
+            # Возврат: строки ВСТРОЕНЫ в списочный метод (`/returns` → raw) —
+            # отдельного lines-ресурса нет, а поход в submissions/{guid}/lines
+            # с guid'ом возврата бьёт чужой ресурс: migfull отвечает 500
+            # «No query results for model [Submission]», и пять ретраев
+            # открывали circuit breaker на 120 с (кейс деталки PVB-0000068,
+            # 30.07). Заявлено — incoming_lines, факт обработки —
+            # outgoing_lines; исторические возвраты «по факту» несут ТОЛЬКО
+            # outgoing — тогда факт и есть состав. ШК добираем best-effort.
+            ret_incoming = _migfull_line_rows(raw.get("incoming_lines"))
+            ret_outgoing = _migfull_line_rows(raw.get("outgoing_lines"))
             mig_products = _migfull_products_from_lines(
-                _migfull_line_rows(raw.get("incoming_lines")),
-                [],
+                ret_incoming or ret_outgoing,
+                ret_outgoing,
                 fact_field="accepted_qty",
+                # Возврат брака часто состоит ТОЛЬКО из грузомест («мешок ПП …
+                # (выявленный брак)») — это и есть его состав, не мусор.
+                include_service_items=True,
             )
             mig_client = await _try_migfull_client(db, project_id, warehouse_id)
         else:
