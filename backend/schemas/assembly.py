@@ -1107,7 +1107,8 @@ class StockMismatchSkuRow(BaseModel):
     article_seller: str | None
     brand: str | None
     name: str | None
-    ff_good: int  # у ФФ (зеркало провайдера), штук россыпи
+    ff_good: int  # у ФФ (зеркало провайдера), штук россыпи; уже ЗА ВЫЧЕТОМ ff_fbs
+    ff_fbs: int = 0  # вычтено из ff_good: отгружено по FBS у нас, провайдер не списал
     our_quantity: int  # у нас годный (WarehouseStock.quantity)
     our_defect: int = 0  # у нас брак (учтён в diff только для migfull)
     diff: int  # ff_good − (our_quantity + our_defect для migfull); >0 — у ФФ больше
@@ -1124,6 +1125,7 @@ class StockMismatchWarehouseRow(BaseModel):
     surplus_our_qty: int  # суммарно у нас больше, штук
     surplus_our_sku: int  # на скольких SKU у нас больше
     net_diff: int  # surplus_ff_qty - surplus_our_qty (нетто ФФ − наш)
+    ff_fbs_qty: int = 0  # Σ ff_fbs по SKU склада: сколько шума сняла FBS-поправка
     sku_total: int  # всего SKU с расхождением
     truncated: bool  # rows обрезаны до лимита (на складе больше расхождений)
     synced_at: str | None  # ISO — последний синк остатков ФФ

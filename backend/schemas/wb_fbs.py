@@ -141,6 +141,10 @@ class FbsWarehouseSettingsUpdate(BaseModel):
     mode: str | None = None
     #: -1 в запросе = «снять гейт» (None не отличить от «не передано»).
     fbo_max_qty: int | None = Field(None, ge=-1)
+    #: Подтверждение рискованной комбинации «translate + ff_mirror», когда
+    #: зеркало ФФ выше нашего учёта: без force сервис отвечает 409 с цифрами
+    #: разрыва, с force — применяет как есть (решение человека).
+    force: bool = False
 
     @field_validator("mode")
     @classmethod
@@ -464,6 +468,10 @@ class FbsOrderOut(BaseModel):
     comment: str | None = None
     written_off_at: datetime | None = None
     synced_at: datetime
+    #: Сколько дней задание едет: от передачи поставки (scan_dt → closed_at →
+    #: written_off_at, что есть) до сейчас. Только у `complete`, ещё не принятых
+    #: СЦ; у прочих фаз и без якоря — None.
+    transit_days: int | None = None
 
 
 class FbsOrderListOut(BaseModel):
@@ -476,6 +484,10 @@ class FbsOrderListOut(BaseModel):
     #: сумма счётчиков и так равна вкладке «Все».
     in_delivery_count: int = 0
     sorted_count: int = 0
+    #: Зависшие в пути: переданы ≥ N дней назад, СЦ так и не принял. Окно
+    #: ограничено сверху (см. сервис): у старых `complete` wb_status застывает
+    #: (синк опрашивает не всё), и без потолка счётчик копил бы мёртвые строки.
+    in_delivery_stuck_count: int = 0
 
 
 class FbsWarehouseQueueRow(BaseModel):
@@ -489,6 +501,10 @@ class FbsWarehouseQueueRow(BaseModel):
     #: Фазы доставки — за выбранный период (`complete` копится вечно).
     in_delivery: int = 0
     sorted: int = 0
+    #: Зависшие в пути (передано ≥ N дней, СЦ не принял) — БЕЗ периода, как
+    #: очередь сборки: пока не отсортировано — вопросы к нам, и зависшее
+    #: обязано быть видно независимо от выбранного окна.
+    in_delivery_stuck: int = 0
 
 
 class FbsWarehouseSummaryOut(BaseModel):
@@ -501,6 +517,44 @@ class FbsWarehouseSummaryOut(BaseModel):
     #: Итог по всем складам — считает бэкенд, чтобы «Все склады» не расходились
     #: с суммой карточек при обрезке выдачи.
     totals: dict[str, int] = Field(default_factory=dict)
+
+
+class FbsWriteoffIssueRow(BaseModel):
+    """Переданные задания, которые НЕЧЕМ списать со склада (агрегат по товару).
+
+    Списание идемпотентно ретраится каждые 5 минут, но пока причина жива,
+    задание молча висит `written_off_at IS NULL` — единственным следом был
+    warning в логе воркера. Эта строка делает отказ видимым.
+    """
+
+    wb_warehouse_id: int | None = None
+    wb_warehouse_name: str | None = None
+    #: Привязанный наш склад (первый активный) — куда списание пыталось попасть.
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    nomenclature_id: int | None = None
+    article: str | None = None
+    barcode: str | None = None
+    #: Сколько заданий не списано по этому товару на этом складе продавца.
+    stuck: int = 0
+    #: Самое старое непроведённое (created_at_wb) — возраст проблемы.
+    oldest_at: datetime | None = None
+    #: Остаток на привязанных складах: почему «нечем» (обычно 0).
+    our_qty: int = 0
+    our_defect: int = 0
+    #: Россыпь в зеркале ФФ (None — зеркала нет): физически товар у провайдера
+    #: может лежать — сигнал, что наш ledger отстал, а не что товара нет.
+    ff_loose: int | None = None
+    #: no_stock — остаток 0 | no_card — нет карточки товара | no_link — склад
+    #: продавца не привязан к нашему.
+    reason: str = "no_stock"
+
+
+class FbsWriteoffIssuesOut(BaseModel):
+    """Сводка незакрытых списаний: `GET /fbs/orders/writeoff-issues`."""
+
+    total_orders: int = 0
+    rows: list[FbsWriteoffIssueRow] = Field(default_factory=list)
 
 
 class FbsOrderBackfillRequest(BaseModel):
