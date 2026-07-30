@@ -429,13 +429,23 @@ async def _build_items_with_stock(
     return items_out
 
 
-def _fbs_supply_status_value(supply: Any) -> str | None:
-    """Производный статус поставки FBS (`supply_status()`), строкой для схемы."""
+def _fbs_supply_status_value(supply: Any, mirror_status: str | None = None) -> str | None:
+    """Производный статус поставки FBS (`supply_status()`), строкой для схемы.
+
+    WB не всегда отдаёт `scanDt` (СЦ принимает и без скана QR продавца —
+    живой кейс WB-GI-258027541: задания давно sorted/sold, а scanDt пуст) —
+    тройка тогда врёт «Отгрузите поставку». Факт приёмки виден только по
+    заданиям (канон DOMAIN_WB_FBS), а зеркало kind=fbs его уже вывело:
+    DELIVERED = все живые задания прошли СЦ → фаза минимум «в обработке».
+    """
     if supply is None:
         return None
-    from backend.models.wb_fbs import supply_status
+    from backend.models.wb_fbs import FbsSupplyStatus, supply_status
 
-    return supply_status(bool(supply.done), supply.scan_dt, supply.reject_dt)
+    base = supply_status(bool(supply.done), supply.scan_dt, supply.reject_dt)
+    if base == FbsSupplyStatus.TO_SHIP.value and mirror_status == AssemblyStatus.DELIVERED.value:
+        return FbsSupplyStatus.IN_DELIVERY.value
+    return base
 
 
 async def _build_response(
@@ -614,7 +624,7 @@ async def _build_response(
         "status": request.status,
         "kind": request.kind,
         "fbs_supply_id": request.fbs_supply_id,
-        "fbs_supply_status": _fbs_supply_status_value(fbs_supply),
+        "fbs_supply_status": _fbs_supply_status_value(fbs_supply, str(request.status)),
         "fbs_scan_dt": fbs_supply.scan_dt if fbs_supply is not None else None,
         "wb_fbo_supply_id": request.wb_fbo_supply_id,
         "wb_supply_name": request.wb_fbo_supply.name if request.wb_fbo_supply else None,
