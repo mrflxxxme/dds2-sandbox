@@ -47,6 +47,7 @@ from backend.routers import (
     monitoring,
     raw_data,
     payment_requests,
+    payroll,
     planning,
     pricing,
     projects,
@@ -683,6 +684,12 @@ app.include_router(
     prefix="/api/v1",
     tags=["Loans"],
     dependencies=[Depends(require_internal)],  # internal-only (defense-in-depth vs ext accounts)
+)
+app.include_router(
+    payroll.router,
+    prefix="/api/v1",
+    tags=["Payroll"],
+    dependencies=[Depends(require_internal)],  # зарплатные данные — только внутренние аккаунты
 )
 # Лендер-портал внешнего заёмщика — кросс-проектный, скоуп по контрагентам внутри роутера.
 app.include_router(

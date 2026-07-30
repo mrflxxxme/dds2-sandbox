@@ -268,6 +268,42 @@ async def get_opiu(
             for mk, v in raw.items()
         }
 
+    # ── 7d. ФОТ (начислено) ──
+    # Зарплата — операционный расход, но по НАЧИСЛЕНИЮ (платят в следующем
+    # месяце и частично мимо счёта), поэтому источник — payroll-ведомость, а не
+    # выписка. Выплаты сотрудникам из выписки исключены из opex_by_type в SQL
+    # (см. build_opex_by_type_sql) — иначе задвоение. К бренду/артикулу ФОТ не
+    # относится — при фильтре строку не показываем (как прочий opex).
+    # Под-месячное окно (напр. 01–10.06) получает ФОТ ПРОПОРЦИОНАЛЬНО дням
+    # пересечения с месяцем — иначе неполный месяц тащил бы весь месячный ФОТ
+    # (тот же класс бага, что месячный бакет COGS движка оценки, см. learnings).
+    # Разбивка (канон юзера): «Менеджеры» = все процентные начисления команд,
+    # фикс-оклады — по должности (пустая → «Без должности»). Pro-rata
+    # применяется к КАЖДОЙ компоненте, родитель остаётся суммой подстрок.
+    payroll_fot: dict[str, dict] = {}
+    if not brand and not article and months_sorted:
+        import calendar as _calendar
+        from datetime import datetime as _datetime
+
+        from backend.services.payroll_service import get_monthly_accruals
+
+        raw_fot = await get_monthly_accruals(db, project_id, months_sorted)
+        for mk in months_sorted:
+            month_start = _datetime.strptime(mk, "%Y-%m").date()
+            days_in_month = _calendar.monthrange(month_start.year, month_start.month)[1]
+            month_end = month_start.replace(day=days_in_month)
+            overlap = (min(date_to, month_end) - max(date_from, month_start)).days + 1
+            factor = min(overlap, days_in_month) / days_in_month if overlap > 0 else 0.0
+            acc = raw_fot.get(mk) or {}
+            payroll_fot[mk] = {
+                "total": float(acc.get("total", 0)) * factor,
+                "managers": float(acc.get("managers", 0)) * factor,
+                "by_position": {
+                    pos: float(v) * factor
+                    for pos, v in (acc.get("by_position") or {}).items()
+                },
+            }
+
     pnl_result: dict = _build_pnl_result(
         monthly_data,
         total_data,
@@ -282,8 +318,18 @@ async def get_opiu(
         tax_by_month=tax_by_month,
         opex_by_type=opex_by_type,
         loan_cost=loan_cost,
+        payroll_fot=payroll_fot,
     )
     return pnl_result
+
+
+def _fot_pos_key(position: str) -> str:
+    """Стабильный row-key подстроки должности: не-алфанум → '_', регистронезависимо.
+
+    Ключ — просто строка для expand/collapse на фронте; кириллица допустима.
+    """
+    slug = "".join(ch if ch.isalnum() else "_" for ch in position.strip().lower()).strip("_")
+    return slug or "no_position"
 
 
 def _build_pnl_result(
@@ -300,6 +346,7 @@ def _build_pnl_result(
     tax_by_month=None,
     opex_by_type=None,
     loan_cost=None,
+    payroll_fot=None,
 ):
     """Build the final P&L rows and return the result dict.
 
@@ -401,8 +448,60 @@ def _build_pnl_result(
     loan_inc_t = sum(loan_inc_m.values())
     loan_t = loan_int_t + loan_fee_t - loan_inc_t
 
-    ops_m = {mk: sum(c[3][mk] for c in opex_child_defs) + loan_m[mk] for mk in months_sorted}
-    ops_t = sum(c[0] for c in opex_child_defs) + loan_t
+    # ФОТ (начислено): из payroll-ведомости, по НАЧИСЛЕНИЮ за расчётный месяц.
+    # Кассовые выплаты сотрудникам исключены из opex_by_type (см. get_opiu 7d).
+    # Родитель = total; подстроки «Менеджеры» + по должностям идут в ops_m/ops_t
+    # ТОЛЬКО через родителя (total == managers + Σ by_position) — не задваиваем.
+    payroll_fot = payroll_fot or {}
+    fot_m = {mk: float(payroll_fot.get(mk, {}).get("total", 0.0)) for mk in months_sorted}
+    fot_t = sum(fot_m.values())
+    fot_mgr_m = {
+        mk: float(payroll_fot.get(mk, {}).get("managers", 0.0)) for mk in months_sorted
+    }
+    fot_mgr_t = sum(fot_mgr_m.values())
+    fot_pos_defs = []  # (total, position, monthly) — по убыванию суммы
+    fot_positions = {
+        pos for v in payroll_fot.values() for pos in (v.get("by_position") or {})
+    }
+    for pos in fot_positions:
+        pos_m = {
+            mk: float(payroll_fot.get(mk, {}).get("by_position", {}).get(pos, 0.0))
+            for mk in months_sorted
+        }
+        pos_t = sum(pos_m.values())
+        if pos_t:
+            fot_pos_defs.append((pos_t, pos, pos_m))
+    fot_pos_defs.sort(key=lambda x: (-x[0], x[1]))
+
+    # Копеечная сходимость: pro-rata масштабирует каждую компоненту отдельно,
+    # а строки отчёта округляются до 2 знаков — Σ детей может уйти от родителя
+    # на ±0.01. Остаток месяца досыпаем крупнейшему ребёнку (largest-remainder).
+    if fot_pos_defs or any(fot_mgr_m.values()):
+        for mk in months_sorted:
+            fot_m[mk] = round(fot_m[mk], 2)
+            fot_mgr_m[mk] = round(fot_mgr_m[mk], 2)
+            for _t, _pos, pos_m in fot_pos_defs:
+                pos_m[mk] = round(pos_m[mk], 2)
+            delta = round(
+                fot_m[mk] - fot_mgr_m[mk] - sum(d[2][mk] for d in fot_pos_defs), 2
+            )
+            if delta:
+                if fot_pos_defs and fot_pos_defs[0][2][mk] >= fot_mgr_m[mk]:
+                    fot_pos_defs[0][2][mk] = round(fot_pos_defs[0][2][mk] + delta, 2)
+                else:
+                    fot_mgr_m[mk] = round(fot_mgr_m[mk] + delta, 2)
+        fot_t = sum(fot_m.values())
+        fot_mgr_t = sum(fot_mgr_m.values())
+        fot_pos_defs = [
+            (sum(pos_m.values()), pos, pos_m) for _t, pos, pos_m in fot_pos_defs
+        ]
+        fot_pos_defs.sort(key=lambda x: (-x[0], x[1]))
+
+    ops_m = {
+        mk: sum(c[3][mk] for c in opex_child_defs) + loan_m[mk] + fot_m[mk]
+        for mk in months_sorted
+    }
+    ops_t = sum(c[0] for c in opex_child_defs) + loan_t + fot_t
 
     ebitda_m = {mk: margin_m[mk] - ops_m[mk] for mk in months_sorted}
     ebitda_t = margin_t - ops_t
@@ -490,6 +589,40 @@ def _build_pnl_result(
                 _r("loan_interest_income", "Проценты полученные", 2, False,
                    neg_m, -loan_inc_t, real_m, real_t, parent_key="opex_loan_interest")
             )
+    if fot_t:
+        # Подстроки: «Менеджеры» (процент команд) + фикс-оклады по должностям.
+        # Ключи должностей динамические — slug от названия (см. _fot_pos_key).
+        fot_children = []
+        used_keys = {"opex_payroll_fot_managers"}
+        if fot_mgr_t:
+            fot_children.append(
+                _r("opex_payroll_fot_managers", "Менеджеры", 2, False,
+                   fot_mgr_m, fot_mgr_t, real_m, real_t, parent_key="opex_payroll_fot")
+            )
+        for pos_t, pos, pos_m in fot_pos_defs:
+            key = "opex_payroll_fot_" + _fot_pos_key(pos)
+            while key in used_keys:  # коллизия слугов («Менеджеры»/regsiter-diff)
+                key += "_x"
+            used_keys.add(key)
+            fot_children.append(
+                _r(key, pos, 2, False, pos_m, pos_t, real_m, real_t,
+                   parent_key="opex_payroll_fot")
+            )
+        opex_child_rows.append(
+            _r(
+                "opex_payroll_fot",
+                "ФОТ (начислено)",
+                1,
+                False,
+                fot_m,
+                fot_t,
+                real_m,
+                real_t,
+                expandable=bool(fot_children),
+                parent_key="operating_expenses",
+            )
+        )
+        opex_child_rows.extend(fot_children)
 
     rows = [
         _r("realization", "Реализация", 0, True, real_m, real_t),

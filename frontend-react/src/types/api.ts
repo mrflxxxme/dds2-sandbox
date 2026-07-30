@@ -8697,3 +8697,372 @@ export interface FbsMatrix {
   wb_stock_known: boolean;
   trend_days: number;
 }
+
+// ─── Payroll (Зарплата) ──────────────────────────────────────────────────────
+// Зеркало backend/schemas/payroll.py. Numeric/Decimal-поля бэка приходят
+// СТРОКАМИ — тип `number | string`, перед formatNumber всегда Number(x).
+
+/** Строка графика выплат фикс-оклада: день месяца (1–28) и доля (0..1]. */
+export interface PayrollPayDayShare {
+  day: number;
+  share: number | string;
+}
+
+/** Период оклада: с месяца month действует amount (история изменений). */
+export interface PayrollSalaryPeriod {
+  /** 'YYYY-MM'. */
+  month: string;
+  amount: number | string;
+}
+
+export interface PayrollEmployeeIn {
+  name: string;
+  /** Должность («Бухгалтер», «Логист»…) — группирует фикс-оклад в подстроках «ФОТ (начислено)» ОПиУ. */
+  position?: string | null;
+  counterparty_id?: number | null;
+  /** История фикс-окладов; оклад месяца = период с max(month) <= месяц, до первого периода — 0. */
+  salary_periods?: PayrollSalaryPeriod[] | null;
+  /** null — дефолт 50/50 на 10-е и 25-е; сумма долей должна быть равна 1. */
+  fixed_pay_days?: PayrollPayDayShare[] | null;
+  is_active?: boolean;
+  notes?: string | null;
+}
+
+export interface PayrollEmployeeUpdate {
+  name?: string | null;
+  position?: string | null;
+  clear_position?: boolean;
+  counterparty_id?: number | null;
+  clear_counterparty?: boolean;
+  /** undefined — не трогать; массив (в т.ч. пустой []) — полная замена истории окладов. */
+  salary_periods?: PayrollSalaryPeriod[] | null;
+  fixed_pay_days?: PayrollPayDayShare[] | null;
+  is_active?: boolean | null;
+  notes?: string | null;
+}
+
+export interface PayrollEmployee {
+  id: number;
+  name: string;
+  position: string | null;
+  counterparty_id: number | null;
+  counterparty_name?: string | null;
+  salary_periods: PayrollSalaryPeriod[];
+  /** Оклад, действующий в текущем месяце (для таблицы; null — нет периода). */
+  current_salary: number | string | null;
+  fixed_pay_days: PayrollPayDayShare[] | null;
+  is_active: boolean;
+  notes: string | null;
+  team_names: string[];
+}
+
+export interface PayrollEmployeeListResponse {
+  items: PayrollEmployee[];
+}
+
+/**
+ * Скоуп команды: бренд, категория или пересечение (бренд × категория).
+ * Хотя бы одно поле; композит (оба) вытесняет одноимённые общие скоупы
+ * других команд — их база считается за вычетом закреплённых композитов.
+ */
+export interface PayrollTeamScope {
+  brand?: string | null;
+  subject?: string | null;
+}
+
+export interface PayrollTeamIn {
+  name: string;
+  is_active?: boolean;
+}
+
+export interface PayrollTeamUpdate {
+  name?: string | null;
+  is_active?: boolean | null;
+}
+
+/** Участие в команде с границами по месяцам ('YYYY-MM'; null = без границы, to_month включительно). */
+export interface PayrollTeamMemberIn {
+  employee_id: number;
+  from_month?: string | null;
+  to_month?: string | null;
+}
+
+export interface PayrollTeamMember {
+  employee_id: number;
+  name: string;
+  from_month?: string | null;
+  to_month?: string | null;
+}
+
+export interface PayrollTeam {
+  id: number;
+  name: string;
+  is_active: boolean;
+  scopes: PayrollTeamScope[];
+  members: PayrollTeamMember[];
+}
+
+export interface PayrollTeamListResponse {
+  items: PayrollTeam[];
+}
+
+/** Доступные значения брендов/категорий из wb_finance_rows проекта. */
+export interface PayrollScopeOptions {
+  brands: string[];
+  subjects: string[];
+}
+
+export interface PayrollTariffStepIn {
+  threshold: number;
+  /** Доли (0..1), не проценты: 0.972% → 0.00972. */
+  company_rate: number;
+  team_rate: number;
+}
+
+export interface PayrollTariffReplace {
+  valid_from: string;
+  steps: PayrollTariffStepIn[];
+}
+
+export interface PayrollTariffStep {
+  id: number;
+  threshold: number | string;
+  company_rate: number | string;
+  team_rate: number | string;
+}
+
+export interface PayrollTariffResponse {
+  valid_from: string | null;
+  steps: PayrollTariffStep[];
+}
+
+/** Начисление команды за одну неделю WB (Пн-Вс). */
+export interface PayrollSheetWeekAccrual {
+  date_from: string;
+  date_to: string;
+  /** «Чистая выплата» по скоупам команды за неделю. */
+  base_amount: number | string;
+  /** Ступень лестницы (null — выплата <= 0, ставка 0). */
+  threshold: number | string | null;
+  team_rate: number | string;
+  team_amount: number | string;
+  per_member: number | string;
+}
+
+export interface PayrollSheetTeam {
+  team_id: number;
+  name: string;
+  scopes: PayrollTeamScope[];
+  member_names: string[];
+  weeks: PayrollSheetWeekAccrual[];
+  total_amount: number | string;
+}
+
+export interface PayrollSheetTeamAccrual {
+  team_id: number;
+  team_name: string;
+  amount: number | string;
+}
+
+export interface PayrollOfficialTxn {
+  date: string;
+  amount: number | string;
+  purpose: string | null;
+  bank: string;
+}
+
+/** Строка плана выплат: день (10/25/из графика фикса) месяца, следующего за расчётным. */
+export interface PayrollSheetPayout {
+  pay_day: number;
+  pay_date: string;
+  amount: number | string;
+  paid: boolean;
+  paid_amount: number | string | null;
+  comment: string | null;
+}
+
+export interface PayrollSheetEmployee {
+  employee_id: number;
+  name: string;
+  position?: string | null;
+  counterparty_id: number | null;
+  team_accruals: PayrollSheetTeamAccrual[];
+  fixed_accrual: number | string;
+  accrued_total: number | string;
+  /** Факт из выписки за месяц выплат (следующий за расчётным). */
+  official_paid: number | string;
+  official_txns: PayrollOfficialTxn[];
+  /** accrued_total − official_paid. */
+  unofficial_due: number | string;
+  payouts: PayrollSheetPayout[];
+}
+
+export interface PayrollSheetWeekRef {
+  date_from: string;
+  date_to: string;
+}
+
+export interface PayrollSheetTotals {
+  accrued_total: number | string;
+  official_total: number | string;
+  unofficial_total: number | string;
+}
+
+export interface PayrollSheetResponse {
+  /** 'YYYY-MM'. */
+  month: string;
+  /** Недели Пн-Вс, привязанные к месяцу (по четвергу). */
+  weeks: PayrollSheetWeekRef[];
+  teams: PayrollSheetTeam[];
+  employees: PayrollSheetEmployee[];
+  totals: PayrollSheetTotals;
+}
+
+export interface PayrollPayoutMarkIn {
+  employee_id: number;
+  /** 'YYYY-MM' — расчётный месяц. */
+  month: string;
+  pay_day: number;
+  paid: boolean;
+  amount?: number | null;
+  comment?: string | null;
+}
+
+// ─── Payroll: Агентство (консалтинг) ─────────────────────────────────────────
+
+export type PayrollBillingMode = 'fixed' | 'percent' | 'profit_share';
+export type PayrollClientEntryKind = 'week_base' | 'month_profit';
+
+/** Период формата оплаты: с месяца month действует billing_mode с параметрами. */
+export interface PayrollClientBillingPeriod {
+  /** 'YYYY-MM'. */
+  month: string;
+  billing_mode: PayrollBillingMode;
+  /** Для fixed. */
+  fixed_amount?: number | string | null;
+  /** Доля от ЧП (profit_share), 0..1. */
+  fee_percent?: number | string | null;
+}
+
+/**
+ * Клиент агентства. Сплит: manager_share команде, остаток агентству.
+ * Формат оплаты — историей периодов: формат месяца M = период с max(month) <= M;
+ * до первого периода начисления нет.
+ */
+export interface PayrollClientProjectIn {
+  name: string;
+  team_id?: number | null;
+  /** Кабинет клиента в системе (percent). */
+  linked_project_id?: number | null;
+  billing_periods?: PayrollClientBillingPeriod[] | null;
+  /** Доля команды, дефолт 0.45. */
+  manager_share?: number;
+  is_active?: boolean;
+  notes?: string | null;
+}
+
+export interface PayrollClientProjectUpdate {
+  name?: string | null;
+  team_id?: number | null;
+  clear_team?: boolean;
+  linked_project_id?: number | null;
+  clear_linked_project?: boolean;
+  /** undefined — не трогать; массив (в т.ч. пустой []) — полная замена истории. */
+  billing_periods?: PayrollClientBillingPeriod[] | null;
+  manager_share?: number | null;
+  is_active?: boolean | null;
+  notes?: string | null;
+}
+
+export interface PayrollClientEntry {
+  kind: PayrollClientEntryKind;
+  /** week_base — понедельник недели; month_profit — 1-е число месяца. */
+  date_from: string;
+  amount: number | string;
+}
+
+export interface PayrollClientProject {
+  id: number;
+  name: string;
+  team_id: number | null;
+  team_name?: string | null;
+  linked_project_id: number | null;
+  linked_project_name?: string | null;
+  billing_periods: PayrollClientBillingPeriod[];
+  /** Формат, действующий в текущем месяце (для карточки; null — нет периода). */
+  current_billing: PayrollClientBillingPeriod | null;
+  manager_share: number | string;
+  is_active: boolean;
+  notes: string | null;
+  entries: PayrollClientEntry[];
+}
+
+export interface PayrollClientProjectListResponse {
+  items: PayrollClientProject[];
+}
+
+/** Ручная сумма: недельная база внешнего кабинета либо ЧП месяца. */
+export interface PayrollClientEntryUpsert {
+  kind: PayrollClientEntryKind;
+  date_from: string;
+  amount: number;
+}
+
+/** Проект инсталляции для привязки кабинета клиента. */
+export interface PayrollProjectOption {
+  id: number;
+  name: string;
+  slug: string;
+}
+
+export interface PayrollProjectOptionsResponse {
+  items: PayrollProjectOption[];
+}
+
+/** Неделя percent-режима: база, ступень, ставка «Команда», fee. */
+export interface PayrollAgencyClientWeek {
+  date_from: string;
+  date_to: string;
+  base_amount: number | string;
+  threshold: number | string | null;
+  team_rate: number | string;
+  fee: number | string;
+  /** База вводится руками (внешний кабинет). */
+  manual: boolean;
+  /** Ручная запись week_base реально существует (false — неделя ещё не введена). */
+  has_entry: boolean;
+}
+
+export interface PayrollAgencySheetClient {
+  client_id: number;
+  name: string;
+  /** Формат оплаты, действовавший В РАСЧЁТНОМ месяце (null — период не задан). */
+  billing_mode: PayrollBillingMode | null;
+  team_id: number | null;
+  team_name: string | null;
+  manager_share: number | string;
+  /** percent. */
+  weeks: PayrollAgencyClientWeek[];
+  /** profit_share: введённая ЧП месяца. */
+  profit_amount: number | string | null;
+  fee_percent: number | string | null;
+  fee_total: number | string;
+  /** Уходит команде (в ведомость и ФОТ «Менеджеры»). */
+  manager_amount: number | string;
+  /** Остаток агентству (в ОПиУ пока не включается). */
+  agency_amount: number | string;
+  /** Не хватает данных: нет команды / нет ЧП месяца / нет недельных баз внешнего. */
+  warnings: string[];
+}
+
+export interface PayrollAgencySheetResponse {
+  month: string;
+  clients: PayrollAgencySheetClient[];
+  totals_fee: number | string;
+  totals_manager: number | string;
+  totals_agency: number | string;
+}
+
+export interface PayrollOkResponse {
+  ok: boolean;
+}

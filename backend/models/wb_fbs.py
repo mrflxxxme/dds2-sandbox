@@ -100,9 +100,12 @@ FBS_WB_SORTED_STATUSES: tuple[str, ...] = ("sorted",)
 #: Псевдо-статусы фильтра выдачи. Значениями `supplierStatus` не являются и в
 #: зеркале не хранятся — только фильтр и счётчик (см. `orders_service`):
 #:   `in_delivery` — передано в WB, ещё НЕ отсортировано;
-#:   `sorted`      — принято сортировочным центром, ещё не у покупателя.
+#:   `sorted`      — принято сортировочным центром, ещё не у покупателя;
+#:   `in_delivery_stuck` — подмножество `in_delivery`: передано давно (порог в
+#:   `orders_service`), а СЦ так и не принял — зависло у перевозчика/на СЦ.
 FBS_IN_DELIVERY_STATUS = "in_delivery"
 FBS_SORTED_STATUS = "sorted"
+FBS_IN_DELIVERY_STUCK_STATUS = "in_delivery_stuck"
 
 
 class FbsSupplyStatus(str, enum.Enum):
