@@ -2969,8 +2969,7 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
         // Заявленное кол-во — во всех под-вкладках (сборка / приёмки / возвраты).
         // Возврат с коробами: «штук россыпи · N кор.» — сырое кол-во строк
         // смешивает короба и штуки (603 «кол-во» = 600 коробов + 3 шт) и
-        // читалось как штуки. Приёмка в обработке: вторая строка «принято X»
-        // — живой факт приёмки Натали (received-строки, обновляется синком).
+        // читалось как штуки. Живой прогресс приёмки живёт в «Стадии».
         {
             key: 'total_qty', label: 'Кол-во', align: 'right',
             render: (v: number | null, row: FfRequestRow) => {
@@ -2984,11 +2983,6 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                         {kind === 'return' && row.total_boxes != null && (
                             <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                                 {' '}· {formatNumber(row.total_boxes, 0)} кор.
-                            </span>
-                        )}
-                        {kind === 'inbound' && row.accepted_qty != null && !row.is_completed && (
-                            <span style={{ display: 'block', fontSize: 11, color: 'var(--color-success)' }}>
-                                принято {formatNumber(row.accepted_qty, 0)}
                             </span>
                         )}
                     </span>
@@ -3009,6 +3003,19 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span>{v || row.status || '—'}</span>
                     {ffStageBadge(row)}
+                    {/* Живой факт приёмки Натали (received-строки, тянет синк):
+                        только когда реально начали принимать — «принято 0» на
+                        каждой активной строке было бы шумом. */}
+                    {kind === 'inbound' && !row.is_completed && (row.accepted_qty ?? 0) > 0 && (
+                        <span
+                            className="badge badge-success"
+                            style={{ fontSize: 11, padding: '2px 8px' }}
+                            title="Принято фактически — живой прогресс приёмки ФФ, обновляется синхронизацией"
+                        >
+                            принято {formatNumber(row.accepted_qty as number, 0)}
+                            {row.total_qty ? ` из ${formatNumber(row.total_qty, 0)}` : ''}
+                        </span>
+                    )}
                     {ffRepackBadge(row, kind)}
                     {ffRepackPaired(row) && (
                         <button
