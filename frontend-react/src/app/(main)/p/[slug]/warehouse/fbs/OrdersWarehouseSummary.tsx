@@ -23,6 +23,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import type { FbsWarehouse, FbsWarehouseSummary } from '@/types/api';
+import { TRANSIT_WARN_DAYS } from './fbsShared';
 
 interface Props {
     warehouses: FbsWarehouse[];
@@ -42,6 +43,8 @@ interface WhCounts {
     confirm: number;
     inDelivery: number;
     sorted: number;
+    /** Зависшие в пути на СЦ — БЕЗ периода, как очередь сборки. */
+    stuck: number;
 }
 
 export default function OrdersWarehouseSummary({
@@ -108,6 +111,7 @@ export default function OrdersWarehouseSummary({
             confirm: c?.confirm ?? 0,
             inDelivery: c?.in_delivery ?? 0,
             sorted: c?.sorted ?? 0,
+            stuck: c?.in_delivery_stuck ?? 0,
         };
     });
     const t = data?.totals ?? {};
@@ -118,6 +122,7 @@ export default function OrdersWarehouseSummary({
         confirm: t.confirm ?? 0,
         inDelivery: t.in_delivery ?? 0,
         sorted: t.sorted ?? 0,
+        stuck: t.in_delivery_stuck ?? 0,
     };
     // Задания склада, которого нет в нашем справочнике, иначе бы просто
     // потерялись из сводки — показываем остаток честной строкой.
@@ -131,6 +136,7 @@ export default function OrdersWarehouseSummary({
             confirm: rest.reduce((a, r) => a + r.confirm, 0),
             inDelivery: rest.reduce((a, r) => a + r.in_delivery, 0),
             sorted: rest.reduce((a, r) => a + r.sorted, 0),
+            stuck: rest.reduce((a, r) => a + (r.in_delivery_stuck ?? 0), 0),
         }
         : null;
 
@@ -152,11 +158,27 @@ export default function OrdersWarehouseSummary({
             }}>
                 {cards.map((c, i) => (
                     <div key={`${c.name}-${i}`} className="glass-card" style={{ padding: '12px 16px' }}>
-                        <div style={{
-                            fontSize: 13, fontWeight: 600, marginBottom: 8,
-                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                        }} title={c.name}>
-                            {c.name}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, minWidth: 0 }}>
+                            <div style={{
+                                fontSize: 13, fontWeight: 600, minWidth: 0,
+                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            }} title={c.name}>
+                                {c.name}
+                            </div>
+                            {/* Зависшие в пути — БЕЗ периода: тревога не должна
+                                исчезать от переключения окна дат */}
+                            {c.stuck > 0 && (
+                                <button
+                                    type="button"
+                                    className="badge badge-warning"
+                                    onClick={() => onPick(c.wbWarehouseId, 'in_delivery_stuck')}
+                                    title={`Переданы ≥ ${TRANSIT_WARN_DAYS} дней назад, СЦ так и не принял `
+                                        + '— показать эти задания'}
+                                    style={{ border: 'none', cursor: 'pointer', whiteSpace: 'nowrap', flex: '0 0 auto' }}
+                                >
+                                    ⚠ {formatNumber(c.stuck, 0)} зависло
+                                </button>
+                            )}
                         </div>
                         <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between' }}>
                             <CountCell label="Новые" value={c.isNew} accent

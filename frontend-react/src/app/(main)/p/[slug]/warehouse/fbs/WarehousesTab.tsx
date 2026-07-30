@@ -177,6 +177,12 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
      * проставленные в кабинете руками, дельта-пуш не обнулит никогда.
      */
     const [askEnable, setAskEnable] = useState(false);
+    /**
+     * 409-гейт «translate + Система ФФ при зеркале выше учёта»: бэк отказал
+     * сохранению и прислал цифры разрыва — они лежат здесь, пока открыт
+     * диалог «применить всё равно?». null — диалога нет.
+     */
+    const [forceAsk, setForceAsk] = useState<string | null>(null);
 
     /** Есть ли у склада хоть одно зеркало ФФ — без него выбирать источник не из чего. */
     const hasMirror = wh.links.some(l => l.has_mirror);
@@ -198,7 +204,7 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
     }, [wh.is_active, wh.mode, wh.stock_source, wh.safety_stock_pct, wh.safety_stock_abs,
         wh.max_qty_per_sku]);
 
-    const doSave = async () => {
+    const doSave = async (force = false) => {
         setSaving(true);
         setError('');
         const payload: FbsWarehouseSettingsPayload = {
@@ -210,14 +216,32 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
             safety_stock_pct: Number(pct.replace(',', '.')) || 0,
             safety_stock_abs: Number(abs) || 0,
             max_qty_per_sku: Number(maxQty) || 0,
+            // force шлём только подтверждённым: дефолт (false) бэк подставит сам,
+            // а явный флаг в каждом PATCH размывал бы смысл «решение человека».
+            ...(force ? { force: true } : {}),
         };
         try {
             await api.updateFbsWarehouseSettings(wh.wb_warehouse_id, payload);
             setAskEnable(false);
+            setForceAsk(null);
             onToast('Настройки склада сохранены');
             onReload();
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка сохранения настроек');
+            const message = e instanceof Error ? e.message : 'Ошибка сохранения настроек';
+            // 409 на рискованной комбинации «translate + Система ФФ» — не ошибка,
+            // а вопрос: зеркало выше учёта, бэк прислал цифры разрыва. Прочие 409
+            // этого экрана (нет ключа, идёт трансляция…) невозможно подтвердить
+            // force'ом — они падают в обычную ошибку веткой ниже.
+            const status = (e as Error & { status?: number })?.status;
+            if (
+                status === 409 && !force
+                && payload.mode === 'translate' && payload.stock_source === 'ff_mirror'
+            ) {
+                setAskEnable(false); // не громоздить модалку на модалку
+                setForceAsk(message);
+                return;
+            }
+            setError(message);
         } finally {
             setSaving(false);
         }
@@ -506,8 +530,21 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
                     // сохранение читается как «кнопка не работает».
                     error={error}
                     onToast={onToast}
-                    onConfirm={doSave}
+                    // Стрелка обязательна: onClick отдаёт event первым аргументом,
+                    // и голый doSave прочитал бы его как force=true.
+                    onConfirm={() => doSave()}
                     onClose={() => setAskEnable(false)}
+                />
+            )}
+
+            {forceAsk !== null && (
+                <ForceMirrorConfirmModal
+                    warehouseName={wh.name || `Склад #${wh.wb_warehouse_id}`}
+                    detail={forceAsk}
+                    busy={saving}
+                    error={error}
+                    onConfirm={() => doSave(true)}
+                    onClose={() => setForceAsk(null)}
                 />
             )}
 
@@ -518,6 +555,57 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
                     onRenamed={() => { setRenaming(false); onReload(); onToast('Склад переименован'); }}
                 />
             )}
+        </div>
+    );
+}
+
+// ─── Подтверждение «Система ФФ» при зеркале выше учёта ──────────────────────
+
+/**
+ * Диалог 409-гейта настроек склада: комбинация «Трансляция + Система ФФ» при
+ * зеркале выше нашего учёта отклонена бэком, `detail` несёт цифры разрыва.
+ * Подтверждение повторяет тот же PATCH с `force: true` — рискует человек,
+ * а не дефолт.
+ */
+function ForceMirrorConfirmModal({ warehouseName, detail, busy, error, onConfirm, onClose }: {
+    warehouseName: string;
+    /** Текст 409 с бэка — там цифры: на сколько штук и SKU зеркало выше учёта. */
+    detail: string;
+    busy: boolean;
+    /** Ошибка ПОВТОРНОГО сохранения (уже с force) — показываем в диалоге. */
+    error: string;
+    onConfirm: () => void;
+    onClose: () => void;
+}) {
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 540 }}>
+                <h2 className="modal-title">Зеркало ФФ выше нашего учёта</h2>
+                <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                    {warehouseName}: источник «Система ФФ» в режиме трансляции не применён — бэкенд
+                    остановил сохранение и прислал размер разрыва.
+                </p>
+                <div
+                    className="glass-card"
+                    style={{
+                        padding: 12, marginBottom: 12, fontSize: 13,
+                        borderLeft: '4px solid var(--color-warning)',
+                    }}
+                >
+                    {detail}
+                </div>
+                <p style={{ fontSize: 13, marginBottom: 16 }}>
+                    Зеркало ФФ выше нашего учёта — WB получит остаток, которого нет в наших книгах.
+                    Применить всё равно?
+                </p>
+                {error && <div style={{ marginBottom: 12, fontSize: 13, color: 'var(--color-danger)' }}>{error}</div>}
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                    <button className="btn btn-secondary" onClick={onClose} disabled={busy}>Отмена</button>
+                    <button className="btn btn-danger" onClick={() => onConfirm()} disabled={busy}>
+                        {busy ? 'Сохранение...' : 'Применить всё равно'}
+                    </button>
+                </div>
+            </div>
         </div>
     );
 }
