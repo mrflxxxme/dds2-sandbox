@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.integrations.wb_portal_client import (
@@ -60,9 +60,32 @@ class CardExchangeError(Exception):
 # ─── справочники ──────────────────────────────────────────────────────────
 
 
-def list_root_categories() -> list[dict]:
-    """Корневые категории для селектора фильтра (из статического справочника)."""
-    return cat_ref.list_root_categories()
+async def list_root_categories(db: AsyncSession, project_id: int) -> list[dict]:
+    """Корневые категории для селектора + сколько НАШИХ артикулов в каждой.
+
+    В фильтре менеджеру нужны прежде всего свои категории, поэтому отдаём признак
+    `is_ours` и `our_count` — фронт показывает наши, а не все 96 подряд.
+    """
+    rows = await db.execute(
+        select(Nomenclature.subject, func.count(func.distinct(Nomenclature.article_wb)))
+        .where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.subject.isnot(None),
+            Nomenclature.article_wb.isnot(None),
+        )
+        .group_by(Nomenclature.subject)
+        .limit(10_000)
+    )
+    per_category: dict[str, int] = {}
+    for subject, count in rows.fetchall():
+        cat = cat_ref.root_category_for_subject(subject or "")
+        if cat:
+            per_category[cat] = per_category.get(cat, 0) + int(count or 0)
+    out = []
+    for c in cat_ref.list_root_categories():
+        our = per_category.get(c["category"], 0)
+        out.append({**c, "is_ours": our > 0, "our_count": our})
+    return out
 
 
 # ─── наши данные из кабинета ───────────────────────────────────────────────

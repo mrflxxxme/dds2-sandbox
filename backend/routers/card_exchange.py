@@ -72,10 +72,11 @@ async def session_from_supply(
 
 @router.get("/categories", response_model=list[RootCategory])
 async def list_categories(
-    _project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
 ) -> list[RootCategory]:
-    """Корневые категории справочника (для каскадного фильтра витрины)."""
-    return [RootCategory(**c) for c in svc.list_root_categories()]
+    """Корневые категории справочника + признак «есть наши товары» (для фильтра)."""
+    return [RootCategory(**c) for c in await svc.list_root_categories(db, project.id)]
 
 
 @router.get("/counters", response_model=dict)

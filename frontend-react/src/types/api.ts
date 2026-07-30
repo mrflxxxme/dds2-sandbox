@@ -8702,6 +8702,8 @@ export interface FbsMatrix {
 export interface RootCategory {
     category: string;
     subject_count: number;
+    is_ours: boolean;
+    our_count: number;
 }
 
 export interface ShowcaseAd {

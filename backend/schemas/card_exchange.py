@@ -18,6 +18,9 @@ class RootCategory(BaseModel):
 
     category: str
     subject_count: int
+    # Есть ли в этой категории НАШИ товары (и сколько артикулов) — фильтр показывает свои.
+    is_ours: bool = False
+    our_count: int = 0
 
 
 # ─── витрина ──────────────────────────────────────────────────────────────

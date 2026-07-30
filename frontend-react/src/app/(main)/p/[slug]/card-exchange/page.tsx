@@ -5,7 +5,6 @@ import PageGuard from '@/components/PageGuard';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import type {
-    CardExchangeOurMode,
     ExchangeSubject,
     ExchangeSupplier,
     ExchangeSessionStatus,
@@ -34,12 +33,6 @@ const SORT_OPTIONS: { value: string; label: string }[] = [
     { value: 'rating:asc', label: 'С низким рейтингом' },
     { value: 'totalPrice:asc', label: 'Дешевле' },
     { value: 'totalPrice:desc', label: 'Дороже' },
-];
-
-const OUR_MODES: { key: '' | CardExchangeOurMode; label: string; hint: string }[] = [
-    { key: '', label: 'Вся биржа', hint: 'Все объявления биржи' },
-    { key: 'categories', label: 'Корневые категории', hint: 'Объявления в корневых категориях наших товаров' },
-    { key: 'exact', label: 'Предмет', hint: 'Наши артикулы на бирже — поиск по всей выдаче' },
 ];
 
 const VIEW_TABS: { key: 'grid' | 'list'; label: string }[] = [
@@ -172,7 +165,6 @@ export default function CardExchangePage() {
     const [searchInput, setSearchInput] = useState('');
     const [sort, setSort] = useState('feedbacksCount:desc');
     const [rootCategory, setRootCategory] = useState('');
-    const [ourMode, setOurMode] = useState<'' | CardExchangeOurMode>('');
     const [view, setView] = useState<'grid' | 'list'>('grid');
     // Фильтры как на бирже WB: предмет, бренд, продавец, рейтинг, остатки.
     const [brandsRef, setBrandsRef] = useState<string[]>([]);
@@ -221,10 +213,19 @@ export default function CardExchangePage() {
     const demo = !!session && !sessionOk && IS_DEV;
     const showUi = sessionOk || demo;
 
-    const categoryOptions = useMemo(
-        () => categories.map(c => ({ value: c.category, label: `${c.category} (${c.subject_count})` })),
-        [categories],
-    );
+    // В фильтре показываем НАШИ категории (где есть наши товары) — их единицы, а не 96.
+    // Если наших нет (пустая номенклатура) — показываем все, иначе фильтр был бы пустым.
+    const categoryOptions = useMemo(() => {
+        const ours = categories.filter(c => c.is_ours);
+        const list = ours.length ? ours : categories;
+        return list
+            .slice()
+            .sort((a, b) => (b.our_count ?? 0) - (a.our_count ?? 0) || a.category.localeCompare(b.category, 'ru'))
+            .map(c => ({
+                value: c.category,
+                label: c.our_count ? `${c.category} (${c.our_count})` : c.category,
+            }));
+    }, [categories]);
 
     // Сквозной id запроса: применяем ТОЛЬКО ответ последнего (смена фильтров, debounce,
     // двойной монтаж StrictMode держат несколько запросов в полёте).
@@ -238,7 +239,6 @@ export default function CardExchangePage() {
             const res = await api.getCardExchangeShowcase({
                 search: search.trim() || null,
                 root_categories: rootCategory ? [rootCategory] : null,
-                our_mode: ourMode || null,
                 subject_ids: filters.subjectIds.length ? filters.subjectIds.map(Number) : null,
                 brands: filters.brands.length ? filters.brands : null,
                 supplier_ids: filters.supplierIds.length ? filters.supplierIds.map(Number) : null,
@@ -269,7 +269,7 @@ export default function CardExchangePage() {
         } finally {
             if (myReq === reqIdRef.current) setLoading(false);
         }
-    }, [search, rootCategory, ourMode, filters, sort, cursors]);
+    }, [search, rootCategory, filters, sort, cursors]);
 
     /** Смена фильтра/сортировки — всегда с первой страницы (курсоры старой выдачи не годятся). */
     const reload = useCallback(() => {
@@ -278,13 +278,13 @@ export default function CardExchangePage() {
         setPage(0);
         void load(0);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [search, rootCategory, ourMode, filters, sort]);
+    }, [search, rootCategory, filters, sort]);
 
     useEffect(() => {
         if (!sessionOk) return;
         reload();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [search, rootCategory, ourMode, filters, sort, sessionOk]);
+    }, [search, rootCategory, filters, sort, sessionOk]);
 
     const toggleCart = async (ad: ShowcaseAd) => {
         setActionError(null);
@@ -380,8 +380,6 @@ export default function CardExchangePage() {
                             placeholder="Категория: все" allLabel="Все категории" maxWidth={280} />
                         <SearchSelect value={sort} onChange={setSort} options={SORT_OPTIONS}
                             placeholder="Больше отзывов" allLabel="Больше отзывов" maxWidth={220} />
-                        <Segmented tabs={OUR_MODES.map(m => ({ key: m.key, label: m.label, hint: m.hint }))}
-                            value={ourMode} onChange={setOurMode} />
                         <Segmented tabs={VIEW_TABS} value={view} onChange={setView} />
                         <FiltersPanel value={filters} onApply={setFilters}
                             subjects={subjectsRef} brands={brandsRef} suppliers={suppliersRef} />
