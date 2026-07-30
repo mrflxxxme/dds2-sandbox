@@ -61,6 +61,11 @@ class FfStockRow(BaseModel):
     ff_box_units: int = 0  # из ff_good пришло коробами (в штуках россыпи)
     ff_box_count: int = 0  # сколько коробов годного сведено в этот товар
     ff_logistics: int = 0  # досчитано к ff_good: товар в стадии списания логистики ФФ, ещё на складе
+    #: Вычтено ИЗ ff_good: отгружено по FBS у нас (движения FBS_ORDER), а
+    #: провайдер выбытие не отразил — ни один из трёх WMS остаток под FBS не
+    #: снимает (сверка 29.07.2026). ff_good приходит уже ЗА ВЫЧЕТОМ, поле —
+    #: расшифровка, симметрично ff_logistics. Кап: не больше сырого ff_good.
+    ff_fbs: int = 0
     our_quantity: int = 0
     our_defect: int = 0
     diff: int = 0  # прочие: ff_good − our_quantity; migfull: ff_good − (our_quantity + our_defect)
@@ -74,6 +79,7 @@ class FfStockTotals(BaseModel):
     ff_defect: int = 0
     ff_box_units: int = 0  # сколько штук годного пришло коробами
     ff_logistics: int = 0  # досчитано к ff_good: товар в стадии списания логистики ФФ
+    ff_fbs: int = 0  # вычтено из ff_good: отгружено по FBS, провайдер ещё не списал
     our_quantity: int = 0
     diff: int = 0
     unmatched: int = 0  # строк ФФ без нашей номенклатуры
