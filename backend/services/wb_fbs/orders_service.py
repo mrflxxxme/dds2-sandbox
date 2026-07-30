@@ -70,7 +70,12 @@ from backend.models import (
 from backend.models.fulfillment import FulfillmentStock
 from backend.models.warehouse import MovementType, StockMovement, Warehouse, WarehouseStock
 
-from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS, WbFbsOrderEvent
+from backend.models.wb_fbs import (
+    FBS_DELIVERED_STATUS,
+    FBS_IN_DELIVERY_STUCK_STATUS,
+    FBS_WB_DELIVERED_STATUSES,
+    WbFbsOrderEvent,
+)
 from backend.services.warehouse_stock_engine import _update_stock
 from backend.services.wb_fbs.client_factory import get_fbs_client
 from backend.services.wb_fbs.contour import contour_condition, is_sandbox_contour, stamp_contour
@@ -216,6 +221,20 @@ def sorted_condition() -> Any:
     return and_(
         effective_status_expr() == FbsSupplierStatus.COMPLETE.value,
         WbFbsOrder.wb_status.in_(FBS_WB_SORTED_STATUSES),
+    )
+
+
+def delivered_condition() -> Any:
+    """«Завершённые» кабинета WB: `complete`, дошедшее до покупателя.
+
+    `sold` — получено покупателем, `defect` — брак (до покупателя не доедет,
+    но и в пути больше не числится): `FBS_WB_DELIVERED_STATUSES`. Это ИСТОРИЯ,
+    а не очередь — в отличие от `in_delivery_stuck` фильтр и счётчик уважают
+    окно периода страницы (симметрично `sorted_condition`).
+    """
+    return and_(
+        effective_status_expr() == FbsSupplierStatus.COMPLETE.value,
+        WbFbsOrder.wb_status.in_(FBS_WB_DELIVERED_STATUSES),
     )
 
 
@@ -1256,13 +1275,20 @@ def _is_in_delivery_row(order: WbFbsOrder) -> bool:
     return not order.wb_status or order.wb_status in FBS_WB_PRE_SORT_STATUSES
 
 
-async def _supply_anchor_map(
-    db: AsyncSession, project_id: int, supply_ids: set[str]
-) -> dict[str, datetime]:
-    """{wb_supply_id: COALESCE(scan_dt, closed_at)} одним IN-запросом (без N+1).
+#: Фаза поставки для строки выдачи: (якорь передачи, done, scan_dt).
+_SupplyMeta = tuple[datetime | None, bool, datetime | None]
 
-    Скоуп по контуру — паритет с `_supply_join_condition`: якорь боевого
-    задания не берётся из одноимённой поставки песочницы.
+
+async def _supply_meta_map(
+    db: AsyncSession, project_id: int, supply_ids: set[str]
+) -> dict[str, _SupplyMeta]:
+    """{wb_supply_id: (COALESCE(scan_dt, closed_at), done, scan_dt)} одним IN-запросом.
+
+    Якорь кормит `transit_days`, `done`/`scan_dt` уходят В КАЖДУЮ строку выдачи
+    (`supply_done`/`supply_scan_dt`): без фазы поставки строка «complete +
+    waiting» читается как противоречие — «закрыто у нас» ≠ «сдано WB», QR может
+    быть не отсканирован. Скоуп по контуру — паритет с `_supply_join_condition`:
+    фаза боевого задания не берётся из одноимённой поставки песочницы.
     """
     ids = sorted(s for s in supply_ids if s)
     if not ids:
@@ -1271,16 +1297,21 @@ async def _supply_anchor_map(
         select(
             WbFbsSupply.wb_supply_id,
             func.coalesce(WbFbsSupply.scan_dt, WbFbsSupply.closed_at),
+            WbFbsSupply.done,
+            WbFbsSupply.scan_dt,
         ).where(
             WbFbsSupply.project_id == project_id,
             WbFbsSupply.wb_supply_id.in_(ids),
             contour_condition(WbFbsSupply.raw),
         )
     )
-    return {supply_id: anchor for supply_id, anchor in result.all() if anchor is not None}
+    return {
+        supply_id: (anchor, bool(done), scan_dt)
+        for supply_id, anchor, done, scan_dt in result.all()
+    }
 
 
-def _transit_days(order: WbFbsOrder, anchor_by_supply: dict[str, datetime], now: datetime) -> int | None:
+def _transit_days(order: WbFbsOrder, meta_by_supply: dict[str, _SupplyMeta], now: datetime) -> int | None:
     """Сколько дней задание едет — только для фазы «в пути», иначе None.
 
     🔴 Считаем `int(total_seconds() // 86400)`, а НЕ `timedelta.days`: известная
@@ -1290,13 +1321,19 @@ def _transit_days(order: WbFbsOrder, anchor_by_supply: dict[str, datetime], now:
     """
     if not _is_in_delivery_row(order):
         return None
-    anchor = (anchor_by_supply.get(order.supply_id) if order.supply_id else None) or order.written_off_at
+    meta = meta_by_supply.get(order.supply_id) if order.supply_id else None
+    anchor = (meta[0] if meta else None) or order.written_off_at
     if anchor is None:
         return None
     return max(0, int((now - anchor).total_seconds() // 86400))
 
 
-def _order_to_dict(order: WbFbsOrder, *, transit_days: int | None = None) -> dict[str, Any]:
+def _order_to_dict(
+    order: WbFbsOrder,
+    *,
+    transit_days: int | None = None,
+    supply_meta: _SupplyMeta | None = None,
+) -> dict[str, Any]:
     """Строка под `FbsOrderOut` (контракт схем)."""
     return {
         "id": order.id,
@@ -1328,6 +1365,11 @@ def _order_to_dict(order: WbFbsOrder, *, transit_days: int | None = None) -> dic
         "written_off_at": order.written_off_at,
         "synced_at": order.synced_at,
         "transit_days": transit_days,
+        # Фаза поставки задания: закрыта ли (done) и отсканирован ли QR
+        # (scan_dt). Нет поставки / зеркало её не знает → None/None — фронт
+        # честно считает «не сдано», а не рисует зелёное «В доставке».
+        "supply_done": supply_meta[1] if supply_meta else None,
+        "supply_scan_dt": supply_meta[2] if supply_meta else None,
     }
 
 
@@ -1446,6 +1488,16 @@ async def list_orders(
     остаться на виду, пока СЦ его не примет. Собственное окно по якорю передачи
     (2–30 дней) у фильтра есть всегда — см. комментарий у констант.
 
+    `status=delivered` / `delivered_count` — «Завершённые» кабинета WB:
+    `complete`, дошедшее до покупателя (`FBS_WB_DELIVERED_STATUSES` — sold/
+    defect). Это ИСТОРИЯ, а не очередь, поэтому окно периода уважается —
+    симметрично `sorted`.
+
+    Каждая строка выдачи несёт фазу СВОЕЙ поставки (`supply_done` /
+    `supply_scan_dt`): `supplier_status='complete'` значит лишь «поставка
+    закрыта у нас», а сдано ли WB — знает только скан QR. Поставки страницы
+    поднимаются тем же батчем, что и якоря `transit_days` (без N+1).
+
     Выдача скоуплена по контуру: боевой список не должен показывать задания
     песочницы (и наоборот) — цифры вкладок обязаны совпадать с тем, что
     участвует в остатке и списании.
@@ -1481,6 +1533,7 @@ async def list_orders(
             func.count(),
             func.count().filter(in_delivery_condition()),
             func.count().filter(sorted_condition()),
+            func.count().filter(delivered_condition()),
         )
         .where(*base)
         .group_by(eff_status)
@@ -1489,6 +1542,7 @@ async def list_orders(
     status_counts = {row[0]: int(row[1]) for row in counts_rows}
     in_delivery_count = sum(int(row[2] or 0) for row in counts_rows)
     sorted_count = sum(int(row[3] or 0) for row in counts_rows)
+    delivered_count = sum(int(row[4] or 0) for row in counts_rows)
 
     # Счётчик зависших — БЕЗ периода (см. docstring); джойн поставок нужен ради
     # якоря передачи и не задваивает строки (1:1 максимум, `uq_wb_fbs_supply`).
@@ -1512,6 +1566,9 @@ async def list_orders(
     elif status == FBS_SORTED_STATUS:
         conditions.append(sorted_condition())
         total = sorted_count
+    elif status == FBS_DELIVERED_STATUS:
+        conditions.append(delivered_condition())
+        total = delivered_count
     elif status == FBS_IN_DELIVERY_STATUS:
         conditions.append(in_delivery_condition())
         total = in_delivery_count
@@ -1532,12 +1589,18 @@ async def list_orders(
     )
     orders = list(items_result.scalars().all())
 
-    # transit_days: якоря поставок страницы — одним запросом, без N+1.
-    anchor_by_supply = await _supply_anchor_map(
-        db, project_id, {o.supply_id for o in orders if o.supply_id and _is_in_delivery_row(o)}
+    # Фазы поставок страницы (done/scan_dt + якорь transit_days) — одним
+    # запросом, без N+1: supply_done/supply_scan_dt нужны КАЖДОЙ строке, не
+    # только фазе «в пути».
+    meta_by_supply = await _supply_meta_map(
+        db, project_id, {o.supply_id for o in orders if o.supply_id}
     )
     items = [
-        _order_to_dict(order, transit_days=_transit_days(order, anchor_by_supply, now))
+        _order_to_dict(
+            order,
+            transit_days=_transit_days(order, meta_by_supply, now),
+            supply_meta=meta_by_supply.get(order.supply_id) if order.supply_id else None,
+        )
         for order in orders
     ]
     return {
@@ -1547,6 +1610,7 @@ async def list_orders(
         "in_delivery_count": in_delivery_count,
         "sorted_count": sorted_count,
         "in_delivery_stuck_count": in_delivery_stuck_count,
+        "delivered_count": delivered_count,
     }
 
 
@@ -1556,15 +1620,26 @@ async def list_orders(
 async def get_order_timeline(db: AsyncSession, project_id: int, wb_order_id: int) -> dict:
     """Таймлайн «Статус заказа» (`FbsOrderTimelineOut`) — модалка как в кабинете WB.
 
-    Два источника, оба наши (WB историю не отдаёт вовсе):
+    Три источника, все наши (WB историю не отдаёт вовсе):
       • якоря (kind="anchor", approx=False) — синтетика из ТОЧНЫХ дат:
         `created` (задание оформлено, created_at_wb), `assembled` (поставка
         закрыта, closed_at), `scanned` (WB отсканировал QR, scan_dt),
-        `written_off` (списано из ledger'а DDS);
+        `written_off` (списано из ledger'а DDS). 🔴 Якоря ПОСТАВКИ — только у
+        заданий, реально с ней уехавших (`complete` / `cancel_carrier` —
+        отмена перевозчиком случается уже ПОСЛЕ передачи): closed_at/scan_dt —
+        моменты поставки, и заказу, отменённому до передачи, они приписывали
+        чужой путь «Продавец собрал → Принят СЦ» без единого слова об отмене;
       • журнал (kind="event", approx=True) — переходы осей из
         `wb_fbs_order_events`; их время — момент фиксации синком (точность =
         каденс, 5 мин). `supplier:complete` может дублировать якорь `assembled`
-        по смыслу — оба отдаются, фронт решает сам.
+        по смыслу — оба отдаются, фронт решает сам;
+      • синтез ТЕКУЩЕГО состояния (kind="event", approx=True) — журнал пишется
+        только с момента деплоя, у старых заданий он пуст, и модалка молчала
+        про отмену/сортировку, которые текущие оси знают. Если журнал финала не
+        содержит (дедуп по code), доклеиваем: терминальный `supplier_status` →
+        `supplier:<status>`, иначе пост-скановый `wb_status` → `wb:<status>`.
+        Время условное (`synced_at`) — фронт показывает «≈». Верх модалки
+        обязан совпадать с бейджем строки.
 
     Сортировка по времени DESC (свежее сверху, как в кабинете) — контракт
     схемы, делается здесь. Журнал срезан `_TIMELINE_EVENTS_MAX` строками.
@@ -1587,7 +1662,14 @@ async def get_order_timeline(db: AsyncSession, project_id: int, wb_order_id: int
             events.append({"kind": "anchor", "code": code, "at": at, "approx": False})
 
     _anchor("created", order.created_at_wb)
-    if order.supply_id:
+    # Заказ реально ехал с поставкой: `complete` — передан, `cancel_carrier` —
+    # отменён перевозчиком уже ПОСЛЕ передачи. Отменённому до передачи даты
+    # поставки не принадлежат — он с ней не ездил.
+    travelled = order.supplier_status in (
+        FbsSupplierStatus.COMPLETE.value,
+        FbsSupplierStatus.CANCEL_CARRIER.value,
+    )
+    if order.supply_id and travelled:
         supply_row = (
             await db.execute(
                 select(WbFbsSupply.closed_at, WbFbsSupply.scan_dt).where(
@@ -1617,6 +1699,27 @@ async def get_order_timeline(db: AsyncSession, project_id: int, wb_order_id: int
         events.append(
             {"kind": "event", "code": f"{prefix}:{new_value}", "at": changed_at, "approx": True}
         )
+
+    # Синтез ТЕКУЩЕГО состояния: журнал наполняется только с деплоя, и у старых
+    # заданий финала (отмена, сортировка, вручение) в нём нет — а бейдж строки
+    # его показывает. Терминальный supplier_status важнее оси WB; из wb_status
+    # синтезируем только ПОСТ-скановые фазы (до-сканового `waiting` в модалке
+    # ждут якоря, событие из него — шум).
+    final_code: str | None = None
+    if order.supplier_status in FBS_TERMINAL_STATUSES:
+        final_code = f"supplier:{order.supplier_status}"
+    elif order.wb_status and order.wb_status in (
+        *FBS_WB_SORTED_STATUSES,
+        *FBS_WB_DELIVERED_STATUSES,
+        *FBS_WB_CANCELLED_STATUSES,
+    ):
+        final_code = f"wb:{order.wb_status}"
+    if final_code is not None and all(
+        e["code"] != final_code for e in events if e["kind"] == "event"
+    ):
+        at = order.synced_at or order.updated_at
+        if at is not None:
+            events.append({"kind": "event", "code": final_code, "at": at, "approx": True})
 
     # Стабильная сортировка: при равном времени порядок вставки сохраняется
     # (якоря хронологией, журнал свежее-первым) — выдача детерминирована.

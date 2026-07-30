@@ -613,7 +613,8 @@ async def list_orders(
         None,
         description="supplier_status: new/confirm/complete/cancel/cancel_carrier "
         "либо псевдо-статусы in_delivery (переданные и ещё не доставленные) / "
-        "sorted / in_delivery_stuck (зависшие в пути — период игнорируется)",
+        "sorted / in_delivery_stuck (зависшие в пути — период игнорируется) / "
+        "delivered (завершённые: получено покупателем или брак)",
     ),
     supply_id: str | None = Query(None, max_length=50),
     wb_warehouse_id: int | None = Query(None, ge=1),

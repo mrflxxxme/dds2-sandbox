@@ -949,9 +949,9 @@ async def list_assembly_requests(
     kind: str | None = None,
     limit: int = 50,
     offset: int = 0,
-) -> tuple[list[AssemblyRequest], int]:
+) -> tuple[list[AssemblyRequest], int, dict[str, int]]:
     """
-    List assembly requests with filters, pagination.
+    List assembly requests with filters, pagination + счётчики статусов.
 
     ff_link: "none" — только заявки БЕЗ привязанной ФФ-заявки; "linked" — только
     с привязанной; None — без фильтра. Привязка живёт в
