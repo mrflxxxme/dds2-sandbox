@@ -37,6 +37,11 @@ class FulfillmentProvider(str, enum.Enum):
 class FfRequestKind(str, enum.Enum):
     ASSEMBLY = "assembly"  # доставка на склад МП (заявка на сборку)
     INBOUND = "inbound"  # приёмка на склад ФФ
+    #: Возврат со склада ФФ (migfull `GET /returns`). Классический смысл —
+    #: товар едет обратно нам; на практике Натали парой «возврат коробов +
+    #: поступление россыпью» оформляет ВСКРЫТИЕ коробов под FBS — такая пара
+    #: физически ничего не увозит и наш сток не трогает (см. repack_return_id).
+    RETURN = "return"
     OTHER = "other"
 
 
@@ -176,6 +181,19 @@ class FulfillmentRequest(Base):
     # (receive_transfer_fact). is_completed у провайдера остаётся True навсегда —
     # без маркера каждый синк применял бы факт повторно.
     transfer_fact_applied_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # ВСКРЫТИЕ КОРОБОВ (склад Натали): ФФ оформляет его парой документов —
+    # «Возврат» списывает короб-SKU, «Поступление» приходует те же товары
+    # россыпью (пример PVB-0000069 ↔ PVB-0000133, 30.07.2026). У ПОСТУПЛЕНИЯ
+    # здесь id возврата-пары. Помеченная пара — внутренняя переупаковка ФФ:
+    # наш сток НЕ двигается (учёт короба не знает — нетто-ноль), поступление
+    # исключается из резерва «в приёмке» и из кандидатов привязки, иначе
+    # 398 штук зашли бы в книги второй раз.
+    repack_return_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("fulfillment_requests.id", ondelete="SET NULL")
+    )
+    # Когда пара распознана (маркер авто-матчера; ставится один раз, синк
+    # повторно не перематчивает уже помеченные).
+    repack_matched_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     __table_args__ = (
         UniqueConstraint("project_id", "provider", "external_id", name="uq_ff_request_external"),
@@ -183,6 +201,7 @@ class FulfillmentRequest(Base):
         Index("ix_fulfillment_requests_assembly_request_id", "assembly_request_id"),
         Index("ix_fulfillment_requests_inbound_receipt_id", "inbound_receipt_id"),
         Index("ix_fulfillment_requests_stock_transfer_id", "stock_transfer_id"),
+        Index("ix_fulfillment_requests_repack_return_id", "repack_return_id"),
     )
 
 

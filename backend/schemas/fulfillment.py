@@ -151,7 +151,7 @@ class FfRequestRow(BaseModel):
     id: int
     external_id: str
     number: str | None = None
-    kind: str  # assembly | inbound | other
+    kind: str  # assembly | inbound | return | other
     type_name: str | None = None
     status: str | None = None
     stage_code: str | None = None
@@ -180,6 +180,14 @@ class FfRequestRow(BaseModel):
     # (True — расхождение, False — совпадает, None — определить нельзя). См.
     # compute_doc_ff_mismatch: сверка по ШК (wmscelicom/migfull) либо по кол-ву (skladbot).
     linked_mismatch: bool | None = None
+    # ВСКРЫТИЕ КОРОБОВ (пара «возврат коробов ↔ поступление россыпью», Натали).
+    # У ПОСТУПЛЕНИЯ — id/номер возврата-пары; у ВОЗВРАТА — id/номер поступления
+    # (заполняет сервис зеркально). Помеченная пара — внутренняя переупаковка ФФ:
+    # сток не двигается, из резерва «в приёмке» поступление исключено.
+    repack_return_id: int | None = None
+    repack_pair_number: str | None = None
+    # kind=return без пары: возможно, РЕАЛЬНЫЙ возврат товара — подсветка в UI.
+    repack_unpaired: bool = False
 
 
 class FfRequestDetailProduct(BaseModel):
