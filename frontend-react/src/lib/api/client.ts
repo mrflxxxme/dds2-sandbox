@@ -216,7 +216,10 @@ export class ApiClient {
             // чтобы вызывающий мог распарсить через JSON.parse(e.message).
             const payload = err.error?.payload;
             if (payload && typeof payload === 'object') {
-                throw this.httpError(JSON.stringify(payload), res.status);
+                // Объект едет и полем error.detail (как в ветке detail ниже):
+                // 409-гейт настроек FBS опознаётся по payload.code, а message
+                // остаётся JSON-строкой для потребителей sc17/sc18.
+                throw this.httpError(JSON.stringify(payload), res.status, payload);
             }
             const detail = err.detail ?? err.error?.message;
             if (typeof detail === 'string') throw this.httpError(detail, res.status);
