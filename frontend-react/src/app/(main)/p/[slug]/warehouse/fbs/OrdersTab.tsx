@@ -24,7 +24,6 @@ import type {
 } from '@/types/api';
 import {
     BACKFILL_DAYS_DEFAULT,
-    BACKFILL_DAYS_OPTIONS,
     CABINET_STATUS_LABEL,
     NOT_SCANNED_CABINET_KEYS,
     ORDER_PHASE_LABEL,
@@ -158,7 +157,6 @@ export default function OrdersTab({
     const [syncing, setSyncing] = useState(false);
     /** Идёт обратная загрузка истории (долгий запрос — до минуты). */
     const [backfilling, setBackfilling] = useState(false);
-    const [backfillDays, setBackfillDays] = useState(BACKFILL_DAYS_DEFAULT);
     const [busy, setBusy] = useState(false);
     const [stickerModal, setStickerModal] = useState(false);
     const [supplyModal, setSupplyModal] = useState(false);
@@ -417,8 +415,8 @@ export default function OrdersTab({
         setBackfilling(true);
         setActionError('');
         try {
-            const res = await api.backfillFbsOrders(backfillDays);
-            onToast(backfillResultMessage(res, backfillDays));
+            const res = await api.backfillFbsOrders(BACKFILL_DAYS_DEFAULT);
+            onToast(backfillResultMessage(res, BACKFILL_DAYS_DEFAULT));
             setSummaryKey(k => k + 1);
             setStatsTick(t => t + 1);
             await load();
@@ -778,25 +776,15 @@ export default function OrdersTab({
                 <button className="btn btn-secondary btn-sm" onClick={handleSync} disabled={syncing || backfilling}>
                     {syncing ? 'Синхронизация...' : '🔄 Забрать новые'}
                 </button>
-                {/* Глубина истории: WB хранит задания 3 месяца, дальше не отдаёт */}
-                <select
-                    className="form-input"
-                    style={{ width: 110 }}
-                    value={backfillDays}
-                    disabled={backfilling}
-                    title="Насколько глубоко тянуть историю заданий. WB хранит их 3 месяца"
-                    onChange={e => setBackfillDays(Number(e.target.value))}
-                >
-                    {BACKFILL_DAYS_OPTIONS.map(d => (
-                        <option key={d} value={d}>{formatNumber(d, 0)} дн.</option>
-                    ))}
-                </select>
+                {/* Селект глубины убран (решение владельца 30.07): он выглядел
+                    фильтром периода списка и путал — фильтрует только календарь
+                    «С/По». История всегда тянется на максимум глубины WB (90 дн). */}
                 <button
                     className="btn btn-secondary btn-sm"
                     onClick={handleBackfill}
                     disabled={backfilling || syncing}
-                    title={'Догрузить задания за прошлые дни: «Забрать новые» приносит только свежие, '
-                        + 'а история до подключения раздела в зеркале не появляется сама'}
+                    title={'Догрузить задания за 90 дней (максимум глубины WB): «Забрать новые» приносит '
+                        + 'только свежие, а история до подключения раздела сама не появляется'}
                 >
                     {backfilling ? 'Загрузка истории…' : '⏬ Загрузить историю'}
                 </button>
@@ -810,7 +798,7 @@ export default function OrdersTab({
                 }}>
                     <span>⏳</span>
                     <span>
-                        Идёт обратная загрузка заданий {backfillPeriodLabel(backfillDays)} — WB отдаёт
+                        Идёт обратная загрузка заданий {backfillPeriodLabel(BACKFILL_DAYS_DEFAULT)} — WB отдаёт
                         историю окнами, это может занять до минуты. Страницу можно не трогать: по
                         завершении список и статистика обновятся сами.
                     </span>
@@ -885,7 +873,7 @@ export default function OrdersTab({
                             >
                                 {backfilling
                                     ? 'Загрузка истории…'
-                                    : `⏬ Загрузить историю ${backfillPeriodLabel(backfillDays)}`}
+                                    : `⏬ Загрузить историю ${backfillPeriodLabel(BACKFILL_DAYS_DEFAULT)}`}
                             </button>
                         </>
                     )}
