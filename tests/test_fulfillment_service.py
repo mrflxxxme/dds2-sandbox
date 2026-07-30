@@ -3817,7 +3817,9 @@ async def test_sync_migfull_submission_enrichment(db_session, project, warehouse
         calls=calls,
     )
     await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
-    assert calls["submission_lines"] == 2  # active + бэкфилл closed; canceled — мимо
+    # active (incoming + received для живого прогресса) + бэкфилл closed
+    # (только incoming); canceled — мимо
+    assert calls["submission_lines"] == 3
 
     assert (await _mirror_row(db_session, project.id, active)).total_qty == 7
     assert (await _mirror_row(db_session, project.id, closed)).total_qty == 14
@@ -3833,7 +3835,8 @@ async def test_sync_migfull_submission_enrichment(db_session, project, warehouse
         calls=calls2,
     )
     await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
-    assert calls2["submission_lines"] == 1  # только активная: closed уже обогащена
+    # только активная (incoming + received): closed уже обогащена
+    assert calls2["submission_lines"] == 2
 
 
 @pytest.mark.asyncio
