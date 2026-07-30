@@ -13,6 +13,7 @@ import WbSupplyPanel from './WbSupplyPanel';
 import FfExpectedCostCard from './FfExpectedCostCard';
 import type { Column } from '@/components/DataTable';
 import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyPickupCostHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply, WbSupplyState, WbSupplySyncStatus } from '@/types/api';
+import { assemblyKindOf } from '@/lib/assembly-kind';
 
 // Статус заноса заявки в кабинет WB (для вкладки «Поставка WB»).
 const WB_SYNC_MAP: Record<WbSupplySyncStatus, { label: string; className: string }> = {
@@ -515,13 +516,17 @@ export default function AssemblyDetailPage() {
         setFfReviewLoading(null);
     };
 
+    // Учётная заявка FBS (kind=fbs) — зеркало сборки, которую ведёт сам ФФ:
+    // статусы двигает джоб, руками её не редактируют, не двигают и не отгружают.
+    const isFbs = assemblyKindOf(assembly?.kind) === 'fbs';
+
     // Мета-поля (склад WB, плановая дата, палеты, вес, комментарий) редактируемы
     // в любом не-CANCELLED статусе, включая SHIPPED/DELIVERED/CLOSED — backend это
     // допускает (не двигает остатки). Структурные поля (позиции, склад-источник,
     // FBO) остаются под canEditFbo / страницей редактирования.
-    const canEditFields = assembly && assembly.status !== 'CANCELLED';
-    const canEditAlways = assembly && assembly.status !== 'CANCELLED';
-    const canEditFbo = assembly && ['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED'].includes(assembly.status);
+    const canEditFields = assembly && assembly.status !== 'CANCELLED' && !isFbs;
+    const canEditAlways = assembly && assembly.status !== 'CANCELLED' && !isFbs;
+    const canEditFbo = assembly && !isFbs && ['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED'].includes(assembly.status);
     // Единица поставки — паллета/короб (отдельное поле shipped_as_boxes, НЕ package_type).
     const unitCountLabel = assembly?.shipped_as_boxes ? 'Короба' : 'Палеты';
     const unitWeightLabel = assembly?.shipped_as_boxes ? 'Вес 1 короба' : 'Вес 1 палеты';
@@ -613,6 +618,10 @@ export default function AssemblyDetailPage() {
 
     const renderActions = () => {
         const buttons: React.ReactNode[] = [];
+
+        // kind=fbs: ручных действий нет вовсе — переходы статусов, машину,
+        // отгрузку/возврат, редактирование и заявки на ФФ ведёт джоб/сам ФФ.
+        if (isFbs) return buttons;
 
         switch (assembly.status) {
             case 'PENDING':
@@ -782,7 +791,35 @@ export default function AssemblyDetailPage() {
                 </div>
             </div>
 
-            {/* Вкладки: «Заявка» | «Раскладка по паллетам» */}
+            {/* kind=fbs: плашка «ведётся автоматически» + ссылка на поставку WB-GI. */}
+            {isFbs && (
+                <div
+                    className="glass-card"
+                    style={{
+                        padding: '12px 16px', marginBottom: 16,
+                        display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+                        borderLeft: '3px solid var(--color-accent)',
+                    }}
+                >
+                    <span style={{ fontSize: 18 }}>🤖</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)' }}>
+                        Учётная заявка FBS — сборку ведёт фулфилмент, статусы обновляются автоматически
+                    </span>
+                    {assembly.fbs_supply_id && (
+                        <Link
+                            href={`/p/${slug}/warehouse/fbs?supply=${encodeURIComponent(assembly.fbs_supply_id)}`}
+                            title="Открыть раздел FBS (поставки)"
+                            style={{ color: 'var(--color-accent)', fontSize: 13, fontWeight: 500 }}
+                        >
+                            Поставка {assembly.fbs_supply_id} →
+                        </Link>
+                    )}
+                </div>
+            )}
+
+            {/* Вкладки: «Заявка» | «Раскладка по паллетам». kind=fbs живёт только
+                на «Заявке»: паллет и заноса в кабинет WB у учётного зеркала нет. */}
+            {!isFbs && (
             <div className="glass-card" style={{ padding: 8, marginBottom: 16, display: 'flex', gap: 8 }}>
                 <button
                     className={`btn btn-sm ${tab === 'request' ? 'btn-primary' : 'btn-secondary'}`}
@@ -805,6 +842,7 @@ export default function AssemblyDetailPage() {
                         : 'Поставка WB'}
                 </button>
             </div>
+            )}
 
             {/* Расхождение: локальное число паллет ≠ паллеты в WB-пропуске (только в «Готово»). */}
             {assembly.status === 'READY'
@@ -1004,6 +1042,8 @@ export default function AssemblyDetailPage() {
                         onSave={(v) => handleFieldSave('estimated_ready_date', v)}
                     />
                     <InfoField label="Дата готовности (факт)" value={formatDate(assembly.actual_ready_date)} />
+                    {/* kind=fbs: паллет/веса у учётного зеркала нет — блоки скрыты. */}
+                    {!isFbs && (<>
                     <EditableInfoField
                         label={unitCountLabel}
                         value={String(assembly.pallets_count || '')}
@@ -1020,7 +1060,8 @@ export default function AssemblyDetailPage() {
                             ? formatNumber(Number(assembly.goods_weight_kg), 1) + ' кг'
                             : '—'}
                     />
-                    {assembly.weight_missing_barcodes && assembly.weight_missing_barcodes.length > 0 && (
+                    </>)}
+                    {!isFbs && assembly.weight_missing_barcodes && assembly.weight_missing_barcodes.length > 0 && (
                         <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '10px 12px', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 8, fontSize: 13 }}>
                             <span style={{ color: 'var(--color-warning)', fontWeight: 500 }}>
                                 ⚠️ Нет веса у {formatNumber(assembly.weight_missing_barcodes.length, 0)} арт.
@@ -1116,6 +1157,8 @@ export default function AssemblyDetailPage() {
                     {assembly.pickup_date && (
                         <InfoField label="Забор" value={`${formatDate(assembly.pickup_date)}${assembly.pickup_time_slot ? ', ' + assembly.pickup_time_slot : ''}`} />
                     )}
+                    {/* Стоимость перевозки: у kind=fbs машин нет — поле скрыто. */}
+                    {!isFbs && (
                     <EditableInfoField
                         label="Стоимость"
                         value={String(assembly.pickup_cost ?? '')}
@@ -1124,6 +1167,7 @@ export default function AssemblyDetailPage() {
                         editable={!!canEditAlways}
                         onSave={(v) => handleFieldSave('pickup_cost', Number(v))}
                     />
+                    )}
                     {assembly.delivery_date && (
                         <InfoField label="Сдача на WB" value={formatDate(assembly.delivery_date)} />
                     )}
