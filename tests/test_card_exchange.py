@@ -92,17 +92,9 @@ def patch_client(monkeypatch):
 
 
 async def _add_nomenclature(db, project_id, *, barcode, nm_id, subject):
-    # Сырой INSERT только по нужным колонкам (ORM-INSERT тащит все поля модели, а в
-    # локальной тест-БД схема nomenclature может отставать — напр. нет chrt_id).
-    from sqlalchemy import text
+    from backend.models.cost import Nomenclature
 
-    await db.execute(
-        text(
-            "INSERT INTO nomenclature (project_id, barcode, article_wb, subject, updated_at) "
-            "VALUES (:pid, :bc, :nm, :subj, now())"
-        ),
-        {"pid": project_id, "bc": barcode, "nm": nm_id, "subj": subject},
-    )
+    db.add(Nomenclature(project_id=project_id, barcode=barcode, article_wb=nm_id, subject=subject))
     await db.commit()
 
 

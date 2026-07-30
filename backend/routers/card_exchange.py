@@ -56,6 +56,20 @@ async def session_set(
     return ExchangeSessionStatus(**state)
 
 
+@router.post("/session/from-supply", response_model=ExchangeSessionStatus)
+async def session_from_supply(
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+    _: None = Depends(rate_limit_write),
+) -> ExchangeSessionStatus:
+    """Взять доступ к бирже из уже настроенного доступа WB для поставок (в один клик)."""
+    try:
+        state = await integrations_service.copy_supply_session_to_exchange(db, project.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return ExchangeSessionStatus(**state)
+
+
 @router.get("/categories", response_model=list[RootCategory])
 async def list_categories(
     _project: Project = Depends(get_current_project),

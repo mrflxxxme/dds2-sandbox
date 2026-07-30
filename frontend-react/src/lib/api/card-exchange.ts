@@ -17,6 +17,9 @@ export function addCardExchangeMethods(api: ApiClient) {
         setCardExchangeSession(authorizev3: string) {
             return api.request<ExchangeSessionStatus>('POST', '/api/v1/card-exchange/session', { authorizev3 });
         },
+        useCardExchangeSessionFromSupply() {
+            return api.request<ExchangeSessionStatus>('POST', '/api/v1/card-exchange/session/from-supply');
+        },
         getCardExchangeCategories() {
             return api.request<RootCategory[]>('GET', '/api/v1/card-exchange/categories');
         },

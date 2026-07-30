@@ -8,6 +8,7 @@ vi.mock('@/lib/api', () => ({
     api: {
         getCardExchangeSessionStatus: vi.fn(),
         setCardExchangeSession: vi.fn(),
+        useCardExchangeSessionFromSupply: vi.fn(),
         getCardExchangeCategories: vi.fn(),
         getCardExchangeShowcase: vi.fn(),
         addCardToCart: vi.fn(),
@@ -90,8 +91,9 @@ describe('Страница «Биржа карточек»', () => {
         getSession.mockResolvedValue({ status: 'NONE' });
         getShowcase.mockResolvedValue(makeResp());
         render(<CardExchangePage />);
-        await screen.findByText(/Доступ к бирже не задан/);
-        expect(screen.getByPlaceholderText('authorizev3 …')).toBeInTheDocument();
+        await screen.findByText(/Нужен доступ к бирже WB/);
+        expect(screen.getByPlaceholderText('Вставьте сюда скопированный доступ')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Взять доступ из поставок' })).toBeInTheDocument();
         expect(getShowcase).not.toHaveBeenCalled();
     });
 
@@ -105,7 +107,7 @@ describe('Страница «Биржа карточек»', () => {
         getSession.mockResolvedValue({ status: 'NONE' });
         getShowcase.mockResolvedValue(makeResp());
         render(<CardExchangePage />);
-        const input = await screen.findByPlaceholderText('authorizev3 …');
+        const input = await screen.findByPlaceholderText('Вставьте сюда скопированный доступ');
         fireEvent.change(input, { target: { value: 'tok123' } });
         fireEvent.click(screen.getByRole('button', { name: 'Сохранить доступ' }));
         await waitFor(() => expect(setSession).toHaveBeenCalledWith('tok123'));

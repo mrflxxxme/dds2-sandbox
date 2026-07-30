@@ -99,6 +99,27 @@ export default function CardExchangePage() {
         }
     };
 
+    const takeFromSupply = async () => {
+        setTokenError(null);
+        setSavingToken(true);
+        try {
+            const st = await api.useCardExchangeSessionFromSupply();
+            setSession(st);
+            void load(true);
+        } catch (e) {
+            setTokenError(e instanceof Error ? e.message : 'Не удалось взять доступ из поставок');
+        } finally {
+            setSavingToken(false);
+        }
+    };
+
+    // Одна команда для консоли кабинета WB: собирает доступ (токен + cookie) в буфер.
+    // Одного authorizev3 бирже мало — WB отвечает 401 без анти-бот-cookie.
+    const GRAB_SNIPPET =
+        "copy(JSON.stringify({authorizev3:localStorage['wb-eu-passport-v2.access-token']," +
+        "cookies:document.cookie.split('; ').map(p=>{const i=p.indexOf('=');" +
+        "return{name:p.slice(0,i),value:p.slice(i+1),domain:'.wildberries.ru',path:'/'}})}))";
+
     const categoryOptions = useMemo(
         () => categories.map((c) => ({ value: c.category, label: `${c.category} (${c.subject_count})` })),
         [categories],
@@ -184,26 +205,48 @@ export default function CardExchangePage() {
             {/* Доступ к бирже — отдельная сессия WB, независимая от сессии поставок */}
             {session && session.status !== 'ACTIVE' && (
                 <div className="glass-card" style={{ marginBottom: 16 }}>
-                    <div style={{ fontSize: 14, color: 'var(--color-text)', marginBottom: 8 }}>
-                        {session.status === 'EXPIRED'
-                            ? 'Доступ к бирже истёк. Вставьте свежий authorizev3.'
-                            : 'Доступ к бирже не задан. Вставьте authorizev3 из кабинета WB (DevTools).'}
+                    <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text)', marginBottom: 4 }}>
+                        {session.status === 'EXPIRED' ? 'Доступ к бирже истёк' : 'Нужен доступ к бирже WB'}
+                    </div>
+                    <div style={{ fontSize: 13, color: 'var(--color-muted)', marginBottom: 12 }}>
+                        Способ 1 — если доступ WB уже настроен для поставок, возьмите его одной кнопкой.
+                    </div>
+                    <button className="btn btn-sm btn-primary" onClick={() => void takeFromSupply()} disabled={savingToken}>
+                        {savingToken ? 'Проверка…' : 'Взять доступ из поставок'}
+                    </button>
+
+                    <div style={{ fontSize: 13, color: 'var(--color-muted)', margin: '20px 0 8px' }}>
+                        Способ 2 — вручную. Откройте <b>seller.wildberries.ru</b>, нажмите <b>F12</b> → вкладка <b>Console</b>,
+                        вставьте эту команду и нажмите Enter — доступ скопируется в буфер. Затем вставьте его в поле ниже.
+                    </div>
+                    <div style={{ position: 'relative', marginBottom: 10 }}>
+                        <code style={{ display: 'block', background: 'var(--color-bg-hover)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '10px 12px', fontSize: 11, lineHeight: 1.5, color: 'var(--color-text)', overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                            {GRAB_SNIPPET}
+                        </code>
+                        <button
+                            className="btn btn-sm btn-secondary"
+                            style={{ marginTop: 8 }}
+                            onClick={() => void navigator.clipboard.writeText(GRAB_SNIPPET)}
+                        >
+                            Скопировать команду
+                        </button>
                     </div>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
                         <input
                             value={tokenInput}
                             onChange={(e) => setTokenInput(e.target.value)}
-                            placeholder="authorizev3 …"
+                            placeholder="Вставьте сюда скопированный доступ"
                             style={{ flex: '1 1 320px', minWidth: 240, background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '8px 12px', fontSize: 13, color: 'var(--color-text)' }}
                         />
                         <button className="btn btn-sm btn-primary" onClick={() => void saveToken()} disabled={savingToken || !tokenInput.trim()}>
                             {savingToken ? 'Проверка…' : 'Сохранить доступ'}
                         </button>
                     </div>
-                    <div style={{ fontSize: 12, color: 'var(--color-muted)', marginTop: 8 }}>
-                        Сессия биржи хранится отдельно от сессии поставок — её обновление не затрагивает поставки.
+                    <div style={{ fontSize: 12, color: 'var(--color-muted)', marginTop: 10 }}>
+                        Доступ биржи хранится отдельно от доступа поставок — его обновление не затрагивает поставки.
+                        Одного токена бирже мало: WB требует ещё cookie, поэтому команда выше собирает всё сразу.
                     </div>
-                    {tokenError && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginTop: 8 }}>{tokenError}</div>}
+                    {tokenError && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginTop: 10 }}>{tokenError}</div>}
                 </div>
             )}
 

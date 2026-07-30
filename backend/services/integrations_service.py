@@ -442,18 +442,34 @@ WB_EXCHANGE_LABEL = "WB Exchange Session"
 
 
 async def set_wb_exchange_session(db: AsyncSession, project_id: int, authorizev3: str) -> dict:
-    """Завести/обновить сессию кабинета для биржи карточек (см. set_wb_portal_session)."""
+    """Завести/обновить доступ к бирже карточек.
+
+    Принимает JSON-бандл {"authorizev3": ..., "cookies": [...]} ИЛИ голый authorizev3.
+    ВАЖНО: exc-api отвечает 401 на голый токен без анти-бот-cookie (проверено на живом
+    WB: тот же токен с cookie → 200, без cookie → 401), поэтому бандл — рабочий вариант,
+    а голый токен принимаем только если он реально проходит проверку.
+
+    Валидируем ВЫЗОВОМ САМОЙ БИРЖИ (showcase/subjects), а не supply-auth/token: у биржи
+    свой контур, и check_session() ходит в supply — он бы врал про пригодность доступа.
+    """
     from backend.integrations.wb_portal_client import WbPortalClient, WbPortalError
 
     authorizev3 = authorizev3.strip()
     if not authorizev3:
-        raise ValueError("Пустой токен")
+        raise ValueError("Пустой доступ")
 
     client = WbPortalClient(authorizev3)
     try:
-        await client.check_session()
+        subjects = await client.showcase_subjects()
+        if not subjects:
+            raise ValueError("WB не отдал справочник биржи — доступ принят, но данных нет")
     except WbPortalError as e:
-        raise ValueError(f"Токен недействителен или WB недоступен: {e}") from e
+        raise ValueError(
+            f"Доступ не подошёл (WB ответил отказом): {e}. "
+            "Нужен полный доступ с cookie — одного authorizev3 бирже недостаточно."
+        ) from e
+    finally:
+        await client.aclose()
 
     # Ищем ВКЛЮЧАЯ soft-deleted (unique-слот занят даже у удалённой строки).
     result = await db.execute(
@@ -484,6 +500,59 @@ async def set_wb_exchange_session(db: AsyncSession, project_id: int, authorizev3
     await db.commit()
     await db.refresh(key)
     return {"status": "ACTIVE", "updated_at": (key.config or {}).get("updated_at")}
+
+
+async def copy_supply_session_to_exchange(db: AsyncSession, project_id: int) -> dict:
+    """Скопировать уже настроенный доступ поставок (wb_portal_session) в слот биржи.
+
+    Чтобы не заставлять пользователя добывать токен и cookie руками, когда рабочий
+    доступ WB в системе уже есть. Копируем ЗАШИФРОВАННОЕ значение как есть (не
+    расшифровываем), слоты остаются независимыми: последующее протухание одного не
+    трогает другой.
+    """
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_PORTAL_SERVICE,
+            IntegrationKey.is_active.is_(True),
+            IntegrationKey.is_deleted.is_(False),
+        )
+    )
+    src = result.scalar_one_or_none()
+    if not src:
+        raise ValueError(
+            "В системе нет активного доступа WB для поставок — скопировать нечего. "
+            "Вставьте доступ к бирже вручную."
+        )
+
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_EXCHANGE_SERVICE,
+            IntegrationKey.label == WB_EXCHANGE_LABEL,
+        )
+    )
+    key = result.scalar_one_or_none()
+    config = {"status": "ACTIVE", "updated_at": utcnow().isoformat(), "source": "supply"}
+    if key:
+        if key.is_deleted:
+            key.restore()
+        key.encrypted_key = src.encrypted_key
+        key.is_active = True
+        key.config = config
+    else:
+        db.add(
+            IntegrationKey(
+                project_id=project_id,
+                service=WB_EXCHANGE_SERVICE,
+                label=WB_EXCHANGE_LABEL,
+                encrypted_key=src.encrypted_key,
+                is_active=True,
+                config=config,
+            )
+        )
+    await db.commit()
+    return {"status": "ACTIVE", "updated_at": config["updated_at"]}
 
 
 async def get_wb_exchange_client(db: AsyncSession, project_id: int) -> "WbPortalClient":
