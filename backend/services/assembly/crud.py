@@ -11,7 +11,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
@@ -462,6 +462,7 @@ async def _build_response(
     machine_box_qty: dict[tuple[int, str], int] | None = None,
     box_weight_kg: Decimal | None = None,
     fbs_supply_map: dict[str, Any] | None = None,
+    fbs_orders_progress: dict[str, tuple[int, int]] | None = None,
 ) -> dict:
     """
     Build AssemblyRequestResponse dict from ORM model.
@@ -627,6 +628,16 @@ async def _build_response(
         "fbs_supply_status": _fbs_supply_status_value(fbs_supply, str(request.status)),
         "fbs_scan_dt": fbs_supply.scan_dt if fbs_supply is not None else None,
         "fbs_supply_created_at": fbs_supply.created_at_wb if fbs_supply is not None else None,
+        "fbs_orders_total": (
+            (fbs_orders_progress or {}).get(request.fbs_supply_id, (None, None))[0]
+            if request.fbs_supply_id
+            else None
+        ),
+        "fbs_orders_pending": (
+            (fbs_orders_progress or {}).get(request.fbs_supply_id, (None, None))[1]
+            if request.fbs_supply_id
+            else None
+        ),
         "wb_fbo_supply_id": request.wb_fbo_supply_id,
         "wb_supply_name": request.wb_fbo_supply.name if request.wb_fbo_supply else None,
         "wb_warehouse_name": request.wb_fbo_supply.warehouse_name if request.wb_fbo_supply else None,
@@ -821,9 +832,17 @@ async def prefetch_list_maps(
 
     # Поставки FBS зеркал — одним IN-запросом: статус/скан кабинета в списке.
     fbs_supply_map: dict[str, Any] = {}
+    fbs_orders_progress: dict[str, tuple[int, int]] = {}
     fbs_ids = sorted({r.fbs_supply_id for r in requests if r.fbs_supply_id})
     if fbs_ids:
-        from backend.models.wb_fbs import WbFbsSupply
+        from backend.models.wb_fbs import (
+            FBS_TERMINAL_STATUSES,
+            FBS_WB_CANCELLED_STATUSES,
+            FBS_WB_DELIVERED_STATUSES,
+            FBS_WB_SORTED_STATUSES,
+            WbFbsOrder,
+            WbFbsSupply,
+        )
 
         sup_rows = await db.execute(
             select(WbFbsSupply).where(
@@ -832,6 +851,42 @@ async def prefetch_list_maps(
             )
         )
         fbs_supply_map = {s.wb_supply_id: s for s in sup_rows.scalars().all()}
+
+        # Прогресс сортировки: живых заданий всего / ещё не прошедших СЦ —
+        # один GROUP BY на все поставки страницы («ждут сортировки: N из M»).
+        past_sc = tuple(FBS_WB_SORTED_STATUSES) + tuple(FBS_WB_DELIVERED_STATUSES)
+        alive = and_(
+            WbFbsOrder.supplier_status.notin_(FBS_TERMINAL_STATUSES),
+            or_(
+                WbFbsOrder.wb_status.is_(None),
+                WbFbsOrder.wb_status.notin_(FBS_WB_CANCELLED_STATUSES),
+            ),
+        )
+        prog_rows = await db.execute(
+            select(
+                WbFbsOrder.supply_id,
+                func.count().filter(alive).label("total"),
+                func.count()
+                .filter(
+                    and_(
+                        alive,
+                        or_(
+                            WbFbsOrder.wb_status.is_(None),
+                            WbFbsOrder.wb_status.notin_(past_sc),
+                        ),
+                    )
+                )
+                .label("pending"),
+            )
+            .where(
+                WbFbsOrder.project_id == project_id,
+                WbFbsOrder.supply_id.in_(fbs_ids),
+            )
+            .group_by(WbFbsOrder.supply_id)
+        )
+        fbs_orders_progress = {
+            row.supply_id: (int(row.total or 0), int(row.pending or 0)) for row in prog_rows.all()
+        }
 
     return {
         "nom_map": nom_map,
@@ -844,6 +899,7 @@ async def prefetch_list_maps(
         "machine_box_qty": machine_box_qty,
         "box_weight_kg": box_weight_kg,
         "fbs_supply_map": fbs_supply_map,
+        "fbs_orders_progress": fbs_orders_progress,
     }
 
 

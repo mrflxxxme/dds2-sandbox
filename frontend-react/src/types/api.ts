@@ -2109,6 +2109,12 @@ export interface AssemblyRequest {
    * задним числом): по ней «передана раньше созданной» читалось парадоксом.
    */
   fbs_supply_created_at?: string | null;
+  /**
+   * Прогресс сортировки (kind=fbs): живых заданий всего / ещё НЕ прошедших СЦ —
+   * подпись «ждут сортировки: N из M» объясняет, почему заявка не идёт дальше.
+   */
+  fbs_orders_total?: number | null;
+  fbs_orders_pending?: number | null;
   wb_fbo_supply_id: number | null;
   wb_supply_name?: string;
   wb_warehouse_name?: string;

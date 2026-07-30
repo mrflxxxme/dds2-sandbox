@@ -1364,10 +1364,23 @@ export default function AssemblyListPage() {
                 || STATUS_MAP[row.status]?.label || row.status,
             render: (_v, row: AssemblyRequest) => {
                 const info = supplyStatusInfo(row.fbs_supply_status);
-                return info ? (
-                    <span className={`badge ${info.badge}`} title={info.hint}>{info.label}</span>
-                ) : (
-                    <span className="badge badge-secondary">{STATUS_MAP[row.status]?.label || row.status}</span>
+                const pending = row.fbs_orders_pending ?? 0;
+                const totalOrders = row.fbs_orders_total ?? 0;
+                return (
+                    <div>
+                        {info ? (
+                            <span className={`badge ${info.badge}`} title={info.hint}>{info.label}</span>
+                        ) : (
+                            <span className="badge badge-secondary">{STATUS_MAP[row.status]?.label || row.status}</span>
+                        )}
+                        {/* Почему заявка не идёт дальше: сколько заданий СЦ ещё
+                            не пропустил. Показываем только в фазе обработки. */}
+                        {row.fbs_supply_status === 'in_delivery' && pending > 0 && (
+                            <div style={{ fontSize: 11, color: 'var(--color-warning)', marginTop: 2 }}>
+                                ждут сортировки: {formatNumber(pending, 0)} из {formatNumber(totalOrders, 0)}
+                            </div>
+                        )}
+                    </div>
                 );
             },
             exportValue: (row: AssemblyRequest) => supplyStatusInfo(row.fbs_supply_status)?.label
@@ -1413,9 +1426,16 @@ export default function AssemblyListPage() {
         },
         {
             key: 'shipped_at', label: 'Передана',
-            headerTitle: 'Момент передачи поставки в WB (скан QR либо закрытие)',
-            render: (_v, row: AssemblyRequest) => row.shipped_at ? formatDateTime(row.shipped_at) : '—',
-            exportValue: (row: AssemblyRequest) => row.shipped_at || '',
+            headerTitle: 'Момент передачи поставки в WB. Пока поставка «Отгрузите поставку» (не отсканирована) — прочерк: закрытие поставки передачей не является',
+            // shipped_at = scan|closed: у неотсканированной поставки это дата
+            // ЗАКРЫТИЯ — показывать её как «передана» значит врать (прод-вопрос
+            // 30.07: WB-GI-259239479 «передана» при неотсканированной поставке).
+            render: (_v, row: AssemblyRequest) =>
+                row.fbs_supply_status === 'in_delivery' && row.shipped_at
+                    ? formatDateTime(row.shipped_at)
+                    : '—',
+            exportValue: (row: AssemblyRequest) =>
+                row.fbs_supply_status === 'in_delivery' ? (row.shipped_at || '') : '',
         },
     ];
 
@@ -1499,7 +1519,14 @@ export default function AssemblyListPage() {
                 «Завершённые»): каунты по фильтрам списка, без статус-среза. */}
             {pageTab === 'fbs' && (
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
-                    {FBS_PHASE_TABS.map(p => {
+                    {FBS_PHASE_TABS.filter(p => {
+                        // «Отменено» — судьба ПОСТАВКИ целиком (reject WB / все
+                        // задания отменены), случается редко: пустой чип — шум
+                        // (решение владельца 30.07). Ненулевой — показываем,
+                        // прятать отклонённые поставки совсем нельзя.
+                        if (p.status !== 'CANCELLED') return true;
+                        return (fbsPhaseCounts.CANCELLED ?? 0) > 0 || statusFilter === 'CANCELLED';
+                    }).map(p => {
                         const count = p.status === ''
                             ? Object.values(fbsPhaseCounts).reduce((s, n) => s + n, 0)
                             : fbsPhaseCounts[p.status] ?? 0;
