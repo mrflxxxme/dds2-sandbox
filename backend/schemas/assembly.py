@@ -14,6 +14,11 @@ from backend.schemas.assembly_wb import WbSupplyStateBrief
 
 PackageTypeStr = Literal["BOX", "MONOPALLET", "SUPERSAFE"]
 
+#: Типы заявки на сборку — контракт фильтра списка и бейджа фронта
+#: (зеркалится в types/api.ts): fbo — операционная заявка логиста,
+#: fbs — учётное зеркало сборки ФФ по поставке FBS.
+ALLOWED_ASSEMBLY_KINDS = ["fbo", "fbs"]
+
 
 class FfLinkInfo(BaseModel):
     """Одна привязанная ФФ-заявка (зеркало фулфилмента) для деталки/списка сборки.
@@ -283,6 +288,11 @@ class AssemblyRequestResponse(BaseModel):
     warehouse_name: str | None = None
     number: str
     status: str
+    #: fbo — операционная заявка логиста; fbs — учётное зеркало сборки ФФ по
+    #: поставке FBS (ведёт джоб: сток и резерв не трогает, машины/веса нет).
+    kind: str = "fbo"
+    #: Поставка FBS (WB-GI-…) — источник зеркала kind=fbs; у fbo всегда None.
+    fbs_supply_id: str | None = None
     wb_fbo_supply_id: int | None = None
     wb_supply_name: str | None = None  # wb_fbo_supplies.name
     wb_warehouse_name: str | None = None  # wb_fbo_supplies.warehouse_name (WB destination)

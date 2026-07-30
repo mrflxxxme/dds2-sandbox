@@ -124,6 +124,9 @@ class FbsWarehouseOut(BaseModel):
     #: Порог FBO-остатка: отдаём в FBS, только если на складах WB осталось ≤ этого.
     #: None — на FBO не смотрим.
     fbo_max_qty: int | None = None
+    #: Авто-учёт сборки FBS: заявки kind=fbs заводит и ведёт джоб (одна на
+    #: поставку WB-GI), сток/резерв они не трогают.
+    auto_assembly: bool = False
     synced_at: datetime | None = None
     links: list[FbsWarehouseLinkOut] = Field(default_factory=list)
 
@@ -153,6 +156,9 @@ class FbsWarehouseSettingsUpdate(BaseModel):
     mode: str | None = None
     #: -1 в запросе = «снять гейт» (None не отличить от «не передано»).
     fbo_max_qty: int | None = Field(None, ge=-1)
+    #: Авто-учёт сборки FBS: WMS склада сам заводит заявки по FBS-заказам —
+    #: мы зеркалим их учётными заявками kind=fbs (одна на поставку WB-GI).
+    auto_assembly: bool | None = None
     #: Подтверждение рискованной комбинации «translate + ff_mirror», когда
     #: зеркало ФФ выше нашего учёта: без force сервис отвечает 409 с цифрами
     #: разрыва, с force — применяет как есть (решение человека).

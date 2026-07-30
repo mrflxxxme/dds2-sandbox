@@ -21,6 +21,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -97,6 +98,24 @@ ASSEMBLY_TRANSITIONS: dict[AssemblyStatus, set[AssemblyStatus]] = {
 # ─── Assembly Request ───────────────────────────────────────────────────────
 
 
+class AssemblyKind(enum.StrEnum):
+    """Тип заявки на сборку — определяет, КТО двигает статусы и КТО трогает сток.
+
+    FBO — операционная заявка логиста: ship списывает сток (OUTBOUND/ASSEMBLY),
+    позиции держат резерв через `_get_reserved_map_batch`.
+
+    FBS — УЧЁТНОЕ зеркало сборки, которую ведёт сам ФФ (kind появился для
+    складов, где WMS провайдера автоматически заводит свои заявки по FBS-заказам
+    WB): создаётся и ведётся джобом из поставки FBS (`fbs_supply_id`), резерв
+    НЕ держит (его уже держат открытые задания через `get_open_fbs_reserved`),
+    сток при SHIPPED НЕ трогает (списание делает `writeoff_completed_orders`
+    по `complete` — единственная точка). Любое второе списание/резерв = дубль.
+    """
+
+    FBO = "fbo"
+    FBS = "fbs"
+
+
 class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     """
     Assembly request for FBO supply shipment.
@@ -104,6 +123,9 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     Lifecycle: PENDING → IN_PROGRESS → READY → VEHICLE_ASSIGNED → SHIPPED
     Ship creates OutboundShipment + deducts stock.
     Cancel from SHIPPED rolls back stock.
+
+    kind=fbs — учётное зеркало сборки ФФ по поставке FBS (см. `AssemblyKind`):
+    статусы двигает джоб, сток и резерв этой заявкой не трогаются.
     """
 
     __tablename__ = "assembly_requests"
@@ -113,6 +135,13 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
     number: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default=AssemblyStatus.PENDING, nullable=False)
+    kind: Mapped[str] = mapped_column(
+        String(10), nullable=False, default=AssemblyKind.FBO, server_default="fbo"
+    )
+    #: Поставка FBS (`wb_fbs_supplies.wb_supply_id`, WB-GI-…), из которой джоб
+    #: собрал это зеркало. Одна поставка — максимум одна заявка (partial unique).
+    #: Задания связаны транзитивно через `wb_fbs_orders.supply_id` — своего FK нет.
+    fbs_supply_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     # FBO supply link (1:1, unique per active project)
     wb_fbo_supply_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("wb_fbo_supplies.id"), nullable=True)
@@ -237,6 +266,15 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_assembly_requests_warehouse_id", "warehouse_id"),
         Index("ix_assembly_requests_status", "status"),
         Index("ix_assembly_requests_is_archived", "is_archived"),
+        # Одна поставка FBS — максимум одно учётное зеркало: джоб идемпотентен
+        # по этому ключу (повторный тик находит заявку, а не плодит дубль).
+        Index(
+            "uq_assembly_requests_fbs_supply",
+            "project_id",
+            "fbs_supply_id",
+            unique=True,
+            postgresql_where=text("fbs_supply_id IS NOT NULL"),
+        ),
         Index("ix_assembly_requests_counterparty_id", "counterparty_id"),
         Index("ix_assembly_requests_source_draft_id", "source_draft_id"),
         Index("ix_assembly_requests_source_vehicle_id", "source_vehicle_id"),
