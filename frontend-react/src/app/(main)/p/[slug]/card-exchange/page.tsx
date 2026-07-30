@@ -67,6 +67,43 @@ function Segmented<T extends string>({ tabs, value, onChange }: {
 
 const money = (v: number | null) => (v == null ? '—' : `${formatNumber(Number(v), 0)} ₽`);
 
+/** Демо-наполнение для работы над вёрсткой, когда доступа к бирже нет.
+ *  ТОЛЬКО в dev: на проде без доступа показывается пустое состояние, а не выдуманные карточки. */
+const IS_DEV = process.env.NODE_ENV === 'development';
+
+const DEMO_ADS: ShowcaseAd[] = [
+    ['Компрессор автомобильный 12V, 150 PSI', 'AUTOPROFI', 'ИП Смирнов А. В.', 148_000, 4.8, 31_204, 393, 3, ['Китай'], true],
+    ['Насос автомобильный электрический', 'CARFORT', 'ООО «Карфорт»', 96_500, 4.7, 12_880, 46, 1, ['Китай'], false],
+    ['Менажница деревянная 30 см, бук', 'Kucher`s', 'ИП Кучеров Д. С.', 1_222_050, 4.9, 29_339, 83, 30, ['Российская Федерация'], false],
+    ['Наушники проводные с микрофоном 3,5 Jack', 'VOLGA MARKET', 'ИП Жуков Д. А.', 106_200, 4.6, 20_341, 124, 14, ['Китай'], false],
+    ['Органайзер для косметики с зеркалом', 'Opt-Family', 'ООО «Опт-Фэмили»', 601_042, 4.9, 32_451, 42, 2, null, false],
+    ['Светодиодная лента RGB 5 м с пультом', 'Lentа Light', 'ИП Орлов П. Н.', 1_358_031, 4.7, 45_277, 51, 3, null, true],
+    ['Кухонные весы электронные до 10 кг', 'EcoFit home', 'ООО «ЭкоФит»', 1_624_767, 4.8, 40_633, 47, 2, ['Китай'], false],
+    ['Набор ключей комбинированных 12 шт', 'ToolMaster', 'ИП Белов И. И.', 254_300, 4.6, 8_412, 0, 1, ['Китай'], false],
+    ['База под макияж выравнивающая', 'JOMTAM', 'ООО «Джомтам»', 10_031_371, 4.9, 156_020, 31_371, 5, ['Китай'], false],
+    ['Носки набор чёрные высокие 10 пар', 'Leora', 'ИП Леонова О. К.', 1_280_000, 4.8, 64_101, 0, 8, null, false],
+    ['Аэрогриль 12 л с таймером', 'HomeChef', 'ООО «ХоумШеф»', 2_140_500, 4.5, 5_902, 212, 4, ['Китай'], false],
+    ['Термокружка 500 мл, нержавейка', 'DrinkGo', 'ИП Гусев Р. А.', 480_900, 4.7, 18_744, 640, 6, ['Китай'], false],
+].map(([title, brand, supplier, price, rating, feedbacks, stock, variants, countries, ours], i) => ({
+    ad_id: 900_001 + i,
+    nm_id: 240_000_000 + i * 137,
+    imt_id: 2_880_000_000 + i,
+    title: title as string,
+    brand: brand as string,
+    supplier_name: supplier as string,
+    imt_count: variants as number,
+    stock_qty: stock as number,
+    photo: null,
+    contact_countries: countries as string[] | null,
+    is_kiz: false,
+    total_price: price as number,
+    rating: rating as number,
+    feedbacks_count: feedbacks as number,
+    has_in_cart: false,
+    is_card_owner: false,
+    is_ours: ours as boolean,
+}));
+
 export default function CardExchangePage() {
     // Доступ к бирже — отдельный слот от доступа поставок. Пользователь его НЕ вводит:
     // раздел сам подхватывает уже настроенный доступ WB (см. useEffect ниже).
@@ -127,6 +164,10 @@ export default function CardExchangePage() {
     }, []);
 
     const sessionOk = session?.status === 'ACTIVE';
+    // Нет доступа + dev → показываем интерфейс на демо-карточках, чтобы можно было
+    // работать над вёрсткой. На проде демо не включается никогда.
+    const demo = !!session && !sessionOk && IS_DEV;
+    const showUi = sessionOk || demo;
 
     const categoryOptions = useMemo(
         () => categories.map(c => ({ value: c.category, label: `${c.category} (${c.subject_count})` })),
@@ -179,8 +220,13 @@ export default function CardExchangePage() {
     }, [search, rootCategory, ourMode, inStockOnly, sort, sessionOk]);
 
     const toggleCart = async (ad: ShowcaseAd) => {
-        setActionError(null); setBusyAd(ad.ad_id);
+        setActionError(null);
         const inCart = cart.has(ad.ad_id);
+        if (demo) {  // демо-режим: корзина живёт только в состоянии страницы
+            setCart(prev => { const n = new Set(prev); if (inCart) n.delete(ad.ad_id); else n.add(ad.ad_id); return n; });
+            return;
+        }
+        setBusyAd(ad.ad_id);
         try {
             if (inCart) {
                 await api.deleteCardsFromCart([ad.ad_id]);
@@ -193,6 +239,8 @@ export default function CardExchangePage() {
             setActionError(e instanceof Error ? e.message : 'Ошибка корзины');
         } finally { setBusyAd(null); }
     };
+
+    const visibleAds = demo ? DEMO_ADS : ads;
 
     const cartBtn = (ad: ShowcaseAd, compact = false) => {
         const inCart = cart.has(ad.ad_id);
@@ -217,7 +265,7 @@ export default function CardExchangePage() {
                 </div>
 
                 {/* Нет доступа — короткое сообщение без технических подробностей. */}
-                {session && session.status !== 'ACTIVE' && (
+                {session && !sessionOk && !demo && (
                     <div className="glass-card" style={{ textAlign: 'center', padding: 40 }}>
                         <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text)', marginBottom: 6 }}>
                             Нет доступа к бирже WB
@@ -233,7 +281,7 @@ export default function CardExchangePage() {
                     <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 32 }}>Загрузка…</div>
                 )}
 
-                {sessionOk && (<>
+                {showUi && (<>
                     {/* Фильтры — в одну строку, как в «Управлении рекламой» */}
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
                         <SearchSelect value={rootCategory} onChange={setRootCategory} options={categoryOptions}
@@ -256,7 +304,7 @@ export default function CardExchangePage() {
                             style={{ flex: '1 1 280px', maxWidth: 380, background: 'var(--color-bg-input)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '7px 12px', fontSize: 13, color: 'var(--color-text)' }} />
                         <span style={{ marginLeft: 'auto', fontSize: 12.5, color: 'var(--color-text-muted)' }}>
                             {session?.supplier_id && <>Кабинет: {session.supplier_id} · </>}
-                            Показано: {formatNumber(ads.length, 0)} · В корзине: {formatNumber(cart.size, 0)}
+                            Показано: {formatNumber(visibleAds.length, 0)} · В корзине: {formatNumber(cart.size, 0)}
                         </span>
                     </div>
 
@@ -268,22 +316,22 @@ export default function CardExchangePage() {
                     {scanNote && <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>{scanNote}</div>}
                     {actionError && <div className="glass-card" style={{ marginBottom: 12, color: 'var(--color-danger)' }}>{actionError}</div>}
 
-                    {loading && <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 32 }}>Загрузка…</div>}
-                    {error && !loading && (
+                    {loading && !demo && <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 32 }}>Загрузка…</div>}
+                    {error && !loading && !demo && (
                         <div className="glass-card" style={{ color: 'var(--color-danger)' }}>
                             {error} <button className="btn btn-sm btn-secondary" onClick={() => void load(true)}>Повторить</button>
                         </div>
                     )}
-                    {!loading && !error && ads.length === 0 && (
+                    {!loading && !error && visibleAds.length === 0 && (
                         <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 48 }}>
                             Ничего не найдено. Измените фильтры или запрос.
                         </div>
                     )}
 
                     {/* Плитка */}
-                    {!loading && !error && ads.length > 0 && view === 'grid' && (
+                    {!loading && !error && visibleAds.length > 0 && view === 'grid' && (
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14 }}>
-                            {ads.map(ad => (
+                            {visibleAds.map(ad => (
                                 <div key={ad.ad_id} className="glass-card" style={{ display: 'flex', flexDirection: 'column', padding: 12, gap: 6 }}>
                                     <div style={{ position: 'relative', aspectRatio: '3 / 4', background: 'var(--color-bg-hover)', borderRadius: 8, overflow: 'hidden' }}>
                                         {ad.photo
@@ -316,7 +364,7 @@ export default function CardExchangePage() {
                     )}
 
                     {/* Список — таблица в стиле «Управления рекламой» */}
-                    {!loading && !error && ads.length > 0 && view === 'list' && (
+                    {!loading && !error && visibleAds.length > 0 && view === 'list' && (
                         <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
                             <div style={{ overflowX: 'auto' }}>
                                 <table className="data-table" style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>
@@ -333,7 +381,7 @@ export default function CardExchangePage() {
                                         <th style={{ ...cThStyle, width: 96 }} />
                                     </tr></thead>
                                     <tbody>
-                                        {ads.map(ad => (
+                                        {visibleAds.map(ad => (
                                             <tr key={ad.ad_id} style={{ color: '#111827' }}>
                                                 <td style={{ ...tdLeft, padding: '3px 6px' }}>
                                                     {ad.photo
