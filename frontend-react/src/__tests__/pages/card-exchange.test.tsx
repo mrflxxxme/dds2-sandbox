@@ -122,6 +122,21 @@ describe('Страница «Биржа карточек»', () => {
         expect(screen.getByText('ИП')).toBeInTheDocument();
     });
 
+    it('клик по заголовку колонки — перезапрос с новой сортировкой', async () => {
+        getShowcase.mockResolvedValue(makeResp());
+        render(<CardExchangePage />);
+        await screen.findByText('Тестовая карточка', { exact: false });
+        fireEvent.click(screen.getByRole('button', { name: 'Список' }));
+        const priceTh = await screen.findByText(/ЦЕНА ₽/);
+        getShowcase.mockClear();
+        fireEvent.click(priceTh);
+        await waitFor(() => expect(getShowcase).toHaveBeenCalled());
+        expect(getShowcase.mock.calls.at(-1)?.[0]).toMatchObject({ sort_field: 'totalPrice', sort_order: 'desc' });
+        // повторный клик разворачивает порядок
+        fireEvent.click(await screen.findByText(/ЦЕНА ₽/));
+        await waitFor(() => expect(getShowcase.mock.calls.at(-1)?.[0]).toMatchObject({ sort_order: 'asc' }));
+    });
+
     it('«наша» карточка помечена бейджем и мы её видим', async () => {
         getShowcase.mockResolvedValue(makeResp({ ads: [makeAd({ is_ours: true })] }));
         render(<CardExchangePage />);

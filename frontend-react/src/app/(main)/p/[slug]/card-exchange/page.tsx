@@ -240,7 +240,30 @@ export default function CardExchangePage() {
         } finally { setBusyAd(null); }
     };
 
-    const visibleAds = demo ? DEMO_ADS : ads;
+    // Сортировка в списке — серверная (WB умеет только эти три поля), поэтому клик по
+    // заголовку меняет общий sort и перезагружает выдачу с начала: иначе при курсорной
+    // пагинации отсортировалась бы лишь загруженная часть.
+    const [sortField, sortOrder] = sort.split(':');
+    const toggleSort = (field: string) => {
+        setSort(sortField === field ? `${field}:${sortOrder === 'asc' ? 'desc' : 'asc'}` : `${field}:desc`);
+    };
+    const sortArrow = (field: string) => (sortField === field ? (sortOrder === 'asc' ? ' ↑' : ' ↓') : '');
+    /** Заголовок сортируемой колонки — вид и поведение как в «Управлении рекламой». */
+    const sortableTh = (field: string, label: string, style: React.CSSProperties) => (
+        <th style={{ ...style, cursor: 'pointer' }} onClick={() => toggleSort(field)}
+            title="Сортировать (данные перезапрашиваются с биржи)">
+            {label}{sortArrow(field)}
+        </th>
+    );
+
+    // В демо запросов нет — сортируем прямо на месте, чтобы клики были видны.
+    const demoSorted = useMemo(() => {
+        const val = (a: ShowcaseAd) => sortField === 'totalPrice' ? Number(a.total_price ?? 0)
+            : sortField === 'rating' ? Number(a.rating) : Number(a.feedbacks_count);
+        return [...DEMO_ADS].sort((a, b) => (sortOrder === 'asc' ? val(a) - val(b) : val(b) - val(a)));
+    }, [sortField, sortOrder]);
+
+    const visibleAds = demo ? demoSorted : ads;
     // В демо запросов нет — начальный loading=true не должен прятать карточки.
     const busy = loading && !demo;
 
@@ -374,9 +397,9 @@ export default function CardExchangePage() {
                                         <th style={{ ...cThLeft, width: 46 }} />
                                         <th style={cThLeft}>ТОВАР</th>
                                         <th style={cThLeft}>ПРОДАВЕЦ</th>
-                                        <th style={{ ...cThStyle, width: 110 }}>ЦЕНА ₽</th>
-                                        <th style={{ ...cThStyle, width: 70 }}>РЕЙТИНГ</th>
-                                        <th style={{ ...cThStyle, width: 90 }}>ОТЗЫВЫ</th>
+                                        {sortableTh('totalPrice', 'ЦЕНА ₽', { ...cThStyle, width: 110 })}
+                                        {sortableTh('rating', 'РЕЙТИНГ', { ...cThStyle, width: 70 })}
+                                        {sortableTh('feedbacksCount', 'ОТЗЫВЫ', { ...cThStyle, width: 90 })}
                                         <th style={{ ...cThStyle, width: 90 }}>ОСТАТКИ</th>
                                         <th style={{ ...cThStyle, width: 80 }}>ВАРИАНТОВ</th>
                                         <th style={{ ...cThLeft, width: 110 }}>СТРАНА</th>
