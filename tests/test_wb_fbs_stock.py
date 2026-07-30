@@ -1242,6 +1242,45 @@ class TestStockFormula:
         assert row["margin_pct"] is None or isinstance(row["margin_pct"], float)
 
     @pytest.mark.asyncio
+    async def test_matrix_ignores_fbo_gate(self, db_session, project, fbs_env, monkeypatch):
+        """Гейт «только то, чего нет на FBO» не срезает «Можем» матрицы.
+
+        Гейт — правило ТРАНСЛЯЦИИ (придержать передачу в WB, пока товар есть на
+        FBO), а матрица — планирование физических поставок: включение настройки
+        на складе обнуляло «Можем» по всем позициям с живым FBO (жалоба 30.07).
+        Превью при этом обязано остаться гейтованным — оно показывает, что
+        реально уедет в WB.
+        """
+        wh, fbs_wh = fbs_env
+        fbs_wh.fbo_max_qty = 0  # «отдаём только то, чего нет на FBO»
+        nom = await _mk_nom(db_session, project.id, chrt_id=8802)
+        await _mk_stock(db_session, project.id, wh, nom, 7)
+        await db_session.commit()
+
+        async def _fake_fbo(db, project_id, nom_ids):
+            return {nom.id: 5}  # на складах WB товар ЕСТЬ → гейт придерживает
+
+        class _Client:
+            async def get_stocks(self, wb_warehouse_id, chrt_ids):
+                return {8802: 0}
+
+        async def _fake_client(db, project_id):
+            return _Client()
+
+        monkeypatch.setattr(stock_service, "_load_fbo", _fake_fbo)
+        monkeypatch.setattr(stock_service, "_get_client", _fake_client)
+
+        preview = await stock_service.preview_stock(db_session, project.id, fbs_wh.wb_warehouse_id)
+        prow = next(r for r in preview["rows"] if r.get("chrt_id") == 8802)
+        assert prow["qty_available"] == 0, "трансляция обязана остаться гейтованной"
+        assert prow["blocked_reason"] == stock_service.BLOCKED_FBO_IN_STOCK
+
+        matrix = await stock_service.stock_matrix(db_session, project.id)
+        row = next(r for r in matrix["rows"] if r["nomenclature_id"] == nom.id)
+        cell = row["cells"][str(fbs_wh.wb_warehouse_id)]
+        assert cell["can"] == 7, "матрица отвечает про физику, гейт её не режет"
+
+    @pytest.mark.asyncio
     async def test_project_isolation(self, db_session, project, other_project, fbs_env):
         """Остаток чужого проекта на «том же» складе продавца не подмешивается."""
         wh, fbs_wh = fbs_env
