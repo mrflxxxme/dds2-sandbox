@@ -1249,7 +1249,9 @@ export default function AssemblyDetailPage() {
             {/* Наполнение зеркала FBS — задания поставки, как на экране поставки
                 в разделе FBS: когда поступил заказ (+«N ч назад»), товар, цена,
                 статус. FBO-таблица позиций (короба/«на складе») тут не о том. */}
-            {isFbs && assembly.fbs_supply_id && <FbsOrdersCard fbsSupplyId={assembly.fbs_supply_id} />}
+            {isFbs && assembly.fbs_supply_id && (
+                <FbsOrdersCard fbsSupplyId={assembly.fbs_supply_id} shippedAt={assembly.shipped_at} />
+            )}
 
             {/* Цепочка попыток отгрузки (отгрузил → не приняли → вернул → переотгрузил) */}
             {attempts.length > 0 && (

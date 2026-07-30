@@ -14,13 +14,17 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+    ORDER_AGE_DANGER_HOURS,
+    ORDER_AGE_WARN_HOURS,
     PSEUDO_STATUS_LABEL,
     TRANSIT_DANGER_DAYS,
     TRANSIT_STALE_DAYS,
     TRANSIT_WARN_DAYS,
     WRITEOFF_REASON_LABEL,
     daysSince,
+    durationSinceLabel,
     hoursAgoLabel,
+    orderAgeColor,
     transitDaysColor,
     writeoffReasonLabel,
 } from '@/app/(main)/p/[slug]/warehouse/fbs/fbsShared';
@@ -146,5 +150,53 @@ describe('hoursAgoLabel (возраст заказа как в кабинете 
     it('null/мусор → null', () => {
         expect(hoursAgoLabel(null, now)).toBeNull();
         expect(hoursAgoLabel('не дата', now)).toBeNull();
+    });
+});
+
+describe('orderAgeColor (подсветка, пока WB не отсканировал)', () => {
+    const now = Date.parse('2026-07-30T12:00:00Z');
+
+    it('не отсканирован: >24ч красный, >12ч оранжевый, свежий без цвета', () => {
+        expect(orderAgeColor('2026-07-29T10:00:00Z', 'new', null, now)).toBe('var(--color-danger)');
+        expect(orderAgeColor('2026-07-29T23:00:00Z', 'confirm', 'waiting', now)).toBe('var(--color-warning)');
+        expect(orderAgeColor('2026-07-30T08:00:00Z', 'new', 'waiting', now)).toBeNull();
+    });
+
+    it('ПЕРЕДАННЫЙ, но не отсканированный — красим: скан WB и есть граница зависания', () => {
+        // Кейс ASM-899: complete + waiting, заказ поступил 1 дн 17 ч назад.
+        expect(orderAgeColor('2026-07-28T18:31:10Z', 'complete', 'waiting', now)).toBe('var(--color-danger)');
+        expect(orderAgeColor('2026-07-28T18:31:10Z', 'complete', '', now)).toBe('var(--color-danger)');
+    });
+
+    it('после скана СЦ и на отменах — не красим (зона логистики WB)', () => {
+        expect(orderAgeColor('2026-07-25T10:00:00Z', 'complete', 'sorted', now)).toBeNull();
+        expect(orderAgeColor('2026-07-25T10:00:00Z', 'complete', 'ready_for_pickup', now)).toBeNull();
+        expect(orderAgeColor('2026-07-25T10:00:00Z', 'complete', 'sold', now)).toBeNull();
+        expect(orderAgeColor('2026-07-25T10:00:00Z', 'cancel', 'canceled', now)).toBeNull();
+        expect(orderAgeColor('2026-07-25T10:00:00Z', 'new', 'declined_by_client', now)).toBeNull();
+    });
+
+    it('пороги согласованы: warn < danger', () => {
+        expect(ORDER_AGE_WARN_HOURS).toBeLessThan(ORDER_AGE_DANGER_HOURS);
+    });
+});
+
+describe('durationSinceLabel (колонка «В пути» — часы вместо «0 дней»)', () => {
+    const now = Date.parse('2026-07-30T12:00:00Z');
+
+    it('суб-суточный транзит показывает часы, а не «0»', () => {
+        expect(durationSinceLabel('2026-07-29T13:03:24Z', now)).toBe('22 ч 56 мин');
+        expect(durationSinceLabel('2026-07-30T11:48:00Z', now)).toBe('12 мин');
+        expect(durationSinceLabel('2026-07-30T07:00:00Z', now)).toBe('5 ч');
+    });
+
+    it('дни + часы, без слова «назад»', () => {
+        expect(durationSinceLabel('2026-07-27T08:00:00Z', now)).toBe('3 дн 4 ч');
+        expect(durationSinceLabel('2026-07-27T12:00:00Z', now)).toBe('3 дн');
+    });
+
+    it('null/мусор → null', () => {
+        expect(durationSinceLabel(null, now)).toBeNull();
+        expect(durationSinceLabel('не дата', now)).toBeNull();
     });
 });

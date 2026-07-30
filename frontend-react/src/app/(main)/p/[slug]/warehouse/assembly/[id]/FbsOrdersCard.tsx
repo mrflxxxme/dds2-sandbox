@@ -15,12 +15,22 @@ import type { FbsOrder } from '@/types/api';
 import {
     SupplierStatusBadge,
     WB_STATUS_LABEL,
+    durationSinceLabel,
     hoursAgoLabel,
+    isAwaitingWbAccept,
     num,
+    orderAgeColor,
     transitDaysColor,
 } from '../../fbs/fbsShared';
 
-export default function FbsOrdersCard({ fbsSupplyId }: { fbsSupplyId: string }) {
+export default function FbsOrdersCard({
+    fbsSupplyId,
+    shippedAt,
+}: {
+    fbsSupplyId: string;
+    /** Момент передачи поставки (assembly.shipped_at) — якорь колонки «В пути». */
+    shippedAt?: string | null;
+}) {
     const [orders, setOrders] = useState<FbsOrder[] | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -79,21 +89,27 @@ export default function FbsOrdersCard({ fbsSupplyId }: { fbsSupplyId: string }) 
                                 <th>Товар</th>
                                 <th style={{ textAlign: 'right' }}>Цена, ₽</th>
                                 <th>Статус</th>
-                                <th title="Дней с передачи поставки, пока СЦ не принял">В пути, дн</th>
+                                <th title="Сколько заказ едет с передачи поставки, пока СЦ не принял">В пути</th>
                                 <th>Срок</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {items.map(o => (
-                                <tr key={o.wb_order_id}>
+                            {items.map(o => {
+                                const now = Date.now();
+                                const ageColor = orderAgeColor(o.created_at_wb, o.supplier_status, o.wb_status, now);
+                                // Подсветка строки — ТОЛЬКО пока WB не отсканировал заказ
+                                // (после приёмки СЦ это зона логистики WB) и ждём ≥ суток.
+                                const stuck = ageColor === 'var(--color-danger)';
+                                return (
+                                <tr key={o.wb_order_id} className={stuck ? 'fbs-row-stuck' : undefined}>
                                     <td>
                                         <div style={{ fontFamily: 'monospace', fontSize: 12 }}>{o.wb_order_id}</div>
                                         <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                                             {o.created_at_wb ? formatDateTime(o.created_at_wb) : '—'}
                                         </div>
                                         {o.created_at_wb && (
-                                            <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
-                                                {hoursAgoLabel(o.created_at_wb)}
+                                            <div style={{ fontSize: 13, fontWeight: 600, color: ageColor ?? 'var(--color-text-muted)' }}>
+                                                {hoursAgoLabel(o.created_at_wb, now)}
                                             </div>
                                         )}
                                     </td>
@@ -130,12 +146,20 @@ export default function FbsOrdersCard({ fbsSupplyId }: { fbsSupplyId: string }) 
                                             </div>
                                         )}
                                     </td>
-                                    <td style={{ color: transitDaysColor(o.transit_days) ?? undefined }}>
-                                        {o.transit_days == null ? '—' : formatNumber(o.transit_days, 0)}
+                                    <td style={{ color: transitDaysColor(o.transit_days) ?? undefined, whiteSpace: 'nowrap', fontWeight: 500 }}>
+                                        {/* transit_days бэка — целые СУТКИ: переданное вчера вечером
+                                            показывало «0», как будто колонка сломана. Часы/дни считаем
+                                            от момента передачи поставки; цвет — по суточным порогам. */}
+                                        {o.transit_days == null
+                                            ? '—'
+                                            : (isAwaitingWbAccept(o.supplier_status, o.wb_status) && shippedAt
+                                                ? durationSinceLabel(shippedAt) ?? formatNumber(o.transit_days, 0)
+                                                : formatNumber(o.transit_days, 0))}
                                     </td>
                                     <td>{o.ddate ? formatDate(o.ddate) : '—'}</td>
                                 </tr>
-                            ))}
+                                );
+                            })}
                         </tbody>
                     </table>
                 </div>

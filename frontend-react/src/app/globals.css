@@ -3753,6 +3753,10 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
    спишется ближайшим прогоном джоба. Приглушаем, чтобы алярмы читались первыми. */
 .fbs-row-queued > td { opacity: 0.55; }
 
+/* Списки заданий FBS: зависшее задание — ждёт сборки дольше порога или
+   передано, а СЦ не принял. Тёплая заливка строки, чтобы глаз цеплялся. */
+.fbs-row-stuck > td { box-shadow: inset 0 0 0 999px color-mix(in srgb, var(--color-warning) 14%, transparent); }
+
 /* Матрица FBS-складов: кликабельные заголовки сортировки */
 .sc-matrix-th-sort { cursor: pointer; user-select: none; white-space: nowrap; }
 .sc-matrix-th-sort:hover { background: color-mix(in srgb, var(--color-accent) 8%, transparent); }
