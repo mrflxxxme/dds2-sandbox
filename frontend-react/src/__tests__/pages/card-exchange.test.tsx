@@ -61,7 +61,7 @@ describe('Страница «Биржа карточек»', () => {
         render(<CardExchangePage />);
         await screen.findByText('Тестовая карточка', { exact: false });
         expect(screen.getByText(/10 отзывов/)).toBeInTheDocument();
-        expect(screen.getByText('3 вариантов товара')).toBeInTheDocument();
+        expect(screen.getByText('3 вариантов')).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Добавить' })).toBeInTheDocument();
     });
 
@@ -84,7 +84,7 @@ describe('Страница «Биржа карточек»', () => {
         const btn = await screen.findByRole('button', { name: 'Добавить' });
         fireEvent.click(btn);
         await waitFor(() => expect(addToCart).toHaveBeenCalledWith(1));
-        await screen.findByRole('button', { name: 'Удалить из корзины' });
+        await screen.findByRole('button', { name: 'Убрать' });
     });
 
     it('нет сессии биржи — форма доступа, витрина не запрашивается', async () => {
@@ -112,6 +112,16 @@ describe('Страница «Биржа карточек»', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Сохранить доступ' }));
         await waitFor(() => expect(setSession).toHaveBeenCalledWith('tok123'));
         await screen.findByText('Тестовая карточка', { exact: false });
+    });
+
+    it('переключение в «Список» — таблица с колонками как в рекламе', async () => {
+        getShowcase.mockResolvedValue(makeResp());
+        render(<CardExchangePage />);
+        await screen.findByText('Тестовая карточка', { exact: false });
+        fireEvent.click(screen.getByRole('button', { name: 'Список' }));
+        expect(await screen.findByText('ПРОДАВЕЦ')).toBeInTheDocument();
+        expect(screen.getByText('ЦЕНА ₽')).toBeInTheDocument();
+        expect(screen.getByText('ИП')).toBeInTheDocument();
     });
 
     it('«наша» карточка помечена бейджем и мы её видим', async () => {
