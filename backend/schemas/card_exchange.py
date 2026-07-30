@@ -102,6 +102,9 @@ class CartActionResult(BaseModel):
 class ExchangeSessionStatus(BaseModel):
     status: str  # ACTIVE | EXPIRED | NONE
     updated_at: str | None = None
+    # Кабинет WB, под которым собран доступ (кука x-supplier-id) — чтобы менеджер видел,
+    # чей это кабинет, и подмена продавца не проходила незамеченной.
+    supplier_id: str | None = None
 
 
 class ExchangeSessionSet(BaseModel):

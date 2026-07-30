@@ -8760,4 +8760,5 @@ export interface CartActionResult {
 export interface ExchangeSessionStatus {
     status: 'ACTIVE' | 'EXPIRED' | 'NONE';
     updated_at?: string | null;
+    supplier_id?: string | null;
 }

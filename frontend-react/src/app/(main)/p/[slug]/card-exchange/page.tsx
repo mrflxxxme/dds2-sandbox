@@ -209,7 +209,8 @@ export default function CardExchangePage() {
                         {session.status === 'EXPIRED' ? 'Доступ к бирже истёк' : 'Нужен доступ к бирже WB'}
                     </div>
                     <div style={{ fontSize: 13, color: 'var(--color-muted)', marginBottom: 12 }}>
-                        Способ 1 — если доступ WB уже настроен для поставок, возьмите его одной кнопкой.
+                        У биржи нет публичного API WB — она работает на том же доступе к кабинету, что и «Поставки».
+                        Если он уже настроен, возьмите его одной кнопкой (доступ скопируется в отдельный слот биржи).
                     </div>
                     <button className="btn btn-sm btn-primary" onClick={() => void takeFromSupply()} disabled={savingToken}>
                         {savingToken ? 'Проверка…' : 'Взять доступ из поставок'}
@@ -284,6 +285,7 @@ export default function CardExchangePage() {
                     </button>
                 ))}
                 <span style={{ marginLeft: 'auto', alignSelf: 'center', fontSize: 13, color: 'var(--color-muted)' }}>
+                    {session?.supplier_id && <>Кабинет: {session.supplier_id} · </>}
                     В корзине: {formatNumber(cart.size, 0)}
                 </span>
             </div>

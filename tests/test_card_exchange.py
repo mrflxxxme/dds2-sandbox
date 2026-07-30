@@ -4,6 +4,8 @@
 Клиент WB мокается FakeClient (get_wb_portal_client подменяется), БД к WB не ходит.
 """
 
+import json
+
 import pytest
 
 from backend.integrations.wb_portal_client import WbPortalError, WbSessionExpired
@@ -272,6 +274,45 @@ async def test_exchange_session_is_separate_slot(db_session, project):
 async def test_exchange_session_absent_raises(db_session, project):
     with pytest.raises(ValueError, match="Биржа карточек"):
         await integrations_service.get_wb_exchange_client(db_session, project.id)
+
+
+def test_normalize_exchange_input_bundle_with_supplier():
+    """Бандл со списком cookie: определяем продавца и схлопываем дубли по имени."""
+    raw = json.dumps({
+        "authorizev3": "tok",
+        "cookies": [
+            {"name": "x-supplier-id", "value": "sup-42"},
+            {"name": "__zzatw-wb", "value": "old"},
+            {"name": "__zzatw-wb", "value": "new"},  # дубль — последний выигрывает
+        ],
+    })
+    session_json, supplier = integrations_service._normalize_exchange_input(raw)
+    assert supplier == "sup-42"
+    parsed = json.loads(session_json)
+    assert parsed["authorizev3"] == "tok"
+    names = [c["name"] for c in parsed["cookies"]]
+    assert names.count("__zzatw-wb") == 1
+    assert next(c["value"] for c in parsed["cookies"] if c["name"] == "__zzatw-wb") == "new"
+
+
+def test_normalize_exchange_input_cookie_string():
+    """cookies строкой (как document.cookie) — тоже принимаем."""
+    raw = json.dumps({"authorizev3": "tok", "cookies": "x-supplier-id=sup-7; cfidsw-wb=abc"})
+    session_json, supplier = integrations_service._normalize_exchange_input(raw)
+    assert supplier == "sup-7"
+    assert {c["name"] for c in json.loads(session_json)["cookies"]} == {"x-supplier-id", "cfidsw-wb"}
+
+
+def test_normalize_exchange_input_bare_token_and_errors():
+    session_json, supplier = integrations_service._normalize_exchange_input("plain-token")
+    assert json.loads(session_json)["authorizev3"] == "plain-token"
+    assert supplier is None
+    with pytest.raises(ValueError, match="Пустой доступ"):
+        integrations_service._normalize_exchange_input("   ")
+    with pytest.raises(ValueError, match="не разобрался"):
+        integrations_service._normalize_exchange_input("{сломанный json")
+    with pytest.raises(ValueError, match="нет authorizev3"):
+        integrations_service._normalize_exchange_input(json.dumps({"cookies": []}))
 
 
 async def test_exchange_session_expired_status(db_session, project):
