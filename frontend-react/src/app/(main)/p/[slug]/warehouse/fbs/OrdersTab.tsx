@@ -25,8 +25,10 @@ import type {
 import {
     BACKFILL_DAYS_DEFAULT,
     BACKFILL_DAYS_OPTIONS,
+    PSEUDO_STATUS_LABEL,
     SUPPLIER_STATUS_LABEL,
     SupplierStatusBadge,
+    TRANSIT_WARN_DAYS,
     WB_STATUS_LABEL,
     SELECT_ALL_MAX,
     WB_STICKER_CHUNK,
@@ -38,7 +40,9 @@ import {
     fetchStickersChunked,
     num,
     selectStickerIds,
+    transitDaysColor,
 } from './fbsShared';
+import WriteoffIssuesPanel from './WriteoffIssuesPanel';
 import OrdersWarehouseSummary from './OrdersWarehouseSummary';
 import OrdersStats, { isoDaysAgo as statsIsoDaysAgo, todayIso as statsTodayIso } from './OrdersStats';
 import SupplyPlanModal, { WB_PLAN_LIMIT } from './SupplyPlanModal';
@@ -62,8 +66,14 @@ const STATUS_TABS: { key: string; label: string; title?: string }[] = [
     { key: 'new', label: SUPPLIER_STATUS_LABEL.new },
     { key: 'confirm', label: SUPPLIER_STATUS_LABEL.confirm },
     { key: 'complete', label: 'Переданы в WB', title: 'Все задания переданных поставок — вместе с доставленными' },
-    { key: 'in_delivery', label: 'Ещё в доставке', title: 'Переданы в WB, сортировочный центр ещё не принял' },
-    { key: 'sorted', label: 'Отсортировано', title: 'Принято сортировочным центром WB, покупатель ещё не получил' },
+    { key: 'in_delivery', label: PSEUDO_STATUS_LABEL.in_delivery, title: 'Переданы в WB, сортировочный центр ещё не принял' },
+    {
+        key: 'in_delivery_stuck',
+        label: PSEUDO_STATUS_LABEL.in_delivery_stuck,
+        title: `Переданы ≥ ${TRANSIT_WARN_DAYS} дней назад, а сортировочный центр так и не принял `
+            + '— товар мог потеряться по дороге на СЦ (окно — последние 30 дней)',
+    },
+    { key: 'sorted', label: PSEUDO_STATUS_LABEL.sorted, title: 'Принято сортировочным центром WB, покупатель ещё не получил' },
     { key: 'cancel', label: SUPPLIER_STATUS_LABEL.cancel },
 ];
 
@@ -397,6 +407,9 @@ export default function OrdersTab({
         }
     };
 
+    /** Фазы после передачи поставки — только у них живёт «В пути, дн». */
+    const showTransit = status === 'complete' || status === 'in_delivery' || status === 'in_delivery_stuck';
+
     // Колонки строятся каждый рендер: замыкаются на текущее выделение и busy
     const cols: Column[] = [
         {
@@ -476,6 +489,24 @@ export default function OrdersTab({
                 ? <span style={{ fontSize: 13 }}>{WB_STATUS_LABEL[v] ?? v}</span>
                 : '—',
         },
+        // «В пути, дн» — только в фазах после передачи: у прочих значение
+        // всегда null, и пустая колонка лишь съедала бы ширину таблицы.
+        ...(showTransit ? [{
+            key: 'transit_days', label: 'В пути, дн', align: 'right',
+            headerTitle: 'Сколько дней задание едет на сортировочный центр после передачи '
+                + 'поставки. Пусто — СЦ уже принял или момент передачи неизвестен. '
+                + `Подсветка: ≥ ${TRANSIT_WARN_DAYS} дн — задержка, дальше — ЧП`,
+            render: (v: number | null) => {
+                if (v == null) return <span style={{ color: 'var(--color-text-dim)' }}>—</span>;
+                const color = transitDaysColor(v);
+                return (
+                    <span style={{ color: color ?? undefined, fontWeight: color ? 700 : 400 }}>
+                        {formatNumber(num(v), 0)}
+                    </span>
+                );
+            },
+            exportValue: (row: FbsOrder) => row.transit_days ?? '',
+        }] as Column[] : []),
         {
             key: 'supply_id', label: 'Поставка',
             render: (v: string | null) => v
@@ -542,6 +573,10 @@ export default function OrdersTab({
 
     return (
         <>
+            {/* Переданные задания, которые нечем списать: тревога выше сводок —
+                пока панель непуста, часть FBS-продаж не проведена по книгам */}
+            <WriteoffIssuesPanel reloadKey={summaryKey} refreshTick={refreshTick} />
+
             {/* Сводка «сколько ждёт на каждом складе» — ответ на «а если складов несколько» */}
             <OrdersWarehouseSummary
                 warehouses={warehouses}
@@ -572,7 +607,9 @@ export default function OrdersTab({
                         ? data?.in_delivery_count
                         : t.key === 'sorted'
                             ? data?.sorted_count
-                            : counts[t.key];
+                            : t.key === 'in_delivery_stuck'
+                                ? data?.in_delivery_stuck_count
+                                : counts[t.key];
                     return (
                         <button
                             key={t.key || 'all'}

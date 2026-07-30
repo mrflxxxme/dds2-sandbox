@@ -33,6 +33,7 @@ import type {
     FbsWarehouseCreatePayload,
     FbsWarehouseRenamePayload,
     FbsWarehouseSettingsPayload,
+    FbsWriteoffIssuesOut,
 } from '@/types/api';
 
 /** Фильтры списка сборочных заданий (GET /fbs/orders). */
@@ -152,6 +153,14 @@ export function addFbsMethods(api: ApiClient) {
             return api.request<FbsWarehouseSummary>(
                 'GET', `/api/v1/fbs/orders/warehouse-summary${qs ? `?${qs}` : ''}`,
             );
+        },
+        /**
+         * Переданные задания, которые НЕЧЕМ списать со склада (агрегат по
+         * товару): остаток 0 / нет карточки / склад не привязан. Пока сводка
+         * непуста, часть FBS-продаж не проведена по нашим книгам.
+         */
+        getFbsWriteoffIssues() {
+            return api.request<FbsWriteoffIssuesOut>('GET', '/api/v1/fbs/orders/writeoff-issues');
         },
         /** Сводка заказов за период: выручка, разрезы, доля в объёме воронки. */
         getFbsOrderStats(f: { dateFrom?: string; dateTo?: string; wbWarehouseId?: number } = {}) {

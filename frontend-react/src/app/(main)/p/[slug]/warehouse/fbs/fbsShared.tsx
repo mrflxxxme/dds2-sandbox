@@ -86,6 +86,47 @@ export function isActiveOrder(status: string | null | undefined): boolean {
     return !!status && !TERMINAL_STATUSES.includes(status);
 }
 
+/**
+ * Псевдо-статусы списка заданий — подмножества `complete`, которые считает
+ * бэкенд (`in_delivery_count` / `sorted_count` / `in_delivery_stuck_count`).
+ * Это НЕ значения `supplierStatus`: в `SUPPLIER_STATUS_LABEL` их нет, а в
+ * `GET /fbs/orders?status=…` они уходят как есть — фильтр понимает оба вида.
+ */
+export const PSEUDO_STATUS_LABEL: Record<string, string> = {
+    in_delivery: 'Ещё в доставке',
+    sorted: 'Отсортировано',
+    in_delivery_stuck: 'Зависли в пути',
+};
+
+// ─── Зависшие в пути на СЦ ──────────────────────────────────────────────────
+
+/** С какого дня «в пути» считаем задержкой (совпадает с порогом бэка). */
+export const TRANSIT_WARN_DAYS = 2;
+/** С какого дня задержка — уже ЧП: товар передали, а СЦ так и не принял. */
+export const TRANSIT_DANGER_DAYS = 4;
+
+/**
+ * Цвет значения «В пути, дн»: null — обычный текст (не подсвечиваем).
+ * Пороги едины с чипом «Зависли в пути», чтобы подсветка и счётчик не спорили.
+ */
+export function transitDaysColor(days: number | null | undefined): string | null {
+    if (days == null) return null;
+    if (days >= TRANSIT_DANGER_DAYS) return 'var(--color-danger)';
+    if (days >= TRANSIT_WARN_DAYS) return 'var(--color-warning)';
+    return null;
+}
+
+/**
+ * Полных дней с момента `iso` до сейчас (0 — сегодня, отрицательное время не
+ * бывает — будущие даты читаем как «сегодня»). Для подписи «N дн назад».
+ */
+export function daysSince(iso: string | null | undefined, now: number = Date.now()): number | null {
+    if (!iso) return null;
+    const ts = Date.parse(iso);
+    if (!Number.isFinite(ts)) return null;
+    return Math.max(0, Math.floor((now - ts) / 86_400_000));
+}
+
 export const WB_STATUS_LABEL: Record<string, string> = {
     waiting: 'Ожидает сборки',
     sorted: 'Отсортировано',
@@ -171,6 +212,25 @@ export const BLOCKED_REASON_LABEL: Record<string, string> = {
 
 export function blockedReasonLabel(reason: string): string {
     return BLOCKED_REASON_LABEL[reason] ?? reason;
+}
+
+/**
+ * Причины, по которым переданное задание НЕЧЕМ списать со склада
+ * (`orders_service`, ручка `GET /fbs/orders/writeoff-issues`).
+ *
+ * Тот же паттерн, что `BLOCKED_REASON_LABEL`: ключи — машинные коды бэкенда,
+ * человеческий текст живёт только здесь, промах словаря в рантайме невидим
+ * (фолбэк «показать код как есть») — контракт закреплён тестом
+ * `src/__tests__/lib/fbsWriteoffIssues.test.ts`.
+ */
+export const WRITEOFF_REASON_LABEL: Record<string, string> = {
+    no_stock: 'нет остатка на складе',
+    no_card: 'нет карточки товара',
+    no_link: 'склад не привязан',
+};
+
+export function writeoffReasonLabel(reason: string): string {
+    return WRITEOFF_REASON_LABEL[reason] ?? reason;
 }
 
 // ─── Ручное количество и режим склада ───────────────────────────────────────

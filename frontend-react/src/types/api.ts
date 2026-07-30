@@ -2756,8 +2756,10 @@ export interface StockMismatchSkuRow {
   article_seller: string | null;
   brand: string | null;
   name: string | null;
-  /** у ФФ (зеркало провайдера), штук россыпи */
+  /** у ФФ (зеркало провайдера), штук россыпи; уже ЗА ВЫЧЕТОМ ff_fbs */
   ff_good: number;
+  /** вычтено из ff_good: отгружено по FBS у нас, провайдер не списал */
+  ff_fbs: number;
   /** у нас годный (WarehouseStock.quantity) */
   our_quantity: number;
   /** у нас брак (вычтен из diff только для migfull) */
@@ -2781,6 +2783,8 @@ export interface StockMismatchWarehouseRow {
   surplus_our_sku: number;
   /** surplus_ff_qty - surplus_our_qty (нетто ФФ − наш) */
   net_diff: number;
+  /** Σ ff_fbs по SKU склада: сколько шума сняла FBS-поправка */
+  ff_fbs_qty: number;
   /** всего SKU с расхождением */
   sku_total: number;
   /** rows обрезаны до лимита (на складе больше расхождений) */
@@ -6134,6 +6138,13 @@ export interface FfStockRow {
   ff_box_count: number;
   /** досчитано к ff_good: товар в стадии списания логистики ФФ, физически ещё на складе */
   ff_logistics: number;
+  /**
+   * Вычтено ИЗ ff_good: отгружено по FBS у нас (движения FBS_ORDER), а
+   * провайдер выбытие не отразил — ни один из трёх WMS остаток под FBS не
+   * снимает (сверка 29.07.2026). ff_good приходит уже ЗА ВЫЧЕТОМ, поле —
+   * расшифровка, симметрично ff_logistics. Кап: не больше сырого ff_good.
+   */
+  ff_fbs: number;
   our_quantity: number;
   our_defect: number;
   /** ff_good - our_quantity (ff_good уже включает ff_logistics) */
@@ -6152,6 +6163,8 @@ export interface FfStockTotals {
   ff_box_units: number;
   /** досчитано к ff_good: товар в стадии списания логистики ФФ */
   ff_logistics: number;
+  /** вычтено из ff_good: отгружено по FBS, провайдер ещё не списал */
+  ff_fbs: number;
   our_quantity: number;
   diff: number;
   /** строк ФФ без нашей номенклатуры */
@@ -8133,6 +8146,12 @@ export interface FbsWarehouseSettingsPayload {
    * null в теле означал бы «не передано», поэтому «снять» кодируется -1.
    */
   fbo_max_qty?: number | null;
+  /**
+   * Подтверждение рискованной комбинации «translate + ff_mirror», когда
+   * зеркало ФФ выше нашего учёта: без force сервис отвечает 409 с цифрами
+   * разрыва, с force — применяет как есть (решение человека).
+   */
+  force?: boolean;
 }
 
 export interface FbsLinkCreatePayload {
@@ -8407,6 +8426,12 @@ export interface FbsOrder {
   comment?: string | null;
   written_off_at?: string | null;
   synced_at: string;
+  /**
+   * Сколько дней задание едет: от передачи поставки (scan_dt → closed_at →
+   * written_off_at, что есть) до сейчас. Только у `complete`, ещё не принятых
+   * СЦ; у прочих фаз и без якоря — null.
+   */
+  transit_days?: number | null;
 }
 
 export interface FbsOrderListResponse {
@@ -8421,6 +8446,12 @@ export interface FbsOrderListResponse {
    */
   in_delivery_count: number;
   sorted_count: number;
+  /**
+   * Зависшие в пути: переданы ≥ N дней назад, СЦ так и не принял. Окно
+   * ограничено сверху (см. сервис): у старых `complete` wb_status застывает
+   * (синк опрашивает не всё), и без потолка счётчик копил бы мёртвые строки.
+   */
+  in_delivery_stuck_count: number;
 }
 
 /** Очередь одного склада продавца по фазам жизни задания. */
@@ -8432,6 +8463,12 @@ export interface FbsWarehouseQueueRow {
   /** Фазы доставки — за выбранный период (`complete` копится вечно). */
   in_delivery: number;
   sorted: number;
+  /**
+   * Зависшие в пути (передано ≥ N дней, СЦ не принял) — БЕЗ периода, как
+   * очередь сборки: пока не отсортировано — вопросы к нам, и зависшее
+   * обязано быть видно независимо от выбранного окна.
+   */
+  in_delivery_stuck: number;
 }
 
 /** GET /fbs/orders/warehouse-summary — очередь по складам одним запросом. */
@@ -8442,6 +8479,47 @@ export interface FbsWarehouseSummary {
   warehouses: FbsWarehouseQueueRow[];
   /** Итог по всем складам — считает бэкенд. */
   totals: Record<string, number>;
+}
+
+/**
+ * Переданные задания, которые НЕЧЕМ списать со склада (агрегат по товару).
+ *
+ * Списание идемпотентно ретраится каждые 5 минут, но пока причина жива,
+ * задание молча висит `written_off_at IS NULL` — единственным следом был
+ * warning в логе воркера. Эта строка делает отказ видимым.
+ */
+export interface FbsWriteoffIssueRow {
+  wb_warehouse_id: number | null;
+  wb_warehouse_name: string | null;
+  /** Привязанный наш склад (первый активный) — куда списание пыталось попасть. */
+  warehouse_id: number | null;
+  warehouse_name: string | null;
+  nomenclature_id: number | null;
+  article: string | null;
+  barcode: string | null;
+  /** Сколько заданий не списано по этому товару на этом складе продавца. */
+  stuck: number;
+  /** Самое старое непроведённое (created_at_wb) — возраст проблемы. ISO. */
+  oldest_at: string | null;
+  /** Остаток на привязанных складах: почему «нечем» (обычно 0). */
+  our_qty: number;
+  our_defect: number;
+  /**
+   * Россыпь в зеркале ФФ (null — зеркала нет): физически товар у провайдера
+   * может лежать — сигнал, что наш ledger отстал, а не что товара нет.
+   */
+  ff_loose: number | null;
+  /**
+   * no_stock — остаток 0 | no_card — нет карточки товара | no_link — склад
+   * продавца не привязан к нашему.
+   */
+  reason: 'no_stock' | 'no_card' | 'no_link' | string;
+}
+
+/** Сводка незакрытых списаний: `GET /fbs/orders/writeoff-issues`. */
+export interface FbsWriteoffIssuesOut {
+  total_orders: number;
+  rows: FbsWriteoffIssueRow[];
 }
 
 /**

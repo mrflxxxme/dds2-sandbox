@@ -352,6 +352,7 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                 brand: r.brand || '',
                 name: r.name || '',
                 ff_good: r.ff_good,
+                ff_fbs: r.ff_fbs ?? 0,
                 our_quantity: r.our_quantity,
                 our_defect: r.our_defect,
                 diff: r.diff,
@@ -370,6 +371,7 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                 { key: 'brand', label: 'Бренд' },
                 { key: 'name', label: 'Название' },
                 { key: 'ff_good', label: 'ФФ шт' },
+                { key: 'ff_fbs', label: 'Отгружено FBS' },
                 { key: 'our_quantity', label: 'Наш шт' },
                 { key: 'our_defect', label: 'Наш брак' },
                 { key: 'diff', label: 'Δ' },
@@ -1062,6 +1064,10 @@ function StockMismatchBlock({
                         <tbody>
                             {rows.map(w => {
                                 const open = expandedWh === w.warehouse_id;
+                                // FBS-отгрузки, ещё не списанные провайдером, вычтены из ФФ-стороны
+                                // диффа — без пометки снятый ими «шум» выглядел бы как чудо-сходимость.
+                                const hasFbs = (w.ff_fbs_qty ?? 0) > 0;
+                                const rowHasFbs = w.rows.some(r => (r.ff_fbs ?? 0) > 0);
                                 return (
                                     <Fragment key={w.warehouse_id}>
                                         <tr
@@ -1073,6 +1079,15 @@ function StockMismatchBlock({
                                                     {open ? '▾' : '▸'}
                                                 </span>
                                                 {w.warehouse_name || `#${w.warehouse_id}`}
+                                                {hasFbs && (
+                                                    <div
+                                                        style={{ fontSize: 11, fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 17 }}
+                                                        title={'Отгружено по FBS у нас, провайдер выбытие ещё не отразил — '
+                                                            + 'эти штуки вычтены из остатка ФФ до сравнения'}
+                                                    >
+                                                        FBS-поправка: {formatNumber(w.ff_fbs_qty, 0)} шт
+                                                    </div>
+                                                )}
                                             </td>
                                             <td style={{ color: 'var(--color-text-muted)' }}>{w.provider || '—'}</td>
                                             <td style={{ textAlign: 'right' }}>
@@ -1114,6 +1129,14 @@ function StockMismatchBlock({
                                                                         <th>Артикул</th>
                                                                         <th>Бренд</th>
                                                                         <th style={{ textAlign: 'right' }}>ФФ шт</th>
+                                                                        {rowHasFbs && (
+                                                                            <th
+                                                                                style={{ textAlign: 'right' }}
+                                                                                title="Отгружено по FBS у нас, провайдер ещё не списал — вычтено из «ФФ шт»"
+                                                                            >
+                                                                                Отгружено FBS
+                                                                            </th>
+                                                                        )}
                                                                         <th style={{ textAlign: 'right' }}>Наш шт</th>
                                                                         {w.provider === 'migfull' && <th style={{ textAlign: 'right' }}>Наш брак</th>}
                                                                         <th style={{ textAlign: 'right' }}>Δ</th>
@@ -1126,6 +1149,11 @@ function StockMismatchBlock({
                                                                             <td>{r.article_seller || r.name || '—'}</td>
                                                                             <td style={{ color: 'var(--color-text-muted)' }}>{r.brand || '—'}</td>
                                                                             <td style={{ textAlign: 'right' }}>{formatNumber(r.ff_good, 0)}</td>
+                                                                            {rowHasFbs && (
+                                                                                <td style={{ textAlign: 'right', color: (r.ff_fbs ?? 0) > 0 ? 'var(--color-accent)' : 'var(--color-text-muted)' }}>
+                                                                                    {formatNumber(r.ff_fbs ?? 0, 0)}
+                                                                                </td>
+                                                                            )}
                                                                             <td style={{ textAlign: 'right' }}>{formatNumber(r.our_quantity, 0)}</td>
                                                                             {w.provider === 'migfull' && (
                                                                                 <td style={{ textAlign: 'right', color: r.our_defect > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)' }}>
