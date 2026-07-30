@@ -6,6 +6,8 @@ import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import type {
     CardExchangeOurMode,
+    ExchangeSubject,
+    ExchangeSupplier,
     ExchangeSessionStatus,
     RootCategory,
     ShowcaseAd,
@@ -14,6 +16,7 @@ import type {
 import WbThumb from '@/components/WbThumb';
 import { productImageUrl } from '@/lib/wbMedia';
 import SearchSelect from '../ads-manager/components/SearchSelect';
+import FiltersPanel, { EMPTY_FILTERS, type ExchangeFilters } from './components/FiltersPanel';
 import Switch from '../ads-manager/components/Switch';
 import { Ic } from '../ads-manager/components/icons';
 import { cThLeft, cThStyle, tdLeft, tdStyle } from '../ads-manager/components/adsShared';
@@ -119,7 +122,9 @@ const DEMO_ADS: ShowcaseAd[] = [
     ['Термокружка 500 мл, нержавейка', 'DrinkGo', 'ИП Гусев Р. А.', 480_900, 4.7, 18_744, 640, 6, ['Китай'], ['Посуда и инвентарь']],
 ].map(([title, brand, supplier, price, rating, feedbacks, stock, variants, countries, cats], i) => ({
     ad_id: 900_001 + i,
-    nm_id: 240_000_000 + i * 137,
+    // null: выдуманные артикулы случайно попадают в реальные товары WB, и прокси
+    // отдаёт чужие обложки — в демо честнее плейсхолдер.
+    nm_id: null,
     imt_id: 2_880_000_000 + i,
     title: title as string,
     brand: brand as string,
@@ -147,13 +152,16 @@ export default function CardExchangePage() {
 
     const [categories, setCategories] = useState<RootCategory[]>([]);
     const [ads, setAds] = useState<ShowcaseAd[]>([]);
-    const [cursor, setCursor] = useState<ShowcaseCursor | null>(null);
+    // Пагинация КУРСОРНАЯ: прыгнуть на произвольную страницу нельзя, поэтому держим
+    // стек курсоров посещённых страниц — назад ходим мгновенно, вперёд по одной.
+    const [cursors, setCursors] = useState<(ShowcaseCursor | null)[]>([null]);
+    const [page, setPage] = useState(0);
     const [hasMore, setHasMore] = useState(false);
+    const [total, setTotal] = useState<number | null>(null);
     const [unmatched, setUnmatched] = useState<string[]>([]);
     const [scanNote, setScanNote] = useState<string | null>(null);
 
     const [loading, setLoading] = useState(true);
-    const [loadingMore, setLoadingMore] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
     const [busyAd, setBusyAd] = useState<number | null>(null);
@@ -165,8 +173,12 @@ export default function CardExchangePage() {
     const [sort, setSort] = useState('feedbacksCount:desc');
     const [rootCategory, setRootCategory] = useState('');
     const [ourMode, setOurMode] = useState<'' | CardExchangeOurMode>('');
-    const [inStockOnly, setInStockOnly] = useState(false);
     const [view, setView] = useState<'grid' | 'list'>('grid');
+    // Фильтры как на бирже WB: предмет, бренд, продавец, рейтинг, остатки.
+    const [brandsRef, setBrandsRef] = useState<string[]>([]);
+    const [suppliersRef, setSuppliersRef] = useState<ExchangeSupplier[]>([]);
+    const [subjectsRef, setSubjectsRef] = useState<ExchangeSubject[]>([]);
+    const [filters, setFilters] = useState<ExchangeFilters>(EMPTY_FILTERS);
 
     useEffect(() => {
         const t = setTimeout(() => setSearch(searchInput), 400);
@@ -195,6 +207,11 @@ export default function CardExchangePage() {
         })();
         api.getCardExchangeCategories().then(c => { if (alive) setCategories(c); })
             .catch(e => { if (alive) setActionError(e instanceof Error ? e.message : 'Не удалось загрузить справочник категорий'); });
+        // Справочники фильтров биржи — молча, они нужны только для выпадашек.
+        api.getCardExchangeBrands().then(b => { if (alive) setBrandsRef(b); }).catch(() => { });
+        api.getCardExchangeSuppliers().then(x => { if (alive) setSuppliersRef(x); }).catch(() => { });
+        api.getCardExchangeSubjects().then(x => { if (alive) setSubjectsRef(x); }).catch(() => { });
+        api.getCardExchangeCounters().then(c => { if (alive) setTotal(c.showcase ?? null); }).catch(() => { });
         return () => { alive = false; };
     }, []);
 
@@ -213,46 +230,61 @@ export default function CardExchangePage() {
     // двойной монтаж StrictMode держат несколько запросов в полёте).
     const reqIdRef = useRef(0);
 
-    const load = useCallback(async (reset: boolean) => {
+    const load = useCallback(async (pageIndex: number) => {
         const [sortField, sortOrder] = sort.split(':');
         const myReq = ++reqIdRef.current;
-        if (reset) { setLoading(true); setError(null); } else { setLoadingMore(true); }
+        setLoading(true); setError(null);
         try {
             const res = await api.getCardExchangeShowcase({
                 search: search.trim() || null,
                 root_categories: rootCategory ? [rootCategory] : null,
                 our_mode: ourMode || null,
-                has_stocks: inStockOnly ? true : null,
+                subject_ids: filters.subjectIds.length ? filters.subjectIds.map(Number) : null,
+                brands: filters.brands.length ? filters.brands : null,
+                supplier_ids: filters.supplierIds.length ? filters.supplierIds.map(Number) : null,
+                rating: filters.ratingMin ? { min: Number(filters.ratingMin.replace(',', '.')), max: 5 } : null,
+                has_stocks: filters.stock === 'in' ? true : filters.stock === 'out' ? false : null,
                 sort_field: sortField,
                 sort_order: sortOrder,
-                cursor: reset ? null : cursor,
+                cursor: cursors[pageIndex] ?? null,
             });
             if (myReq !== reqIdRef.current) return;
-            setAds(prev => (reset ? res.ads : [...prev, ...res.ads]));
-            setCursor(res.next_cursor);
+            setAds(res.ads);
+            setPage(pageIndex);
+            // курсор СЛЕДУЮЩЕЙ страницы кладём в стек — по нему и пойдём вперёд
+            setCursors(prev => {
+                const next = prev.slice(0, pageIndex + 1);
+                if (res.next_cursor) next.push(res.next_cursor);
+                return next;
+            });
             setHasMore(res.has_more);
             setUnmatched(res.unmatched_subjects || []);
             setScanNote(res.scanned_pages != null
                 ? `Просканировано страниц: ${res.scanned_pages}${res.scan_truncated ? ' (упёрлись в лимит — показаны не все)' : ''}`
                 : null);
-            const inCartIds = res.ads.filter(a => a.has_in_cart).map(a => a.ad_id);
-            setCart(prev => (reset ? new Set(inCartIds) : new Set([...prev, ...inCartIds])));
+            setCart(new Set(res.ads.filter(a => a.has_in_cart).map(a => a.ad_id)));
         } catch (e) {
             if (myReq !== reqIdRef.current) return;
-            if (reset) setError(e instanceof Error ? e.message : 'Не удалось загрузить биржу');
-            else setActionError(e instanceof Error ? e.message : 'Не удалось догрузить');
+            setError(e instanceof Error ? e.message : 'Не удалось загрузить биржу');
         } finally {
-            if (myReq === reqIdRef.current) {
-                if (reset) setLoading(false); else setLoadingMore(false);
-            }
+            if (myReq === reqIdRef.current) setLoading(false);
         }
-    }, [search, rootCategory, ourMode, inStockOnly, sort, cursor]);
+    }, [search, rootCategory, ourMode, filters, sort, cursors]);
+
+    /** Смена фильтра/сортировки — всегда с первой страницы (курсоры старой выдачи не годятся). */
+    const reload = useCallback(() => {
+        reqIdRef.current++;
+        setCursors([null]);
+        setPage(0);
+        void load(0);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [search, rootCategory, ourMode, filters, sort]);
 
     useEffect(() => {
         if (!sessionOk) return;
-        void load(true);
+        reload();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [search, rootCategory, ourMode, inStockOnly, sort, sessionOk]);
+    }, [search, rootCategory, ourMode, filters, sort, sessionOk]);
 
     const toggleCart = async (ad: ShowcaseAd) => {
         setActionError(null);
@@ -351,10 +383,8 @@ export default function CardExchangePage() {
                         <Segmented tabs={OUR_MODES.map(m => ({ key: m.key, label: m.label, hint: m.hint }))}
                             value={ourMode} onChange={setOurMode} />
                         <Segmented tabs={VIEW_TABS} value={view} onChange={setView} />
-                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--color-text)' }}>
-                            <Switch on={inStockOnly} onClick={() => setInStockOnly(v => !v)} size="sm" ariaLabel="Только в наличии" />
-                            В наличии
-                        </label>
+                        <FiltersPanel value={filters} onApply={setFilters}
+                            subjects={subjectsRef} brands={brandsRef} suppliers={suppliersRef} />
                     </div>
 
                     {/* Поиск и счётчики */}
@@ -379,7 +409,7 @@ export default function CardExchangePage() {
                     {busy && <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 32 }}>Загрузка…</div>}
                     {error && !busy && !demo && (
                         <div className="glass-card" style={{ color: 'var(--color-danger)' }}>
-                            {error} <button className="btn btn-sm btn-secondary" onClick={() => void load(true)}>Повторить</button>
+                            {error} <button className="btn btn-sm btn-secondary" onClick={() => reload()}>Повторить</button>
                         </div>
                     )}
                     {!busy && !error && visibleAds.length === 0 && (
@@ -464,11 +494,28 @@ export default function CardExchangePage() {
                         </div>
                     )}
 
-                    {!busy && !error && hasMore && (
-                        <div style={{ textAlign: 'center', marginTop: 20 }}>
-                            <button className="btn btn-secondary" onClick={() => void load(false)} disabled={loadingMore}>
-                                {loadingMore ? 'Загрузка…' : 'Показать ещё'}
-                            </button>
+                    {!busy && !error && visibleAds.length > 0 && (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginTop: 20, flexWrap: 'wrap' }}>
+                            <span style={{ fontSize: 12.5, color: 'var(--color-text-muted)' }}>
+                                {total != null
+                                    ? `Всего на бирже: ${formatNumber(total, 0)}`
+                                    : `Показано: ${formatNumber(visibleAds.length, 0)}`}
+                            </span>
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                <button className="btn btn-sm btn-secondary" disabled={page === 0 || demo}
+                                    onClick={() => void load(page - 1)} aria-label="Предыдущая страница">←</button>
+                                {/* Кликабельны только посещённые страницы: у биржи курсорная пагинация,
+                                    прыгнуть на произвольную страницу нельзя — курсора для неё ещё нет. */}
+                                {cursors.map((_, i) => i).filter(i => Math.abs(i - page) <= 2).map(i => (
+                                    <button key={i} className={`btn btn-sm ${i === page ? 'btn-primary' : 'btn-secondary'}`}
+                                        disabled={demo} onClick={() => void load(i)}>{i + 1}</button>
+                                ))}
+                                <button className="btn btn-sm btn-secondary" disabled={!hasMore || demo}
+                                    onClick={() => void load(page + 1)} aria-label="Следующая страница">→</button>
+                                <span style={{ fontSize: 12.5, color: 'var(--color-text-muted)', marginLeft: 8 }}>
+                                    Стр. {page + 1}{total != null ? ` из ${formatNumber(Math.max(1, Math.ceil(total / 24)), 0)}` : ''}
+                                </span>
+                            </div>
                         </div>
                     )}
                 </>)}

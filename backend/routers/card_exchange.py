@@ -78,6 +78,54 @@ async def list_categories(
     return [RootCategory(**c) for c in svc.list_root_categories()]
 
 
+@router.get("/counters", response_model=dict)
+async def counters(
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+) -> dict:
+    """Счётчики биржи: всего объявлений (для пагинации)."""
+    try:
+        return await svc.get_counters(db, project.id)
+    except (CardExchangeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/brands", response_model=list[str])
+async def list_brands(
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+) -> list[str]:
+    """Бренды биржи — для фильтра."""
+    try:
+        return await svc.list_brands(db, project.id)
+    except (CardExchangeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/suppliers", response_model=list[dict])
+async def list_suppliers(
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+) -> list[dict]:
+    """Продавцы биржи — для фильтра."""
+    try:
+        return await svc.list_suppliers(db, project.id)
+    except (CardExchangeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/subjects", response_model=list[dict])
+async def list_subjects(
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+) -> list[dict]:
+    """Предметы биржи — для фильтра (плоский список WB)."""
+    try:
+        return await svc.list_subjects(db, project.id)
+    except (CardExchangeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.post("/showcase", response_model=ShowcaseResponse)
 async def showcase(
     query: ShowcaseQuery,

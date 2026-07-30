@@ -10,6 +10,10 @@ vi.mock('@/lib/api', () => ({
         setCardExchangeSession: vi.fn(),
         useCardExchangeSessionFromSupply: vi.fn(),
         getCardExchangeCategories: vi.fn(),
+        getCardExchangeBrands: vi.fn(),
+        getCardExchangeSuppliers: vi.fn(),
+        getCardExchangeSubjects: vi.fn(),
+        getCardExchangeCounters: vi.fn(),
         getCardExchangeShowcase: vi.fn(),
         addCardToCart: vi.fn(),
         deleteCardsFromCart: vi.fn(),
@@ -44,6 +48,10 @@ describe('Страница «Биржа карточек»', () => {
         getShowcase.mockReset();
         getCategories.mockReset();
         getCategories.mockResolvedValue([{ category: 'Автоаксессуары', subject_count: 5 }]);
+        vi.mocked(api.getCardExchangeBrands).mockResolvedValue(['AUTOPROFI', 'CARFORT']);
+        vi.mocked(api.getCardExchangeSuppliers).mockResolvedValue([{ id: 1, name: 'ИП Смирнов' }]);
+        vi.mocked(api.getCardExchangeSubjects).mockResolvedValue([{ id: 100, name: 'Компрессоры автомобильные' }]);
+        vi.mocked(api.getCardExchangeCounters).mockResolvedValue({ showcase: 10916 });
         addToCart.mockReset();
         addToCart.mockResolvedValue({ ok: true });
         getSession.mockReset();

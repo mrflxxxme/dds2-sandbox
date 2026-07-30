@@ -413,6 +413,27 @@ class WbPortalClient:
         data = await self._raw_post(AUTH_BASE + EXC_PREFIX + "/showcase/ads", body)
         return (data.get("data") or {}) if isinstance(data, dict) else {}
 
+    async def exc_counters(self) -> dict:
+        """Счётчики биржи: {"showcase": всего объявлений, "ads", "requests", "cart"}.
+
+        Нужен для пагинации: сама выдача total не отдаёт (курсорная), а число страниц
+        показать хочется. ВАЖНО: счётчик — по ВСЕЙ бирже, фильтры его не сужают.
+        """
+        data = await self._raw_get(AUTH_BASE, "/ns/exc-api/monetization/api/v1/counters", {})
+        return (data.get("data") or {}) if isinstance(data, dict) else {}
+
+    async def showcase_brands(self) -> list[str]:
+        """Справочник брендов биржи: массив СТРОК (не объектов)."""
+        data = await self._raw_get(AUTH_BASE, EXC_PREFIX + "/showcase/brands", {})
+        brands = (data.get("data") or {}).get("brands") if isinstance(data, dict) else None
+        return [b for b in brands if b] if isinstance(brands, list) else []
+
+    async def showcase_suppliers(self) -> list[dict]:
+        """Справочник продавцов биржи: [{"id": int, "name": str}]."""
+        data = await self._raw_get(AUTH_BASE, EXC_PREFIX + "/showcase/suppliers", {})
+        sup = (data.get("data") or {}).get("suppliers") if isinstance(data, dict) else None
+        return sup if isinstance(sup, list) else []
+
     async def showcase_ad_details(self, ad_id: int) -> list[dict]:
         """Детали объявления: `data.group[]` — товары группы (варианты одного объявления).
 

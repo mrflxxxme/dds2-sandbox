@@ -8742,13 +8742,30 @@ export interface ShowcaseResponse {
 
 export type CardExchangeOurMode = 'categories' | 'exact';
 
+export interface ExchangeSupplier {
+    id: number;
+    name: string;
+}
+
+export interface ExchangeSubject {
+    id: number;
+    name: string;
+}
+
+/** ВНИМАНИЕ: WB принимает рейтинг только как {min,max} (число → 400). */
+export interface RatingRange {
+    min: number;
+    max: number;
+}
+
 export interface ShowcaseQueryPayload {
     search?: string | null;
     root_categories?: string[] | null;
     our_mode?: CardExchangeOurMode | null;
+    subject_ids?: number[] | null;
     brands?: string[] | null;
     supplier_ids?: number[] | null;
-    rating?: number | null;
+    rating?: RatingRange | null;
     has_stocks?: boolean | null;
     sort_field?: string;
     sort_order?: string;
