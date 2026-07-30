@@ -158,6 +158,7 @@ const navGroups: { title: string; section: string; items: NavItem[] }[] = [
             { href: '/funnel', label: 'Воронка продаж', icon: '📊', pageKey: 'funnel' },
             { href: '/reviews', label: 'Отзывы', icon: '⭐', pageKey: 'reviews' },
             { href: '/ads-manager', label: 'Управление рекламой', icon: '📢', pageKey: 'ads-manager' },
+            { href: '/card-exchange', label: 'Биржа карточек', icon: '🃏', pageKey: 'card-exchange' },
             { href: '/ab-tests', label: 'АБ-тесты фото', icon: '🧪', pageKey: 'ab-tests' },
             { href: '/pricing', label: 'Ценообразование', icon: '💲', pageKey: 'funnel' },
             { href: '/trends', label: 'Метрики и тренды', icon: '📈', pageKey: 'trends' },
