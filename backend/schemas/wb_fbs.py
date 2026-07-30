@@ -579,6 +579,37 @@ class FbsWriteoffIssuesOut(BaseModel):
     truncated: bool = False
 
 
+class FbsOrderTimelineEvent(BaseModel):
+    """Строка таймлайна «Статус заказа» (модалка по заданию, как в кабинете WB).
+
+    Смесь двух источников, оба уже отсортированы сервисом по времени:
+    - `kind="anchor"` — синтетический якорь из ТОЧНОЙ даты (задание оформлено,
+      поставка закрыта, QR отсканирован, списано в DDS);
+    - `kind="event"` — переход из журнала `wb_fbs_order_events`; его время —
+      момент ФИКСАЦИИ синком (точность = каденс, 5 мин), об этом говорит
+      `approx=True`.
+    """
+
+    kind: str = "event"
+    #: Человеческий ярлык рисует фронт по коду (словарь TIMELINE_LABEL) — здесь
+    #: машинный код: created | assembling | assembled | scanned | written_off |
+    #: wb:<status> | supplier:<status>.
+    code: str
+    at: datetime | None = None
+    #: Время приблизительное (зафиксировано синком, не WB).
+    approx: bool = False
+
+
+class FbsOrderTimelineOut(BaseModel):
+    """`GET /fbs/orders/{wb_order_id}/timeline`."""
+
+    wb_order_id: int
+    article: str | None = None
+    subject: str | None = None
+    nm_id: int | None = None
+    events: list[FbsOrderTimelineEvent] = Field(default_factory=list)
+
+
 class FbsOrderBackfillRequest(BaseModel):
     """Обратная загрузка истории заданий из `GET /api/v3/orders`.
 
