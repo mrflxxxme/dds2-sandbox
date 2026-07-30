@@ -8512,6 +8512,14 @@ export interface FbsWarehouseSummary {
 }
 
 /**
+ * Код причины «не списано» (`ALLOWED_WRITEOFF_REASONS` бэка). `queued` —
+ * НЕ проблема: остаток есть, задание просто ждёт ближайшего прогона
+ * 5-минутного джоба списания. `(string & {})` — неизвестный код нового бэка
+ * не роняет тип, фронт покажет его как есть.
+ */
+export type FbsWriteoffReason = 'no_stock' | 'no_card' | 'no_link' | 'queued' | (string & {});
+
+/**
  * Переданные задания, которые НЕЧЕМ списать со склада (агрегат по товару).
  *
  * Списание идемпотентно ретраится каждые 5 минут, но пока причина жива,
@@ -8541,15 +8549,37 @@ export interface FbsWriteoffIssueRow {
   ff_loose: number | null;
   /**
    * no_stock — остаток 0 | no_card — нет карточки товара | no_link — склад
-   * продавца не привязан к нашему.
+   * продавца не привязан к нашему | queued — остаток есть, ждёт ближайшего
+   * прогона списания (очередь, не проблема).
    */
-  reason: 'no_stock' | 'no_card' | 'no_link' | string;
+  reason: FbsWriteoffReason;
 }
 
 /** Сводка незакрытых списаний: `GET /fbs/orders/writeoff-issues`. */
-export interface FbsWriteoffIssuesOut {
+export interface FbsWriteoffIssues {
   total_orders: number;
   rows: FbsWriteoffIssueRow[];
+  /**
+   * Выдача срезана капом строк сервера (`total_orders` считается ДО среза) —
+   * UI обязан сказать «показаны первые N групп», а не молча спрятать хвост.
+   */
+  truncated: boolean;
+}
+
+/**
+ * Структурированный detail 409-гейта настроек склада FBS
+ * (`PATCH /fbs/warehouses/{id}/settings`): комбинация «Трансляция + Система ФФ»
+ * при зеркале выше учёта. Фронт опознаёт гейт по `code`, а не по своей копии
+ * серверного условия. Числа — штуки (целые), но могут приехать строкой.
+ */
+export interface FbsMirrorGateDetail {
+  code: 'fbs_mirror_above_ledger';
+  /** Человеческий текст отказа — показывается в диалоге как есть. */
+  message: string;
+  /** На сколько штук зеркало ФФ выше нашего учёта. */
+  mirror_over_ledger: number;
+  ledger_total: number;
+  mirror_total: number;
 }
 
 /**
