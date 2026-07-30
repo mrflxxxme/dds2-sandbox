@@ -236,6 +236,34 @@ export const CABINET_STATUS_LABEL: Record<FbsCabinetStatusKey, { label: string; 
 /** Фазы, где заказ ещё НЕ отсканирован WB — наша зона: подсветка зависших живёт тут. */
 export const NOT_SCANNED_CABINET_KEYS: readonly FbsCabinetStatusKey[] = ['new', 'assembling', 'ship_goods'];
 
+/**
+ * Терминальные фазы: заказ завершён (получен/брак) или отменён — «Срок»
+ * у них не тикает («3 дн 7 ч назад» у проданного — бессмыслица), показываем «—».
+ */
+export const TERMINAL_CABINET_KEYS: readonly FbsCabinetStatusKey[] = [
+    'sold', 'defect', 'cancelled_client', 'cancelled_seller', 'cancelled_carrier', 'cancelled',
+];
+
+/**
+ * Цена задания В РУБЛЯХ. Канон — `price_rub` бэка (у валют СНГ это пересчёт
+ * WB: заказ 5384434223 лежит как 60.10 BYN, номинал показывать нельзя).
+ * Фолбэк для старого бэка без поля — sale_price → price, но ТОЛЬКО у
+ * рублёвых заказов; у валютных без пересчёта честнее «—», чем тенге за рубли.
+ */
+export function orderPriceRub(o: {
+    price_rub?: number | string | null;
+    sale_price?: number | string | null;
+    price?: number | string | null;
+    currency_code?: string | null;
+}): number | null {
+    if (o.price_rub != null) return Number(o.price_rub);
+    if (o.currency_code == null || o.currency_code === '643') {
+        const nominal = o.sale_price ?? o.price;
+        return nominal == null ? null : Number(nominal);
+    }
+    return null;
+}
+
 export function cabinetOrderStatus(
     supplierStatus: string | null | undefined,
     wbStatus: string | null | undefined,

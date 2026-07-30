@@ -1400,6 +1400,9 @@ def _order_to_dict(
         "subject": order.subject,
         "price": _money(order.price),
         "sale_price": _money(order.sale_price),
+        # Рублёвый канон для UI: у СНГ-валют номинал price/sale_price
+        # показывать нельзя (60.10 BYN читались как «60 ₽»).
+        "price_rub": _money(order_price(order)),
         "currency_code": order.currency_code,
         "cargo_type": order.cargo_type,
         "is_zero_order": order.is_zero_order,

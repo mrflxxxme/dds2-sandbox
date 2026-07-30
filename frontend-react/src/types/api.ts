@@ -8532,6 +8532,12 @@ export interface FbsOrder {
    * 0 — отмена без штрафа, null — фаза не отменная / оценки нет.
    */
   penalty_est?: number | string | null;
+  /**
+   * Цена задания В РУБЛЯХ (канон бэка): рубль → sale_price → price; валюта
+   * СНГ → пересчёт WB. null — пересчёта нет, показывать номинал нельзя.
+   * Numeric — приходит СТРОКОЙ, перед показом Number().
+   */
+  price_rub?: number | string | null;
 }
 
 /**
