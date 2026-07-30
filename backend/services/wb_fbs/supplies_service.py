@@ -1496,11 +1496,17 @@ async def list_supply_orders(db: AsyncSession, project_id: int, wb_supply_id: st
         .order_by(WbFbsOrder.created_at_wb.desc().nullslast(), WbFbsOrder.id.desc())
         .limit(_SUPPLY_ORDERS_LIMIT)
     )
-    anchor = supply.scan_dt or supply.closed_at
-    anchor_by_supply = {supply_id: anchor} if anchor else {}
+    # Фаза поставки одна на все строки: (якорь передачи, done, scan_dt) —
+    # тот же кортеж, что собирает `_supply_meta_map` в списке заданий.
+    meta = (supply.scan_dt or supply.closed_at, bool(supply.done), supply.scan_dt)
+    meta_by_supply = {supply_id: meta}
     now = utcnow()
     return [
-        _order_to_dict(order, transit_days=_transit_days(order, anchor_by_supply, now))
+        _order_to_dict(
+            order,
+            transit_days=_transit_days(order, meta_by_supply, now),
+            supply_meta=meta,
+        )
         for order in result.scalars().all()
     ]
 

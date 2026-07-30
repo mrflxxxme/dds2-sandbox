@@ -25,24 +25,29 @@ import type {
 import {
     BACKFILL_DAYS_DEFAULT,
     BACKFILL_DAYS_OPTIONS,
+    CABINET_STATUS_LABEL,
+    NOT_SCANNED_CABINET_KEYS,
+    ORDER_PHASE_LABEL,
     PSEUDO_STATUS_LABEL,
-    SUPPLIER_STATUS_LABEL,
-    SupplierStatusBadge,
     TRANSIT_STALE_DAYS,
     TRANSIT_WARN_DAYS,
-    WB_STATUS_LABEL,
     SELECT_ALL_MAX,
     WB_STICKER_CHUNK,
     backfillPeriodLabel,
     backfillResultMessage,
+    cabinetOrderStatus,
     cargoLabel,
     collectAllOrderIds,
     deliverStickers,
+    durationSinceLabel,
     fetchStickersChunked,
+    hoursAgoLabel,
     num,
+    orderAgeColor,
     selectStickerIds,
     transitDaysColor,
 } from './fbsShared';
+import type { FbsCabinetStatusKey } from './fbsShared';
 import WriteoffIssuesPanel from './WriteoffIssuesPanel';
 import OrderTimelineModal from './OrderTimelineModal';
 import OrdersWarehouseSummary from './OrdersWarehouseSummary';
@@ -58,26 +63,44 @@ const PAGE_SIZE = 100;
 const STICKER_WARN_LIMIT = 500;
 
 /**
- * Вкладки выдачи. `in_delivery` — не статус задания, а его подмножество:
- * `complete` говорит лишь «поставку передали» и таким остаётся навсегда, а
- * «едет ли ещё» знает `wbStatus`. Счётчик к этой вкладке приходит отдельным
- * полем `in_delivery_count`, не ключом `status_counts`.
+ * Фазовые чипы — как вкладки кабинета WB (`ORDER_PHASE_LABEL`). Счётчик
+ * «В доставке» считается честно: complete_total − delivered_count —
+ * `complete` включает и доставленное, и прежний ярлык «Переданы в WB»
+ * зелёным бейджем врал про неотсканированные поставки. «Отменено» суммирует
+ * cancel + cancel_carrier (фильтр по клику — cancel: отмены перевозчиком
+ * редки, отдельного чипа не заслуживают).
  */
-const STATUS_TABS: { key: string; label: string; title?: string }[] = [
+const PHASE_TABS: { key: string; label: string; title?: string }[] = [
     { key: '', label: 'Все' },
-    { key: 'new', label: SUPPLIER_STATUS_LABEL.new },
-    { key: 'confirm', label: SUPPLIER_STATUS_LABEL.confirm },
-    { key: 'complete', label: 'Переданы в WB', title: 'Все задания переданных поставок — вместе с доставленными' },
+    { key: 'new', label: ORDER_PHASE_LABEL.new },
+    { key: 'confirm', label: ORDER_PHASE_LABEL.confirm, title: 'Добавлены в поставку, поставка ещё не закрыта' },
+    {
+        key: 'complete',
+        label: ORDER_PHASE_LABEL.complete,
+        title: 'Поставка закрыта у нас, покупатель ещё не получил — от «Отгрузите товар» до «Готово к выдаче»',
+    },
+    { key: 'delivered', label: ORDER_PHASE_LABEL.delivered, title: 'Получено покупателем или брак' },
+    { key: 'cancel', label: ORDER_PHASE_LABEL.cancel, title: 'Отменённые — включая отмены перевозчиком' },
+];
+
+/**
+ * Под-фильтры фазы «В доставке» — второй ряд помельче, виден только внутри
+ * фазы: это подмножества `complete`, отдельными вкладками верхнего ряда они
+ * дублировали бы друг друга.
+ */
+const DELIVERY_SUB_TABS: { key: string; label: string; title?: string }[] = [
     { key: 'in_delivery', label: PSEUDO_STATUS_LABEL.in_delivery, title: 'Переданы в WB, сортировочный центр ещё не принял' },
+    { key: 'sorted', label: PSEUDO_STATUS_LABEL.sorted, title: 'Принято сортировочным центром WB, покупатель ещё не получил' },
     {
         key: 'in_delivery_stuck',
         label: PSEUDO_STATUS_LABEL.in_delivery_stuck,
         title: `Переданы ≥ ${TRANSIT_WARN_DAYS} дней назад, а сортировочный центр так и не принял `
             + `— товар мог потеряться по дороге на СЦ (окно — последние ${TRANSIT_STALE_DAYS} дней)`,
     },
-    { key: 'sorted', label: PSEUDO_STATUS_LABEL.sorted, title: 'Принято сортировочным центром WB, покупатель ещё не получил' },
-    { key: 'cancel', label: SUPPLIER_STATUS_LABEL.cancel },
 ];
+
+/** Статусы семейства «В доставке»: сама фаза + её под-фильтры. */
+const DELIVERY_FAMILY: readonly string[] = ['complete', ...DELIVERY_SUB_TABS.map(t => t.key)];
 
 interface Props {
     warehouses: FbsWarehouse[];
@@ -411,8 +434,18 @@ export default function OrdersTab({
         }
     };
 
-    /** Фазы после передачи поставки — только у них живёт «В пути, дн». */
-    const showTransit = status === 'complete' || status === 'in_delivery' || status === 'in_delivery_stuck';
+    /** Фазы после передачи поставки — только у них живёт «В пути». */
+    const showTransit = DELIVERY_FAMILY.includes(status);
+
+    /**
+     * Кабинетный статус строки: две оси + фаза ЕЁ поставки. `supplier_status
+     * = 'complete'` значит лишь «поставка закрыта у нас» — без done/scan_dt
+     * строка «complete + waiting» читалась как противоречие («В доставке»
+     * зелёным при неотсканированном QR).
+     */
+    const cabOf = (o: FbsOrder): FbsCabinetStatusKey =>
+        cabinetOrderStatus(o.supplier_status, o.wb_status, !!o.supply_done, !!o.supply_scan_dt);
+    const now = Date.now();
 
     // Колонки строятся каждый рендер: замыкаются на текущее выделение и busy
     const cols: Column[] = [
@@ -430,14 +463,23 @@ export default function OrdersTab({
         },
         {
             key: 'wb_order_id', label: 'Задание',
-            render: (v: number, row: FbsOrder) => (
-                <div>
-                    <div style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</div>
-                    <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                        {row.created_at_wb ? formatDateTime(row.created_at_wb) : '—'}
+            render: (v: number, row: FbsOrder) => {
+                // Возраст красится, пока WB не отсканировал QR (наша зона).
+                const ageColor = orderAgeColor(row.created_at_wb, cabOf(row), now);
+                return (
+                    <div>
+                        <div style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                            {row.created_at_wb ? formatDateTime(row.created_at_wb) : '—'}
+                        </div>
+                        {row.created_at_wb && (
+                            <div style={{ fontSize: 12, fontWeight: 600, color: ageColor ?? 'var(--color-text-muted)' }}>
+                                {hoursAgoLabel(row.created_at_wb, now)}
+                            </div>
+                        )}
                     </div>
-                </div>
-            ),
+                );
+            },
         },
         {
             key: 'article', label: 'Товар', width: '250px',
@@ -485,34 +527,46 @@ export default function OrdersTab({
         },
         {
             key: 'supplier_status', label: 'Статус',
-            // Клик по бейджу — модалка «Статус заказа» с историей переходов
-            render: (v: string, row: FbsOrder) => (
-                <span
-                    style={{ cursor: 'pointer' }}
-                    title="История статусов"
-                    onClick={e => { e.stopPropagation(); setTimelineOrder(row); }}
-                >
-                    <SupplierStatusBadge status={v} />
-                </span>
-            ),
+            // Кабинетный бейдж: обе оси + фаза поставки — включает бывшую
+            // колонку «Статус WB». Клик — модалка «Статус заказа».
+            render: (_v: string, row: FbsOrder) => {
+                const cab = cabOf(row);
+                return (
+                    <span
+                        className={`badge ${CABINET_STATUS_LABEL[cab].badge}`}
+                        style={{ cursor: 'pointer' }}
+                        title="История статусов"
+                        onClick={e => { e.stopPropagation(); setTimelineOrder(row); }}
+                    >
+                        {CABINET_STATUS_LABEL[cab].label}
+                    </span>
+                );
+            },
+            exportValue: (row: FbsOrder) => CABINET_STATUS_LABEL[cabOf(row)].label,
         },
-        {
-            key: 'wb_status', label: 'Статус WB',
-            render: (v: string | null) => v
-                ? <span style={{ fontSize: 13 }}>{WB_STATUS_LABEL[v] ?? v}</span>
-                : '—',
-        },
-        // «В пути, дн» — только в фазах после передачи: у прочих значение
-        // всегда null, и пустая колонка лишь съедала бы ширину таблицы.
+        // «В пути» — только в фазах после передачи: у прочих значение
+        // всегда пустое, и колонка лишь съедала бы ширину таблицы.
         ...(showTransit ? [{
-            key: 'transit_days', label: 'В пути, дн', align: 'right',
-            headerTitle: 'Сколько дней задание едет на сортировочный центр после передачи '
-                + 'поставки. Пусто — СЦ уже принял или момент передачи неизвестен. '
+            key: 'transit_days', label: 'В пути', align: 'right',
+            headerTitle: 'Сколько задание едет после передачи поставки: до скана QR — «—» '
+                + '(ещё наша зона), после скана — часы/дни до приёма СЦ, дальше — дни числом. '
                 + `Подсветка: ≥ ${TRANSIT_WARN_DAYS} дн — задержка, дальше — ЧП; `
                 + `> ${TRANSIT_STALE_DAYS} дн — застывший статус старого задания `
                 + '(в чипе «Зависли в пути» не считается), не живой груз',
-            render: (v: number | null) => {
-                if (v == null) return <span style={{ color: 'var(--color-text-dim)' }}>—</span>;
+            render: (v: number | null, row: FbsOrder) => {
+                const cab = cabOf(row);
+                // Паттерн FbsOrdersCard: ждёт сортировки — точная длительность
+                // от скана ЕГО поставки; до скана — «—»; после — дни числом.
+                if (cab === 'awaiting_sort' && row.supply_scan_dt) {
+                    return (
+                        <span style={{ color: transitDaysColor(v) ?? undefined, whiteSpace: 'nowrap', fontWeight: 500 }}>
+                            {durationSinceLabel(row.supply_scan_dt, now) ?? '—'}
+                        </span>
+                    );
+                }
+                if (NOT_SCANNED_CABINET_KEYS.includes(cab) || v == null) {
+                    return <span style={{ color: 'var(--color-text-dim)' }}>—</span>;
+                }
                 const color = transitDaysColor(v);
                 return (
                     <span style={{ color: color ?? undefined, fontWeight: color ? 700 : 400 }}>
@@ -615,20 +669,25 @@ export default function OrdersTab({
                 onPeriodChange={setPeriod}
             />
 
-            {/* Статусные вкладки */}
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-                {STATUS_TABS.map(t => {
-                    const count = t.key === 'in_delivery'
-                        ? data?.in_delivery_count
-                        : t.key === 'sorted'
-                            ? data?.sorted_count
-                            : t.key === 'in_delivery_stuck'
-                                ? data?.in_delivery_stuck_count
+            {/* Фазовые чипы — как вкладки кабинета WB */}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                {PHASE_TABS.map(t => {
+                    // «В доставке» честно: complete включает и доставленное.
+                    const count = t.key === 'complete'
+                        ? data ? Math.max(0, (counts.complete ?? 0) - (data.delivered_count ?? 0)) : undefined
+                        : t.key === 'delivered'
+                            ? data?.delivered_count
+                            : t.key === 'cancel'
+                                ? data ? (counts.cancel ?? 0) + (counts.cancel_carrier ?? 0) : undefined
                                 : counts[t.key];
+                    // Родительский чип «В доставке» подсвечен и под её под-фильтрами.
+                    const active = t.key === 'complete'
+                        ? DELIVERY_FAMILY.includes(status)
+                        : status === t.key;
                     return (
                         <button
                             key={t.key || 'all'}
-                            className={`btn btn-sm ${status === t.key ? 'btn-primary' : 'btn-secondary'}`}
+                            className={`btn btn-sm ${active ? 'btn-primary' : 'btn-secondary'}`}
                             onClick={() => setStatus(t.key)}
                             title={t.title}
                         >
@@ -638,6 +697,32 @@ export default function OrdersTab({
                     );
                 })}
             </div>
+
+            {/* Под-фильтры внутри «В доставке» — второй ряд помельче */}
+            {DELIVERY_FAMILY.includes(status) && (
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12, paddingLeft: 8 }}>
+                    {DELIVERY_SUB_TABS.map(t => {
+                        const count = t.key === 'in_delivery'
+                            ? data?.in_delivery_count
+                            : t.key === 'sorted'
+                                ? data?.sorted_count
+                                : data?.in_delivery_stuck_count;
+                        return (
+                            <button
+                                key={t.key}
+                                className={`btn btn-sm ${status === t.key ? 'btn-primary' : 'btn-secondary'}`}
+                                style={{ fontSize: 12, padding: '2px 10px' }}
+                                title={t.title}
+                                // Повторный клик по активному под-фильтру возвращает всю фазу.
+                                onClick={() => setStatus(status === t.key ? 'complete' : t.key)}
+                            >
+                                {t.label}
+                                {count != null && ` · ${formatNumber(count, 0)}`}
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
 
             {/* Фильтры */}
             <div className="glass-card" style={{
@@ -761,10 +846,10 @@ export default function OrdersTab({
                         <>
                             <div>
                                 📭 {status
-                                    // Ярлык берём из вкладок: `in_delivery` — псевдо-статус,
-                                    // в словаре статусов задания его нет.
-                                    ? `Заданий в статусе «${STATUS_TABS.find(t => t.key === status)?.label
-                                        ?? SUPPLIER_STATUS_LABEL[status] ?? status}» нет.`
+                                    // Фазы и псевдо-статусы живут в разных словарях;
+                                    // промах обоих — показать код как есть.
+                                    ? `Заданий в статусе «${ORDER_PHASE_LABEL[status]
+                                        ?? PSEUDO_STATUS_LABEL[status] ?? status}» нет.`
                                     : 'Сборочных заданий нет.'}
                             </div>
                             <div style={{ marginTop: 8, fontSize: 13 }}>
@@ -838,6 +923,11 @@ export default function OrdersTab({
                         exportName="FBS_задания"
                         enableSorting
                         enablePagination={false}
+                        // Подсветка зависших: WB не отсканировал ≥ суток — наша зона.
+                        rowClassName={(o: FbsOrder) =>
+                            orderAgeColor(o.created_at_wb, cabOf(o), now) === 'var(--color-danger)'
+                                ? 'fbs-row-stuck'
+                                : ''}
                     />
 
                     {/* Пагинация */}

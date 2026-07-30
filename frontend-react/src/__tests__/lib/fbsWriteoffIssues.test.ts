@@ -18,6 +18,7 @@ import {
     NOT_SCANNED_CABINET_KEYS,
     ORDER_AGE_DANGER_HOURS,
     ORDER_AGE_WARN_HOURS,
+    ORDER_PHASE_LABEL,
     PSEUDO_STATUS_LABEL,
     TRANSIT_DANGER_DAYS,
     TRANSIT_STALE_DAYS,
@@ -74,6 +75,40 @@ describe('псевдо-статус in_delivery_stuck', () => {
     it('соседние псевдо-статусы на месте (общий словарь, не три копии)', () => {
         expect(PSEUDO_STATUS_LABEL.in_delivery).toBe('Ещё в доставке');
         expect(PSEUDO_STATUS_LABEL.sorted).toBe('Отсортировано');
+    });
+});
+
+describe('ORDER_PHASE_LABEL (фазовые чипы вкладки «Заказы»)', () => {
+    /**
+     * Валидные значения фильтра `GET /fbs/orders?status=…` — зеркало
+     * `ALLOWED_ORDER_STATUS_FILTERS` бэка (schemas/wb_fbs.py): supplier-статусы
+     * + псевдо-статусы фаз доставки. Чип с ключом вне этого списка получил бы
+     * 422 на каждый клик.
+     */
+    const ALLOWED_ORDER_STATUS_FILTERS = [
+        'new', 'confirm', 'complete', 'cancel', 'cancel_carrier',
+        'in_delivery', 'sorted', 'in_delivery_stuck', 'delivered',
+    ];
+
+    it('каждый ключ словаря — валидный фильтр бэка', () => {
+        for (const key of Object.keys(ORDER_PHASE_LABEL)) {
+            expect(ALLOWED_ORDER_STATUS_FILTERS, `ключ ${key} не примет бэк`).toContain(key);
+        }
+    });
+
+    it('псевдо-статус delivered — «Завершённые», фазы — в терминах кабинета', () => {
+        expect(ORDER_PHASE_LABEL.delivered).toBe('Завершённые');
+        expect(ORDER_PHASE_LABEL.new).toBe('Новые');
+        expect(ORDER_PHASE_LABEL.confirm).toBe('На сборке');
+        // «Переданы в WB» ушёл: complete читается как фаза кабинета.
+        expect(ORDER_PHASE_LABEL.complete).toBe('В доставке');
+        expect(ORDER_PHASE_LABEL.cancel).toBe('Отменено');
+    });
+
+    it('под-фильтры «В доставке» — тоже валидные фильтры (второй ряд чипов)', () => {
+        for (const key of Object.keys(PSEUDO_STATUS_LABEL)) {
+            expect(ALLOWED_ORDER_STATUS_FILTERS, `ключ ${key} не примет бэк`).toContain(key);
+        }
     });
 });
 
