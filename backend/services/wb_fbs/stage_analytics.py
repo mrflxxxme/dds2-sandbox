@@ -502,6 +502,13 @@ def _milestones(project_id: int, wb_warehouse_id: int | None) -> Any:
                 case((with_supply, WbFbsSupply.closed_at), else_=None),
             ).label("t_closed"),
             case((with_supply, WbFbsSupply.scan_dt), else_=None).label("t_scan"),
+            # 🔴 Отдельная колонка «закрытие ПОСТАВКИ» — без подмеса истории.
+            # `t_closed` выше коалесцирует историю кабинета, и после первого же
+            # догона он заполняется у заданий БЕЗ строки поставки. Граница зон
+            # (`_left_us_expr`) различает источники по NULL, и на общей колонке
+            # 326 прод-заданий уехали бы обратно в «ждёт отгрузки», пока вкладка
+            # «Заказы» считает их зависшими в пути.
+            case((with_supply, WbFbsSupply.closed_at), else_=None).label("t_closed_supply"),
             func.coalesce(history.c.h_sorted, events.c.t_sorted).label("t_sorted"),
             func.coalesce(history.c.h_ready, events.c.t_ready).label("t_ready"),
             func.coalesce(history.c.h_sold, events.c.t_sold).label("t_sold"),
@@ -784,7 +791,7 @@ def _left_us_expr(ms: Any) -> Any:
     """
     return or_(
         ms.c.t_scan.isnot(None),
-        and_(ms.c.t_closed.is_(None), ms.c.t_writeoff.isnot(None)),
+        and_(ms.c.t_closed_supply.is_(None), ms.c.t_writeoff.isnot(None)),
     )
 
 

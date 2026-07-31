@@ -348,7 +348,9 @@ async def _destinations(
     ]
 
 
-async def _nodes(db: AsyncSession, project_id: int, start: Any, end: Any) -> list[dict[str, Any]]:
+async def _nodes(
+    db: AsyncSession, project_id: int, start: Any, end: Any, wh: int | None
+) -> list[dict[str, Any]]:
     """Узлы маршрута: сколько заказов прошло и сколько узел держит груз.
 
     Удержание — от первого события узла до последнего по этому же заказу.
@@ -364,8 +366,13 @@ async def _nodes(db: AsyncSession, project_id: int, start: Any, end: Any) -> lis
             func.max(WbFbsOrderHistory.at).label("left_at"),
             func.count().label("events"),
         )
+        .join(WbFbsOrder, WbFbsOrder.id == WbFbsOrderHistory.order_id)
         .where(
             WbFbsOrderHistory.project_id == project_id,
+            # Контур и фильтр склада — как у остальных блоков вкладки: строки
+            # истории своей метки контура не несут, наследуют её от задания.
+            contour_condition(WbFbsOrder.raw),
+            *([WbFbsOrder.wb_warehouse_id == int(wh)] if wh else []),
             func.coalesce(WbFbsOrderHistory.place, "") != "",
             WbFbsOrderHistory.at >= start,
             WbFbsOrderHistory.at < end,
@@ -472,7 +479,7 @@ async def geo_analytics(
     now = func.timezone("UTC", func.now())
 
     directions = await _directions(db, project_id, paths, start, end, wb_warehouse_id, now)
-    nodes = await _nodes(db, project_id, start, end)
+    nodes = await _nodes(db, project_id, start, end, wb_warehouse_id)
     result: dict[str, Any] = {
         "date_from": d_from,
         "date_to": d_to,

@@ -166,20 +166,6 @@ export default function StagesTab({ warehouses, refreshTick, writeEnabled, write
         setDateTo(todayIso());
     }, []);
 
-    const runHistorySync = useCallback(async () => {
-        setSyncing(true);
-        try {
-            const res = await api.syncFbsOrderHistory(500);
-            onToast(res.message || 'История догнана');
-            await load();
-        } catch (e: unknown) {
-            onToast(e instanceof Error ? e.message : 'Не удалось догнать историю');
-        } finally {
-            setSyncing(false);
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [onToast]);
-
     const load = useCallback(async (signal?: AbortSignal) => {
         setLoading(true);
         setError('');
@@ -205,6 +191,29 @@ export default function StagesTab({ warehouses, refreshTick, writeEnabled, write
         load(controller.signal);
         return () => controller.abort();
     }, [load, refreshTick]);
+
+    /**
+     * Ручной догон истории. 🔴 Потолок 300 — контракт ручки
+     * (`POST /orders/history/sync`, `limit ≤ 300`): она исполняется в
+     * API-контейнере рядом с uvicorn, и длинный прогон там выедает память.
+     * Значение больше даёт 422 ещё до тела ручки.
+     */
+    const runHistorySync = useCallback(async () => {
+        setSyncing(true);
+        try {
+            const res = await api.syncFbsOrderHistory(300);
+            onToast(res.message || 'История догнана');
+            // `load` В ЗАВИСИМОСТЯХ обязателен: без него колбэк навсегда держит
+            // загрузчик первого рендера и после синка перечитывает данные за
+            // СТАРЫЙ период — на экране фильтр 90 дней, цифры за 30.
+            await load();
+        } catch (e: unknown) {
+            onToast(e instanceof Error ? e.message : 'Не удалось догнать историю');
+        } finally {
+            setSyncing(false);
+        }
+    }, [onToast, load]);
+
 
     const flow = useMemo(() => (data?.stages ?? []).filter(s => !s.summary), [data]);
     const summary = useMemo(() => (data?.stages ?? []).filter(s => s.summary), [data]);
@@ -256,7 +265,7 @@ export default function StagesTab({ warehouses, refreshTick, writeEnabled, write
      * её же вопрос «кто медленный — мы или WB»: глаз не отделяет нашу
      * ответственность от чужой. Две таблицы отвечают на это самой вёрсткой.
      */
-    const zoneColumns = useCallback((zone: 'us' | 'wb'): Column[] => {
+    const buildZoneColumns = useCallback((zone: 'us' | 'wb'): Column[] => {
         const all = measurable.length ? measurable : (data?.stages ?? []);
         // «Заказ → отметка ФФ о передаче» в таблицу не идёт: она меряет клик
         // фулфилмента, а не отгрузку, и рядом с итогом зоны читается как
@@ -302,10 +311,16 @@ export default function StagesTab({ warehouses, refreshTick, writeEnabled, write
         ];
     }, [measurable, data]);
 
+    const usColumns = useMemo(() => buildZoneColumns('us'), [buildZoneColumns]);
+    const wbColumns = useMemo(() => buildZoneColumns('wb'), [buildZoneColumns]);
+
     const journalSinceMs = parseUtcMs(data?.journal.since);
     const journalSince = journalSinceMs === null ? null : sinceFmt.format(new Date(journalSinceMs));
 
     /** Доля заданий с выгруженной историей кабинета — подпись «на чём посчитано». */
+    /** Хоть один замер опёрся на журнал — тогда его происхождение стоит назвать. */
+    const usedJournal = (data?.stages ?? []).some(s => s.approx_count > 0);
+
     const coveragePct = !data?.history.orders_total || !data.history.orders_covered
         ? null
         : Math.round((data.history.orders_covered / data.history.orders_total) * 100);
@@ -342,6 +357,11 @@ export default function StagesTab({ warehouses, refreshTick, writeEnabled, write
                         текущая очередь целиком, период не применяется
                     </span>
                 </div>
+                {data.queue.length === 0 && (
+                    <div style={{ padding: 16, color: 'var(--color-text-muted)', fontSize: 13 }}>
+                        Очередь пуста — незавершённых заданий нет.
+                    </div>
+                )}
                 <div style={{
                     display: 'grid',
                     gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
@@ -462,8 +482,9 @@ export default function StagesTab({ warehouses, refreshTick, writeEnabled, write
                         ? 'история ещё не выгружена, пока считаем по журналу переходов (± прогон синка).'
                         : `история выгружена для ${formatNumber(data.history.orders_covered, 0)} из ${formatNumber(data.history.orders_total, 0)} заданий (${coveragePct}%), строк ${formatNumber(data.history.rows, 0)}.`}
                     {' '}«≈ N» у этапа — сколько замеров опёрлись на журнал вместо истории.
+                    {usedJournal && journalSince && ` Журнал переходов ведётся с ${journalSince}.`}
                 </p>
-                {coveragePct !== 100 && (
+                {data.history.orders_covered < data.history.orders_total && (
                     <button
                         className="btn btn-secondary btn-sm"
                         style={{ marginTop: 10 }}
@@ -589,7 +610,8 @@ export default function StagesTab({ warehouses, refreshTick, writeEnabled, write
                                 name="Медиана"
                                 stroke="var(--color-accent)"
                                 strokeWidth={2}
-                                dot={false}
+                                // Один бакет линией не рисуется — показываем точкой.
+                                dot={chartData.length === 1}
                             />
                             <Line
                                 yAxisId="hours"
@@ -599,7 +621,7 @@ export default function StagesTab({ warehouses, refreshTick, writeEnabled, write
                                 stroke="var(--color-warning)"
                                 strokeWidth={2}
                                 strokeDasharray="4 3"
-                                dot={false}
+                                dot={chartData.length === 1}
                             />
                         </ComposedChart>
                     </ResponsiveContainer>
@@ -619,7 +641,7 @@ export default function StagesTab({ warehouses, refreshTick, writeEnabled, write
                     наведите на цифру, чтобы увидеть число замеров. В Excel — часы.
                 </p>
                 <TanStackDataTable
-                    columns={zoneColumns('us')}
+                    columns={usColumns}
                     data={warehouseRows}
                     exportName={`FBS_наша_зона_по_складам_${data.date_from}_${data.date_to}`}
                     enableSorting
@@ -640,7 +662,7 @@ export default function StagesTab({ warehouses, refreshTick, writeEnabled, write
                     до скана доезжают почти все задания, до ПВЗ пока единицы.
                 </p>
                 <TanStackDataTable
-                    columns={zoneColumns('wb')}
+                    columns={wbColumns}
                     data={warehouseRows}
                     exportName={`FBS_зона_WB_по_складам_${data.date_from}_${data.date_to}`}
                     enableSorting

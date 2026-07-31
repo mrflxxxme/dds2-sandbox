@@ -471,6 +471,8 @@ async def _handle_order_history(db: AsyncSession, project_id: int) -> tuple[int,
         # протухание видно только строкой в SyncLog, а UI продолжает считать
         # доступ живым и не просит его обновить. Куки кабинета WB ротирует
         # примерно раз в неделю, так что это штатное событие, а не авария.
+        # Сервис поднимает это исключение только после SESSION_DEAD_AFTER
+        # подряд неудач — одиночный 401 сессию не хоронит.
         await integrations_service.mark_wb_portal_expired(db, project_id)
         raise
     finally:
@@ -573,7 +575,7 @@ async def sync_all_projects_fbs_supplies() -> None:
 
 
 async def sync_all_projects_fbs_order_history() -> None:
-    """Догнать историю статусов заданий из кабинета WB (каденс — 30 мин)."""
+    """Догнать историю статусов заданий из кабинета WB (каденс — 15 мин)."""
     await _run_fbs_job(
         sync_type="order_history",
         title="WB FBS order history",

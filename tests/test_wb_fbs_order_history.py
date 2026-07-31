@@ -321,21 +321,39 @@ async def test_single_order_failure_does_not_stop_run(db_session, project):
     assert stats["rows"] == 1
 
 
-async def test_expired_session_aborts_run(db_session, project):
-    """🔴 Протухшая сессия роняет прогон сразу: без неё не ответит НИ ОДНО задание.
+async def test_single_401_does_not_kill_session(db_session, project):
+    """🔴 Одиночный 401 сессию НЕ хоронит — на этом хосте он бывает и при живой.
 
-    Молотить лимит хоста впустую бессмысленно, а причина обязана быть видна
-    в SyncLog, а не выглядеть случайным таймаутом.
+    `mark_wb_portal_expired` гасит ключ для ВСЕХ потребителей, включая
+    FBW-транспорт, а восстановление — ручной харвест кук. Цена ложного
+    срабатывания слишком велика, чтобы верить одному ответу.
     """
     await _order(db_session, project.id, 8040)
     await _order(db_session, project.id, 8041)
     await db_session.commit()
 
-    client = FakePortal(fail_with={8040: WbSessionExpired("401")})
+    client = FakePortal(
+        payloads={8041: _payload(("2026-07-24T05:23:22Z", "Оформлен", ""))},
+        fail_with={8040: WbSessionExpired("401")},
+    )
+    stats = await oh.sync_order_history(db_session, project.id, client=client, limit=10)
+
+    assert stats["failed"] == 1
+    assert stats["orders"] == 1, "прогон продолжился на следующем задании"
+
+
+async def test_session_declared_dead_after_streak(db_session, project):
+    """Серия 401 подряд = сессия действительно мертва: прогон останавливается."""
+    ids = list(range(8050, 8050 + oh.SESSION_DEAD_AFTER + 2))
+    for wb_id in ids:
+        await _order(db_session, project.id, wb_id)
+    await db_session.commit()
+
+    client = FakePortal(fail_with={wb_id: WbSessionExpired("401") for wb_id in ids})
     with pytest.raises(WbSessionExpired):
         await oh.sync_order_history(db_session, project.id, client=client, limit=10)
 
-    assert len(client.asked) == 1, "второе задание спрашивать уже незачем"
+    assert len(client.asked) == oh.SESSION_DEAD_AFTER, "дальше спрашивать незачем"
 
 
 async def test_project_isolation(db_session, project, other_project):

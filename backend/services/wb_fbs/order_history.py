@@ -43,7 +43,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, func, literal, or_, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,9 +55,19 @@ from backend.integrations.wb_portal_client import (
 )
 from backend.models.wb_fbs import FBS_TERMINAL_STATUSES, WbFbsOrder, WbFbsOrderHistory
 from backend.services.wb_fbs.contour import contour_condition
+from backend.services.wb_fbs.locks import (
+    ORDER_HISTORY_LOCK_NAME,
+    ORDER_HISTORY_LOCK_TTL_SEC,
+    acquire_lock,
+    release_lock,
+)
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+class HistorySyncBusy(Exception):
+    """Догон уже идёт (лок занят). Второй прогон удвоил бы темп и выбил лимит."""
 
 #: Размер пачки. Считался из потребности, а не из головы: живых заданий на
 #: проде ~5.9 к, по лестнице протухания это ~18 к запросов в сутки. Пачка 400
@@ -71,11 +81,22 @@ DEFAULT_BATCH = 400
 #: системы (FBW-транспорт живёт на той же сессии).
 REQUEST_PAUSE_SEC = 0.3
 
+#: Сколько заданий подряд должны упасть по 401, чтобы счесть сессию мёртвой.
+#: 🔴 Одиночный 401 на маркетплейс-хосте бывает и при ЖИВОЙ сессии (ровно так
+#: вёл себя неверный `origin`), а `mark_wb_portal_expired` гасит ключ для ВСЕХ
+#: потребителей, включая FBW-транспорт. Цена ложного срабатывания — простой
+#: до ручного харвеста кук.
+SESSION_DEAD_AFTER = 3
+
 #: Внутренний бюджет прогона. 🔴 Обязан быть строго МЕНЬШЕ внешнего таймаута
 #: джоба (`ORDER_HISTORY_TIMEOUT_SEC`), иначе мягкая деградация недостижима:
 #: внешний `wait_for` убьёт корутину раньше, чем она успеет вернуть частичный
 #: результат (та же грабля, что у синков рекламы — см. learnings).
 DEFAULT_BUDGET_SEC = 200.0
+
+#: Потолок строк истории на одно задание. Внешние данные: без него один
+#: аномальный ответ упирается в лимит asyncpg 32767 параметров на INSERT.
+_MAX_STATUSES = 500
 
 #: Веха → правило распознавания сырого имени статуса WB.
 #: Порядок ВАЖЕН: правила проверяются сверху вниз, первое совпадение выигрывает.
@@ -195,7 +216,7 @@ _REFRESH_LADDER: tuple[tuple[int, timedelta], ...] = (
 _TRACK_MAX_DAYS = 45
 
 
-def _finished_expr() -> Any:
+def _finished_expr(project_id: int) -> Any:
     """Путь задания ЗАВЕРШЁН по данным истории — перезабирать больше нечего.
 
     Признак берётся из вех (`ready` / `sold` / `cancelled`), а НЕ из
@@ -210,6 +231,11 @@ def _finished_expr() -> Any:
     has_terminal_leg = (
         select(WbFbsOrderHistory.order_id)
         .where(
+            # 🔴 project_id обязателен не только по Iron rule: без него подзапрос
+            # не ложится на уникальный индекс (project_id, order_id, at, name),
+            # планировщик сканирует историю ВСЕХ проектов и держится за это,
+            # пока хеш влезает в work_mem. С ним — Index Only Scan (243→73 мс).
+            WbFbsOrderHistory.project_id == project_id,
             WbFbsOrderHistory.order_id == WbFbsOrder.id,
             or_(*[func.lower(WbFbsOrderHistory.name).like(f"%{n}%") for n in needles]),
         )
@@ -236,10 +262,7 @@ async def _pick_orders(db: AsyncSession, project_id: int, limit: int) -> list[tu
     for days, gap in reversed(_REFRESH_LADDER):
         branch = now - gap
         ladder = branch if ladder is None else case((age_days <= days, branch), else_=ladder)
-    stale_before = case(
-        (age_days <= _REFRESH_LADDER[0][0], now - _REFRESH_LADDER[0][1]),
-        else_=ladder,
-    )
+    stale_before = ladder
 
     rows = (
         await db.execute(
@@ -252,7 +275,7 @@ async def _pick_orders(db: AsyncSession, project_id: int, limit: int) -> list[tu
                     and_(
                         WbFbsOrder.history_synced_at < stale_before,
                         age_days <= _TRACK_MAX_DAYS,
-                        ~_finished_expr(),
+                        ~_finished_expr(project_id),
                     ),
                 ),
             )
@@ -271,7 +294,10 @@ async def _store(db: AsyncSession, project_id: int, order_pk: int, payload: dict
     """Записать историю одного задания. Возвращает число НОВЫХ строк."""
     rows: list[dict[str, Any]] = []
     seen: set[tuple[datetime, str]] = set()
-    for item in payload.get("statuses") or []:
+    raw_statuses = payload.get("statuses")
+    for item in (raw_statuses if isinstance(raw_statuses, list) else [])[:_MAX_STATUSES]:
+        if not isinstance(item, dict):
+            continue  # внешние данные: WB может отдать что угодно
         at = _parse_dt(item.get("date"))
         name = (item.get("name") or "").strip()
         if at is None or not name:
@@ -311,10 +337,16 @@ async def _store(db: AsyncSession, project_id: int, order_pk: int, payload: dict
 
     await db.execute(
         sa_update(WbFbsOrder)
-        .where(WbFbsOrder.id == order_pk)
+        .where(WbFbsOrder.id == order_pk, WbFbsOrder.project_id == project_id)
         .values(
             history_synced_at=utcnow(),
-            delivery_date_plan=_parse_dt(payload.get("deliveryDate")),
+            # coalesce, а не присваивание: на повторном заходе WB может не
+            # отдать поле, и обещанная дата — единственный источник колонки
+            # SLA в географии — обнулилась бы.
+            delivery_date_plan=func.coalesce(
+                literal(_parse_dt(payload.get("deliveryDate")), type_=WbFbsOrder.delivery_date_plan.type),
+                WbFbsOrder.delivery_date_plan,
+            ),
         )
     )
     return inserted
@@ -338,12 +370,40 @@ async def sync_order_history(
     а вот протухшая сессия роняет сразу: без неё не ответит НИ ОДНО задание, и
     молотить лимит впустую бессмысленно.
     """
+    # 🔴 Лок берётся ВНУТРИ сервиса, а не у вызывающего: точек входа две (ручка
+    # в api-контейнере и джоб в worker'е), и обе обязаны упереться в один замок.
+    token = await acquire_lock(
+        ORDER_HISTORY_LOCK_NAME, project_id, ttl=ORDER_HISTORY_LOCK_TTL_SEC
+    )
+    if token is None:
+        raise HistorySyncBusy("Догон истории уже идёт — дождитесь окончания прогона")
+    try:
+        return await _run_sync(db, project_id, client=client, limit=limit, budget_sec=budget_sec)
+    finally:
+        await release_lock(ORDER_HISTORY_LOCK_NAME, project_id, token)
+
+
+async def _run_sync(
+    db: AsyncSession,
+    project_id: int,
+    *,
+    client: Any,
+    limit: int,
+    budget_sec: float,
+) -> dict[str, int]:
+    """Тело прогона под уже взятым локом."""
     queue = await _pick_orders(db, project_id, limit)
+    # 🔴 Закрыть транзакцию ДО первого похода в WB. SQLAlchemy открывает её на
+    # первом же SELECT, а дальше цикл ждёт сеть — серверный коннект pgbouncer
+    # висел бы `idle in transaction` всё время прогона и выедал пул (клин
+    # локалки 2026-07-16, см. learnings). Паттерн — `bulk_create_ff_requests`.
+    await db.commit()
     stats = {"asked": 0, "orders": 0, "rows": 0, "failed": 0}
     if not queue:
         return stats
 
     deadline = time.monotonic() + budget_sec
+    session_fails = 0
     for idx, (order_pk, wb_order_id) in enumerate(queue):
         if time.monotonic() >= deadline:
             logger.info(
@@ -365,7 +425,16 @@ async def sync_order_history(
             # без истории до следующего прогона (ловилось живьём 30.07, когда
             # два прогона случайно пошли параллельно и удвоили темп).
             pause = min(max(int(getattr(e, "retry_after", 0) or 0), 5), 60)
+            # 🔴 Дедлайн проверяется ПЕРЕД паузой: она бывает до минуты, и
+            # итерация, начатая под конец бюджета, пробивала бы внешний таймаут
+            # джоба — ровно тот сценарий, ради которого бюджет и заведён.
+            if time.monotonic() + pause >= deadline:
+                logger.info("FBS история: лимит кабинета у границы бюджета — прогон закрыт")
+                await db.commit()
+                break
             logger.warning("FBS история: лимит кабинета, пауза %s c", pause)
+            # Пауза до минуты — транзакцию через неё держать нельзя.
+            await db.commit()
             await asyncio.sleep(pause)
             try:
                 payload = await client.fetch_order_history(wb_order_id)
@@ -374,10 +443,23 @@ async def sync_order_history(
                 logger.warning("FBS история: задание %s — %s", wb_order_id, retry_error)
                 continue
         except WbSessionExpired:
+            # Одиночный 401 сессию НЕ хоронит: на маркетплейс-хосте он бывает и
+            # при живой сессии. Хороним только серию подряд — тогда это
+            # действительно протухшие куки, и джоб пометит ключ EXPIRED.
+            session_fails += 1
+            stats["failed"] += 1
+            if session_fails < SESSION_DEAD_AFTER:
+                logger.warning(
+                    "FBS история: 401 на задании %s (%s/%s) — продолжаем",
+                    wb_order_id,
+                    session_fails,
+                    SESSION_DEAD_AFTER,
+                )
+                continue
             logger.warning(
-                "FBS история: сессия кабинета протухла на задании %s — прогон остановлен "
+                "FBS история: %s подряд 401 — сессия кабинета мертва, прогон остановлен "
                 "(забрано %s из %s)",
-                wb_order_id,
+                session_fails,
                 stats["orders"],
                 len(queue),
             )
@@ -388,11 +470,21 @@ async def sync_order_history(
             logger.warning("FBS история: задание %s — %s", wb_order_id, e)
             continue
 
-        stats["rows"] += await _store(db, project_id, order_pk, payload)
+        try:
+            stats["rows"] += await _store(db, project_id, order_pk, payload)
+        except (AttributeError, TypeError, ValueError) as e:
+            # Формат ответа WB — не наша ответственность: битое задание
+            # пропускаем, прогон продолжается (раньше падало всё).
+            stats["failed"] += 1
+            logger.warning("FBS история: задание %s — формат ответа: %s", wb_order_id, e)
+            await db.rollback()
+            continue
         stats["orders"] += 1
-        # Коммитим пачкой: прогон длинный, и обрыв не должен обнулять работу.
-        if stats["orders"] % 25 == 0:
-            await db.commit()
+        session_fails = 0  # успех — серия прервана
+        # Коммит на КАЖДОМ задании: следующий шаг цикла — снова поход в сеть,
+        # и открытая транзакция дожила бы до него. Заодно обрыв не обнуляет
+        # работу — на прогоне в 5600 заданий это уже спасало (OOM 30.07).
+        await db.commit()
 
     await db.commit()
     logger.info(
@@ -423,10 +515,15 @@ async def history_coverage(db: AsyncSession, project_id: int) -> dict[str, Any]:
             )
         )
     ).one()
+    # Контур: строки истории своей метки не несут, поэтому фильтруем через
+    # задание — иначе при переключении sandbox↔prod счётчики смешаются.
     rows, first_at = (
         await db.execute(
-            select(func.count(), func.min(WbFbsOrderHistory.at)).where(
-                WbFbsOrderHistory.project_id == project_id
+            select(func.count(), func.min(WbFbsOrderHistory.at))
+            .join(WbFbsOrder, WbFbsOrder.id == WbFbsOrderHistory.order_id)
+            .where(
+                WbFbsOrderHistory.project_id == project_id,
+                contour_condition(WbFbsOrder.raw),
             )
         )
     ).one()

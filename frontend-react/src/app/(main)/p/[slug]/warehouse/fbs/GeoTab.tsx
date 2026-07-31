@@ -157,7 +157,12 @@ export default function GeoTab({ warehouses, refreshTick }: Props) {
 
     const directionColumns = useMemo<Column[]>(() => [
         { key: 'label', label: 'Округ покупателя', align: 'left' },
-        { key: 'orders', label: 'Замеров', align: 'right', format: 'number' },
+        {
+            key: 'orders', label: 'Замеров', align: 'right', sortingFn: 'basic',
+            // 🔴 НЕ format:'number' — он зовёт formatNumber без разрядности,
+            // а дефолт два знака: счётчик печатался бы «125,00».
+            render: (v: unknown) => formatNumber(Number(v ?? 0), 0),
+        },
         {
             key: 'median_days', label: 'Медиана', align: 'right', sortingFn: 'basic',
             render: (v: unknown) => fmtDays(v as number),
@@ -177,6 +182,12 @@ export default function GeoTab({ warehouses, refreshTick }: Props) {
                 const total = Number(row.sla_total ?? 0);
                 return total ? `${pct(Number(row.sla_in_time ?? 0), total)} из ${formatNumber(total, 0)}` : '—';
             },
+            // На экране доля, поэтому и в Excel доля: иначе выгрузка и таблица
+            // под одним заголовком показывали бы разные величины.
+            exportValue: (row: Record<string, unknown>) => {
+                const total = Number(row.sla_total ?? 0);
+                return total ? Number(row.sla_in_time ?? 0) / total : '';
+            },
         },
         {
             key: 'refused', label: 'Отказы', align: 'right', headerWrap: true,
@@ -187,12 +198,19 @@ export default function GeoTab({ warehouses, refreshTick }: Props) {
                     ? `${pct(Number(row.refused ?? 0), matured)} из ${formatNumber(matured, 0)}`
                     : '—';
             },
+            exportValue: (row: Record<string, unknown>) => {
+                const matured = Number(row.matured ?? 0);
+                return matured ? Number(row.refused ?? 0) / matured : '';
+            },
         },
     ], []);
 
     const destinationColumns = useMemo<Column[]>(() => [
         { key: 'label', label: 'Город назначения', align: 'left' },
-        { key: 'orders', label: 'Заказов', align: 'right', format: 'number' },
+        {
+            key: 'orders', label: 'Заказов', align: 'right', sortingFn: 'basic',
+            render: (v: unknown) => formatNumber(Number(v ?? 0), 0),
+        },
         {
             key: 'median_days', label: 'Медиана', align: 'right', sortingFn: 'basic',
             render: (v: unknown) => fmtDays(v as number),
@@ -205,7 +223,10 @@ export default function GeoTab({ warehouses, refreshTick }: Props) {
 
     const nodeColumns = useMemo<Column[]>(() => [
         { key: 'label', label: 'Узел маршрута', align: 'left' },
-        { key: 'passes', label: 'Проходов', align: 'right', format: 'number' },
+        {
+            key: 'passes', label: 'Проходов', align: 'right', sortingFn: 'basic',
+            render: (v: unknown) => formatNumber(Number(v ?? 0), 0),
+        },
         {
             key: 'median_hours', label: 'Держит груз', align: 'right', sortingFn: 'basic',
             headerTitle: 'Медиана от прибытия до отправки. Прочерк — в истории одно событие, удержание неизвестно',

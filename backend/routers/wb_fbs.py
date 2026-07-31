@@ -35,6 +35,7 @@ from backend.integrations.wb_fbs_api import (
     is_write_enabled,
     resolve_base_url,
 )
+from backend.integrations.wb_portal_client import WbPortalError, WbSessionExpired
 from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.wb_fbs import (
@@ -95,6 +96,7 @@ from backend.services.wb_fbs.client_factory import (
     service_for_mode,
 )
 from backend.services.wb_fbs.locks import PUSH_LOCK_NAME, PUSH_RUN_BUDGET_SEC, is_locked
+from backend.services.wb_fbs.order_history import HistorySyncBusy
 from backend.utils.rate_limit import rate_limit_write
 from backend.utils.time import utcnow
 
@@ -167,6 +169,17 @@ def _fbs_errors() -> Iterator[None]:
         raise HTTPException(409, e.message) from e
     except WbFbsApiError as e:
         _raise_wb_error(e)
+    except WbSessionExpired as e:
+        # Протухание кук кабинета — штатное еженедельное событие, а не сбой.
+        # Без этой ветки пользователь получал голый 500 со стектрейсом, а UI
+        # продолжал считать доступ живым (джоб при этом помечает EXPIRED сам).
+        raise HTTPException(
+            409, "Сессия кабинета WB недействительна — обновите доступ WB в настройках."
+        ) from e
+    except HistorySyncBusy as e:
+        raise HTTPException(409, str(e)) from e
+    except WbPortalError as e:
+        raise HTTPException(502, f"Кабинет WB недоступен: {e}") from e
     except (ValueError, LookupError) as e:
         _raise_domain_error(e)
     except Exception as e:
@@ -732,18 +745,20 @@ async def orders_geo_analytics(
     dependencies=[Depends(rate_limit_write)],
 )
 async def sync_order_history(
-    limit: int = Query(200, ge=1, le=300, description="Сколько заданий догнать за прогон"),
+    limit: int = Query(120, ge=1, le=150, description="Сколько заданий догнать за прогон"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Догнать историю статусов заданий из КАБИНЕТА WB (точные вехи для этапов).
 
     Публичный Marketplace API истории не отдаёт — ходим портальной сессией.
-    Ручка нужна для ПЕРВИЧНОЙ заливки: фоновый джоб берёт по 200 заданий раз в
-    полчаса, и три месяца истории он догоняет полсуток. ⚠️ Потолок 300 за вызов
-    намеренно низкий: ручка исполняется в API-контейнере рядом с uvicorn, и
-    длинный прогон здесь выедает память (локально 5600 заданий одним заходом
-    словили OOM-kill). Массовый догон — дело джоба в worker-контейнере. `affected` — сколько
+    Ручка нужна для ТОЧЕЧНОГО догона: фоновый джоб берёт по 400 заданий каждые
+    15 минут и три месяца истории разгребает сам. ⚠️ Потолок 150 и бюджет 90 c
+    выбраны под прод-шлюз (`proxy_read_timeout 120s`) и под то, что ручка
+    исполняется в API-контейнере рядом с uvicorn: длинный прогон здесь выедает
+    память (локально 5600 заданий одним заходом словили OOM-kill).
+    Параллельный запуск невозможен — догон под распределённым локом, второй
+    вызов получит 409. `affected` — сколько
     заданий обработано за этот прогон.
 
     Запись в WB не делается (это GET к кабинету), но ручка write-типа: она
@@ -755,7 +770,13 @@ async def sync_order_history(
     with _fbs_errors():
         client = await integrations_service.get_wb_portal_client(db, project.id)
         try:
-            stats = await run_history(db, project.id, client=client, limit=limit)
+            # 🔴 Бюджет строго меньше `proxy_read_timeout 120s` у nginx: иначе
+            # клиент получает 504 с не-JSON телом (в тосте «Error 504»), а
+            # прогон продолжает молотить лимит кабинета в фоне. Массовый догон —
+            # дело джоба в worker'е, у него свой бюджет 200 c.
+            stats = await run_history(
+                db, project.id, client=client, limit=limit, budget_sec=90.0
+            )
         finally:
             await client.aclose()
     return FbsActionOut(
