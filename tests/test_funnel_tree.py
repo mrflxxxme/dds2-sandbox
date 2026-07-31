@@ -109,7 +109,7 @@ async def test_tree_nests_in_dimension_order():
     p1, p2 = _patch_maps()
     with p1, p2:
         tree = await get_funnel_tree(
-            _db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["subject", "nm", "week"]
+            _db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["subject", "nm", "week"], depth=3
         )
 
     assert len(tree) == 1
@@ -132,7 +132,7 @@ async def test_parent_totals_equal_sum_of_children():
     ]
     p1, p2 = _patch_maps()
     with p1, p2:
-        tree = await get_funnel_tree(_db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["subject", "nm"])
+        tree = await get_funnel_tree(_db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["subject", "nm"], depth=2)
 
     cat = tree[0]
     assert cat["orders_sum_rub"] == pytest.approx(4000)
@@ -158,12 +158,12 @@ async def test_same_dimensions_different_order_give_different_trees():
     p1, p2 = _patch_maps()
     with p1, p2:
         by_subject = await get_funnel_tree(
-            _db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["subject", "brand"]
+            _db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["subject", "brand"], depth=2
         )
     p1, p2 = _patch_maps()
     with p1, p2:
         by_brand = await get_funnel_tree(
-            _db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["brand", "subject"]
+            _db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["brand", "subject"], depth=2
         )
 
     assert len(by_subject) == 1 and len(by_subject[0]["children"]) == 2
@@ -340,7 +340,7 @@ async def test_abc_dimension_splits_by_revenue_share():
     ]
     p1, p2 = _patch_maps()
     with p1, p2:
-        tree = await get_funnel_tree(_db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["abc", "nm"])
+        tree = await get_funnel_tree(_db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["abc", "nm"], depth=2)
 
     by_cat = {n["sort_key"]: n for n in tree}
     assert set(by_cat) == {"A", "B", "C"}
@@ -359,7 +359,7 @@ async def test_abc_category_totals_equal_sum_of_children():
     ]
     p1, p2 = _patch_maps()
     with p1, p2:
-        tree = await get_funnel_tree(_db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["abc", "nm"])
+        tree = await get_funnel_tree(_db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["abc", "nm"], depth=2)
 
     for cat in tree:
         assert cat["orders_sum_rub"] == pytest.approx(sum(c["orders_sum_rub"] for c in cat["children"]))
@@ -371,3 +371,118 @@ async def test_abc_is_offered_by_dimension_catalog():
     """Пресет «ABC анализ» собирается цепочкой — измерение обязано быть в каталоге."""
     assert "abc" in DIMENSIONS
     assert DIMENSIONS["abc"].label == "Категория ABC"
+
+
+# ─── Ленивое дерево: уровень по требованию ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_only_requested_level_is_returned():
+    """По умолчанию приезжает один уровень: полное дерево — это десятки мегабайт."""
+    rows = [
+        _row(1, "A", subject="Кофе", d=date(2026, 7, 15)),
+        _row(2, "B", subject="Чай", d=date(2026, 7, 16)),
+    ]
+    p1, p2 = _patch_maps()
+    with p1, p2:
+        tree = await get_funnel_tree(_db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["subject", "day", "nm"])
+
+    assert {n["label"] for n in tree} == {"Кофе", "Чай"}
+    assert all(n["children"] == [] for n in tree)
+    assert all(n["has_children"] is True for n in tree)
+
+
+@pytest.mark.asyncio
+async def test_last_level_reports_no_children():
+    rows = [_row(1, "A", subject="Кофе")]
+    p1, p2 = _patch_maps()
+    with p1, p2:
+        tree = await get_funnel_tree(_db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["subject"])
+
+    assert tree[0]["has_children"] is False
+
+
+@pytest.mark.asyncio
+async def test_path_returns_children_of_that_node_only():
+    """Раскрытие ветки — узкий запрос: только дети выбранного узла."""
+    rows = [
+        _row(1, "A", subject="Кофе", d=date(2026, 7, 15)),
+        _row(2, "B", subject="Кофе", d=date(2026, 7, 16)),
+        _row(3, "C", subject="Чай", d=date(2026, 7, 15)),
+    ]
+    p1, p2 = _patch_maps()
+    with p1, p2:
+        kids = await get_funnel_tree(
+            _db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["subject", "day", "nm"], path=["Кофе"]
+        )
+
+    assert {n["label"] for n in kids} == {"2026-07-15", "2026-07-16"}
+    assert all(n["dim"] == "day" for n in kids)
+    assert all(n["has_children"] is True for n in kids)
+
+
+@pytest.mark.asyncio
+async def test_path_two_levels_deep_reaches_articles():
+    rows = [
+        _row(1, "COFFEE_1kg", subject="Кофе", d=date(2026, 7, 15)),
+        _row(2, "COFFEE_2kg", subject="Кофе", d=date(2026, 7, 15)),
+        _row(3, "COFFEE_3kg", subject="Кофе", d=date(2026, 7, 16)),
+    ]
+    p1, p2 = _patch_maps()
+    with p1, p2:
+        kids = await get_funnel_tree(
+            _db(rows), PROJECT_ID, TAX_INFO, None, None, None, None,
+            ["subject", "day", "nm"], path=["Кофе", "2026-07-15"],
+        )
+
+    assert {n["label"] for n in kids} == {"COFFEE_1kg", "COFFEE_2kg"}
+    assert all(n["has_children"] is False for n in kids)
+
+
+@pytest.mark.asyncio
+async def test_branch_totals_equal_parent_row():
+    """Цифры ветки, загруженной отдельно, сходятся с её родительской строкой."""
+    rows = [
+        _row(1, "A", subject="Кофе", orders_sum_rub=1000, orders_count=1),
+        _row(2, "B", subject="Кофе", orders_sum_rub=3000, orders_count=3),
+    ]
+    p1, p2 = _patch_maps()
+    with p1, p2:
+        top = await get_funnel_tree(_db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["subject", "nm"])
+        kids = await get_funnel_tree(
+            _db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["subject", "nm"], path=["Кофе"]
+        )
+
+    assert top[0]["orders_sum_rub"] == pytest.approx(sum(k["orders_sum_rub"] for k in kids))
+    assert top[0]["orders_count"] == sum(k["orders_count"] for k in kids)
+
+
+@pytest.mark.asyncio
+async def test_path_longer_than_chain_rejected():
+    p1, p2 = _patch_maps()
+    with p1, p2, pytest.raises(UnknownDimension):
+        await get_funnel_tree(
+            _db([]), PROJECT_ID, TAX_INFO, None, None, None, None, ["subject"], path=["Кофе"]
+        )
+
+
+@pytest.mark.asyncio
+async def test_glue_node_carries_products_for_thumbnails():
+    """Миниатюры склейки рисуются до раскрытия — значит, товары едут в самой строке."""
+    rows = [
+        _row(1, "A", d=date(2026, 7, 15), orders_sum_rub=5000),
+        _row(2, "B", d=date(2026, 7, 15), orders_sum_rub=9000),
+        _row(2, "B", d=date(2026, 7, 16), orders_sum_rub=1000),
+    ]
+    p1, p2 = _patch_maps()
+    with p1, p2, patch(
+        "backend.services.funnel.grouping_tree._build_context",
+        AsyncMock(return_value={"nm_tags": {}, "nm_imt": {1: "#100", 2: "#100"}, "nm_abc": {}}),
+    ):
+        tree = await get_funnel_tree(_db(rows), PROJECT_ID, TAX_INFO, None, None, None, None, ["imt", "day", "nm"])
+
+    node = tree[0]
+    assert node["label"] == "#100"
+    assert node["nm_total"] == 2
+    assert node["nm_ids"][0] == 2      # первым — товар с большей суммой заказов
+    assert node["children"] == [] and node["has_children"] is True

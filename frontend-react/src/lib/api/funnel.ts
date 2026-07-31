@@ -26,9 +26,13 @@ export function addFunnelMethods(api: ApiClient) {
             return api.request<{ data: (FunnelDayRow | FunnelSkuRow | FunnelGroupRow)[]; detailed: boolean; tax_rate: number; has_bdr?: boolean; group_by?: string }>('GET', `/api/v1/funnel/data?${q.toString()}`);
         },
         /** Воронка деревом по произвольной цепочке группировок: dims в порядке уровней. */
-        getFunnelTree(params: { dims: string[]; date_from?: string; date_to?: string; brand?: string; subject?: string; vendor_code?: string; extended?: boolean; min_orders?: number; tag?: string; imt?: string; color?: string }) {
+        /** path — ключи узлов-предков (раскрытие ветки), depth — сколько уровней материализовать.
+         *  Без path приезжает только верхний уровень: полное дерево весит десятки мегабайт. */
+        getFunnelTree(params: { dims: string[]; date_from?: string; date_to?: string; brand?: string; subject?: string; vendor_code?: string; extended?: boolean; min_orders?: number; tag?: string; imt?: string; color?: string; path?: string[]; depth?: number }) {
             const q = new URLSearchParams();
             q.set('group_by', params.dims.join(','));
+            (params.path || []).forEach(k => q.append('path', k));
+            if (params.depth) q.set('depth', String(params.depth));
             if (params.date_from) q.set('date_from', params.date_from);
             if (params.date_to) q.set('date_to', params.date_to);
             if (params.brand) q.set('brand', params.brand);

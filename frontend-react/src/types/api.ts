@@ -514,6 +514,11 @@ export interface FunnelTreeNode extends FunnelGroupRow {
   sort_key?: string;
   date?: string;
   children?: FunnelTreeNode[];
+  /** Есть ли уровень ниже: дети приезжают отдельным запросом при раскрытии. */
+  has_children?: boolean;
+  /** Товары узла на миниатюры (сейчас — у склеек) и их общее число. */
+  nm_ids?: number[];
+  nm_total?: number;
 }
 
 export interface FunnelTreeResponse {
