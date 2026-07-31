@@ -1,5 +1,6 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
+import type { ClipboardEvent as ReactClipboardEvent, CSSProperties } from 'react';
 import { api } from '@/lib/api';
 import { exportToExcel, formatNumber } from '@/lib/utils';
 import type {
@@ -18,8 +19,10 @@ import type {
  * «Натали» (migfull). Создание НЕОБРАТИМО — портал не даёт удалить/отменить
  * документ, повтор требует подтверждения.
  *
- * Массовое редактирование: Excel-экспорт текущей раскладки + вставка из
- * буфера «ШК → короб/россыпь → кол-во» (Tab/«;»-разделитель, отчёт об ошибках).
+ * Массовое редактирование — отдельная вкладка модалки (как «наполнение машины»
+ * в поставках Китая): грид нумерованных строк [ШК → упаковка → шт в коробе →
+ * кол-во] со вставкой из Excel (Tab/«;»-разделитель), live-матчем по ШК к
+ * составу и инлайн-ошибками; валидные строки применяются к раскладке состава.
  */
 
 /** Состояние упаковки одной строки состава (ключ — ШК товара). */
@@ -47,13 +50,65 @@ const effQty = (it: MigfullInboundItem, r: PackRowState): number => {
     return Number.isFinite(n) && n >= 0 && n <= it.qty ? n : it.qty;
 };
 
-/** Отчёт применения массовой вставки из буфера. */
+/** Отчёт применения массового редактирования. */
 interface PasteReport {
     applied: number;
     errors: string[];
 }
 
-const PASTE_PLACEHOLDER = '2049985828273\tкороб\t120\n2049985828280\tроссыпь\n2049985828297;к;40';
+/** Вкладка модалки: таблица состава / грид массового редактирования. */
+type ModalTab = 'compose' | 'bulk';
+
+/** Строка грида массового редактирования (сырые input-значения). */
+interface BulkRow {
+    barcode: string; // ШК товара
+    pack: string;    // упаковка: «короб»/«россыпь» (или «к»/«р»)
+    units: string;   // шт в коробе (опционально — фолбэк на текущее/prefill)
+    qty: string;     // кол-во (опционально — без него берётся текущее)
+}
+
+const emptyBulkRow = (): BulkRow => ({ barcode: '', pack: '', units: '', qty: '' });
+
+const BULK_MIN_ROWS = 5;
+
+/** Инвариант грида: минимум BULK_MIN_ROWS строк + последняя строка всегда пустая. */
+const padBulkRows = (rows: BulkRow[]): BulkRow[] => {
+    const next = [...rows];
+    while (next.length < BULK_MIN_ROWS) next.push(emptyBulkRow());
+    if (next[next.length - 1].barcode.trim()) next.push(emptyBulkRow());
+    return next;
+};
+
+/** «короб»/«коробом»/«к» → true, «россыпь»/«россыпью»/«р» → false, иначе null. */
+const parsePackToken = (s: string): boolean | null => {
+    const v = s.trim().toLowerCase();
+    if (['короб', 'коробом', 'к'].includes(v)) return true;
+    if (['россыпь', 'россыпью', 'р'].includes(v)) return false;
+    return null;
+};
+
+/**
+ * Патч упаковки строки состава: units — явное значение → текущее → prefill-кратность;
+ * при коробе «коробов» пересчитывается на максимум под новое кол-во, при россыпи
+ * units/boxes не трогаются (кроме явно заданной кратности).
+ */
+const buildPackPatch = (
+    it: MigfullInboundItem,
+    prev: PackRowState,
+    boxMode: boolean,
+    unitsStr: string,
+    qty: number,
+): PackRowState => {
+    const units = boxMode
+        ? (unitsStr || prev.units || (it.units_per_box != null ? String(it.units_per_box) : ''))
+        : (unitsStr || prev.units);
+    return {
+        boxMode,
+        units,
+        boxes: boxMode ? maxBoxesStr(qty, units) : prev.boxes,
+        qty: String(qty),
+    };
+};
 
 interface Props {
     /** id нашей приёмки машины (InboundReceipt) — источник поставки */
@@ -91,10 +146,11 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
     const [selected, setSelected] = useState<Set<string>>(new Set());
     const [bulkUnits, setBulkUnits] = useState('');
 
-    // Массовая вставка из буфера (панель с textarea + отчёт о применении).
-    const [pasteOpen, setPasteOpen] = useState(false);
-    const [pasteText, setPasteText] = useState('');
-    const [pasteReport, setPasteReport] = useState<PasteReport | null>(null);
+    // Вкладка «Состав» / «Массовое редактирование». Переключение не теряет
+    // правок: packRows и bulkRows живут на уровне модалки.
+    const [tab, setTab] = useState<ModalTab>('compose');
+    const [bulkRows, setBulkRows] = useState<BulkRow[]>(() => padBulkRows([]));
+    const [bulkReport, setBulkReport] = useState<PasteReport | null>(null);
 
     const [submitting, setSubmitting] = useState(false);
     const [submitError, setSubmitError] = useState('');
@@ -310,66 +366,105 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
         );
     };
 
-    // ─── Массовая вставка из буфера: ШК <TAB|;> короб|россыпь <TAB|;> кол-во ────
-    // Кол-во опционально (без него — текущее). Матч по ШК; нераспознанные/ошибочные
-    // строки — в видимый отчёт, незатронутые строки состава не меняются.
-    const applyPaste = () => {
-        const byBarcode = new Map(items.map(it => [it.barcode, it]));
+    // ─── Вкладка «Массовое редактирование»: грид [ШК → упаковка → шт/кор → кол-во] ─
+    const itemByBarcode = new Map(items.map(it => [it.barcode, it]));
+
+    /** Live-проверка строки грида (подсветка инпутов + гейт применения). */
+    const checkBulkRow = (row: BulkRow) => {
+        const bc = row.barcode.trim();
+        const filled = bc !== '';
+        const it = filled ? (itemByBarcode.get(bc) ?? null) : null;
+        const notFound = filled && !it;
+        const boxMode = parsePackToken(row.pack);
+        const packInvalid = filled && boxMode == null;
+        const unitsStr = row.units.trim();
+        const unitsInvalid = filled && unitsStr !== ''
+            && !(/^\d+$/.test(unitsStr) && parseInt(unitsStr, 10) >= 2);
+        const qtyStr = row.qty.trim();
+        const qtyInvalid = filled && qtyStr !== ''
+            && (!/^\d+$/.test(qtyStr) || (it != null && parseInt(qtyStr, 10) > it.qty));
+        const valid = filled && it != null && !packInvalid && !unitsInvalid && !qtyInvalid;
+        return { it, boxMode, filled, notFound, packInvalid, unitsInvalid, qtyInvalid, valid };
+    };
+
+    const bulkValidCount = bulkRows.reduce((s, r) => s + (checkBulkRow(r).valid ? 1 : 0), 0);
+    const bulkFilledCount = bulkRows.reduce((s, r) => s + (checkBulkRow(r).filled ? 1 : 0), 0);
+
+    const updateBulkRow = (idx: number, field: keyof BulkRow, value: string) => {
+        setBulkRows(prev => {
+            const next = [...prev];
+            next[idx] = { ...next[idx], [field]: value };
+            return padBulkRows(next);
+        });
+    };
+
+    /**
+     * Вставка из Excel в любой инпут ШК: построчный разбор (Tab/«;»), позиционно
+     * «ШК → короб/россыпь → шт в коробе → кол-во», заполняет грид вниз от строки
+     * вставки. Одиночное значение (без разделителей) — обычная вставка в инпут.
+     */
+    const handleBulkPaste = (startIdx: number) => (e: ReactClipboardEvent) => {
+        const text = e.clipboardData.getData('text/plain');
+        if (!text.includes('\t') && !text.includes('\n') && !text.includes(';')) return;
+        e.preventDefault();
+        const parsed: BulkRow[] = [];
+        for (const raw of text.split(/\r?\n/)) {
+            const line = raw.trim();
+            if (!line) continue;
+            const parts = line.split(/[\t;]/).map(s => s.trim());
+            parsed.push({
+                barcode: parts[0] ?? '',
+                pack: parts[1] ?? '',
+                units: parts[2] ?? '',
+                qty: parts[3] ?? '',
+            });
+        }
+        if (parsed.length === 0) return;
+        setBulkRows(prev => {
+            const next = [...prev];
+            parsed.forEach((r, i) => { next[startIdx + i] = r; });
+            return padBulkRows(next);
+        });
+        setBulkReport(null);
+    };
+
+    /**
+     * «Применить (N)»: валидные строки грида → раскладка состава (boxMode/units/qty),
+     * применённые уходят из грида, ошибочные остаются подсвеченными + отчёт.
+     * Незатронутые строки состава не меняются.
+     */
+    const applyBulk = () => {
         const errors: string[] = [];
         const patches: Record<string, PackRowState> = {};
+        const kept: BulkRow[] = [];
         let applied = 0;
-        pasteText.split(/\r?\n/).forEach((raw, idx) => {
-            const line = raw.trim();
-            if (!line) return;
-            const no = idx + 1;
-            const parts = line.split(/[\t;]/).map(s => s.trim()).filter(s => s !== '');
-            if (parts.length < 2 || parts.length > 3) {
-                errors.push(`стр. ${no}: не распознан формат «${line}» (ожидается: ШК → короб/россыпь → кол-во)`);
+        bulkRows.forEach((row, idx) => {
+            const bc = row.barcode.trim();
+            if (!bc) return; // пустые строки просто выпадают
+            const c = checkBulkRow(row);
+            if (!c.valid || c.it == null || c.boxMode == null) {
+                kept.push(row);
+                const no = idx + 1;
+                if (c.notFound) errors.push(`стр. ${no}: ШК «${bc}» не найден в составе приёмки`);
+                else if (c.packInvalid) errors.push(`стр. ${no} (${bc}): упаковка «${row.pack}» не распознана — ожидается «короб»/«россыпь» (или «к»/«р»)`);
+                else if (c.unitsInvalid) errors.push(`стр. ${no} (${bc}): шт в коробе «${row.units}» — ожидается целое ≥ 2`);
+                else if (c.qtyInvalid) errors.push(`стр. ${no} (${bc}): кол-во «${row.qty}» — не число или больше состава приёмки (${formatNumber(c.it?.qty ?? 0, 0)})`);
                 return;
             }
-            const bc = parts[0];
-            const it = byBarcode.get(bc);
-            if (!it) {
-                errors.push(`стр. ${no}: ШК «${bc}» не найден в составе приёмки`);
-                return;
-            }
-            const modeRaw = parts[1].toLowerCase();
-            let boxMode: boolean;
-            if (['короб', 'коробом', 'к'].includes(modeRaw)) boxMode = true;
-            else if (['россыпь', 'россыпью', 'р'].includes(modeRaw)) boxMode = false;
-            else {
-                errors.push(`стр. ${no} (${bc}): упаковка «${parts[1]}» не распознана — ожидается «короб»/«россыпь» (или «к»/«р»)`);
-                return;
-            }
-            const prev = patches[bc] ?? packRows[bc] ?? { ...EMPTY_ROW, qty: String(it.qty) };
-            let qty = effQty(it, prev); // без кол-ва в строке — берётся текущее
-            if (parts.length === 3) {
-                if (!/^\d+$/.test(parts[2])) {
-                    errors.push(`стр. ${no} (${bc}): кол-во «${parts[2]}» — не число`);
-                    return;
-                }
-                const n = parseInt(parts[2], 10);
-                if (n > it.qty) {
-                    errors.push(`стр. ${no} (${bc}): кол-во ${formatNumber(n, 0)} больше состава приёмки (${formatNumber(it.qty, 0)})`);
-                    return;
-                }
-                qty = n;
-            }
-            // «короб» — короб-режим (units: текущее → prefill-кратность, коробов = максимум
-            // под новое кол-во); «россыпь» — россыпь (units/boxes не трогаем).
-            const units = boxMode
-                ? (prev.units || (it.units_per_box != null ? String(it.units_per_box) : ''))
-                : prev.units;
-            patches[bc] = {
-                boxMode,
-                units,
-                boxes: boxMode ? maxBoxesStr(qty, units) : prev.boxes,
-                qty: String(qty),
-            };
+            // Дубли ШК в гриде применяются каскадом: patch предыдущей строки — база следующей.
+            const prev = patches[bc] ?? packRows[bc] ?? { ...EMPTY_ROW, qty: String(c.it.qty) };
+            const qty = row.qty.trim() !== '' ? parseInt(row.qty, 10) : effQty(c.it, prev);
+            patches[bc] = buildPackPatch(c.it, prev, c.boxMode, row.units.trim(), qty);
             applied++;
         });
-        if (Object.keys(patches).length > 0) setPackRows(prev => ({ ...prev, ...patches }));
-        setPasteReport({ applied, errors });
+        if (applied > 0) setPackRows(prev => ({ ...prev, ...patches }));
+        setBulkRows(padBulkRows(kept));
+        setBulkReport({ applied, errors });
+    };
+
+    const clearBulk = () => {
+        setBulkRows(padBulkRows([]));
+        setBulkReport(null);
     };
 
     const hasItems = items.length > 0;
@@ -637,102 +732,62 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                 </div>
                             )}
 
-                            {/* Состав (редактируемая упаковка: коробом / россыпью) */}
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
-                                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                                    Состав поставки
+                            {/* Вкладки: Состав | Массовое редактирование (переключение не теряет правок) */}
+                            {hasItems && (
+                                <div style={{ display: 'flex', gap: 4, marginBottom: 12 }}>
+                                    {([
+                                        { key: 'compose' as const, label: '📋 Состав' },
+                                        { key: 'bulk' as const, label: `📎 Массовое редактирование${bulkFilledCount > 0 ? ` (${formatNumber(bulkFilledCount, 0)})` : ''}` },
+                                    ]).map(m => (
+                                        <button
+                                            key={m.key}
+                                            onClick={() => setTab(m.key)}
+                                            style={{
+                                                padding: '6px 16px', borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: 'pointer',
+                                                border: tab === m.key ? '2px solid var(--color-accent)' : '1px solid var(--color-border)',
+                                                background: tab === m.key ? 'rgba(0,113,227,0.08)' : 'var(--color-bg)',
+                                                color: tab === m.key ? 'var(--color-accent)' : 'var(--color-text)',
+                                            }}
+                                        >
+                                            {m.label}
+                                        </button>
+                                    ))}
                                 </div>
-                                {hasItems && (
-                                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                                        <button
-                                            className="btn btn-secondary btn-sm"
-                                            onClick={exportExcel}
-                                            title="Выгрузить текущую раскладку в Excel (весь состав)"
-                                        >
-                                            📥 Excel
-                                        </button>
-                                        <button
-                                            className={`btn btn-sm ${pasteOpen ? 'btn-primary' : 'btn-secondary'}`}
-                                            onClick={() => setPasteOpen(o => !o)}
-                                            title="Массовое редактирование: вставить строки «ШК → короб/россыпь → кол-во» из Excel/буфера"
-                                        >
-                                            📋 Вставить из буфера
-                                        </button>
-                                        <button
-                                            className="btn btn-secondary btn-sm"
-                                            onClick={applyKnownMultiplicity}
-                                            disabled={knownCount === 0}
-                                            title="Коробом по известной кратности (Натали / наша) для всех строк, где она есть"
-                                        >
-                                            Коробом, где известна кратность{knownCount > 0 ? ` (${formatNumber(knownCount, 0)})` : ''}
-                                        </button>
-                                        <button className="btn btn-secondary btn-sm" onClick={applyAllLoose}>
-                                            Всё россыпью
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
+                            )}
 
-                            {/* Панель массовой вставки из буфера */}
-                            {hasItems && pasteOpen && (
-                                <div style={{
-                                    border: '1px solid var(--color-border)', borderRadius: 8,
-                                    background: 'var(--color-bg-card)', padding: 12, marginBottom: 12,
-                                }}>
-                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
-                                        Формат строки: <strong>ШК</strong> → <strong>короб / россыпь</strong> (можно «к» / «р») →{' '}
-                                        <strong>кол-во</strong> (опционально — без него берётся текущее; не больше состава приёмки).
-                                        Разделитель — Tab (вставка из Excel) или «;». Незатронутые строки состава не меняются.
+                            {/* Состав (редактируемая упаковка: коробом / россыпью) */}
+                            {tab === 'compose' && (
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
+                                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                                        Состав поставки
                                     </div>
-                                    <textarea
-                                        value={pasteText}
-                                        onChange={e => setPasteText(e.target.value)}
-                                        rows={6}
-                                        placeholder={PASTE_PLACEHOLDER}
-                                        style={{
-                                            width: '100%', padding: '8px 10px', borderRadius: 8,
-                                            border: '1px solid var(--color-border)',
-                                            background: 'var(--color-bg)', color: 'var(--color-text)',
-                                            fontSize: 13, fontFamily: 'monospace', resize: 'vertical', boxSizing: 'border-box',
-                                        }}
-                                    />
-                                    <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                                        <button
-                                            className="btn btn-primary btn-sm"
-                                            onClick={applyPaste}
-                                            disabled={!pasteText.trim()}
-                                        >
-                                            Применить
-                                        </button>
-                                        <button
-                                            className="btn btn-secondary btn-sm"
-                                            onClick={() => { setPasteOpen(false); setPasteText(''); setPasteReport(null); }}
-                                        >
-                                            Закрыть
-                                        </button>
-                                    </div>
-                                    {pasteReport && (
-                                        <div style={{ marginTop: 8, fontSize: 13 }}>
-                                            <div style={{ color: pasteReport.applied > 0 ? 'var(--color-success)' : 'var(--color-text-muted)' }}>
-                                                ✓ Применено строк: {formatNumber(pasteReport.applied, 0)}
-                                            </div>
-                                            {pasteReport.errors.length > 0 && (
-                                                <div style={{ color: 'var(--color-danger)', marginTop: 4 }}>
-                                                    <div style={{ fontWeight: 600 }}>
-                                                        Не применено ({formatNumber(pasteReport.errors.length, 0)}):
-                                                    </div>
-                                                    {pasteReport.errors.map((er, i) => (
-                                                        <div key={i}>• {er}</div>
-                                                    ))}
-                                                </div>
-                                            )}
+                                    {hasItems && (
+                                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                            <button
+                                                className="btn btn-secondary btn-sm"
+                                                onClick={exportExcel}
+                                                title="Выгрузить текущую раскладку в Excel (весь состав)"
+                                            >
+                                                📥 Excel
+                                            </button>
+                                            <button
+                                                className="btn btn-secondary btn-sm"
+                                                onClick={applyKnownMultiplicity}
+                                                disabled={knownCount === 0}
+                                                title="Коробом по известной кратности (Натали / наша) для всех строк, где она есть"
+                                            >
+                                                Коробом, где известна кратность{knownCount > 0 ? ` (${formatNumber(knownCount, 0)})` : ''}
+                                            </button>
+                                            <button className="btn btn-secondary btn-sm" onClick={applyAllLoose}>
+                                                Всё россыпью
+                                            </button>
                                         </div>
                                     )}
                                 </div>
                             )}
 
                             {/* Поиск + сегмент-фильтр (правки при фильтрации не теряются — state по ШК) */}
-                            {hasItems && (
+                            {tab === 'compose' && hasItems && (
                                 <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
                                     <input
                                         value={search}
@@ -785,7 +840,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                             )}
 
                             {/* Панель массовых операций по выбранным */}
-                            {selected.size > 0 && (
+                            {tab === 'compose' && selected.size > 0 && (
                                 <div style={{
                                     display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
                                     padding: '8px 12px', marginBottom: 10, borderRadius: 8,
@@ -833,11 +888,12 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                 </div>
                             )}
 
-                            {!hasItems ? (
+                            {!hasItems && (
                                 <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 14 }}>
                                     В приёмке нет позиций — поставку создать нельзя
                                 </div>
-                            ) : (
+                            )}
+                            {hasItems && tab === 'compose' && (
                                 <div style={{ overflowX: 'auto', border: '1px solid var(--color-border)', borderRadius: 8 }}>
                                     <table style={{ width: '100%', minWidth: 960, borderCollapse: 'collapse', fontSize: 13, tableLayout: 'fixed' }}>
                                         <colgroup>
@@ -1056,6 +1112,180 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                         </tbody>
                                     </table>
                                 </div>
+                            )}
+
+                            {/* ═══ Вкладка «Массовое редактирование»: грид со вставкой из Excel ═══ */}
+                            {hasItems && tab === 'bulk' && (
+                                <>
+                                    <div style={{
+                                        padding: 10, marginBottom: 12, fontSize: 13, color: 'var(--color-text-muted)',
+                                        background: 'var(--color-bg-card)', borderRadius: 8,
+                                    }}>
+                                        Вставьте из Excel в любой инпут ШК: <strong>ШК</strong>, <strong>короб/россыпь</strong> (можно
+                                        «к»/«р»), <strong>шт в коробе</strong>, <strong>кол-во</strong>. Шт в коробе и кол-во опциональны
+                                        (без них — текущие значения строки). Разделитель — Tab (Excel) или «;». Незатронутые строки
+                                        состава не меняются.
+                                    </div>
+
+                                    <div style={{ overflowX: 'auto', border: '1px solid var(--color-border)', borderRadius: 8 }}>
+                                        <table style={{ width: '100%', minWidth: 860, borderCollapse: 'collapse', fontSize: 13 }}>
+                                            <thead>
+                                                <tr style={{ background: 'var(--color-bg-card)', textAlign: 'left' }}>
+                                                    <th style={{ padding: '8px 10px', width: 36, textAlign: 'center', color: 'var(--color-text-muted)' }}>#</th>
+                                                    <th style={{ padding: '8px 10px', fontWeight: 600, minWidth: 170 }}>ШК</th>
+                                                    <th style={{ padding: '8px 10px', fontWeight: 600 }}>Наименование</th>
+                                                    <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', width: 90 }} title="Состав приёмки (максимум для «кол-во»)">Доступно</th>
+                                                    <th style={{ padding: '8px 10px', fontWeight: 600, width: 130 }} title="«короб» / «россыпь» (или «к» / «р»)">Упаковка</th>
+                                                    <th style={{ padding: '8px 10px', fontWeight: 600, width: 110 }} title="Штук в коробе (опционально — текущее / prefill-кратность)">Шт в коробе</th>
+                                                    <th style={{ padding: '8px 10px', fontWeight: 600, width: 110 }} title="Отправляемое кол-во (опционально — текущее)">Кол-во</th>
+                                                    <th style={{ padding: '8px 10px', width: 44, textAlign: 'center' }}></th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {bulkRows.map((row, i) => {
+                                                    const c = checkBulkRow(row);
+                                                    const cellInput: CSSProperties = {
+                                                        width: '100%', padding: '5px 8px', borderRadius: 8, fontSize: 13,
+                                                        border: '1px solid var(--color-border)',
+                                                        background: 'var(--color-bg-card)', color: 'var(--color-text)',
+                                                        boxSizing: 'border-box',
+                                                    };
+                                                    return (
+                                                        <tr
+                                                            key={i}
+                                                            style={{
+                                                                borderTop: '1px solid var(--color-border)',
+                                                                background: c.notFound ? 'rgba(239,68,68,0.06)' : undefined,
+                                                            }}
+                                                        >
+                                                            <td style={{ padding: '6px 10px', textAlign: 'center', fontSize: 12, color: 'var(--color-text-muted)' }}>{i + 1}</td>
+                                                            <td style={{ padding: '6px 10px' }}>
+                                                                <input
+                                                                    value={row.barcode}
+                                                                    onChange={e => updateBulkRow(i, 'barcode', e.target.value)}
+                                                                    onPaste={handleBulkPaste(i)}
+                                                                    placeholder="ШК"
+                                                                    autoComplete="off"
+                                                                    style={{
+                                                                        ...cellInput, fontFamily: 'monospace', fontSize: 12,
+                                                                        borderColor: c.notFound ? 'var(--color-danger)' : 'var(--color-border)',
+                                                                        color: c.notFound ? 'var(--color-danger)' : 'var(--color-text)',
+                                                                    }}
+                                                                />
+                                                            </td>
+                                                            <td style={{ padding: '6px 10px', fontSize: 12, overflowWrap: 'break-word' }}>
+                                                                {c.notFound ? (
+                                                                    <span style={{ color: 'var(--color-danger)' }}>ШК не найден в составе приёмки</span>
+                                                                ) : c.it ? (
+                                                                    <>
+                                                                        {c.it.name || '—'}
+                                                                        {c.it.article_seller && (
+                                                                            <div style={{ color: 'var(--color-text-muted)', fontSize: 11, marginTop: 1 }}>
+                                                                                {c.it.article_seller}
+                                                                            </div>
+                                                                        )}
+                                                                    </>
+                                                                ) : ''}
+                                                            </td>
+                                                            <td style={{ padding: '6px 10px', textAlign: 'right', fontSize: 12, color: c.qtyInvalid ? 'var(--color-danger)' : 'var(--color-text-muted)' }}>
+                                                                {c.it ? formatNumber(c.it.qty, 0) : c.filled ? '—' : ''}
+                                                            </td>
+                                                            <td style={{ padding: '6px 10px' }}>
+                                                                <input
+                                                                    value={row.pack}
+                                                                    onChange={e => updateBulkRow(i, 'pack', e.target.value)}
+                                                                    placeholder="короб / россыпь"
+                                                                    autoComplete="off"
+                                                                    style={{
+                                                                        ...cellInput,
+                                                                        borderColor: c.packInvalid ? 'var(--color-danger)' : 'var(--color-border)',
+                                                                    }}
+                                                                />
+                                                            </td>
+                                                            <td style={{ padding: '6px 10px' }}>
+                                                                <input
+                                                                    type="number"
+                                                                    min={2}
+                                                                    value={row.units}
+                                                                    onChange={e => updateBulkRow(i, 'units', e.target.value)}
+                                                                    placeholder={c.boxMode ? 'шт' : '—'}
+                                                                    autoComplete="off"
+                                                                    style={{
+                                                                        ...cellInput, textAlign: 'right',
+                                                                        borderColor: c.unitsInvalid ? 'var(--color-danger)' : 'var(--color-border)',
+                                                                    }}
+                                                                />
+                                                            </td>
+                                                            <td style={{ padding: '6px 10px' }}>
+                                                                <input
+                                                                    type="number"
+                                                                    min={0}
+                                                                    max={c.it?.qty}
+                                                                    value={row.qty}
+                                                                    onChange={e => updateBulkRow(i, 'qty', e.target.value)}
+                                                                    placeholder="тек."
+                                                                    autoComplete="off"
+                                                                    style={{
+                                                                        ...cellInput, textAlign: 'right',
+                                                                        borderColor: c.qtyInvalid ? 'var(--color-danger)' : 'var(--color-border)',
+                                                                    }}
+                                                                />
+                                                            </td>
+                                                            <td style={{ padding: '6px 10px', textAlign: 'center', fontSize: 12 }}>
+                                                                {!c.filled ? '' :
+                                                                    c.notFound ? <span style={{ color: 'var(--color-danger)' }}>✗</span> :
+                                                                    c.packInvalid ? <span style={{ color: 'var(--color-danger)' }} title="Укажите «короб»/«россыпь» (или «к»/«р»)">к/р?</span> :
+                                                                    c.unitsInvalid || c.qtyInvalid ? <span style={{ color: 'var(--color-danger)' }}>!</span> :
+                                                                    <span style={{ color: 'var(--color-success)' }}>✓</span>}
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+
+                                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 }}>
+                                        <button
+                                            className="btn btn-primary btn-sm"
+                                            onClick={applyBulk}
+                                            disabled={bulkValidCount === 0}
+                                            title="Применить валидные строки к раскладке состава (ошибочные останутся в гриде)"
+                                        >
+                                            Применить ({formatNumber(bulkValidCount, 0)})
+                                        </button>
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            onClick={clearBulk}
+                                            disabled={bulkFilledCount === 0 && !bulkReport}
+                                        >
+                                            Очистить
+                                        </button>
+                                        {bulkFilledCount > bulkValidCount && (
+                                            <span style={{ fontSize: 13, color: 'var(--color-danger)' }}>
+                                                ⚠ Ошибочных строк: {formatNumber(bulkFilledCount - bulkValidCount, 0)}
+                                            </span>
+                                        )}
+                                    </div>
+
+                                    {bulkReport && (
+                                        <div style={{ marginTop: 8, fontSize: 13 }}>
+                                            <div style={{ color: bulkReport.applied > 0 ? 'var(--color-success)' : 'var(--color-text-muted)' }}>
+                                                ✓ Применено строк: {formatNumber(bulkReport.applied, 0)}
+                                            </div>
+                                            {bulkReport.errors.length > 0 && (
+                                                <div style={{ color: 'var(--color-danger)', marginTop: 4 }}>
+                                                    <div style={{ fontWeight: 600 }}>
+                                                        Не применено ({formatNumber(bulkReport.errors.length, 0)}):
+                                                    </div>
+                                                    {bulkReport.errors.map((er, i) => (
+                                                        <div key={i}>• {er}</div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </>
                             )}
                         </>
                     )}
