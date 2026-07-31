@@ -175,6 +175,12 @@ export default function TransferFfLinkModal({
                             value={search}
                             onChange={e => setSearch(e.target.value)}
                         />
+                        {(candidates?.length ?? 0) >= CANDIDATES_LIMIT && (
+                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                                Показаны {formatNumber(CANDIDATES_LIMIT, 0)} самых свежих заявок склада — более
+                                старые в список не попали, поиск идёт по этим же.
+                            </div>
+                        )}
                         {filtered.length === 0 ? (
                             <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 13 }}>
                                 Ничего не найдено по запросу
