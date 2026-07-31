@@ -44,6 +44,17 @@ interface Props {
     rowKey: (row: Row, index: number, depth: number) => string;
     /** Дети строки для раскрытия (undefined/[] = строка не раскрывается). */
     childrenOf?: (row: Row) => Row[] | undefined;
+    /* ─── Ленивое дерево: дети приезжают запросом при раскрытии ───
+     * Всё дерево целиком — это десятки мегабайт на реальных данных, из которых
+     * видно верхние 30 строк. Поэтому уровень запрашивается по требованию. */
+    /** Ключ узла для пути к нему (nodeKey задан → дерево ленивое). */
+    nodeKey?: (row: Row) => string;
+    /** Есть ли уровень ниже (флаг с бэка), пока дети ещё не загружены. */
+    hasChildren?: (row: Row) => boolean;
+    /** Загруженные дети по пути; undefined — ещё не загружены. */
+    childrenAt?: (path: string[]) => Row[] | undefined;
+    /** Запросить детей узла по его пути. */
+    onExpandPath?: (path: string[]) => void;
     /** Сортировка по подписи (напр. по дате); без неё первая колонка не сортируется. */
     labelValue?: (row: Row) => number | string;
     sort: SortState | null;
@@ -66,7 +77,8 @@ const TOTAL_BG = '#f5f3ff';
 
 export default function FunnelTable({
     rows, layout, extended, loading, labelHeader, labelWidth = 210, labelCell, rowKey,
-    childrenOf, labelValue, sort, onSort, labelColor, timeSeries, shading = 'bar', defaultOrder,
+    childrenOf, nodeKey, hasChildren, childrenAt, onExpandPath,
+    labelValue, sort, onSort, labelColor, timeSeries, shading = 'bar', defaultOrder,
     emptyText = 'Нет данных за выбранный период', footer,
 }: Props) {
     const sections = useMemo(() => buildSections(layout, extended), [layout, extended]);
@@ -247,16 +259,22 @@ export default function FunnelTable({
         );
     };
 
-    const renderRow = (r: Row, i: number, depth: number, base: Map<string, number | null>, range: Map<string, number[]>): React.ReactNode => {
+    const renderRow = (r: Row, i: number, depth: number, base: Map<string, number | null>, range: Map<string, number[]>,
+                       parentPath: string[] = []): React.ReactNode => {
         const key = rowKey(r, i, depth);
-        const kids = childrenOf?.(r);
-        const canExpand = !!kids?.length;
+        const lazy = !!nodeKey;
+        const path = lazy ? [...parentPath, nodeKey(r)] : [];
+        const kids = lazy ? childrenAt?.(path) : childrenOf?.(r);
+        const canExpand = lazy ? !!hasChildren?.(r) : !!kids?.length;
         const open = expanded.has(key);
         const bg = depth > 0 ? '#fafbfc' : '#ffffff';   // без «зебры» — как в рекламе
         return (
             <React.Fragment key={key}>
                 <tr className="fn-row" style={{ background: bg, height: rowH, cursor: canExpand ? 'pointer' : undefined }}
-                    onClick={canExpand ? () => setExpanded(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; }) : undefined}>
+                    onClick={canExpand ? () => {
+                        setExpanded(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+                        if (lazy && !open && kids === undefined) onExpandPath?.(path);
+                    } : undefined}>
                     <td style={stickyLabel(bg, depth, { color: labelColor?.(r) })}>
                         <span style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
                             <span style={{ width: 11, flexShrink: 0, fontSize: 11, lineHeight: 1, color: canExpand ? '#64748b' : 'transparent' }}>{canExpand ? (open ? '▾' : '▶') : '·'}</span>
@@ -273,11 +291,16 @@ export default function FunnelTable({
                         );
                     }))}
                 </tr>
-                {open && (() => {
+                {open && kids === undefined && (
+                    <tr style={{ background: '#fafbfc' }}>
+                        <td colSpan={flatCols.length + 1} style={{ padding: `2px 8px 2px ${22 + depth * 14}px`, fontSize: 11, color: 'var(--color-text-dim)' }}>Загрузка…</td>
+                    </tr>
+                )}
+                {open && kids && (() => {
                     // дети сравниваются со своими соседями: и среднее, и диапазон — по их уровню
-                    const kidsBase = baselineFor(kids!);
-                    const kidsRange = rangeFor(kids!);
-                    return sortRows(kids!).map((k, ki) => renderRow(k, ki, depth + 1, kidsBase, kidsRange));
+                    const kidsBase = baselineFor(kids);
+                    const kidsRange = rangeFor(kids);
+                    return sortRows(kids).map((k, ki) => renderRow(k, ki, depth + 1, kidsBase, kidsRange, path));
                 })()}
             </React.Fragment>
         );

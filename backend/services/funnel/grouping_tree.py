@@ -70,12 +70,19 @@ class Dimension:
     многозначным (у товара несколько ярлыков — он попадает в несколько веток).
     extra — поля, которые узел этого уровня кладёт в ответ поверх метрик,
     чтобы фронт мог показать артикул/дату так же, как в одноуровневых режимах.
+    collect_nm — узлы уровня несут список своих товаров (нужны миниатюры карточек
+    у склейки, а сами артикулы лежат уровнями ниже и приезжают отдельным запросом).
     """
 
     key: str
     label: str
     keys: Callable[[WbFunnelDaily, dict], list[tuple[str, str]]]
     extra: Callable[[WbFunnelDaily], dict] | None = None
+    collect_nm: bool = False
+
+
+# Сколько товаров узел отдаёт на миниатюры (в UI видно 5, шестой — запас на битые фото).
+NM_SAMPLE = 6
 
 
 def _one(key: str | None, fallback: str) -> list[tuple[str, str]]:
@@ -131,6 +138,7 @@ DIMENSIONS: dict[str, Dimension] = {
     "imt": Dimension(
         "imt", "По склейкам",
         lambda r, ctx: _one(ctx["nm_imt"].get(r.nm_id), "Без склейки"),
+        collect_nm=True,
     ),
     "abc": Dimension("abc", "Категория ABC", _abc_keys),
 }
@@ -230,7 +238,7 @@ class _Node:
     где подпись («13.07–19.07») сортировке не поддаётся.
     """
 
-    __slots__ = ("agg", "key", "label", "extra", "children")
+    __slots__ = ("agg", "key", "label", "extra", "children", "nm_rev")
 
     def __init__(self, key: str, label: str, has_bdr: bool):
         self.agg = _new_group_agg(has_bdr)
@@ -239,16 +247,31 @@ class _Node:
         self.label = label
         self.extra: dict = {}
         self.children: dict[str, _Node] = {}
+        # Заполняется только у измерений с collect_nm: nm_id → сумма заказов
+        self.nm_rev: dict[int, float] | None = None
 
 
-def _finalize(nodes: dict[str, _Node], dim_index: int, dims: list[Dimension], tax_rate: float, limit: int) -> list[dict]:
-    """Рекурсивно превращает узлы в строки ответа (метрики считает _finalize_groups)."""
+def _finalize(
+    nodes: dict[str, _Node],
+    dim_index: int,
+    dims: list[Dimension],
+    tax_rate: float,
+    limit: int,
+    levels_left: int,
+) -> list[dict]:
+    """Рекурсивно превращает узлы в строки ответа (метрики считает _finalize_groups).
+
+    levels_left — сколько уровней ещё материализуем. Глубже узлы не строятся и не
+    отдаются: у строки остаётся только `has_children`, а дети приезжают отдельным
+    запросом при раскрытии (иначе ответ разрастается до десятков мегабайт).
+    """
     if not nodes:
         return []
     aggs = {k: n.agg for k, n in nodes.items()}
     rows = _finalize_groups(aggs, tax_rate, "label", limit)
 
     dim = dims[dim_index]
+    deeper = dim_index + 1 < len(dims)
     out = []
     for row in rows:
         node = nodes.get(row["label"])   # в label лежит ключ узла — см. _Node
@@ -258,9 +281,16 @@ def _finalize(nodes: dict[str, _Node], dim_index: int, dims: list[Dimension], ta
         row["label"] = node.label
         row["dim"] = dim.key
         row.update(node.extra)
+        row["has_children"] = deeper
         row["children"] = (
-            _finalize(node.children, dim_index + 1, dims, tax_rate, limit) if dim_index + 1 < len(dims) else []
+            _finalize(node.children, dim_index + 1, dims, tax_rate, limit, levels_left - 1)
+            if deeper and levels_left > 1
+            else []
         )
+        if node.nm_rev:
+            top = sorted(node.nm_rev.items(), key=lambda kv: kv[1], reverse=True)
+            row["nm_ids"] = [nm for nm, _ in top[:NM_SAMPLE]]
+            row["nm_total"] = len(node.nm_rev)
         out.append(row)
     return out
 
@@ -278,15 +308,26 @@ async def get_funnel_tree(
     limit: int = MAX_CHILDREN,
     nm_ids: set[int] | None = None,
     vendor_code: str | None = None,
+    path: list[str] | None = None,
+    depth: int = 1,
 ) -> list[dict]:
     """Воронка деревом по произвольной цепочке измерений.
 
     dims — упорядоченный список ключей из DIMENSIONS: первый ключ даёт верхний
     уровень, последний — листья. Порядок задаёт форму дерева: «бренд → предмет»
     и «предмет → бренд» дают разные разрезы одних и тех же данных.
+
+    path — ключи узлов-предков (по одному на первые len(path) измерений): строки
+    отфильтруются по ним, а дерево соберётся от следующего уровня. depth — сколько
+    уровней материализовать. Так раскрытие строки стоит один узкий запрос, а не
+    выгрузку всего дерева (25 тыс. узлов ≈ 20 МБ на реальных данных).
     """
     chain = validate_chain(dims)
     limit = max(1, min(limit, MAX_CHILDREN))
+    path = list(path or [])
+    if len(path) >= len(chain):
+        raise UnknownDimension("Путь длиннее цепочки группировок")
+    depth = max(1, min(depth, len(chain) - len(path)))
 
     rows = await _load_funnel_rows(db, pid, date_from, date_to, brand, subject, nm_ids=nm_ids, vendor_code=vendor_code)
     ctx = await _build_context(db, pid, chain)
@@ -300,26 +341,44 @@ async def get_funnel_tree(
     if any(d.key == "abc" for d in chain):
         ctx["nm_abc"] = _build_abc_map(rows, has_bdr, bdr_rates_map, tariff_map, buyout_map, tax_info, tax_rate)
 
+    ancestors = chain[: len(path)]      # уровни, по которым фильтруем
+    build = chain[len(path): len(path) + depth]   # уровни, которые материализуем
+
     roots: dict[str, _Node] = {}
     for r in rows:
+        # Отбор по пути: строка нужна, если на каждом уровне-предке её ключ совпал
+        # с выбранным узлом (многозначные измерения дают несколько ключей на строку).
+        if ancestors:
+            skip = False
+            for dim, want in zip(ancestors, path):
+                if want not in (k for k, _ in dim.keys(r, ctx)):
+                    skip = True
+                    break
+            if skip:
+                continue
+
         # Многозначные измерения (ярлыки) размножают строку по веткам — как в
         # одноуровневой группировке по ярлыку, где товар с N ярлыками виден N раз.
-        paths: list[list[tuple[str, str]]] = [[]]
-        for dim in chain:
+        branches: list[list[tuple[str, str]]] = [[]]
+        for dim in build:
             variants = dim.keys(r, ctx)
-            paths = [p + [v] for p in paths for v in variants]
+            branches = [p + [v] for p in branches for v in variants]
 
-        for path in paths:
+        for branch in branches:
             level = roots
-            for depth, (key, label) in enumerate(path):
+            for lvl, (key, label) in enumerate(branch):
                 node = level.get(key)
                 if node is None:
                     node = _Node(key, label, has_bdr)
-                    extra = chain[depth].extra
+                    extra = build[lvl].extra
                     if extra:
                         node.extra = extra(r)
+                    if build[lvl].collect_nm:
+                        node.nm_rev = {}
                     level[key] = node
+                if node.nm_rev is not None:
+                    node.nm_rev[r.nm_id] = node.nm_rev.get(r.nm_id, 0.0) + float(r.orders_sum_rub or 0)
                 _accumulate_row(node.agg, r, r.nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
                 level = node.children
 
-    return _finalize(roots, 0, chain, tax_rate, limit)
+    return _finalize(roots, len(path), chain, tax_rate, limit, depth)

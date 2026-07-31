@@ -16,6 +16,7 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.tariff import WbTariffSchema, WbTariffUploadResult
 from backend.services import funnel as funnel_service
+from backend.services.funnel.grouping_tree import MAX_CHAIN
 from backend.services.tariff_service import delete_tariff, list_tariffs, upload_tariffs
 from backend.utils.rate_limit import rate_limit_write
 
@@ -1940,6 +1941,8 @@ async def get_funnel_tree_endpoint(
     tag: str | None = Query(None),
     imt: str | None = Query(None),
     color: str | None = Query(None),
+    path: list[str] = Query(default_factory=list, description="Ключи узлов-предков: раскрытие ветки"),
+    depth: int = Query(1, ge=1, le=MAX_CHAIN, description="Сколько уровней материализовать"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1948,8 +1951,12 @@ async def get_funnel_tree_endpoint(
     Порядок ключей в group_by задаёт форму дерева: «subject,nm,week» — предметы,
     внутри артикулы, внутри недели. Метрики считаются теми же примитивами, что и
     в одноуровневых режимах, поэтому цифры сходятся с /data.
+
+    По умолчанию отдаётся только запрошенный уровень (`has_children` подсказывает,
+    есть ли что раскрывать): полное дерево на реальных данных — это ~25 тыс. узлов
+    и ~20 МБ, из которых видно 30 строк. Дети приезжают запросом с `path`.
     """
-    from backend.services.funnel.grouping_tree import UnknownDimension, get_funnel_tree
+    from backend.services.funnel.grouping_tree import UnknownDimension, get_funnel_tree  # noqa: F401
 
     dims = [d.strip() for d in group_by.split(",") if d.strip()]
     tax_info = await _load_tax_info(db, project)
@@ -1969,6 +1976,8 @@ async def get_funnel_tree_endpoint(
             bdr_rates_map=bdr_rates_map,
             nm_ids=nm_filter,
             vendor_code=vendor_code,
+            path=path,
+            depth=depth,
         )
     except UnknownDimension as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

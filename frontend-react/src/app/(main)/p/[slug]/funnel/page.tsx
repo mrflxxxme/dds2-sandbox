@@ -70,9 +70,11 @@ const isWeekend = (iso: string) => {
  *  миниатюры её товаров. nm_id берём из уже загруженных детей строки; если детей
  *  нет (или это не артикулы — например, уровень дней в цепочке), остаётся подпись. */
 const GLUE_THUMBS = 5;
-/** Товары склейки собираем по всему поддереву: в цепочке «Склейки → Дни → Артикулы»
- *  прямые дети узла — дни, а артикулы лежат уровнем ниже. */
+/** Товары склейки. В дереве их присылает бэк (`nm_ids` — дети приезжают отдельно и
+ *  на момент отрисовки их ещё нет); в старых одноуровневых режимах берём из детей. */
 const glueNmIds = (r: Row): number[] => {
+    const fromApi = (r as { nm_ids?: number[] }).nm_ids;
+    if (fromApi?.length) return fromApi;
     const seen = new Set<number>();
     const walk = (node: Row) => {
         const nm = (node as { nm_id?: number }).nm_id;
@@ -84,8 +86,8 @@ const glueNmIds = (r: Row): number[] => {
 };
 
 const GlueLabel = ({ row, label, depth }: { row: Row; label: string; depth: number }) => {
-    // Обход поддерева не бесплатный (дни × артикулы) — считаем один раз на строку
     const nms = useMemo(() => glueNmIds(row), [row]);
+    const total = (row as { nm_total?: number }).nm_total ?? nms.length;
     // Алиас склейки (если задан) оставляем — он несёт смысл; голый «#id» заменяют картинки
     const named = !!label && !/^#\d+$/.test(label);
     if (nms.length === 0) {
@@ -93,15 +95,23 @@ const GlueLabel = ({ row, label, depth }: { row: Row; label: string; depth: numb
             <span style={{ fontSize: 12, fontWeight: depth ? 500 : 600 }}>{label || '—'}</span>
         );
     }
-    const rest = nms.length - GLUE_THUMBS;
+    const rest = total - GLUE_THUMBS;
     return (
-        <span title={`${label} · товаров: ${nms.length}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+        <span title={`${label} · товаров: ${total}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
             {nms.slice(0, GLUE_THUMBS).map(nm => <WbThumb key={nm} nmId={nm} size={20} rounded={4} />)}
             {rest > 0 && <span style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600 }}>+{rest}</span>}
             {named && <span style={{ fontSize: 12, fontWeight: depth ? 500 : 600, marginLeft: 4, overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>}
         </span>
     );
 };
+
+/** Строка товара: фото карточки WB + артикул продавца. */
+const ArticleLabel = ({ nmId, text, depth }: { nmId?: number; text: string; depth: number }) => (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+        <WbThumb nmId={nmId} size={18} rounded={4} />
+        <span style={{ fontSize: 12, fontWeight: depth ? 500 : 600, overflow: 'hidden', textOverflow: 'ellipsis' }}>{text}</span>
+    </span>
+);
 
 /** Подпись фильтра над полем — как в референсе.
  *  Именно <div>, а не <label>: label пересылает клик на первый контрол внутри себя,
@@ -153,6 +163,11 @@ export default function FunnelPage() {
     // Базовая цепочка: день → предмет → артикул. Выбор пользователя переживает перезагрузку.
     const [chain, setChain] = useState<string[]>(DEFAULT_CHAIN);
     const [chainRows, setChainRows] = useState<Row[]>([]);
+    /* Дерево грузится по уровню: сразу приезжает только верхний, ветки — по клику.
+     * Полное дерево на реальных данных — ~25 тыс. узлов и ~20 МБ, из которых видно
+     * тридцать строк; ключ кэша — путь ключей узлов от корня. */
+    const [subtrees, setSubtrees] = useState<Map<string, Row[]>>(new Map());
+    const loadingPaths = useRef<Set<string>>(new Set());
     const [dimCatalog, setDimCatalog] = useState<Dim[]>([]);
     const [maxChain, setMaxChain] = useState(4);
     const [groupingOpen, setGroupingOpen] = useState(false);
@@ -221,6 +236,7 @@ export default function FunnelPage() {
                 extended,
             });
             setChainRows((res.data || []) as Row[]);
+            setSubtrees(new Map());   // фильтры/цепочка изменились — загруженные ветки протухли
         } catch (e: unknown) {
             console.error(e);
             setChainRows([]);
@@ -228,6 +244,25 @@ export default function FunnelPage() {
             setLoading(false);
         }
     }, [dateFrom, dateTo, brand, subject, article, extended]);
+
+    /** Дети узла по пути: один узкий запрос вместо выгрузки всего дерева. */
+    const loadBranch = useCallback(async (path: string[]) => {
+        const key = path.join('\u0000');
+        if (!dateFrom || !dateTo || loadingPaths.current.has(key)) return;
+        loadingPaths.current.add(key);
+        try {
+            const res = await api.getFunnelTree({
+                dims: chain, date_from: dateFrom, date_to: dateTo, brand, subject, vendor_code: article,
+                extended, path, depth: 1,
+            });
+            setSubtrees(prev => new Map(prev).set(key, (res.data || []) as Row[]));
+        } catch (e: unknown) {
+            console.error(e);
+            setSubtrees(prev => new Map(prev).set(key, []));   // не зависаем на «Загрузка…»
+        } finally {
+            loadingPaths.current.delete(key);
+        }
+    }, [chain, dateFrom, dateTo, brand, subject, article, extended]);
 
     const loadData = useCallback(async (df?: string, dt?: string, gb?: GroupBy) => {
         const from = df || dateFrom;
@@ -584,7 +619,7 @@ export default function FunnelPage() {
             if (TIME_DIMS.has(dim)) return <span style={{ fontFamily: MONO, fontSize: 12 }}>{label}</span>;
             // Только артикул продавца: бренд и предмет во вложенной строке — повтор
             // родительских уровней, они съедали вторую строку в каждой строке дерева
-            if (dim === 'nm') return <span style={{ fontSize: 12, fontWeight: depth ? 500 : 600 }}>{label}</span>;
+            if (dim === 'nm') return <ArticleLabel nmId={r.nm_id} text={label} depth={depth} />;
             if (dim === 'imt') return <GlueLabel row={r} label={label} depth={depth} />;
             const kids = r.children?.length || 0;
             return (
@@ -603,7 +638,7 @@ export default function FunnelPage() {
             );
         }
         if (groupBy === 'sku' || (depth > 0 && r.nm_id)) {
-            return <span style={{ fontSize: 12, fontWeight: depth ? 500 : 600 }}>{r.vendor_code || r.nm_id}</span>;
+            return <ArticleLabel nmId={r.nm_id} text={String(r.vendor_code || r.nm_id)} depth={depth} />;
         }
         if (groupBy === 'abc') {
             const g = r as Row & { abc?: string; abc_label?: string };
@@ -647,18 +682,40 @@ export default function FunnelPage() {
 
     /* ─── Excel: ровно те колонки, что видит пользователь ────── */
 
-    const handleExportFunnel = () => {
+    const [exporting, setExporting] = useState(false);
+
+    const handleExportFunnel = async () => {
         const sections = buildSections(layout, extended);
         const cols = sections.flatMap(s => s.cols);
-        const label = GROUP_TABS.find(g => g.key === groupBy)?.title ?? '';
+        const label = chain.length > 0 ? chain.map(dimLabel).join(' → ') : (GROUP_TABS.find(g => g.key === groupBy)?.title ?? '');
+        // В дереве строки на экране — только верхний уровень (остальное грузится по клику).
+        // Для выгрузки просим все уровни разом: это единственное место, где нужно дерево целиком.
+        let src = rows;
+        if (chain.length > 0) {
+            setExporting(true);
+            try {
+                const res = await api.getFunnelTree({
+                    dims: chain, date_from: dateFrom, date_to: dateTo, brand, subject, vendor_code: article,
+                    extended, depth: chain.length,
+                });
+                src = (res.data || []) as Row[];
+            } catch (e: unknown) {
+                console.error(e);
+                alert('Не удалось выгрузить полное дерево — попробуйте ещё раз');
+                setExporting(false);
+                return;
+            }
+            setExporting(false);
+        }
         const flat: Record<string, string | number>[] = [];
+        const labelOf = (r: Row) => String((r as { label?: string }).label ?? r.vendor_code ?? r.size ?? r.subcategory ?? r.nm_id ?? '');
         const push = (r: Row, prefix: string) => {
             const rec: Record<string, string | number> = { [groupTitle]: prefix };
             for (const c of cols) rec[c.label] = c.value(r) ?? '';
             flat.push(rec);
-            (r.children || []).forEach(ch => push(ch, `${prefix} → ${ch.vendor_code || ch.size || ch.subcategory || ch.nm_id || ''}`));
+            (r.children || []).forEach(ch => push(ch, `${prefix} → ${labelOf(ch)}`));
         };
-        rows.forEach(r => push(r, groupBy === 'day' ? (r.date || '') : groupLabelOf(r)));
+        src.forEach(r => push(r, chain.length > 0 ? labelOf(r) : groupBy === 'day' ? (r.date || '') : groupLabelOf(r)));
         if (flat.length === 0) { alert('Нет данных для экспорта'); return; }
         exportToExcel(flat, `Воронка_${label}${dateFrom && dateTo ? `_${dateFrom}_${dateTo}` : ''}`);
     };
@@ -732,8 +789,8 @@ export default function FunnelPage() {
                     }}>
                     <IcSun size={15} />
                 </button>
-                <button onClick={handleExportFunnel} className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
-                    <IcDownload size={14} />Excel
+                <button onClick={handleExportFunnel} disabled={exporting} className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                    <IcDownload size={14} />{exporting ? 'Готовим…' : 'Excel'}
                 </button>
                 </>)}
                 {/* Переключатель режима — крайний справа и в таблице, и в графике: иначе он
@@ -876,7 +933,11 @@ export default function FunnelPage() {
                             labelWidth={chain.length > 0 ? 265 : groupBy === 'day' ? 150 : 220}
                             labelCell={labelCell}
                             rowKey={rowKey}
-                            childrenOf={r => r.children}
+                            childrenOf={chain.length > 0 ? undefined : (r => r.children)}
+                            nodeKey={chain.length > 0 ? (r => String((r as { sort_key?: string; label?: string }).sort_key ?? (r as { label?: string }).label ?? '')) : undefined}
+                            hasChildren={chain.length > 0 ? (r => !!(r as { has_children?: boolean }).has_children) : undefined}
+                            childrenAt={chain.length > 0 ? (path => subtrees.get(path.join('\u0000'))) : undefined}
+                            onExpandPath={chain.length > 0 ? loadBranch : undefined}
                             labelValue={chain.length > 0
                                 ? (r => (r as { label?: string }).label || '')
                                 : groupBy === 'day' ? (r => r.date || '') : (r => groupLabelOf(r))}
