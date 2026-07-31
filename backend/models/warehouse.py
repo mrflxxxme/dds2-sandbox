@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -243,6 +244,22 @@ class OutboundShipment(Base, TimestampMixin, SoftDeleteMixin):
     wb_fbo_supply_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("wb_fbo_supplies.id", ondelete="SET NULL"), nullable=True
     )
+    # ─── Забор ВНУТРЕННЕГО ПЕРЕЕЗДА (перемещение между складами) ───────────
+    # Отгрузка создаётся при send_transfer как НОСИТЕЛЬ ЛОГИСТИКИ И ДЕНЕГ:
+    # снимок машины/перевозчика/стоимости + связка с заявкой на оплату
+    # (PaymentRequestShipment: N заборов → 1 платёж, кейс «одна машина везёт
+    # три документа») и с банковской выпиской (etl/sync_shipment_payments).
+    # СТОК ЭТОТ ЗАБОР НЕ ДВИГАЕТ — списание уже сделал сам перемещение
+    # (MovementType.TRANSFER_OUT, reference_type='TRANSFER'). Второй раз
+    # списывать нельзя: движения остаются за перемещением, забор — только
+    # логистика и деньги.
+    # ВАЖНО для читателей outbound_shipments: строка с непустым
+    # stock_transfer_id — это ПЕРЕЕЗД МЕЖДУ НАШИМИ СКЛАДАМИ, а не отгрузка на
+    # маркетплейс. Отчёты, считающие отгрузку/выручку/списание, обязаны её
+    # исключать (фильтр stock_transfer_id IS NULL).
+    stock_transfer_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("stock_transfers.id", ondelete="SET NULL"), nullable=True
+    )
     attempt_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     # Снимок логистики попытки на момент отгрузки — на AssemblyRequest эти поля
     # перезатираются при назначении нового водителя; здесь сохраняются по-попыточно.
@@ -285,6 +302,17 @@ class OutboundShipment(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_outbound_shipments_project_id", "project_id"),
         Index("ix_outbound_shipments_warehouse_id", "warehouse_id"),
         Index("ix_outbound_shipments_assembly_request_id", "assembly_request_id"),
+        # Один переезд — РОВНО ОДИН живой забор. Инвариант держался только на
+        # row-lock при DRAFT → IN_TRANSIT; на уровне БД два забора на один
+        # stock_transfer_id ничем не запрещались, а это прямой путь к двойной
+        # заявке на оплату одной перевозки. Переотправки у переезда нет
+        # (в отличие от заявки с её attempt_no), поэтому уникальность честная.
+        Index(
+            "uq_outbound_shipments_stock_transfer",
+            "stock_transfer_id",
+            unique=True,
+            postgresql_where=text("stock_transfer_id IS NOT NULL AND is_deleted = false"),
+        ),
         Index("ix_outbound_shipments_wb_fbo_supply_id", "wb_fbo_supply_id"),
         Index("ix_outbound_shipments_counterparty_id", "counterparty_id"),
         Index("ix_outbound_shipments_matched_transaction_id", "matched_transaction_id"),
@@ -330,13 +358,89 @@ class StockTransfer(Base, TimestampMixin, SoftDeleteMixin):
     is_defect: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     defect_reason: Mapped[str | None] = mapped_column(Text)
 
+    # ─── Машина и логистика переезда ───────────────────────────────────────
+    # Зеркало блока «Назначить машину» у заявки на сборку (AssemblyRequest):
+    # переезд между ФФ везёт та же наёмная машина и оплачивается так же.
+    # Отличия от заявки: НЕТ WB-пропуска (переезд не едет на маркетплейс) и
+    # НЕТ гарда Газельки (агрегатор возит только сборки на WB).
+    # Статусную цепочку DRAFT → IN_TRANSIT → COMPLETED машина НЕ трогает:
+    # ступень VEHICLE_ASSIGNED не вводим (её читают авто-приём ФФ и отчёты —
+    # см. _collect_transfer_fact_candidates), назначенная машина показывается
+    # бейджем на черновике.
+    #
+    # vehicle_info — госномер (как на заявке: у старых записей может лежать
+    # свободный текст «номер, водитель, ТК», читатели обязаны терпеть оба).
+    vehicle_info: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    vehicle_brand: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    driver_first_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    driver_last_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    driver_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # ondelete=SET NULL — как у counterparty_id заявки и забора: жёсткое
+    # удаление контрагента не должно ронять переезд. Слияние контрагентов
+    # перецепляет эту ссылку (counterparty_service.merge), иначе забор с мёртвым
+    # id никогда не сматчился бы с выпиской.
+    counterparty_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("counterparty.id", ondelete="SET NULL"), nullable=True
+    )
+    # Логистику оказывает склад забора: перевозчик берётся из
+    # Warehouse.counterparty_id склада-ИСТОЧНИКА, а не из введённого ИНН.
+    # Флаг — чтобы UI помнил режим при переоткрытии (симметрично заявке).
+    logistics_by_warehouse: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    pickup_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    pickup_time_slot: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Транспортная единица переезда — 1:1 с заявкой на сборку (AssemblyRequest):
+    # shipped_as_boxes=False → паллеты (по умолчанию), True → короба. Флаг меняет
+    # только ЕДИНИЦУ измерения pallets_count/pallet_weight_kg и подписи в UI
+    # («Короба» / «Вес 1 короба» vs «Палеты»). При конвертации заявки в переезд
+    # единица и её количество переносятся из заявки — иначе переезд терял бы
+    # паллеты (у всех шести заявок кейса «транзит Питер/ЕКБ» они проставлены),
+    # а ₽/паллета по переездам было бы не посчитать.
+    # Nullable (в отличие от заявки): переезд можно завести и без транспортной
+    # оценки — например когда машину ещё не считали.
+    pallets_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pallet_weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    shipped_as_boxes: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    # Стоимость забора. Деньги хранятся ЗДЕСЬ только как план переезда; фактом
+    # оплаты владеет OutboundShipment (снимок логистики + связка с выпиской и
+    # заявкой на оплату), который создаётся при отправке перемещения.
+    pickup_cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    delivery_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    vehicle_assigned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Переезд, созданный ИЗ заявки на сборку («Переделать в перемещение»).
+    # Кейс: ФФ собрал заявку, но товар едет не на WB, а на транзитный склад
+    # (в т.ч. после возврата «WB не принял» — ASM-807 → возврат IN-232 →
+    # переезд). Заявка остаётся со своей историей и своими зеркалами ФФ,
+    # перемещение живёт рядом. Конвертация РАЗРЕШЕНА только когда нетто-сток
+    # заявки не списан (движения ASSEMBLY компенсированы возвратом) — иначе
+    # отправка переезда списала бы те же единицы второй раз.
+    converted_from_assembly_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("assembly_requests.id", ondelete="SET NULL"), nullable=True
+    )
+
     # Relationships
     items: Mapped[list["StockTransferItem"]] = relationship(
         back_populates="transfer",
         cascade="all, delete-orphan",
     )
 
-    __table_args__ = (Index("ix_stock_transfers_project_id", "project_id"),)
+    __table_args__ = (
+        Index("ix_stock_transfers_project_id", "project_id"),
+        Index("ix_stock_transfers_counterparty_id", "counterparty_id"),
+        # Одна заявка — один живой переезд: проверка «уже сконвертирована» в
+        # сервисе не атомарна, двойной клик дал бы два переезда по одному
+        # составу и двойное списание при отправке.
+        Index(
+            "uq_stock_transfers_converted_from_assembly",
+            "converted_from_assembly_id",
+            unique=True,
+            postgresql_where=text("converted_from_assembly_id IS NOT NULL AND is_deleted = false"),
+        ),
+    )
 
 
 class StockTransferItem(Base):

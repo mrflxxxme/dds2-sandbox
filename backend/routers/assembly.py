@@ -4,6 +4,7 @@ Router: /warehouse/assembly — Assembly request CRUD + workflow transitions.
 """
 
 from datetime import date
+from decimal import Decimal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -73,7 +74,8 @@ from backend.schemas.assembly import (
     StockMismatchSnapshotResponse,
 )
 from backend.schemas.fulfillment import FfMismatchDetail
-from backend.services import assembly_service, fulfillment_service
+from backend.schemas.warehouse import AssemblyToTransfer, AssemblyToTransferResult
+from backend.services import assembly_service, fulfillment_service, warehouse_service
 from backend.services.assembly.analytics import (
     get_assembly_flow_analytics,
     get_assembly_wb_warehouses,
@@ -464,7 +466,12 @@ async def _enrich_joint(
         resp.joint_ready = all(row.status not in not_ready for row in group)
         resp.joint_total_pallets = sum(int(row.pallets_count or 0) for row in group)
         # Вес = паллеты × вес паллеты (как total_weight_kg в _build_response), суммируем по сборкам.
-        resp.joint_total_weight_kg = sum((int(row.pallets_count or 0) * (row.pallet_weight_kg or 0)) for row in group)
+        # Стартовое значение Decimal, а не дефолтный int 0: на пустой группе sum()
+        # вернул бы int и поле Decimal | None получило бы неверный тип (mypy-гейт CI).
+        resp.joint_total_weight_kg = sum(
+            (int(row.pallets_count or 0) * (row.pallet_weight_kg or Decimal(0)) for row in group),
+            Decimal(0),
+        )
         resp.joint_siblings = [
             JointSibling(
                 assembly_id=row.id,
@@ -1243,6 +1250,37 @@ async def delete_request(
     except ValueError as e:
         msg = str(e)
         status = 404 if "not found" in msg.lower() else 400
+        raise HTTPException(status, msg) from None
+
+
+@router.post(
+    "/{request_id}/to-transfer",
+    response_model=AssemblyToTransferResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def convert_to_transfer(
+    request_id: int,
+    payload: AssemblyToTransfer,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """«Переделать заявку в перемещение»: переезд по составу заявки (DRAFT).
+
+    Заявка НЕ отменяется и статус не меняет — конвертировать можно из любого,
+    включая CLOSED/RETURNED/CANCELLED. 400 — если сток заявки списан и не
+    вернулся (перемещение списало бы те же единицы второй раз).
+    """
+    try:
+        return await warehouse_service.convert_assembly_to_transfer(
+            db, project.id, request_id, payload
+        )
+    except FbsMirrorManualError as e:
+        raise HTTPException(422, str(e)) from None
+    except ValueError as e:
+        msg = str(e)
+        # «не найден» (мужской род) — тоже 404: «Склад назначения не найден»
+        # иначе уходил бы как 400. Тот же широкий детект, что у соседних ручек.
+        status = 404 if "не найден" in msg.lower() else 400
         raise HTTPException(status, msg) from None
 
 

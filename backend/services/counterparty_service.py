@@ -987,7 +987,7 @@ class CounterpartyService:
         from backend.models.customs import CustomsTopup
         from backend.models.payment_request import PaymentRequest
         from backend.models.supply_chain import Supplier
-        from backend.models.warehouse import OutboundShipment, Warehouse
+        from backend.models.warehouse import OutboundShipment, StockTransfer, Warehouse
 
         if target_id == source_id:
             raise CounterpartyConflictError("Нельзя слить контрагента с самим собой")
@@ -1062,6 +1062,12 @@ class CounterpartyService:
         moved["loans"] = await _move(Loan)
         moved["warehouses"] = await _move(Warehouse)
         moved["outbound_shipments"] = await _move(OutboundShipment)
+        # Перевозчик переезда. Без переноса ссылка осталась бы на слитом
+        # (софт-удалённом) контрагенте, а `_create_transfer_pickup` скопировал бы
+        # мёртвый id в забор — после чего `etl/sync_shipment_payments` (джойнит
+        # Counterparty с is_deleted == False) НИКОГДА не сматчил бы этот забор с
+        # выпиской, молча и без ошибки. Кейс реальный: дубли газелек.
+        moved["stock_transfers"] = await _move(StockTransfer)
         moved["payment_requests"] = await _move(PaymentRequest)  # общие (project_id NULL) — вне скоупа
         moved["suppliers"] = await _move(Supplier)
         moved["customs_topup"] = await _move(CustomsTopup)

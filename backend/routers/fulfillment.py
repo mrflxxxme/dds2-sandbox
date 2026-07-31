@@ -254,11 +254,23 @@ async def list_requests(
     warehouse_id: int,
     kind: str | None = None,
     show_archived: bool = False,
+    stock_transfer_id: int | None = None,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Зеркало заявок ФФ (kind: assembly | inbound | return | other; show_archived — вид «Архив»)."""
-    return await fulfillment_service.list_requests(db, project.id, warehouse_id, kind, show_archived=show_archived)
+    """Зеркало заявок ФФ (kind: assembly | inbound | return | other; show_archived — вид «Архив»).
+
+    `?stock_transfer_id=` — только связки этого переезда (обе стороны, оба
+    склада). Карточке переезда нужны 0-2 строки, а не весь список склада.
+    """
+    return await fulfillment_service.list_requests(
+        db,
+        project.id,
+        warehouse_id,
+        kind,
+        show_archived=show_archived,
+        stock_transfer_id=stock_transfer_id,
+    )
 
 
 @wh_router.get("/unlinked-assemblies", response_model=list[FfUnlinkedAssembly])

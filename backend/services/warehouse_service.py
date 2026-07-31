@@ -35,9 +35,12 @@ from backend.services.warehouse_inbound import (  # noqa: F401
 
 # ─── Outbound ─────────────────────────────────────────────────────────────
 from backend.services.warehouse_outbound import (  # noqa: F401
+    assign_vehicle_transfer,
+    assign_vehicle_transfer_bulk,
     cancel_shipment,
     cancel_transfer,
     complete_transfer,
+    convert_assembly_to_transfer,
     create_shipment,
     create_transfer,
     deliver_shipment,
@@ -47,6 +50,7 @@ from backend.services.warehouse_outbound import (  # noqa: F401
     list_transfers,
     send_transfer,
     ship_shipment,
+    unassign_vehicle_transfer,
 )
 
 # ─── Stock Engine ──────────────────────────────────────────────────────────

@@ -485,7 +485,12 @@ async def test_link_transfer_to_inbound_request(db_session, project, warehouse, 
 async def test_link_transfer_rejects_wrong_direction_and_double_link(
     db_session, project, warehouse, source_warehouse
 ):
-    """Склад-приёмник обязан совпасть с заявкой, а перемещение — быть свободным."""
+    """Склад стороны обязан совпасть с заявкой, а сторона переезда — быть свободной.
+
+    Переезд виден провайдерам С ОБЕИХ СТОРОН (у источника — сборкой, у
+    получателя — приёмкой), поэтому направление проверяется ПО KIND заявки, а
+    занятость — только внутри своей стороны.
+    """
     ff = await _add(db_session, _mirror(project.id, warehouse.id, kind="inbound"))
     outgoing = await _make_transfer(db_session, project.id, warehouse.id, source_warehouse.id)
     with pytest.raises(ValueError, match="другой склад"):
@@ -504,13 +509,24 @@ async def test_link_transfer_rejects_wrong_direction_and_double_link(
             db_session, project.id, ff.id, stock_transfer_id=transfer.id, warehouse_id=warehouse.id
         )
 
-    # Сборку перемещением не закрыть — слоты не взаимозаменяемы.
+    # Сборка на складе-ПОЛУЧАТЕЛЕ — не сторона этого переезда (он оттуда не уезжает).
     asm_ff = await _add(db_session, _mirror(project.id, warehouse.id, kind="assembly"))
     free = await _make_transfer(db_session, project.id, source_warehouse.id, warehouse.id)
-    with pytest.raises(ValueError, match="только к ФФ-заявке типа inbound"):
+    with pytest.raises(ValueError, match="другой склад"):
         await fulfillment_service.link_request(
             db_session, project.id, asm_ff.id, stock_transfer_id=free.id, warehouse_id=warehouse.id
         )
+    # А на складе-ИСТОЧНИКЕ та же сборка встаёт отгрузочной стороной, не мешая
+    # приёмочному зеркалу того же переезда.
+    src_asm = await _add(db_session, _mirror(project.id, source_warehouse.id, kind="assembly"))
+    row = await fulfillment_service.link_request(
+        db_session,
+        project.id,
+        src_asm.id,
+        stock_transfer_id=transfer.id,
+        warehouse_id=source_warehouse.id,
+    )
+    assert row["stock_transfer_id"] == transfer.id
 
 
 # ─── get_link_candidates: фолбэк по датам (состав недоступен) ────────────────

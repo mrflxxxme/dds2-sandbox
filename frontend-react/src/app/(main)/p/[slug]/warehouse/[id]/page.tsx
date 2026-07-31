@@ -4,6 +4,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
+import { transferSkuCount, transferUnits } from '@/lib/transfer';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type {
     Warehouse, InboundReceipt, OutboundShipment, AssemblyRequest,
@@ -1663,10 +1664,11 @@ function TransfersTab({ warehouseId, onCountChange }: {
     const directionText = (row: StockTransfer) => row.from_warehouse_id === warehouseId
         ? `Исходящее → ${whName(row.to_warehouse_id)}`
         : `Входящее ← ${whName(row.from_warehouse_id)}`;
-    const itemsText = (row: StockTransfer) => {
-        const qty = row.items.reduce((s: number, it: { quantity: number }) => s + it.quantity, 0);
-        return `${row.items.length} поз., ${formatNumber(qty)} шт.`;
-    };
+    // Состав в ответе СПИСКА перемещений больше не приходит (его убрали —
+    // тянул мегабайты ради двух чисел); считаем через общие хелперы, которые
+    // берут готовые units_total/sku_count, а на состав падают только в деталке.
+    const itemsText = (row: StockTransfer) =>
+        `${formatNumber(transferSkuCount(row), 0)} поз., ${formatNumber(transferUnits(row))} шт.`;
 
     const cols: Column[] = [
         { key: 'number', label: '№' },

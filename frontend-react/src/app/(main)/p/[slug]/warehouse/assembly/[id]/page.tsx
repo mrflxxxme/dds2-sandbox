@@ -8,6 +8,8 @@ import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchBlock } from '@/components/FfMismatchModal';
 import MigfullModal from './MigfullModal';
+import ConvertToTransferModal, { convertSuccessMessage } from './ConvertToTransferModal';
+import { Toast } from '@/components';
 import PalletLayoutTab from './PalletLayoutTab';
 import WbSupplyPanel from './WbSupplyPanel';
 import FfExpectedCostCard from './FfExpectedCostCard';
@@ -107,6 +109,15 @@ export default function AssemblyDetailPage() {
     // Migfull-портал (ФФ «Натали») — создать заявку на отгрузку из сборки.
     const [migfullConfig, setMigfullConfig] = useState<MigfullPortalConfig | null>(null);
     const [showMigfullModal, setShowMigfullModal] = useState(false);
+
+    // «Переделать в перемещение»: заявка → переезд между нашими складами.
+    const [showConvertModal, setShowConvertModal] = useState(false);
+    const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+    // Отложенный переход на карточку созданного переезда — чистим при уходе.
+    const convertRedirectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => () => {
+        if (convertRedirectRef.current) clearTimeout(convertRedirectRef.current);
+    }, []);
 
     // Refresh from FBO result
     const [refreshResult, setRefreshResult] = useState<RefreshFromFboResponse | null>(null);
@@ -730,6 +741,17 @@ export default function AssemblyDetailPage() {
                 break;
         }
 
+        // «Переделать в перемещение» доступна в ЛЮБОМ статусе, включая закрытые
+        // и отменённые заявки: основной сценарий — груз по факту уехал не на WB,
+        // а на наш склад, и это выясняется уже после закрытия заявки. Проверку
+        // «сток списан» делает бэкенд и возвращает текстом.
+        buttons.push(
+            <button key="to-transfer" className="btn btn-secondary" onClick={() => setShowConvertModal(true)} disabled={actionLoading}
+                title="Создать переезд между нашими складами из состава этой заявки">
+                🚚 Переделать в перемещение
+            </button>,
+        );
+
         if (canPushToFf) {
             buttons.push(
                 <button key="push-ff" className="btn btn-secondary" onClick={openPushModal} disabled={actionLoading}
@@ -762,6 +784,9 @@ export default function AssemblyDetailPage() {
 
     return (
         <div className="animate-in">
+            {toast && (
+                <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} duration={toast.type === 'error' ? 5000 : 3000} />
+            )}
             {/* Header */}
             <div className="page-header">
                 <div>
@@ -1803,6 +1828,32 @@ export default function AssemblyDetailPage() {
                     assemblyNumber={assembly.number}
                     onClose={() => setShowMigfullModal(false)}
                     onSuccess={() => { load(); }}
+                />
+            )}
+
+            {/* «Переделать в перемещение» — заявка превращается в переезд. */}
+            {showConvertModal && assembly && (
+                <ConvertToTransferModal
+                    assemblyId={assembly.id}
+                    assemblyNumber={assembly.number}
+                    fromWarehouseId={assembly.warehouse_id}
+                    palletsCount={assembly.pallets_count}
+                    palletWeightKg={assembly.pallet_weight_kg}
+                    shippedAsBoxes={assembly.shipped_as_boxes}
+                    onClose={() => setShowConvertModal(false)}
+                    onSuccess={(result) => {
+                        setShowConvertModal(false);
+                        setToast({ message: convertSuccessMessage(result), type: 'success' });
+                        // Даём тосту показаться, потом уводим на деталку переезда:
+                        // навигация размонтирует страницу вместе с тостом. Id
+                        // держим в ref и чистим при размонтировании — иначе
+                        // пользователя, успевшего уйти на другой экран, выбросит
+                        // на переезд «из ниоткуда» через секунду.
+                        convertRedirectRef.current = setTimeout(
+                            () => router.push(`/p/${slug}/warehouse/transfers/${result.transfer_id}`),
+                            1200,
+                        );
+                    }}
                 />
             )}
 

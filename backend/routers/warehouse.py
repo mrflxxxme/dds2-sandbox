@@ -3,6 +3,8 @@
 Router: /warehouse — warehouses CRUD, stock, receipts, shipments, transfers, adjustments.
 """
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +47,9 @@ from backend.schemas.warehouse import (
     StockTransferCreate,
     StockTransferSchema,
     SupplyAcceptanceSlotsResponse,
+    TransferAssignVehicle,
+    TransferAssignVehicleBulk,
+    TransferLogisticsReport,
     WarehouseCounterpartyLink,
     WarehouseCreate,
     WarehouseExtraCounterpartyAdd,
@@ -57,6 +62,7 @@ from backend.services import (
     barcode_eligibility_service,
     box_multiplicity_service,
     supply_acceptance_slots_service,
+    transfer_logistics,
     warehouse_acceptance_service,
     warehouse_defect,
     warehouse_service,
@@ -646,16 +652,161 @@ async def cancel_shipment(
 # ─── Stock Transfers (Перемещение) ────────────────────────────────────────
 
 
+def _transfer_error(e: ValueError) -> HTTPException:
+    """ValueError сервиса перемещений → HTTP-код.
+
+    404 — документа нет (тот же код, что у `GET /transfers/{id}` на тот же id:
+    иначе один и тот же несуществующий переезд отвечал бы то 404, то 400).
+    400 — доменный отказ (не тот статус, у склада нет контрагента и т.п.).
+    """
+    if "не найдено" in str(e).lower():
+        return HTTPException(404, str(e))
+    return HTTPException(400, str(e))
+
+
 @router.get("/transfers")
 async def list_transfers(
     in_transit: bool = Query(False),
     warehouse_id: int | None = Query(None),
+    # Whitelist статусов — симметрично `group_by` в отчёте: мусорное значение
+    # честно отбивается 422, а не возвращает пустой список, который читается
+    # как «переездов нет».
+    status: str | None = Query(None, pattern="^(DRAFT|IN_TRANSIT|COMPLETED)$"),
+    has_vehicle: bool | None = Query(None),
+    converted_from_assembly_id: int | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """List transfers. ?in_transit=true for only active ones, ?warehouse_id= for source OR destination."""
-    rows = await warehouse_service.list_transfers(db, project.id, in_transit, warehouse_id)
+    """List transfers. ?in_transit=true — только активные, ?warehouse_id= — источник ИЛИ получатель.
+
+    Срез Листа логиста: `?status=DRAFT&has_vehicle=false` — переезды, ждущие машину.
+    `?converted_from_assembly_id=` — переезды из конкретной заявки: карточка
+    заявки показывает «уже переделана в TR-хх», не ловя 400 повторной попыткой.
+
+    🔴 Состав (`items`) в списке ВСЕГДА пустой — вместо него `units_total` и
+    `sku_count`. За составом — `GET /warehouse/transfers/{id}`.
+    """
+    rows = await warehouse_service.list_transfers(
+        db,
+        project.id,
+        in_transit,
+        warehouse_id,
+        status=status,
+        has_vehicle=has_vehicle,
+        converted_from_assembly_id=converted_from_assembly_id,
+    )
     return [StockTransferSchema.model_validate(r) for r in rows]
+
+
+@router.post(
+    "/transfers/assign-vehicle-bulk",
+    response_model=list[StockTransferSchema],
+    dependencies=[Depends(rate_limit_write)],
+)
+async def assign_vehicle_transfer_bulk(
+    payload: TransferAssignVehicleBulk,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Одна машина на несколько переездов (Лист логиста).
+
+    Первый отказ роняет весь вызов — частичное назначение логист бы не заметил.
+
+    🔴 Объявлен ВЫШЕ `/transfers/{transfer_id}`: иначе путь съест
+    «assign-vehicle-bulk» как int-параметр и вернёт 422.
+    """
+    try:
+        rows = await warehouse_service.assign_vehicle_transfer_bulk(
+            db, project.id, payload.ids, payload.payload
+        )
+        return [StockTransferSchema.model_validate(r) for r in rows]
+    except ValueError as e:
+        raise _transfer_error(e) from None
+
+
+@router.get("/transfers/logistics-report", response_model=TransferLogisticsReport)
+async def transfer_logistics_report(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    group_by: str = Query("month", pattern="^(day|week|month)$"),
+    from_warehouse_id: int | None = Query(None),
+    to_warehouse_id: int | None = Query(None),
+    counterparty_id: int | None = Query(None),
+    summary_only: bool = Query(False),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Логистика ПЕРЕЕЗДОВ: стоимость перевозки между нашими складами.
+
+    Отдельный от логистики сборок отчёт — маршрут «наш склад → наш склад»
+    несопоставим с маршрутами на маркетплейс. Период — по дате забора.
+
+    🔴 Объявлен ВЫШЕ `/transfers/{transfer_id}`: иначе FastAPI сматчит
+    «logistics-report» на int-параметр пути и вернёт 422 вместо отчёта.
+    """
+    return await transfer_logistics.get_transfer_logistics_report(
+        db,
+        project.id,
+        date_from=date_from,
+        date_to=date_to,
+        group_by=group_by,
+        from_warehouse_id=from_warehouse_id,
+        to_warehouse_id=to_warehouse_id,
+        counterparty_id=counterparty_id,
+        summary_only=summary_only,
+    )
+
+
+@router.get("/transfers/{transfer_id}", response_model=StockTransferSchema)
+async def get_transfer(
+    transfer_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Одно перемещение с составом (карточка переезда: машина, логистика, связки)."""
+    transfer = await warehouse_service.get_transfer(db, project.id, transfer_id)
+    if not transfer:
+        raise HTTPException(404, "Перемещение не найдено")
+    return StockTransferSchema.model_validate(transfer)
+
+
+@router.post(
+    "/transfers/{transfer_id}/assign-vehicle",
+    response_model=StockTransferSchema,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def assign_vehicle_transfer(
+    transfer_id: int,
+    payload: TransferAssignVehicle,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Назначить машину на переезд. Статус НЕ меняется — признак назначения `vehicle_assigned_at`."""
+    try:
+        transfer = await warehouse_service.assign_vehicle_transfer(
+            db, project.id, transfer_id, payload
+        )
+        return StockTransferSchema.model_validate(transfer)
+    except ValueError as e:
+        raise _transfer_error(e) from None
+
+
+@router.post(
+    "/transfers/{transfer_id}/unassign-vehicle",
+    response_model=StockTransferSchema,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def unassign_vehicle_transfer(
+    transfer_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Снять машину с переезда (только DRAFT). Транспортную единицу груза не трогает."""
+    try:
+        transfer = await warehouse_service.unassign_vehicle_transfer(db, project.id, transfer_id)
+        return StockTransferSchema.model_validate(transfer)
+    except ValueError as e:
+        raise _transfer_error(e) from None
 
 
 @router.post("/transfers", dependencies=[Depends(rate_limit_write)])

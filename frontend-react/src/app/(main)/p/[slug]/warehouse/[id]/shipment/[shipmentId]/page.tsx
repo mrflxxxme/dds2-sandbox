@@ -1,6 +1,7 @@
 'use client';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
@@ -70,6 +71,8 @@ export default function ShipmentDetailPage() {
     const goBack = () => router.push(`/p/${slug}/warehouse/${warehouseId}`);
 
     const handleShip = async () => {
+        // Забор переезда отгружается вместе с перемещением (бэкенд вернёт 400).
+        if (shipment?.stock_transfer_id) return;
         setActionLoading(true);
         try { const r = await api.shipShipment(shipmentId); setShipment(r); }
         catch (e: unknown) { setError(e instanceof Error ? e.message : 'Ошибка'); }
@@ -77,6 +80,8 @@ export default function ShipmentDetailPage() {
     };
 
     const handleDeliver = async () => {
+        // Доставку переезда фиксирует приёмка перемещения (бэкенд вернёт 400).
+        if (shipment?.stock_transfer_id) return;
         setActionLoading(true);
         try { const r = await api.deliverShipment(shipmentId); setShipment(r); }
         catch (e: unknown) { setError(e instanceof Error ? e.message : 'Ошибка'); }
@@ -84,6 +89,10 @@ export default function ShipmentDetailPage() {
     };
 
     const handleCancel = async () => {
+        // Забор переезда сток НЕ списывал — отмена вернула бы на склад единицы,
+        // которых он никогда не забирал. Кнопки для таких скрыты, но гардим и тут
+        // (серверный отказ авторитетный, этот гард — чтобы не показывать 400).
+        if (shipment?.stock_transfer_id) return;
         if (!confirm('Отменить отгрузку? Товар вернётся на склад.')) return;
         setActionLoading(true);
         try { const r = await api.cancelShipment(shipmentId); setShipment(r); }
@@ -117,20 +126,39 @@ export default function ShipmentDetailPage() {
                         </p>
                     </div>
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                    {shipment.status === 'DRAFT' && (
-                        <button className="btn btn-primary" onClick={handleShip} disabled={actionLoading}>
-                            {actionLoading ? '...' : 'Отгрузить'}
-                        </button>
-                    )}
-                    {shipment.status === 'SHIPPED' && (
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    {/* Забор ПЕРЕЕЗДА: он не двигал сток и его цепочку ведёт само
+                        перемещение — бэкенд отказывает и на «Отгрузить», и на
+                        «Доставлено», и на «Отменить». Показываем не мёртвые
+                        кнопки, а куда идти (в список склада такие заборы вообще
+                        не попадают — сюда приходят по прямой ссылке). */}
+                    {shipment.stock_transfer_id ? (
+                        <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                            Статусы ведёт перемещение —{' '}
+                            <Link
+                                href={`/p/${slug}/warehouse/transfers/${shipment.stock_transfer_id}`}
+                                style={{ color: 'var(--color-accent)', fontWeight: 500 }}
+                            >
+                                открыть карточку →
+                            </Link>
+                        </span>
+                    ) : (
                         <>
-                            <button className="btn btn-success" onClick={handleDeliver} disabled={actionLoading}>
-                                {actionLoading ? '...' : 'Доставлено'}
-                            </button>
-                            <button className="btn btn-danger" onClick={handleCancel} disabled={actionLoading}>
-                                Отменить
-                            </button>
+                            {shipment.status === 'DRAFT' && (
+                                <button className="btn btn-primary" onClick={handleShip} disabled={actionLoading}>
+                                    {actionLoading ? '...' : 'Отгрузить'}
+                                </button>
+                            )}
+                            {shipment.status === 'SHIPPED' && (
+                                <>
+                                    <button className="btn btn-success" onClick={handleDeliver} disabled={actionLoading}>
+                                        {actionLoading ? '...' : 'Доставлено'}
+                                    </button>
+                                    <button className="btn btn-danger" onClick={handleCancel} disabled={actionLoading}>
+                                        Отменить
+                                    </button>
+                                </>
+                            )}
                         </>
                     )}
                 </div>
@@ -181,6 +209,14 @@ export default function ShipmentDetailPage() {
                         <div style={{ gridColumn: '1 / -1' }}>
                             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Причина (брак)</div>
                             <div>{shipment.defect_reason}</div>
+                        </div>
+                    )}
+                    {shipment.stock_transfer_id && (
+                        <div>
+                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>Тип</div>
+                            <div style={{ fontWeight: 500 }} title="Забор внутреннего перемещения: сток он не двигает, цепочку ведёт перемещение">
+                                Забор переезда
+                            </div>
                         </div>
                     )}
                 </div>

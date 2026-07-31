@@ -4,6 +4,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import { mergeRowsByBarcode } from '@/lib/utils/transferRows';
+import { unitCountLabel, unitWeightLabel } from '@/lib/transfer';
 import type { Nomenclature, Warehouse } from '@/types/api';
 
 /* ─── Nomenclature lookup helper ──────────────────────────────────────────── */
@@ -46,6 +47,18 @@ export default function NewTransferPage() {
     const [formComment, setFormComment] = useState('');
     const [isDefect, setIsDefect] = useState(false);
     const [defectReason, setDefectReason] = useState('');
+    // Транспортная единица переезда — та же, что у заявки на сборку: флаг меняет
+    // только ЕДИНИЦУ измерения двух полей ниже и подписи (см. lib/transfer.ts).
+    //
+    // 🔴 Семантика пустого значения здесь НЕ такая, как в «Назначить машину».
+    // На создании (StockTransferCreate) shipped_as_boxes — обычный bool с
+    // дефолтом false: пустое = «паллеты». Трёхзначность («null = не трогай»)
+    // живёт только в TransferAssignVehicle, где есть что не трогать. Поэтому
+    // компонент формы назначения машины здесь намеренно НЕ переиспользован:
+    // он протащил бы сюда чужой контракт.
+    const [shippedAsBoxes, setShippedAsBoxes] = useState(false);
+    const [palletsCount, setPalletsCount] = useState<number | ''>('');
+    const [palletWeight, setPalletWeight] = useState<number | ''>('');
     const [rows, setRows] = useState<ItemRow[]>(() => Array.from({ length: 8 }, emptyItemRow));
     const [search, setSearch] = useState('');
     const [saving, setSaving] = useState(false);
@@ -178,6 +191,11 @@ export default function NewTransferPage() {
                 is_defect: isDefect || undefined,
                 defect_reason: isDefect && defectReason.trim() ? defectReason.trim() : undefined,
                 items,
+                // Оценка необязательна: пустые поля уходят как null («не задано»),
+                // а флаг единицы — всегда, у него на этом пути обычный дефолт.
+                pallets_count: palletsCount === '' ? null : Number(palletsCount),
+                pallet_weight_kg: palletWeight === '' ? null : Number(palletWeight),
+                shipped_as_boxes: shippedAsBoxes,
             });
             if (transfer?.id) {
                 // Auto-send (source deducted immediately, destination gets in_transit).
@@ -272,6 +290,56 @@ export default function NewTransferPage() {
                     <div className="form-group" style={{ margin: 0 }}>
                         <label className="form-label">Комментарий</label>
                         <input className="form-input" value={formComment} onChange={e => setFormComment(e.target.value)} placeholder="Примечание..." />
+                    </div>
+                </div>
+                {/* Транспортная единица — как у заявки на сборку: переключатель
+                    меняет только подписи и смысл двух соседних полей. Оценка
+                    необязательна — переезд можно завести и без неё, уточнив при
+                    назначении машины. */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginTop: 16 }}>
+                    <div className="form-group" style={{ margin: 0 }}>
+                        <label className="form-label">Транспортная единица</label>
+                        <div style={{ display: 'flex', gap: 0 }}>
+                            <button
+                                type="button"
+                                className={`btn btn-sm ${!shippedAsBoxes ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setShippedAsBoxes(false)}
+                                style={{ borderRadius: '8px 0 0 8px' }}
+                            >
+                                Паллеты
+                            </button>
+                            <button
+                                type="button"
+                                className={`btn btn-sm ${shippedAsBoxes ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setShippedAsBoxes(true)}
+                                style={{ borderRadius: '0 8px 8px 0' }}
+                            >
+                                Короба
+                            </button>
+                        </div>
+                    </div>
+                    <div className="form-group" style={{ margin: 0 }}>
+                        <label className="form-label">{unitCountLabel(shippedAsBoxes)}</label>
+                        <input
+                            className="form-input"
+                            type="number"
+                            min={0}
+                            value={palletsCount}
+                            onChange={e => setPalletsCount(e.target.value ? Number(e.target.value) : '')}
+                            placeholder={shippedAsBoxes ? '12' : '5'}
+                        />
+                    </div>
+                    <div className="form-group" style={{ margin: 0 }}>
+                        <label className="form-label">{unitWeightLabel(shippedAsBoxes)}, кг</label>
+                        <input
+                            className="form-input"
+                            type="number"
+                            min={0}
+                            step="0.1"
+                            value={palletWeight}
+                            onChange={e => setPalletWeight(e.target.value ? Number(e.target.value) : '')}
+                            placeholder={shippedAsBoxes ? '18' : '300'}
+                        />
                     </div>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 16 }}>
