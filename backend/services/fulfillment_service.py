@@ -5575,6 +5575,7 @@ def _build_match(
     products: list[dict],
     our_by_barcode: dict[str, int],
     nom_by_barcode: dict[str, tuple[int, str | None]],
+    extra_ff_by_barcode: dict[str, int] | None = None,
 ) -> dict:
     """Сверка состава ФФ-заявки с нашим документом (FfRequestMatch shape).
 
@@ -5584,6 +5585,10 @@ def _build_match(
     провайдера — приписки строк соседних заявок) — они видны в общей таблице
     состава (колонка «В нашей заявке» = 0). Согласовано с compute_doc_ff_mismatch.
     Позиции ФФ без barcode сверке не подлежат и в тоталы не входят.
+
+    extra_ff_by_barcode — состав «сестёр» мульти-связки {ШК: шт} (N заявок →
+    один документ): доливается к стороне ФФ, сверка идёт по СУММЕ группы —
+    иначе строки документа из парной заявки ложно краснеют «нет у ФФ».
     """
     ff_by_barcode: dict[str, int] = {}
     name_by_barcode: dict[str, str | None] = {}
@@ -5593,6 +5598,8 @@ def _build_match(
             continue
         ff_by_barcode[barcode] = ff_by_barcode.get(barcode, 0) + p["qty"]
         name_by_barcode.setdefault(barcode, p.get("name"))
+    for barcode, qty in (extra_ff_by_barcode or {}).items():
+        ff_by_barcode[barcode] = ff_by_barcode.get(barcode, 0) + qty
 
     mismatch_rows: list[tuple[int, str, dict]] = []
     for barcode in set(ff_by_barcode) | set(our_by_barcode):
@@ -6104,6 +6111,66 @@ async def get_ff_link_for_assembly(db: AsyncSession, project_id: int, assembly_r
     return {**links[0], "ff_links": links, "ff_mismatch": mismatch.get(assembly_request_id)}
 
 
+async def _load_inbound_siblings(
+    db: AsyncSession, project_id: int, req: FulfillmentRequest
+) -> list[FulfillmentRequest]:
+    """«Сёстры» приёмки по мульти-связке (N заявок migfull → один InboundReceipt).
+
+    Другие АКТИВНЫЕ (не archived/local_archived — тот же предикат, что в
+    compute_doc_ff_mismatch) заявки ФФ с тем же inbound_receipt_id, без текущей.
+    Машина у Натали раскладывается на «штучную + коробовую» PVB — деталка при
+    наличии сестёр строит сверку по СУММЕ составов всей группы.
+    """
+    if req.kind != FfRequestKind.INBOUND.value or not req.inbound_receipt_id:
+        return []
+    result = await db.execute(
+        select(FulfillmentRequest)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.inbound_receipt_id == req.inbound_receipt_id,
+            FulfillmentRequest.id != req.id,
+            FulfillmentRequest.archived == False,  # noqa: E712
+            FulfillmentRequest.local_archived == False,  # noqa: E712
+        )
+        .order_by(FulfillmentRequest.id)
+        .limit(50)
+    )
+    return list(result.scalars().all())
+
+
+async def _siblings_ff_extra(
+    db: AsyncSession,
+    project_id: int,
+    siblings: list[FulfillmentRequest],
+    base_guid_map: dict[str, tuple[str, int]],
+    warehouse_id: int,
+) -> dict[str, int] | None:
+    """Суммарный состав сестёр {ШК: шт россыпи} для групповой сверки деталки.
+
+    Короба сведены к штукам той же картой guid→(ШК, штук в коробе), что и у
+    текущей заявки (base_guid_map: зеркало + overrides + live-добор); сестра
+    с другого склада — своей картой из зеркала. None — состав хотя бы одной
+    сестры не разрезолвился в ШК: групповая сверка по ШК невозможна, деталка
+    остаётся в прежнем поведении «одна заявка vs весь документ».
+    """
+    extra: dict[str, int] = {}
+    for s in siblings:
+        guid_map = base_guid_map
+        if s.provider == "migfull" and s.warehouse_id != warehouse_id:
+            guids = {
+                p["guid"]
+                for p in _migfull_products_from_lines(_migfull_mismatch_lines(s), [], fact_field="delivery_qty")
+                if p["qty"] > 0
+            }
+            guid_map = await _migfull_guid_barcodes(db, project_id, s.warehouse_id, guids)
+        comp = _mirror_ff_composition(s, guid_map)
+        if comp is None:
+            return None
+        for bc, q in comp.items():
+            extra[bc] = extra.get(bc, 0) + q
+    return extra or None
+
+
 async def get_request_detail(
     db: AsyncSession,
     project_id: int,
@@ -6161,9 +6228,21 @@ async def get_request_detail(
         db, project_id, req, bool(assembly_map), bool(inbound_map), bool(transfer_map)
     )
 
+    # Мульти-связка (N заявок migfull → один InboundReceipt): «сёстры» группы.
+    # При их наличии сверка строится по СУММЕ составов всей группы — иначе
+    # строки документа из парной заявки ложно краснеют «нет у ФФ».
+    siblings = await _load_inbound_siblings(db, project_id, req)
+    sibling_rows = [{"id": s.id, "number": s.number, "kind": s.kind, "total_qty": s.total_qty} for s in siblings]
+    group_numbers = [req.number or req.external_id] + [s.number or s.external_id for s in siblings]
+
     if req.provider == "wmscelicom":
         wms_products, wms_fields, creator = _wms_detail_parts(req)
-        match_barcodes = {p["barcode"] or "" for p in wms_products} | set(our_by_barcode or {})
+        sib_extra = (
+            await _siblings_ff_extra(db, project_id, siblings, {}, warehouse_id)
+            if siblings and our_by_barcode is not None
+            else None
+        )
+        match_barcodes = {p["barcode"] or "" for p in wms_products} | set(our_by_barcode or {}) | set(sib_extra or {})
         nom_by_barcode = await _resolve_noms(db, project_id, match_barcodes)
         products = []
         for p in wms_products:
@@ -6200,7 +6279,13 @@ async def get_request_detail(
                 "products": products,
                 "stage_logs": [],
                 "fields": wms_fields,
-                "match": _build_match(products, our_by_barcode, nom_by_barcode) if our_by_barcode is not None else None,
+                "match": (
+                    _build_match(products, our_by_barcode, nom_by_barcode, extra_ff_by_barcode=sib_extra)
+                    if our_by_barcode is not None
+                    else None
+                ),
+                "sibling_requests": sibling_rows,
+                "mismatch_group_numbers": group_numbers if sib_extra is not None else None,
             }
         )
         return row
@@ -6270,7 +6355,14 @@ async def get_request_detail(
 
         # ШК только в карточке товара → guid→(ШК россыпи, штук в коробе) из зеркала
         # остатков. Короб сводится к россыпи: ШК россыпи для матча, qty × units_per_box.
+        # Сюда же — guid'ы сестёр мульти-связки того же склада: групповая сверка
+        # сводит их короба к штукам ТОЙ ЖЕ картой (включая overrides и live-добор).
         line_guids = {p["guid"] for p in mig_products}
+        for s in siblings:
+            if s.provider == "migfull" and s.warehouse_id == warehouse_id:
+                for p in _migfull_products_from_lines(_migfull_mismatch_lines(s), [], fact_field="delivery_qty"):
+                    if p["qty"] > 0:
+                        line_guids.add(p["guid"])
         guid_barcodes = await _migfull_guid_barcodes(db, project_id, warehouse_id, line_guids)
         # Ручной ШК для товаров с пустой карточкой (overlay поверх зеркала и пустой
         # карточки): короб (ITF14) сводим к россыпи по имени «короб N шт.», иначе ШК как есть.
@@ -6284,7 +6376,12 @@ async def get_request_detail(
             # Дотягиваем живой карточкой (commit — не держать транзакцию на HTTP).
             await db.commit()
             await _migfull_resolve_detail_barcodes(mig_client, line_guids, guid_barcodes)
-        match_barcodes = {bc for bc, _ in guid_barcodes.values()} | set(our_by_barcode or {})
+        sib_extra = (
+            await _siblings_ff_extra(db, project_id, siblings, guid_barcodes, warehouse_id)
+            if siblings and our_by_barcode is not None
+            else None
+        )
+        match_barcodes = {bc for bc, _ in guid_barcodes.values()} | set(our_by_barcode or {}) | set(sib_extra or {})
         nom_by_barcode = await _resolve_noms(db, project_id, match_barcodes)
         products = []
         for p in mig_products:
@@ -6324,7 +6421,13 @@ async def get_request_detail(
                 "products": products,
                 "stage_logs": [],
                 "fields": _migfull_detail_fields(req),
-                "match": _build_match(products, our_by_barcode, nom_by_barcode) if our_by_barcode is not None else None,
+                "match": (
+                    _build_match(products, our_by_barcode, nom_by_barcode, extra_ff_by_barcode=sib_extra)
+                    if our_by_barcode is not None
+                    else None
+                ),
+                "sibling_requests": sibling_rows,
+                "mismatch_group_numbers": group_numbers if sib_extra is not None else None,
             }
         )
         return row
@@ -6352,7 +6455,14 @@ async def get_request_detail(
         raise ValueError(f"skladbot.ru вернул ошибку сервера, попробуйте позже ({str(e)[:100]})") from e
 
     raw_products = detail.get("products") or []
-    match_barcodes = {str(p.get("barcode") or "").strip() for p in raw_products} | set(our_by_barcode or {})
+    sib_extra = (
+        await _siblings_ff_extra(db, project_id, siblings, {}, warehouse_id)
+        if siblings and our_by_barcode is not None
+        else None
+    )
+    match_barcodes = (
+        {str(p.get("barcode") or "").strip() for p in raw_products} | set(our_by_barcode or {}) | set(sib_extra or {})
+    )
     nom_by_barcode = await _resolve_noms(db, project_id, match_barcodes)
 
     products = []
@@ -6411,7 +6521,13 @@ async def get_request_detail(
             "products": products,
             "stage_logs": stage_logs,
             "fields": fields,
-            "match": _build_match(products, our_by_barcode, nom_by_barcode) if our_by_barcode is not None else None,
+            "match": (
+                _build_match(products, our_by_barcode, nom_by_barcode, extra_ff_by_barcode=sib_extra)
+                if our_by_barcode is not None
+                else None
+            ),
+            "sibling_requests": sibling_rows,
+            "mismatch_group_numbers": group_numbers if sib_extra is not None else None,
         }
     )
     return row

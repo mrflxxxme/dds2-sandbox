@@ -308,6 +308,20 @@ class FfMismatchDetail(BaseModel):
     extra_rows: list[FfMismatchDetailRow] = Field(default_factory=list)
 
 
+class FfSiblingRequest(BaseModel):
+    """«Сестра» заявки ФФ по мульти-связке (N заявок → один наш документ).
+
+    migfull раскладывает одну машину на несколько PVB (штучная + коробовая),
+    привязанных к одному InboundReceipt. Деталка показывает группу бейджами и
+    строит сверку по СУММЕ составов группы.
+    """
+
+    id: int
+    number: str | None = None
+    kind: str  # assembly | inbound | return | other
+    total_qty: int | None = None  # заявлено всего, шт (зеркало БД)
+
+
 class FfRequestStageLog(BaseModel):
     stage: str | None = None
     executor: str | None = None
@@ -338,6 +352,12 @@ class FfRequestDetail(FfRequestRow):
     fields: list[FfRequestFieldValue] = Field(default_factory=list)
     # Сверка состава со связанным нашим документом (None — связи нет)
     match: FfRequestMatch | None = None
+    # Мульти-связка: другие активные заявки ФФ, привязанные к тому же документу
+    # (без текущей). Пусто — заявка одиночная.
+    sibling_requests: list[FfSiblingRequest] = Field(default_factory=list)
+    # Сверка `match` построена по СУММЕ составов всей группы: номера всех заявок
+    # группы (включая текущую). None — сверка обычная (одна заявка vs документ).
+    mismatch_group_numbers: list[str] | None = None
 
 
 class FfLinkPayload(BaseModel):

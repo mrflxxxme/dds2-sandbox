@@ -1838,6 +1838,9 @@ async def test_request_detail_match_inbound(db_session, project, warehouse, conn
     assert row["match"]["matched"] is True
     assert row["match"]["our_total"] == 8
     assert row["products"][0]["our_qty"] == 8
+    # Одиночная заявка (без «сестёр» мульти-связки): сверка прежняя, не групповая
+    assert row["sibling_requests"] == []
+    assert row["mismatch_group_numbers"] is None
 
 
 # ─── ФФ-связь для нашей заявки на сборку ─────────────────────────────────────
@@ -4047,6 +4050,165 @@ async def test_migfull_guid_barcode_override_resolves_inbound_detail(
     await fulfillment_service.delete_guid_barcode(db_session, project.id, warehouse.id, p)
     row3 = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
     assert row3["products"][0]["nomenclature_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_migfull_inbound_detail_group_match_with_sibling(
+    db_session, project, warehouse, connected_mig_key, monkeypatch
+):
+    """Мульти-связка (2 PVB → один InboundReceipt): сверка деталки — по СУММЕ группы.
+
+    Машина раскладывается на «штучную + коробовую» PVB. Раньше деталка сверяла
+    ОДНУ заявку против ВСЕГО документа → строки из парной заявки ложно краснели
+    «нет у ФФ». Теперь: строка сестры (короб 3×20=60) покрыта группой и в
+    mismatches НЕ попадает; реальное расхождение по своей строке — остаётся.
+    Архивная заявка того же документа группу не раздувает.
+    """
+    bc_piece = f"BC-{_uid()}"  # штучная позиция — в текущей заявке
+    base_bc = f"20{_uid()[:6]}330578"  # россыпь коробовой позиции — в сестре
+    nom_p = await _make_nomenclature(db_session, project.id, bc_piece, article="ART-P")
+    nom_b = await _make_nomenclature(db_session, project.id, base_bc, article="ART-B")
+
+    p_piece, p_box = _mig_guid(130), _mig_guid(133)
+    sub_cur, sub_sib, sub_arch = _mig_guid(131), _mig_guid(132), _mig_guid(134)
+
+    # Зеркало остатков: guid→ШК; у коробового товара — карта короб→россыпь ×20
+    db_session.add_all(
+        [
+            FulfillmentStock(
+                project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+                barcode=bc_piece, external_product_id=p_piece, name="штучный", qty_good=1,
+            ),
+            FulfillmentStock(
+                project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+                barcode="12043160330575", base_barcode=base_bc, units_per_box=20,
+                external_product_id=p_box, name="X короб 20 шт.", qty_good=5,
+            ),
+        ]
+    )
+    receipt = InboundReceipt(project_id=project.id, warehouse_id=warehouse.id, number=f"IN-{_uid()[:6]}")
+    db_session.add(receipt)
+    await db_session.commit()
+    await db_session.refresh(receipt)
+    db_session.add_all(
+        [
+            InboundReceiptItem(
+                project_id=project.id, receipt_id=receipt.id, nomenclature_id=nom_p.id,
+                barcode=bc_piece, expected_qty=12,
+            ),
+            InboundReceiptItem(
+                project_id=project.id, receipt_id=receipt.id, nomenclature_id=nom_b.id,
+                barcode=base_bc, expected_qty=60,
+            ),
+        ]
+    )
+    cur = FulfillmentRequest(
+        project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+        external_id=sub_cur, number="PVB-100", kind="inbound", status="processing",
+        inbound_receipt_id=receipt.id, raw={},
+    )
+    sib = FulfillmentRequest(
+        project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+        external_id=sub_sib, number="PVB-101", kind="inbound", status="processing",
+        inbound_receipt_id=receipt.id, total_qty=3,
+        raw={"incoming_lines": [_mig_line(p_box, 3, name="X короб 20 шт.")]},
+    )
+    arch = FulfillmentRequest(
+        project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+        external_id=sub_arch, number="PVB-102", kind="inbound", status="canceled",
+        archived=True, inbound_receipt_id=receipt.id,
+        raw={"incoming_lines": [_mig_line(p_box, 99, name="X короб 20 шт.")]},
+    )
+    db_session.add_all([cur, sib, arch])
+    await db_session.commit()
+    await db_session.refresh(cur)
+    await db_session.refresh(sib)
+
+    # Живые lines — только для текущей заявки (10 шт при наших 12 — реальный дифф)
+    _mock_mig_fetches(
+        monkeypatch,
+        submission_lines={(sub_cur, "incoming"): [_mig_line(p_piece, 10, name="штучный")]},
+    )
+
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, cur.id)
+    assert row is not None
+    assert row["sibling_requests"] == [{"id": sib.id, "number": "PVB-101", "kind": "inbound", "total_qty": 3}]
+    assert row["mismatch_group_numbers"] == ["PVB-100", "PVB-101"]
+
+    match = row["match"]
+    assert match is not None
+    # «У ФФ» — сумма группы в штуках: 10 (текущая) + 3×20 (сестра)
+    assert match["ff_total"] == 70 and match["our_total"] == 72
+    assert match["ff_positions"] == 2
+    by_bc = {m["barcode"]: m for m in match["mismatches"]}
+    # Строка сестры НЕ краснеет: base_bc покрыт группой (60 == 60)
+    assert base_bc not in by_bc
+    # Реальное расхождение по своей строке остаётся: 10 у ФФ vs 12 у нас
+    assert set(by_bc) == {bc_piece}
+    assert by_bc[bc_piece]["ff_qty"] == 10 and by_bc[bc_piece]["our_qty"] == 12
+    # Состав в таблице — только своя заявка (сестра не подмешивается в products)
+    assert [p["barcode"] for p in row["products"]] == [bc_piece]
+
+
+@pytest.mark.asyncio
+async def test_migfull_inbound_detail_group_covers_doc_matched(
+    db_session, project, warehouse, connected_mig_key, monkeypatch
+):
+    """Группа полностью покрывает документ → matched=True (зелёная плашка)."""
+    bc_a, bc_b = f"BC-{_uid()}", f"BC-{_uid()}"
+    nom_a = await _make_nomenclature(db_session, project.id, bc_a, article="ART-GA")
+    nom_b = await _make_nomenclature(db_session, project.id, bc_b, article="ART-GB")
+    p_a, p_b = _mig_guid(140), _mig_guid(141)
+    sub_cur, sub_sib = _mig_guid(142), _mig_guid(143)
+    db_session.add_all(
+        [
+            FulfillmentStock(
+                project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+                barcode=bc_a, external_product_id=p_a, name="A", qty_good=1,
+            ),
+            FulfillmentStock(
+                project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+                barcode=bc_b, external_product_id=p_b, name="B", qty_good=1,
+            ),
+        ]
+    )
+    receipt = InboundReceipt(project_id=project.id, warehouse_id=warehouse.id, number=f"IN-{_uid()[:6]}")
+    db_session.add(receipt)
+    await db_session.commit()
+    await db_session.refresh(receipt)
+    db_session.add_all(
+        [
+            InboundReceiptItem(
+                project_id=project.id, receipt_id=receipt.id, nomenclature_id=nom_a.id,
+                barcode=bc_a, expected_qty=7,
+            ),
+            InboundReceiptItem(
+                project_id=project.id, receipt_id=receipt.id, nomenclature_id=nom_b.id,
+                barcode=bc_b, expected_qty=4,
+            ),
+        ]
+    )
+    cur = FulfillmentRequest(
+        project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+        external_id=sub_cur, number="PVB-200", kind="inbound", status="processing",
+        inbound_receipt_id=receipt.id, raw={},
+    )
+    sib = FulfillmentRequest(
+        project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+        external_id=sub_sib, number="PVB-201", kind="inbound", status="processing",
+        inbound_receipt_id=receipt.id, raw={"incoming_lines": [_mig_line(p_b, 4, name="B")]},
+    )
+    db_session.add_all([cur, sib])
+    await db_session.commit()
+    await db_session.refresh(cur)
+
+    _mock_mig_fetches(monkeypatch, submission_lines={(sub_cur, "incoming"): [_mig_line(p_a, 7, name="A")]})
+
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, cur.id)
+    assert row["match"]["matched"] is True
+    assert row["match"]["mismatches"] == []
+    assert row["match"]["ff_total"] == 11 and row["match"]["our_total"] == 11
+    assert row["mismatch_group_numbers"] == ["PVB-200", "PVB-201"]
 
 
 @pytest.mark.asyncio

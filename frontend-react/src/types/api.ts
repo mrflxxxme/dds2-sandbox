@@ -6492,6 +6492,16 @@ export interface FfRequestFieldValue {
   value: string | null;
 }
 
+/** «Сестра» заявки ФФ по мульти-связке (N заявок → один наш документ) */
+export interface FfSiblingRequest {
+  id: number;
+  number: string | null;
+  /** assembly | inbound | return | other */
+  kind: string;
+  /** заявлено всего, шт (зеркало БД) */
+  total_qty: number | null;
+}
+
 /** Деталка заявки ФФ: шапка списочной строки + живой состав от провайдера */
 export interface FfRequestDetail extends FfRequestRow {
   comment: string | null;
@@ -6506,6 +6516,10 @@ export interface FfRequestDetail extends FfRequestRow {
   fields: FfRequestFieldValue[];
   /** сверка состава со связанным нашим документом; null — связи нет */
   match: FfRequestMatch | null;
+  /** мульти-связка: другие активные заявки ФФ того же документа (без текущей) */
+  sibling_requests?: FfSiblingRequest[];
+  /** сверка построена по СУММЕ группы: номера всех заявок (включая текущую); null — обычная */
+  mismatch_group_numbers?: string[] | null;
 }
 
 /* ─── Сводная страница «Заявки ФФ» (все склады с интеграцией) ─── */
