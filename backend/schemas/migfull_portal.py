@@ -108,3 +108,45 @@ class MigfullSendResult(BaseModel):
     shipment_number: str | None = None
     message: str | None = None
     order_id: int | None = None  # id нашей audit-записи MigfullShipmentOrder
+
+
+# ─── Поставка (приёмка) на склад Натали из нашей приёмки машины ──────────────
+# Источник в DDS — InboundReceipt (приёмка машины V-… на склад «Натали»).
+# На портале это зеркальный ресурс /app/submissions (в read-API — submissions,
+# kind=inbound в зеркале FulfillmentRequest).
+
+
+class MigfullInboundPrefill(BaseModel):
+    """Предзаполнение шапки поставки из приёмки/машины — пользователь правит в модалке."""
+
+    number: str | None = None  # наш номер для оператора (V-… машины / № приёмки)
+    submission_date: date | None = None  # плановая дата поставки
+    notes: str | None = None
+    vehicle_order_no: str | None = None  # инфо: машина-источник (V-…)
+    receipt_number: str | None = None  # инфо: наша приёмка (IN-…)
+
+
+class MigfullInboundDraftResponse(BaseModel):
+    """Данные для confirm-модалки: предзаполнение + превью описи (позиции/штуки/короба)."""
+
+    eligible: bool
+    already_sent: bool = False
+    sent_guid: str | None = None
+    sent_number: str | None = None
+    prefill: MigfullInboundPrefill
+    opis_lines: list[MigfullOpisLine] = Field(default_factory=list)
+    total_boxes: int = 0
+    total_pieces: int = 0
+    warnings: list[str] = Field(default_factory=list)
+
+
+class MigfullInboundSendRequest(BaseModel):
+    """Поля поставки, подтверждённые пользователем в модалке."""
+
+    number: str | None = Field(default=None, max_length=100)
+    submission_date: date | None = None
+    notes: str | None = Field(default=None, max_length=1000)
+    # Подтверждение повторной отправки: если у приёмки уже есть SENT-поставка или
+    # связанная FulfillmentRequest(migfull, kind=inbound), без флага send вернёт 409 —
+    # создание на портале НЕОБРАТИМО (нет delete/cancel).
+    force_resend: bool = False

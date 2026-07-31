@@ -425,6 +425,22 @@ async def _compute_opis_lines(
         qty_by_bc[bc] = qty_by_bc.get(bc, 0) + int(it.quantity or 0)
         if it.nomenclature_id:
             nom_by_bc.setdefault(bc, it.nomenclature_id)
+    return await compute_opis_lines_from_qty(db, project_id, warehouse_id, qty_by_bc, nom_by_bc)
+
+
+async def compute_opis_lines_from_qty(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    qty_by_bc: dict[str, int],
+    nom_by_bc: dict[str, int],
+) -> tuple[list[MigfullOpisLine], list[str]]:
+    """Штуки по ШК → строки описи (короб/россыпь) через зеркало остатков ФФ.
+
+    Общее ядро для обоих направлений: заявка на отгрузку (состав сборки) и
+    поставка/приёмка (состав нашей InboundReceipt) — источник qty разный,
+    сопоставление короб→россыпь и фолбэк имени из номенклатуры одинаковые.
+    """
     qty_by_bc = {bc: q for bc, q in qty_by_bc.items() if q > 0}
     if not qty_by_bc:
         return [], []
