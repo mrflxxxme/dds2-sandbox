@@ -29,8 +29,12 @@ import type {
     FulfillmentStatus,
     MigfullInboundDraft,
     MigfullInboundSendRequest,
+    MigfullInboundSource,
     MigfullSendResult,
 } from '@/types/api';
+
+/** Сегмент пути поставки у Натали по источнику состава (`/inbound` | `/transfer`). */
+const inboundSeg = (source: MigfullInboundSource) => (source.kind === 'transfer' ? 'transfer' : 'inbound');
 
 export function addFulfillmentMethods(api: ApiClient) {
     return {
@@ -162,18 +166,21 @@ export function addFulfillmentMethods(api: ApiClient) {
             return api.request<FfBulkArchiveResult>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/bulk-archive`, payload);
         },
 
-        // ─── Поставка (приёмка) у Натали из нашей приёмки машины (migfull-портал) ──
-        migfullInboundDraft(receiptId: number) {
-            return api.request<MigfullInboundDraft>('GET', `/api/v1/migfull-portal/inbound/${receiptId}/draft`);
+        // ─── Поставка (приёмка) у Натали (migfull-портал) ──────────────────────
+        // Два источника состава: наша приёмка машины (`receipt`) и наше перемещение
+        // на склад Натали (`transfer`). Контракт запроса/ответа общий — различается
+        // только сегмент пути, поэтому методы принимают источник целиком.
+        migfullInboundDraft(source: MigfullInboundSource) {
+            return api.request<MigfullInboundDraft>('GET', `/api/v1/migfull-portal/${inboundSeg(source)}/${source.id}/draft`);
         },
         /**
          * РЕАЛЬНОЕ создание поставки (приёмки) в портале ФФ «Натали» — НЕОБРАТИМО.
          * Повторная отправка без force_resend → HTTP 409; тегируем `.code='conflict'`
          * (как migfullPortalSend), чтобы модалка показала подтверждение.
          */
-        async migfullInboundSend(receiptId: number, body: MigfullInboundSendRequest) {
+        async migfullInboundSend(source: MigfullInboundSource, body: MigfullInboundSendRequest) {
             try {
-                return await api.request<MigfullSendResult>('POST', `/api/v1/migfull-portal/inbound/${receiptId}/send`, body);
+                return await api.request<MigfullSendResult>('POST', `/api/v1/migfull-portal/${inboundSeg(source)}/${source.id}/send`, body);
             } catch (e) {
                 const msg = e instanceof Error ? e.message : '';
                 if (!body.force_resend && /уже\s+(отправ|созда|есть)|already|409|конфликт/i.test(msg)) {

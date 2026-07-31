@@ -33,8 +33,9 @@ class MigfullShipmentOrder(Base, TimestampMixin):
     """Лог создания документа в migfull-портале (одна попытка = одна строка).
 
     Источник — ровно ОДИН из FK: ``assembly_request_id`` (заявка на отгрузку из
-    сборки) либо ``inbound_receipt_id`` (поставка/приёмка на склад ФФ из нашей
-    приёмки машины V-…). Второй FK — NULL.
+    сборки), ``inbound_receipt_id`` (поставка/приёмка на склад ФФ из нашей
+    приёмки машины V-…) либо ``stock_transfer_id`` (та же поставка, но состав
+    берётся из нашего ПЕРЕМЕЩЕНИЯ TR-… на склад ФФ). Остальные FK — NULL.
     """
 
     __tablename__ = "migfull_shipment_orders"
@@ -47,6 +48,11 @@ class MigfullShipmentOrder(Base, TimestampMixin):
     # Поставка (приёмка) на склад ФФ: наша приёмка машины — источник документа
     inbound_receipt_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("inbound_receipts.id", ondelete="SET NULL"), nullable=True
+    )
+    # Поставка (приёмка) на склад ФФ из ПЕРЕМЕЩЕНИЯ: наш склад → Натали (TR-…).
+    # Наша приёмка при этом НЕ создаётся — приход у ФФ заводит эта поставка.
+    stock_transfer_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("stock_transfers.id", ondelete="SET NULL"), nullable=True
     )
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     shipment_guid: Mapped[str | None] = mapped_column(String(64), nullable=True)  # guid заявки на портале
@@ -62,4 +68,5 @@ class MigfullShipmentOrder(Base, TimestampMixin):
         Index("ix_migfull_shipment_orders_project_id", "project_id"),
         Index("ix_migfull_shipment_orders_assembly_request_id", "assembly_request_id"),
         Index("ix_migfull_shipment_orders_inbound_receipt_id", "inbound_receipt_id"),
+        Index("ix_migfull_shipment_orders_stock_transfer_id", "stock_transfer_id"),
     )

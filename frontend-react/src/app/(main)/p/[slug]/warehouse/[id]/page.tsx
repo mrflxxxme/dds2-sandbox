@@ -885,8 +885,8 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
             )}
             {natPushFor && natPushFor.receipt_id != null && (
                 <MigfullInboundModal
-                    receiptId={natPushFor.receipt_id}
-                    vehicleOrderNo={natPushFor.order_no}
+                    source={{ kind: 'receipt', id: natPushFor.receipt_id }}
+                    sourceLabel={`Машина ${natPushFor.order_no}`}
                     onClose={() => setNatPushFor(null)}
                     onSuccess={res => {
                         setToast(`Поставка у Натали создана: ${res.shipment_number || res.shipment_guid || '—'}`);

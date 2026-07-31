@@ -13,6 +13,11 @@
  *    нет. Все эти блоки обязаны переживать отсутствие данных.
  *  • Оплата забора (OUT-xx) в схему перемещения ещё не приехала — блок
  *    показывает то, что есть (стоимость забора), и честно говорит про остальное.
+ *  • «Создать поставку у Натали» — тот же контур, что на карточке машины, но
+ *    состав берётся из строк ЭТОГО переезда: своей приёмки перемещение не
+ *    создаёт, приход у ФФ заводит именно созданная поставка (PVB-…). Кнопка
+ *    живёт только когда получатель — склад migfull-портала и переезд ещё не
+ *    принят; бэкенд повторно проверяет и то, и другое.
  */
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -22,6 +27,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import { Toast, AssignVehicleModal } from '@/components';
 import type { AssignVehicleValues } from '@/components';
+import MigfullInboundModal from '../../[id]/MigfullInboundModal';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
@@ -55,10 +61,19 @@ export default function TransferDetailPage() {
     // Заявки ФФ, привязанные к этому переезду (slot stock_transfer_id).
     const [ffLinks, setFfLinks] = useState<{ row: FfRequestRow; warehouseId: number }[]>([]);
     const [ffLoading, setFfLoading] = useState(false);
+    // Явный триггер перечитывания связок: эффект ниже намеренно НЕ зависит от
+    // объекта переезда, поэтому после создания поставки у Натали (новая PVB со
+    // stock_transfer_id) обновить блок можно только так.
+    const [ffReloadKey, setFfReloadKey] = useState(0);
 
     const [showVehicleModal, setShowVehicleModal] = useState(false);
     const [assigning, setAssigning] = useState(false);
     const [assignError, setAssignError] = useState('');
+
+    // Склад migfull-портала: кнопка «Создать поставку у Натали» только когда
+    // получатель переезда — именно он. Портал не подключён → кнопки просто нет.
+    const [migfullWhId, setMigfullWhId] = useState<number | null>(null);
+    const [showNatPush, setShowNatPush] = useState(false);
 
     // ─── Load ─────────────────────────────────────────────────────────────
 
@@ -81,6 +96,11 @@ export default function TransferDetailPage() {
         // Справочники — фоном: без них страница живёт (покажет id вместо имени).
         api.getWarehouses().then(setWarehouses).catch(() => {});
         api.getNomenclature().then(setNomenclature).catch(() => {});
+        let cancelled = false;
+        api.migfullPortalConfig()
+            .then(c => { if (!cancelled) setMigfullWhId(c.configured ? c.warehouse_id : null); })
+            .catch(() => { /* портал не подключён — кнопки просто нет */ });
+        return () => { cancelled = true; };
     }, []);
 
     // ФФ-связки: в схеме перемещения их нет, поэтому спрашиваем оба склада
@@ -112,7 +132,7 @@ export default function TransferDetailPage() {
             })
             .finally(() => { if (!cancelled) setFfLoading(false); });
         return () => { cancelled = true; };
-    }, [transferId, fromWhId, toWhId]);
+    }, [transferId, fromWhId, toWhId, ffReloadKey]);
 
     const warehouseById = useMemo(() => {
         const map = new Map<number, Warehouse>();
@@ -218,6 +238,14 @@ export default function TransferDetailPage() {
     // контрагента для тумблера «логистику оказывает склад»).
     const fromWhName = transfer.from_warehouse_name || fromWh?.name || null;
     const canAssignVehicle = canEdit() && transfer.status === 'DRAFT';
+    // Поставку у Натали заводим, пока переезд не принят (после COMPLETED товар уже
+    // оприходован — бэк вернёт 400). Черновик тоже годится: поставку у ФФ обычно
+    // создают заранее, до фактической отправки машины.
+    const canPushToNatali = canEdit()
+        && migfullWhId != null
+        && transfer.to_warehouse_id === migfullWhId
+        && transfer.status !== 'COMPLETED'
+        && (transfer.items?.length ?? 0) > 0;
 
     const itemColumns: Column[] = [
         {
@@ -292,6 +320,15 @@ export default function TransferDetailPage() {
                             title="Оприходовать товар на складе-получателе"
                         >
                             Принять
+                        </button>
+                    )}
+                    {canPushToNatali && (
+                        <button
+                            className="btn btn-secondary"
+                            onClick={() => setShowNatPush(true)}
+                            title="Создать поставку (приёмку) в WMS Натали из состава этого перемещения"
+                        >
+                            Создать поставку у Натали
                         </button>
                     )}
                 </div>
@@ -525,6 +562,24 @@ export default function TransferDetailPage() {
                     error={assignError}
                     onSubmit={handleAssign}
                     onClose={() => { setShowVehicleModal(false); setAssignError(''); }}
+                />
+            )}
+
+            {showNatPush && (
+                <MigfullInboundModal
+                    source={{ kind: 'transfer', id: transfer.id }}
+                    sourceLabel={`Перемещение ${transfer.number}`}
+                    onClose={() => setShowNatPush(false)}
+                    onSuccess={res => {
+                        setShowNatPush(false);
+                        setToast({
+                            message: `Поставка у Натали создана: ${res.shipment_number || res.shipment_guid || '—'}`,
+                            type: 'success',
+                        });
+                        // PVB уже связана с переездом (stock_transfer_id) — перечитываем
+                        // блок ФФ-связок, чтобы она появилась без перезагрузки страницы.
+                        setFfReloadKey(k => k + 1);
+                    }}
                 />
             )}
         </div>

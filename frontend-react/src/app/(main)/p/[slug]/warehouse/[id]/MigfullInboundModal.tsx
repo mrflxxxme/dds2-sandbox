@@ -7,17 +7,22 @@ import type {
     MigfullInboundDraft,
     MigfullInboundItem,
     MigfullInboundSendRequest,
+    MigfullInboundSource,
     MigfullPackingLine,
     MigfullSendResult,
 } from '@/types/api';
 
 /**
- * Confirm-модалка «Создать поставку у Натали»: РЕДАКТИРУЕМЫЙ состав нашей
- * приёмки машины (per-строка: коробом/россыпью + шт в коробе + отправляемое
- * кол-во ≤ состава приёмки, prefill по цепочке кратность Натали → наша
+ * Confirm-модалка «Создать поставку у Натали»: РЕДАКТИРУЕМЫЙ состав нашего
+ * документа-источника (per-строка: коробом/россыпью + шт в коробе +
+ * отправляемое кол-во ≤ состава, prefill по цепочке кратность Натали → наша
  * кратность → россыпь) → РЕАЛЬНОЕ создание поставки (приёмки) в портале ФФ
  * «Натали» (migfull). Создание НЕОБРАТИМО — портал не даёт удалить/отменить
  * документ, повтор требует подтверждения.
+ *
+ * Источников состава ДВА (проп `source`) и модалка между ними не различается,
+ * кроме подписей: приёмка машины V-… (`receipt`) и перемещение на склад Натали
+ * TR-… (`transfer`; своей приёмки не создаёт — приход заводит эта поставка).
  *
  * Массовое редактирование — отдельная вкладка модалки (как «наполнение машины»
  * в поставках Китая): грид нумерованных строк [ШК → упаковка → шт в коробе →
@@ -69,6 +74,26 @@ interface BulkRow {
 
 const emptyBulkRow = (): BulkRow => ({ barcode: '', pack: '', units: '', qty: '' });
 
+/**
+ * Подписи документа-источника во всех падежах, которые нужны текстам модалки.
+ * Одна карта вместо россыпи тернаров — зеркало бэковых `_NOT_NATALI` /
+ * `_EMPTY_COMPOSITION` / `_ALREADY_SENT` (словари по `SourceKind`).
+ */
+const SOURCE_WORDS: Record<MigfullInboundSource['kind'], {
+    gen: string;   // родительный: «нет в составе …»
+    prep: string;  // предложный: «в … нет позиций»
+    dem: string;   // указательный: «Поставка для … уже есть»
+    wh: string;    // подпись склада в блоке !eligible
+}> = {
+    receipt: {
+        gen: 'приёмки', prep: 'приёмке', dem: 'этой приёмки', wh: 'Склад приёмки',
+    },
+    transfer: {
+        gen: 'перемещения', prep: 'перемещении', dem: 'этого перемещения',
+        wh: 'Склад-получатель перемещения',
+    },
+};
+
 const BULK_MIN_ROWS = 5;
 
 /** Инвариант грида: минимум BULK_MIN_ROWS строк + последняя строка всегда пустая. */
@@ -111,16 +136,20 @@ const buildPackPatch = (
 };
 
 interface Props {
-    /** id нашей приёмки машины (InboundReceipt) — источник поставки */
-    receiptId: number;
-    /** номер машины (V-…) для заголовка */
-    vehicleOrderNo: string;
+    /**
+     * Документ DDS, дающий состав поставки: приёмка машины (`receipt`) либо
+     * перемещение на склад Натали (`transfer`). Модалка ниже про источник не
+     * знает — вся разница в URL (её держит api.migfullInbound*).
+     */
+    source: MigfullInboundSource;
+    /** подпись источника в заголовке и имени выгрузки («Машина V-…» / «Перемещение TR-…») */
+    sourceLabel: string;
     onClose: () => void;
     /** поставка создана (res.ok): родитель показывает тост и перезагружает списки */
     onSuccess: (res: MigfullSendResult) => void;
 }
 
-export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose, onSuccess }: Props) {
+export default function MigfullInboundModal({ source, sourceLabel, onClose, onSuccess }: Props) {
     const [draft, setDraft] = useState<MigfullInboundDraft | null>(null);
     const [loadingDraft, setLoadingDraft] = useState(true);
     const [draftError, setDraftError] = useState('');
@@ -156,12 +185,18 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
     const [submitError, setSubmitError] = useState('');
     const [result, setResult] = useState<MigfullSendResult | null>(null);
 
+    // Источник разбираем на примитивы: пропом приходит объектный литерал, и
+    // зависимость от него самого пересоздавала бы loadDraft на каждый рендер
+    // родителя (бесконечная перезагрузка draft'а).
+    const { kind: sourceKind, id: sourceId } = source;
+    const w = SOURCE_WORDS[sourceKind];
+
     // ─── Загрузка draft (маунт + кнопка «Повторить»). StrictMode-safe. ──────────
     const loadDraft = useCallback(() => {
         setLoadingDraft(true);
         setDraftError('');
         const controller = new AbortController();
-        api.migfullInboundDraft(receiptId).then(d => {
+        api.migfullInboundDraft({ kind: sourceKind, id: sourceId }).then(d => {
             if (controller.signal.aborted) return;
             setDraft(d);
             setNumber(d.prefill.number ?? '');
@@ -189,7 +224,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
             if (!controller.signal.aborted) setLoadingDraft(false);
         });
         return () => controller.abort();
-    }, [receiptId]);
+    }, [sourceKind, sourceId]);
 
     useEffect(() => loadDraft(), [loadDraft]);
 
@@ -362,7 +397,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                     'ШК короба': r.boxMode ? (it.box_barcode ?? '') : '',
                 };
             }),
-            `natali-postavka-${vehicleOrderNo}`,
+            `natali-postavka-${number.trim() || draft?.prefill.number || sourceLabel}`,
         );
     };
 
@@ -445,10 +480,10 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
             if (!c.valid || c.it == null || c.boxMode == null) {
                 kept.push(row);
                 const no = idx + 1;
-                if (c.notFound) errors.push(`стр. ${no}: ШК «${bc}» не найден в составе приёмки`);
+                if (c.notFound) errors.push(`стр. ${no}: ШК «${bc}» не найден в составе ${w.gen}`);
                 else if (c.packInvalid) errors.push(`стр. ${no} (${bc}): упаковка «${row.pack}» не распознана — ожидается «короб»/«россыпь» (или «к»/«р»)`);
                 else if (c.unitsInvalid) errors.push(`стр. ${no} (${bc}): шт в коробе «${row.units}» — ожидается целое ≥ 2`);
-                else if (c.qtyInvalid) errors.push(`стр. ${no} (${bc}): кол-во «${row.qty}» — не число или больше состава приёмки (${formatNumber(c.it?.qty ?? 0, 0)})`);
+                else if (c.qtyInvalid) errors.push(`стр. ${no} (${bc}): кол-во «${row.qty}» — не число или больше состава ${w.gen} (${formatNumber(c.it?.qty ?? 0, 0)})`);
                 return;
             }
             // Дубли ШК в гриде применяются каскадом: patch предыдущей строки — база следующей.
@@ -499,7 +534,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
         setSubmitting(true);
         setSubmitError('');
         try {
-            const res = await api.migfullInboundSend(receiptId, body);
+            const res = await api.migfullInboundSend({ kind: sourceKind, id: sourceId }, body);
             if (res.ok) {
                 setResult(res);
                 onSuccess(res);
@@ -510,7 +545,10 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
             // 409 от бэка (повторная отправка без force_resend) → подтверждение и повтор.
             if (e && typeof e === 'object' && (e as { code?: string }).code === 'conflict') {
                 setConfirmResend(true);
-                setSubmitError('Поставка для этой приёмки уже есть у ФФ. Подтвердите повторную отправку и нажмите «Создать поставку» ещё раз.');
+                setSubmitError(
+                    `Поставка для ${w.dem} уже есть у ФФ. `
+                    + 'Подтвердите повторную отправку и нажмите «Создать поставку» ещё раз.',
+                );
             } else {
                 setSubmitError(e instanceof Error ? e.message : 'Ошибка отправки');
             }
@@ -543,7 +581,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                     <div>
                         <h2 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Создать поставку у Натали</h2>
                         <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 2 }}>
-                            Машина {vehicleOrderNo}
+                            {sourceLabel}
                             {draft?.prefill.receipt_number ? ` · приёмка ${draft.prefill.receipt_number}` : ''}
                         </div>
                     </div>
@@ -580,7 +618,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
 
                     {!loadingDraft && !draftError && draft && !draft.eligible && (
                         <div style={{ padding: 16, borderRadius: 8, background: 'rgba(245,158,11,0.1)', color: 'var(--color-warning)' }}>
-                            Склад приёмки не совпадает со складом интеграции ФФ Натали — поставку создать нельзя.
+                            {w.wh} не совпадает со складом интеграции ФФ Натали — поставку создать нельзя.
                         </div>
                     )}
 
@@ -600,7 +638,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                             {draft.already_sent && (
                                 <div style={{ padding: '12px 16px', borderRadius: 8, background: 'rgba(245,158,11,0.12)', color: 'var(--color-warning)', marginBottom: 16, fontSize: 14 }}>
                                     <div style={{ fontWeight: 600 }}>
-                                        Поставка для этой приёмки уже есть{draft.sent_number ? ` (${draft.sent_number})` : ''}.
+                                        Поставка для {w.dem} уже есть{draft.sent_number ? ` (${draft.sent_number})` : ''}.
                                     </div>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, cursor: 'pointer' }}>
                                         <input
@@ -890,7 +928,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
 
                             {!hasItems && (
                                 <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 14 }}>
-                                    В приёмке нет позиций — поставку создать нельзя
+                                    В {w.prep} нет позиций — поставку создать нельзя
                                 </div>
                             )}
                             {hasItems && tab === 'compose' && (
@@ -919,7 +957,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                 </th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }}>ШК</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }}>Наименование</th>
-                                                <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }} title="Отправляемое количество (не больше состава приёмки; 0 — строка не едет)">Кол-во</th>
+                                                <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }} title={`Отправляемое количество (не больше состава ${w.gen}; 0 — строка не едет)`}>Кол-во</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }}>Упаковка</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }} title="Штук в коробе">Шт в коробе</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }} title="Коробов (остаток едет россыпью)">Коробов</th>
@@ -1003,7 +1041,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                                         ? { qty: v, boxes: maxBoxesStr(n, r.units) }
                                                                         : { qty: v });
                                                                 }}
-                                                                title={`Отправляемое количество (из ${formatNumber(it.qty, 0)} в приёмке; 0 — строка не едет)`}
+                                                                title={`Отправляемое количество (из ${formatNumber(it.qty, 0)} в ${w.prep}; 0 — строка не едет)`}
                                                                 style={{
                                                                     width: 62, padding: '3px 6px', borderRadius: 8, fontSize: 13,
                                                                     textAlign: 'right',
@@ -1134,7 +1172,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                     <th style={{ padding: '8px 10px', width: 36, textAlign: 'center', color: 'var(--color-text-muted)' }}>#</th>
                                                     <th style={{ padding: '8px 10px', fontWeight: 600, minWidth: 170 }}>ШК</th>
                                                     <th style={{ padding: '8px 10px', fontWeight: 600 }}>Наименование</th>
-                                                    <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', width: 90 }} title="Состав приёмки (максимум для «кол-во»)">Доступно</th>
+                                                    <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right', width: 90 }} title={`Состав ${w.gen} (максимум для «кол-во»)`}>Доступно</th>
                                                     <th style={{ padding: '8px 10px', fontWeight: 600, width: 130 }} title="«короб» / «россыпь» (или «к» / «р»)">Упаковка</th>
                                                     <th style={{ padding: '8px 10px', fontWeight: 600, width: 110 }} title="Штук в коробе (опционально — текущее / prefill-кратность)">Шт в коробе</th>
                                                     <th style={{ padding: '8px 10px', fontWeight: 600, width: 110 }} title="Отправляемое кол-во (опционально — текущее)">Кол-во</th>
@@ -1175,7 +1213,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                             </td>
                                                             <td style={{ padding: '6px 10px', fontSize: 12, overflowWrap: 'break-word' }}>
                                                                 {c.notFound ? (
-                                                                    <span style={{ color: 'var(--color-danger)' }}>ШК не найден в составе приёмки</span>
+                                                                    <span style={{ color: 'var(--color-danger)' }}>ШК не найден в составе {w.gen}</span>
                                                                 ) : c.it ? (
                                                                     <>
                                                                         {c.it.name || '—'}

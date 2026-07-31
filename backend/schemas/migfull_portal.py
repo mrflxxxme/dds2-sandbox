@@ -110,10 +110,12 @@ class MigfullSendResult(BaseModel):
     order_id: int | None = None  # id нашей audit-записи MigfullShipmentOrder
 
 
-# ─── Поставка (приёмка) на склад Натали из нашей приёмки машины ──────────────
-# Источник в DDS — InboundReceipt (приёмка машины V-… на склад «Натали»).
+# ─── Поставка (приёмка) на склад Натали ──────────────────────────────────────
+# Источник в DDS — ОДИН ИЗ ДВУХ: InboundReceipt (приёмка машины V-… на склад
+# «Натали») либо StockTransfer (перемещение наш склад → Натали, TR-…; своей
+# приёмки не создаёт — приход у ФФ заводит именно эта поставка).
 # На портале это зеркальный ресурс /app/submissions (в read-API — submissions,
-# kind=inbound в зеркале FulfillmentRequest).
+# kind=inbound в зеркале FulfillmentRequest). Схемы общие для обоих источников.
 
 
 # Источник кратности строки состава: карта Натали (короб в зеркале ФФ) →
@@ -169,13 +171,18 @@ class MigfullPackingLine(BaseModel):
 
 
 class MigfullInboundPrefill(BaseModel):
-    """Предзаполнение шапки поставки из приёмки/машины — пользователь правит в модалке."""
+    """Предзаполнение шапки поставки из приёмки/машины/перемещения — правится в модалке.
 
-    number: str | None = None  # наш номер для оператора (V-… машины / № приёмки)
+    Инфо-поля источника взаимоисключающие: у приёмки заполнены
+    ``vehicle_order_no``/``receipt_number``, у перемещения — ``transfer_number``.
+    """
+
+    number: str | None = None  # наш номер для оператора (V-… машины / № приёмки / TR-…)
     submission_date: date | None = None  # плановая дата поставки
     notes: str | None = None
     vehicle_order_no: str | None = None  # инфо: машина-источник (V-…)
     receipt_number: str | None = None  # инфо: наша приёмка (IN-…)
+    transfer_number: str | None = None  # инфо: наше перемещение (TR-…)
 
 
 class MigfullInboundDraftResponse(BaseModel):

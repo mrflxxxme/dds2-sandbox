@@ -115,3 +115,46 @@ async def migfull_portal_inbound_send(
         raise HTTPException(status_code=e.status_code, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+# ─── Та же поставка, но из ПЕРЕМЕЩЕНИЯ (наш склад → Натали) ──────────────────
+# Перемещение своей приёмки не создаёт (приход у ФФ заводит эта поставка), поэтому
+# источником состава выступает сам переезд TR-…. Контур идентичен /inbound.
+
+
+@router.get("/transfer/{transfer_id}/draft", response_model=MigfullInboundDraftResponse)
+async def migfull_portal_transfer_draft(
+    transfer_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> MigfullInboundDraftResponse:
+    """Превью поставки из перемещения: prefill шапки + состав (позиции/штуки/короба)."""
+    try:
+        return await migfull_portal_inbound.build_transfer_draft(db, project.id, transfer_id)
+    except MigfullPortalServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post(
+    "/transfer/{transfer_id}/send",
+    response_model=MigfullSendResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def migfull_portal_transfer_send(
+    transfer_id: int,
+    payload: MigfullInboundSendRequest,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MigfullSendResult:
+    """РЕАЛЬНОЕ создание поставки из перемещения (НЕОБРАТИМО). Пишет audit."""
+    try:
+        return await migfull_portal_inbound.send_transfer_submission(
+            db, project.id, transfer_id, payload, actor=_actor(user)
+        )
+    except MigfullPortalServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e

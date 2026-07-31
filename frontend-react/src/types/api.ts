@@ -2780,14 +2780,24 @@ export interface MigfullSendResult {
   order_id: number | null;
 }
 
-// Поставка (приёмка) на склад Натали из нашей приёмки машины (InboundReceipt)
+// Поставка (приёмка) на склад Натали. Источник — ОДИН ИЗ ДВУХ: наша приёмка
+// машины (InboundReceipt, V-…/IN-…) либо наше перемещение (StockTransfer, TR-…,
+// наш склад → Натали; своей приёмки не создаёт — приход заводит эта поставка).
+// Схемы/эндпоинты у обоих источников одинаковые, различается только префикс URL.
+
+/** Источник поставки для модалки: какой документ DDS даёт состав. */
+export interface MigfullInboundSource {
+  kind: 'receipt' | 'transfer';
+  id: number;
+}
 
 export interface MigfullInboundPrefill {
-  number: string | null;            // наш номер для оператора (V-… машины / № приёмки)
+  number: string | null;            // наш номер для оператора (V-… машины / № приёмки / TR-…)
   submission_date: string | null;   // YYYY-MM-DD (плановая дата поставки)
   notes: string | null;
   vehicle_order_no: string | null;  // инфо: машина-источник (V-…)
   receipt_number: string | null;    // инфо: наша приёмка (IN-…)
+  transfer_number: string | null;   // инфо: наше перемещение (TR-…)
 }
 
 /** Источник кратности строки: карта Натали → наша кратность отгрузки → нет. */
