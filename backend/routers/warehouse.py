@@ -4,6 +4,7 @@ Router: /warehouse — warehouses CRUD, stock, receipts, shipments, transfers, a
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -400,6 +401,27 @@ async def get_expected_vehicles(
 
     vehicles = await _get_expected(db, project.id, warehouse_id)
     receipt_map = await get_vehicle_receipt_map(db, project.id, [v.id for v in vehicles])
+    # Номера заявок ФФ, уже связанных с приёмками этих машин (PVB-… Натали):
+    # карточка показывает связку, чтобы «Связать»/«Создать поставку» читались
+    # в контексте, а не выглядели непройденным шагом.
+    ff_by_receipt: dict[int, list[str]] = {}
+    receipt_ids = [rid for rid in receipt_map.values() if rid]
+    if receipt_ids:
+        from backend.models.fulfillment import FulfillmentRequest
+
+        ff_rows = await db.execute(
+            select(FulfillmentRequest.inbound_receipt_id, FulfillmentRequest.number)
+            .where(
+                FulfillmentRequest.project_id == project.id,
+                FulfillmentRequest.inbound_receipt_id.in_(receipt_ids),
+                FulfillmentRequest.archived == False,  # noqa: E712
+            )
+            .order_by(FulfillmentRequest.number)
+            .limit(200)
+        )
+        for rid, number in ff_rows.all():
+            if rid is not None and number:
+                ff_by_receipt.setdefault(rid, []).append(number)
     result = []
     for v in vehicles:
         # selectinload(CostOrder.items) грузит и soft-deleted строки (перезаливки
@@ -422,6 +444,8 @@ async def get_expected_vehicles(
                 "transport_type": v.transport_type,
                 # id нашей приёмки этой машины — для связки заявок ФФ из карточки
                 "receipt_id": receipt_map.get(v.id),
+                # уже связанные заявки ФФ (номера PVB-…) — карточка показывает связку
+                "linked_ff_numbers": ff_by_receipt.get(receipt_map.get(v.id) or 0, []),
             }
         )
     return result

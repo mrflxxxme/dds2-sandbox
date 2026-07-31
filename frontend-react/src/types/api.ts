@@ -1212,6 +1212,8 @@ export interface ExpectedVehicleRow {
   transport_type: string | null;
   /** id нашей приёмки этой машины (InboundReceipt.cost_order_id) — цель связки заявок ФФ */
   receipt_id: number | null;
+  /** Уже связанные заявки ФФ (номера PVB-… Натали) — карточка показывает связку */
+  linked_ff_numbers?: string[];
 }
 
 export interface OutboundShipmentItem {

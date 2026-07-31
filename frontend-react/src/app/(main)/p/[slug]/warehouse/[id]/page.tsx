@@ -824,6 +824,18 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
                                     <span style={{ fontSize: 11, color: 'var(--color-success)', fontWeight: 600 }}>→ Приёмки</span>
                                 ) : null}
                             </div>
+                            {/* Уже связанные заявки ФФ — «Связать»/«Создать поставку»
+                                читаются в контексте, а не как непройденный шаг. */}
+                            {(v.linked_ff_numbers?.length ?? 0) > 0 && (
+                                <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Заявки ФФ:</span>
+                                    {v.linked_ff_numbers!.map(n => (
+                                        <span key={n} className="badge badge-success" style={{ fontSize: 11, padding: '2px 8px' }}>
+                                            {n}
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
                             {v.receipt_id != null && (ffConnected || migfullWhId === warehouseId) && (
                                 <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                                     {ffConnected && (
@@ -3165,6 +3177,20 @@ function FfRequestsTab({ warehouseId, slug, kind, externalTick = 0 }: { warehous
         }
         return m;
     }, [rows]);
+    // Группа приёмок одной машины: {inbound_receipt_id: [номера заявок]} —
+    // машина порождает пару «штучная + коробовая», и без метки строки выглядят
+    // несвязанными (кейс V-0035: PVB-0000128 + PVB-0000129).
+    const inboundSiblings = useMemo(() => {
+        const m = new Map<number, string[]>();
+        for (const r of rows) {
+            if (r.inbound_receipt_id != null && r.number) {
+                const arr = m.get(r.inbound_receipt_id) ?? [];
+                arr.push(r.number);
+                m.set(r.inbound_receipt_id, arr);
+            }
+        }
+        return m;
+    }, [rows]);
 
     const cols: Column[] = [
         {
@@ -3363,6 +3389,9 @@ function FfRequestsTab({ warehouseId, slug, kind, externalTick = 0 }: { warehous
                 }
                 if (row.linked_number) {
                     const siblings = row.assembly_request_id != null ? (linkedCount.get(row.assembly_request_id) ?? 0) : 0;
+                    const inbGroup = row.inbound_receipt_id != null
+                        ? (inboundSiblings.get(row.inbound_receipt_id) ?? [])
+                        : [];
                     return (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                             {row.assembly_request_id != null ? (
@@ -3383,6 +3412,16 @@ function FfRequestsTab({ warehouseId, slug, kind, externalTick = 0 }: { warehous
                                     title={`Сборка ${row.linked_number}: на неё в ФФ «Натали» заведено ${formatNumber(siblings, 0)} заявок — все относятся к одной нашей сборке`}
                                 >
                                     заявок на сборку: {formatNumber(siblings, 0)}
+                                </span>
+                            )}
+                            {/* Группа одной машины: пара «штучная + коробовая» видна как целое */}
+                            {inbGroup.length > 1 && (
+                                <span
+                                    className="badge badge-info"
+                                    style={{ fontSize: 11, padding: '2px 8px' }}
+                                    title={`${row.linked_number}: заявки одной машины — ${inbGroup.join(', ')}`}
+                                >
+                                    🚛 {formatNumber(inbGroup.length, 0)} заявки машины
                                 </span>
                             )}
                             {row.linked_status && (
