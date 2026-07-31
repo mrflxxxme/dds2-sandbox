@@ -129,6 +129,9 @@ export default function WarehouseDetailPage() {
     useEffect(() => { load(); }, [load]);
 
     const ffConnected = ffStatus?.connected === true;
+    // Сигнал «связали заявки из карточки машины» → вкладки ФФ перезагружаются:
+    // модалка живёт в блоке машин и иначе список заявок не узнаёт о связке.
+    const [ffLinkTick, setFfLinkTick] = useState(0);
 
     // Если интеграцию отключили, а открыта ФФ-вкладка — возвращаемся на «Реквизиты».
     // Пока статус не загружен (ffStatus === null) — не сбрасываем: иначе ?tab=ff-* проигрывает гонку загрузке статуса.
@@ -182,7 +185,7 @@ export default function WarehouseDetailPage() {
             </div>
 
             {/* Expected vehicles */}
-            <ExpectedVehicles warehouseId={warehouseId} slug={slug} ffConnected={ffConnected} />
+            <ExpectedVehicles warehouseId={warehouseId} slug={slug} ffConnected={ffConnected} onFfLinked={() => setFfLinkTick(t => t + 1)} />
 
             {/* Tabs with counts */}
             <div style={{ display: 'flex', gap: 4, marginBottom: 20, borderBottom: '1px solid var(--color-border)', paddingBottom: 0 }}>
@@ -252,7 +255,7 @@ export default function WarehouseDetailPage() {
             {tab === 'defects' && <DefectsTab warehouseId={warehouseId} onCountChange={setDefectCount} />}
             {tab === 'delivery' && <DeliveryTab warehouseId={warehouseId} />}
             {tab === 'fulfillment' && ffConnected && (
-                <FulfillmentTabs warehouseId={warehouseId} slug={slug} sub={ffSub} onSubChange={setFfSub} provider={ffStatus?.provider ?? null} />
+                <FulfillmentTabs warehouseId={warehouseId} slug={slug} sub={ffSub} onSubChange={setFfSub} provider={ffStatus?.provider ?? null} externalTick={ffLinkTick} />
             )}
             {tab === 'ffbilling' && isFulfillment && <FfBillingTab warehouseId={warehouseId} />}
             {tab === 'requisites' && (
@@ -732,7 +735,7 @@ const NEXT_VEHICLE_ACTION: Record<string, { status: string; label: string; color
     // DISPATCHED: приёмка через InboundReceipt (таб "Приёмки")
 };
 
-function ExpectedVehicles({ warehouseId, slug, ffConnected }: { warehouseId: number; slug: string; ffConnected: boolean }) {
+function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { warehouseId: number; slug: string; ffConnected: boolean; onFfLinked?: () => void }) {
     const router = useRouter();
     const [vehicles, setVehicles] = useState<ExpectedVehicleRow[]>([]);
     // Модалка «Связать заявки ФФ» — машина, к чьей приёмке привязываем
@@ -834,6 +837,7 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected }: { warehouseId: num
                         setLinkFor(null);
                         setToast(`Связано с приёмкой машины ${linkFor.order_no}: ${linkedNumbers.join(', ')}`);
                         loadVehicles();
+                        onFfLinked?.();  // вкладки ФФ перезагружают списки
                     }}
                 />
             )}
@@ -2157,13 +2161,15 @@ function DeliveryTab({ warehouseId }: { warehouseId: number }) {
 /* ─── Раздел «Фулфилмент»: одна вкладка с вложенными под-вкладками ───────── */
 
 function FulfillmentTabs({
-    warehouseId, slug, sub, onSubChange, provider,
+    warehouseId, slug, sub, onSubChange, provider, externalTick = 0,
 }: {
     warehouseId: number;
     slug: string;
     sub: FfSubTab;
     onSubChange: (s: FfSubTab) => void;
     provider: string | null;
+    /** Внешний сигнал перезагрузки (связка из карточки машины). */
+    externalTick?: number;
 }) {
     // Вкладка «Сопоставление» (короба) — только для migfull; на других провайдерах прячем.
     const tabs = FF_SUB_TABS.filter(t => !t.migfullOnly || provider === 'migfull');
@@ -2183,9 +2189,9 @@ function FulfillmentTabs({
             </div>
             {activeSub === 'stocks' && <FfStocksTab warehouseId={warehouseId} provider={provider} />}
             {activeSub === 'boxes' && <FfBoxPacksTab warehouseId={warehouseId} />}
-            {activeSub === 'assembly' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="assembly" />}
-            {activeSub === 'inbound' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="inbound" />}
-            {activeSub === 'return' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="return" />}
+            {activeSub === 'assembly' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="assembly" externalTick={externalTick} />}
+            {activeSub === 'inbound' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="inbound" externalTick={externalTick} />}
+            {activeSub === 'return' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="return" externalTick={externalTick} />}
             {activeSub === 'history' && <FfHistoryTab warehouseId={warehouseId} slug={slug} />}
             {activeSub === 'sync' && <FfSyncTab warehouseId={warehouseId} />}
         </>
@@ -2968,7 +2974,7 @@ function ffProgressCode(row: FfRequestRow): 'accepting' | 'done' | 'over' | 'idl
     return acc === planned ? 'done' : 'accepting';
 }
 
-function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug: string; kind: FfRequestKind }) {
+function FfRequestsTab({ warehouseId, slug, kind, externalTick = 0 }: { warehouseId: number; slug: string; kind: FfRequestKind; externalTick?: number }) {
     const [rows, setRows] = useState<FfRequestRow[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -3028,7 +3034,7 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка'); })
             .finally(() => { if (!controller.signal.aborted) setLoading(false); });
         return () => controller.abort();
-    }, [warehouseId, kind, showArchived, reloadTick]);
+    }, [warehouseId, kind, showArchived, reloadTick, externalTick]);
 
     const handleUnlink = async (row: FfRequestRow) => {
         if (!confirm(`Отвязать заявку ${row.number || row.external_id} от документа ${row.linked_number}?`)) return;
