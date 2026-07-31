@@ -419,6 +419,10 @@ export interface FunnelDayRow {
   margin?: number;
   roi?: number;
   tax?: number;
+  /** НДС, выделенный из налога (в разделе — своя колонка). */
+  nds?: number;
+  /** Эквайринг WB — часть «Расхода WB», не добавка к нему. */
+  acquiring?: number;
   commission_rate?: number;
   commission?: number;
   avg_price?: number;
@@ -453,6 +457,8 @@ export interface FunnelSkuRow {
   add_to_cart_pct: number;
   cart_to_order_pct: number;
   tax: number;
+  nds?: number;
+  acquiring?: number;
   profit: number;
   margin: number;
   commission: number;

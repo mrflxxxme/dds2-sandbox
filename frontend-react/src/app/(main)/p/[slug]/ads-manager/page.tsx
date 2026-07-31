@@ -4,7 +4,7 @@ import { api } from '@/lib/api';
 import { exportToExcel } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
 import Link from 'next/link';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { IcMegaphone, IcRefresh, IcDownload, IcSliders, IcColumns, IcPause, IcPlay, IcClock, IcGear, IcHistory, IcExternal, IcSearch, IcX, IcCopy } from './components/icons';
 import SearchSelect from './components/SearchSelect';
 import AdSections from './components/AdSections';
@@ -314,6 +314,20 @@ export default function AdsManagerPage() {
             if (Array.isArray(f.campNmFilter)) setCampNmFilter(f.campNmFilter.filter((n: unknown) => typeof n === 'number'));
         } catch { /* битый JSON / SSR — игнор */ }
     }, []);
+
+    /* Вход из воронки: `?nm=<nm_id>` открывает список сразу по кампаниям этого артикула.
+     * Ставим ПОСЛЕ восстановления из sessionStorage — параметр в адресе главнее того,
+     * что осталось от прошлого захода, иначе старый фильтр перебил бы переход. */
+    const searchParams = useSearchParams();
+    useEffect(() => {
+        const nm = searchParams?.get('nm') ?? '';
+        if (!/^\d+$/.test(nm)) return;
+        setArticle(nm);
+        setCampNmFilter([]);   // отбор «по выбранным товарам» из «Склеек» тут только мешает
+        setSearch('');
+        setStatusFilter('');
+        setPage(1);
+    }, [searchParams]);
 
     // Сохранение фильтров при каждом изменении. skip-first: пропускаем маунт-прогон,
     // иначе дефолты затёрли бы сохранённое ДО гидрации (эффект выше).

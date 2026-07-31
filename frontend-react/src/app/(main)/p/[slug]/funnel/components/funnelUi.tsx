@@ -13,6 +13,9 @@ import React from 'react';
  *  «Управление рекламой»: края таблицы совпадают с рекламой слева и справа. */
 export const PAGE_SHELL: React.CSSProperties = {
     height: 'calc(100vh - 56px)', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden',
+    // Раздел выходит за поля .main-content (48px по бокам): в таблице 30+ колонок,
+    // и каждый отвоёванный пиксель — это ещё одна цифра на экране (просьба 31.07).
+    marginLeft: -28, marginRight: -28,
 };
 
 /** Заголовок раздела (28/700 с иконкой) — как h1 в рекламе. */

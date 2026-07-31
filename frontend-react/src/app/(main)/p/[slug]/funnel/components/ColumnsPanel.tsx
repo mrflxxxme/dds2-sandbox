@@ -138,7 +138,8 @@ export default function ColumnsPanel({ layout, onChange, onClose }: {
         <div style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: 380, maxWidth: '92vw', zIndex: 60, background: '#fff', borderLeft: '1px solid var(--color-border)', boxShadow: '-12px 0 32px rgba(0,0,0,.10)', display: 'flex', flexDirection: 'column' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 16px', borderBottom: '1px solid var(--color-border)', flexShrink: 0 }}>
                 <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: '.04em', textTransform: 'uppercase' }}>Настройка колонок</span>
-                <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto', fontSize: 12 }} onClick={() => onChange(defaultLayout())}>Сбросить</button>
+                <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto', fontSize: 12 }} title="Вернуть раскладку по умолчанию"
+                    onClick={() => onChange(defaultLayout())}>Сбросить</button>
                 <button onClick={onClose} title="Закрыть" style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#6b7280', display: 'inline-flex' }}><IcX size={17} /></button>
             </div>
 

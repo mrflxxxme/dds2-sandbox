@@ -21,7 +21,8 @@ import ShadingPopover from './components/ShadingPopover';
 import { COLUMN_BY_KEY, defaultLayout, type ColumnLayout, type Row, type Shading } from './components/columns';
 import {
     loadLayout, saveLayout, loadPresets, savePresets, loadChain, saveChain, loadShading, saveShading,
-    loadView, saveView, loadChartMetrics, saveChartMetrics, DEFAULT_CHAIN, type FunnelPreset, type FunnelView,
+    loadView, saveView, loadChartMetrics, saveChartMetrics, loadFilterState, saveFilterState,
+    DEFAULT_CHAIN, type FunnelPreset, type FunnelView,
 } from './components/presets';
 import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelAbcRow, FunnelSummary, FunnelFilters } from '@/types/api';
 
@@ -38,8 +39,8 @@ const GROUP_TABS: { key: GroupBy; label: string; title: string; dims: string[] }
     { key: 'sku', label: 'Артикулы', title: 'По артикулам', dims: ['subject', 'day', 'nm'] },
     { key: 'brand', label: 'Бренды', title: 'По брендам', dims: ['brand', 'day', 'nm'] },
     { key: 'size', label: 'Размеры', title: 'По размеру', dims: ['subject', 'day', 'size', 'nm'] },
-    { key: 'tag', label: 'Ярлыки', title: 'По ярлыкам', dims: ['subject', 'day', 'tag', 'nm'] },
-    { key: 'imt', label: 'Склейки', title: 'По склейкам', dims: ['imt', 'day', 'nm'] },
+    { key: 'tag', label: 'Ярлыки', title: 'По ярлыкам', dims: ['subject', 'tag', 'day', 'nm'] },
+    { key: 'imt', label: 'Склейки', title: 'По склейкам', dims: ['day', 'imt', 'nm'] },
     { key: 'abc', label: 'ABC', title: 'ABC анализ', dims: ['abc', 'subject', 'day', 'nm'] },
 ];
 
@@ -106,13 +107,30 @@ const GlueLabel = ({ row, label, depth }: { row: Row; label: string; depth: numb
     );
 };
 
-/** Строка товара: фото карточки WB + артикул продавца. */
-const ArticleLabel = ({ nmId, text, depth }: { nmId?: number; text: string; depth: number }) => (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-        <WbThumb nmId={nmId} size={18} rounded={4} />
-        <span style={{ fontSize: 12, fontWeight: depth ? 500 : 600, overflow: 'hidden', textOverflow: 'ellipsis' }}>{text}</span>
-    </span>
-);
+/** Строка товара: фото карточки WB + артикул продавца.
+ *  Клик уводит в «Управление рекламой» с фильтром по этому артикулу; настройки
+ *  группировки и фильтры воронки лежат в проекте, поэтому возврат ничего не теряет. */
+const ArticleLabel = ({ nmId, text, depth, slug }: { nmId?: number; text: string; depth: number; slug: string }) => {
+    const inner = (
+        <>
+            <WbThumb nmId={nmId} size={18} rounded={4} />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{text}</span>
+        </>
+    );
+    const base: React.CSSProperties = {
+        display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0,
+        fontSize: 12, fontWeight: depth ? 500 : 600,
+    };
+    if (nmId == null) return <span style={base}>{inner}</span>;
+    return (
+        <Link href={`/p/${slug}/ads-manager?nm=${nmId}`} className="fn-article"
+            title={`${text} · открыть рекламные кампании артикула`}
+            onClick={e => e.stopPropagation()}   // клик по товару не должен ещё и сворачивать строку
+            style={{ ...base, color: 'inherit', textDecoration: 'none' }}>
+            {inner}
+        </Link>
+    );
+};
 
 /** Подпись фильтра над полем — как в референсе.
  *  Именно <div>, а не <label>: label пересылает клик на первый контрол внутри себя,
@@ -226,14 +244,18 @@ export default function FunnelPage() {
     }, []);
 
     /** Дерево по цепочке измерений. Пустая цепочка = обычные одноуровневые режимы. */
-    const loadTree = useCallback(async (dims: string[], df?: string, dt?: string) => {
+    /** at — фильтры «прямо сейчас»: на первом заходе состояние ещё не применилось
+     *  реактом, а восстановленные из хранилища значения уже нужны запросу. */
+    const loadTree = useCallback(async (dims: string[], df?: string, dt?: string,
+                                        at?: { brand: string; subject: string; article: string }) => {
         const from = df || dateFrom;
         const to = dt || dateTo;
         if (!from || !to || dims.length === 0) return;
         setLoading(true);
         try {
             const res = await api.getFunnelTree({
-                dims, date_from: from, date_to: to, brand, subject, vendor_code: article,
+                dims, date_from: from, date_to: to,
+                brand: at?.brand ?? brand, subject: at?.subject ?? subject, vendor_code: at?.article ?? article,
                 extended,
             });
             setChainRows((res.data || []) as Row[]);
@@ -265,16 +287,18 @@ export default function FunnelPage() {
         }
     }, [chain, dateFrom, dateTo, brand, subject, article, extended]);
 
-    const loadData = useCallback(async (df?: string, dt?: string, gb?: GroupBy) => {
+    const loadData = useCallback(async (df?: string, dt?: string, gb?: GroupBy,
+                                        at?: { brand: string; subject: string; article: string }) => {
         const from = df || dateFrom;
         const to = dt || dateTo;
         const mode = gb || groupBy;
+        const br = at?.brand ?? brand, sj = at?.subject ?? subject, ar = at?.article ?? article;
         if (!from || !to) return [];
         setLoading(true);
         try {
             const [res, sum] = await Promise.all([
-                api.getFunnelData({ date_from: from, date_to: to, brand, vendor_code: article, subject, group_by: mode, extended, subcat: splitSubcat }),
-                api.getFunnelSummary(from, to, brand, subject),
+                api.getFunnelData({ date_from: from, date_to: to, brand: br, vendor_code: ar, subject: sj, group_by: mode, extended, subcat: splitSubcat }),
+                api.getFunnelSummary(from, to, br, sj),
             ]);
             if (mode === 'abc') {
                 setAbcData((res.data || []) as unknown as FunnelAbcRow[]);
@@ -396,11 +420,19 @@ export default function FunnelPage() {
                 const defaultFrom = thirtyDaysAgo.toISOString().slice(0, 10);
                 const yesterdayStr = yesterday.toISOString().slice(0, 10);
                 const defaultTo = yesterdayStr < f.max_date ? yesterdayStr : f.max_date;
-                setDateFrom(defaultFrom);
-                setDateTo(defaultTo);
+
+                // Период и фильтры прошлого захода: перезагрузка не должна сбрасывать
+                // то, ЧТО смотришь. Даты подрезаем под доступный диапазон — сохранённый
+                // период мог протухнуть, пока раздел не открывали.
+                const saved = loadFilterState(slug);
+                const startFrom = saved ? (saved.dateFrom < f.min_date ? f.min_date : saved.dateFrom) : defaultFrom;
+                const startTo = saved ? (saved.dateTo > f.max_date ? f.max_date : saved.dateTo) : defaultTo;
+                setDateFrom(startFrom);
+                setDateTo(startTo);
+                if (saved) { setBrand(saved.brand); setSubject(saved.subject); setArticle(saved.article); }
                 const startChain = loadChain(slug);
-                if (startChain.length > 0) await loadTree(startChain, defaultFrom, defaultTo);
-                else await loadData(defaultFrom, defaultTo);
+                if (startChain.length > 0) await loadTree(startChain, startFrom, startTo, saved ?? undefined);
+                else await loadData(startFrom, startTo, undefined, saved ?? undefined);
             }
             setInitDone(true);
         })();
@@ -430,6 +462,12 @@ export default function FunnelPage() {
         if (!initDone || !dateFrom || !dateTo) return;
         if (chain.length > 0) loadTree(chain); else loadData();
     }, [dateFrom, dateTo, brand, subject, article, extended, splitSubcat, chain]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Период и фильтры переживают перезагрузку
+    useEffect(() => {
+        if (!initDone || !slug || !dateFrom || !dateTo) return;
+        saveFilterState(slug, { dateFrom, dateTo, brand, subject, article });
+    }, [initDone, slug, dateFrom, dateTo, brand, subject, article]);
 
     // График грузим только когда он открыт: закрытая вкладка не должна дёргать бэк
     useEffect(() => {
@@ -602,6 +640,19 @@ export default function FunnelPage() {
 
     const dimLabel = (key: string) => dimCatalog.find(d => d.key === key)?.label ?? key;
 
+    /* Подпись кнопки «Пресеты» идёт от ТЕКУЩЕЙ цепочки, а не от того, что выбрали
+     * когда-то: иначе имя пресета залипало на кнопке после ручной пересборки
+     * группировки и врало, каким видом смотришь. */
+    const quickView = useMemo(
+        () => GROUP_TABS.find(g => g.dims.join('>') === chain.join('>')),
+        [chain]);
+    const savedPreset = presets.find(p => p.name === activePreset);
+    const presetMatches = !!savedPreset && (savedPreset.chain ?? []).join('>') === chain.join('>');
+    const presetLabel = presetMatches ? activePreset
+        : quickView ? quickView.title
+        : chain.length > 0 ? 'Своя группировка'
+        : 'Пресеты';
+
     const groupTitle = chain.length > 0 ? (DIM_HEADERS[chain[0]] ?? dimLabel(chain[0]).toUpperCase())
         : groupBy === 'brand' ? 'БРЕНД' : groupBy === 'tag' ? 'ЯРЛЫК' : groupBy === 'imt' ? 'СКЛЕЙКА'
         : groupBy === 'size' ? 'КАТЕГОРИЯ → РАЗМЕР' : groupBy === 'subject' ? 'КАТЕГОРИЯ'
@@ -620,7 +671,7 @@ export default function FunnelPage() {
             if (TIME_DIMS.has(dim)) return <span style={{ fontFamily: MONO, fontSize: 12 }}>{label}</span>;
             // Только артикул продавца: бренд и предмет во вложенной строке — повтор
             // родительских уровней, они съедали вторую строку в каждой строке дерева
-            if (dim === 'nm') return <ArticleLabel nmId={r.nm_id} text={label} depth={depth} />;
+            if (dim === 'nm') return <ArticleLabel nmId={r.nm_id} text={label} depth={depth} slug={slug} />;
             if (dim === 'imt') return <GlueLabel row={r} label={label} depth={depth} />;
             const kids = r.children?.length || 0;
             return (
@@ -639,7 +690,7 @@ export default function FunnelPage() {
             );
         }
         if (groupBy === 'sku' || (depth > 0 && r.nm_id)) {
-            return <ArticleLabel nmId={r.nm_id} text={String(r.vendor_code || r.nm_id)} depth={depth} />;
+            return <ArticleLabel nmId={r.nm_id} text={String(r.vendor_code || r.nm_id)} depth={depth} slug={slug} />;
         }
         if (groupBy === 'abc') {
             const g = r as Row & { abc?: string; abc_label?: string };
@@ -867,9 +918,10 @@ export default function FunnelPage() {
                         Внутри и быстрые виды (Дни/Артикулы/…/ABC), и сохранённые пресеты:
                         в тулбаре они занимали целый ряд, а переключают одно и то же — вид таблицы. */}
                     <div style={{ position: 'relative' }}>
-                        <button type="button" className={`filter-trigger${activePreset ? ' is-active' : ''}`} aria-expanded={presetsOpen} onClick={() => setPresetsOpen(o => !o)}
-                            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, minWidth: 130, background: 'var(--color-bg-card)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: activePreset ? '#1e3a8a' : 'var(--color-text)', cursor: 'pointer' }}>
-                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{activePreset || 'Пресеты'}</span>
+                        <button type="button" className={`filter-trigger${presetMatches ? ' is-active' : ''}`} aria-expanded={presetsOpen} onClick={() => setPresetsOpen(o => !o)}
+                            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, minWidth: 130, background: 'var(--color-bg-card)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: presetMatches ? '#1e3a8a' : 'var(--color-text)', cursor: 'pointer' }}>
+                            <span title={chain.length > 0 ? chain.map(dimLabel).join(' → ') : undefined}
+                                style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{presetLabel}</span>
                             <span style={{ color: 'var(--color-text-dim)', fontSize: 11, flexShrink: 0 }}>⌄</span>
                         </button>
                         {presetsOpen && (<>
@@ -885,6 +937,7 @@ export default function FunnelPage() {
                                                 setSort(null);
                                                 // Быстрый вид — это цепочка из одного уровня: она видна в пилюле
                                                 // рядом с «Группировкой» и достраивается следующими уровнями
+                                                setActivePreset('');
                                                 setChain(g.dims); saveChain(slug, g.dims);
                                                 loadTree(g.dims);
                                             }}
@@ -897,7 +950,7 @@ export default function FunnelPage() {
                                 {presets.length === 0 && <div style={{ padding: '8px 10px', fontSize: 12, color: '#9ca3af' }}>Сохранённых пресетов пока нет</div>}
                                 {presets.map(p => (
                                     <div key={p.name} onClick={() => { applyPreset(p); setPresetsOpen(false); }} className="menu-row"
-                                        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px', borderRadius: 8, cursor: 'pointer', fontSize: 13, background: activePreset === p.name ? '#eff6ff' : undefined }}>
+                                        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px', borderRadius: 8, cursor: 'pointer', fontSize: 13, background: presetMatches && activePreset === p.name ? '#eff6ff' : undefined }}>
                                         <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
                                         <span onClick={e => { e.stopPropagation(); deletePreset(p.name); }} title="Удалить пресет"
                                             style={{ display: 'inline-flex', color: '#94a3b8' }}><IcX size={13} /></span>
@@ -937,7 +990,7 @@ export default function FunnelPage() {
                             shading={shading}
                             defaultOrder={defaultOrder}
                             labelHeader={groupTitle}
-                            labelWidth={chain.length > 0 ? 265 : groupBy === 'day' ? 150 : 220}
+                            labelWidth={chain.length > 0 ? 244 : groupBy === 'day' ? 140 : 205}
                             labelCell={labelCell}
                             rowKey={rowKey}
                             childrenOf={chain.length > 0 ? undefined : (r => r.children)}
@@ -945,6 +998,7 @@ export default function FunnelPage() {
                             hasChildren={chain.length > 0 ? (r => !!(r as { has_children?: boolean }).has_children) : undefined}
                             childrenAt={chain.length > 0 ? (path => subtrees.get(path.join('\u0000'))) : undefined}
                             onExpandPath={chain.length > 0 ? loadBranch : undefined}
+                            onPrefetchPath={chain.length > 0 ? loadBranch : undefined}
                             labelValue={chain.length > 0
                                 ? (r => (r as { label?: string }).label || '')
                                 : groupBy === 'day' ? (r => r.date || '') : (r => groupLabelOf(r))}
@@ -983,7 +1037,7 @@ export default function FunnelPage() {
             )}
             {groupingOpen && (
                 <GroupingPopover anchor={groupBtnRef.current} all={dimCatalog} active={chain} maxChain={maxChain}
-                    onApply={dims => { setChain(dims); saveChain(slug, dims); setSort(null); loadTree(dims); }}
+                    onApply={dims => { setChain(dims); saveChain(slug, dims); setSort(null); setActivePreset(''); loadTree(dims); }}
                     onClose={() => setGroupingOpen(false)} />
             )}
         </div>

@@ -20,13 +20,15 @@ export interface FunnelPreset {
 }
 
 const presetsKey = (slug: string) => `funnel_presets_v1:${slug}`;
-// v2 — порядок колонок пересобран под старый раздел (31.07.2026); сохранённая
-// раскладка v1 иначе перекрыла бы новый порядок у всех, кто уже открывал воронку
-const layoutKey = (slug: string) => `funnel_columns_v2:${slug}`;
+// v4 — первым блоком «Ключевые метрики» (31.07.2026). Ключ бампаем при каждой смене
+// раскладки по умолчанию: сохранённая раскладка иначе перекрывает её у всех, кто
+// уже открывал раздел, и правку никто не увидит.
+const layoutKey = (slug: string) => `funnel_columns_v4:${slug}`;
 const chainKey = (slug: string) => `funnel_chain_v1:${slug}`;
 const shadingKey = (slug: string) => `funnel_shading_v1:${slug}`;
 const viewKey = (slug: string) => `funnel_view_v1:${slug}`;
 const chartKey = (slug: string) => `funnel_chart_metrics_v1:${slug}`;
+const filtersKey = (slug: string) => `funnel_filters_v1:${slug}`;
 
 /** Цепочка группировок по умолчанию — день → предмет → артикул. */
 export const DEFAULT_CHAIN = ['day', 'subject', 'nm'];
@@ -91,6 +93,35 @@ export function loadView(slug: string): FunnelView {
 
 export function saveView(slug: string, v: FunnelView): void {
     write(viewKey(slug), v);
+}
+
+/* ─── Фильтры и период ────────────────────────────────────────────────────
+ * Раньше перезагрузка страницы сбрасывала период и все фильтры на дефолт: раскладка
+ * колонок и цепочка переживали её, а то, ЧТО именно смотришь, — нет.
+ * ─────────────────────────────────────────────────────────────────────── */
+
+export interface FunnelFilterState {
+    dateFrom: string;
+    dateTo: string;
+    brand: string;
+    subject: string;
+    article: string;
+}
+
+export function loadFilterState(slug: string): FunnelFilterState | null {
+    const v = read<Partial<FunnelFilterState>>(filtersKey(slug));
+    if (!v || typeof v !== 'object') return null;
+    const str = (x: unknown) => (typeof x === 'string' ? x : '');
+    const state: FunnelFilterState = {
+        dateFrom: str(v.dateFrom), dateTo: str(v.dateTo),
+        brand: str(v.brand), subject: str(v.subject), article: str(v.article),
+    };
+    // Без дат состояние бесполезно: период всё равно возьмётся дефолтный
+    return state.dateFrom && state.dateTo ? state : null;
+}
+
+export function saveFilterState(slug: string, state: FunnelFilterState): void {
+    write(filtersKey(slug), state);
 }
 
 /** Выбранные линии графика — ключи колонок из каталога. */
