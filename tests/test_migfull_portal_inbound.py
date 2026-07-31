@@ -325,7 +325,7 @@ async def test_send_with_packing_builds_opis(db_session, env, monkeypatch):
     # Ручная кратность != карточки Натали (5) → предупреждение
     assert any("в карточке Натали короб 5" in w for w in order.payload["warnings"])
     # Packing зафиксирован в audit-payload
-    assert order.payload["packing"] == [{"barcode": EAN, "qty": 40, "units_per_box": 12}]
+    assert order.payload["packing"] == [{"barcode": EAN, "qty": 40, "units_per_box": 12, "boxes": None}]
     # Автосвязь несёт суммарные штуки
     req_row = (
         await db_session.execute(
@@ -358,6 +358,82 @@ async def test_send_with_packing_loose_overrides_natali(db_session, env, monkeyp
     assert ols[0]["quantity"] == 40
 
 
+# ─── Явный сплит: boxes — сколько коробов, остаток россыпью (чистая функция) ─
+
+
+def test_build_opis_explicit_boxes_partial_split():
+    """120 шт × кратность 20, boxes=4 → 4 короба (80 шт) + 40 россыпью БЕЗ warning."""
+    lines, warnings = svc.build_opis_lines_from_packing(
+        [MigfullPackingLine(barcode=EAN, qty=120, units_per_box=20, boxes=4)],
+        box_for_piece={},
+        name_for_barcode={EAN: "ELKA"},
+    )
+    assert warnings == []  # осознанный сплит — остаток россыпью не ворнится
+    box = next(line for line in lines if line.is_box)
+    loose = next(line for line in lines if not line.is_box)
+    assert box.barcode == svc.ean13_to_itf14(EAN)
+    assert box.quantity == 4
+    assert box.units_per_box == 20
+    assert box.pieces == 80
+    assert loose.barcode == EAN
+    assert loose.quantity == 40
+    assert loose.pieces == 40
+
+
+def test_build_opis_explicit_boxes_zero_all_loose():
+    """boxes=0 → вся строка россыпью, даже при заданной кратности и карте Натали."""
+    lines, warnings = svc.build_opis_lines_from_packing(
+        [MigfullPackingLine(barcode=EAN, qty=40, units_per_box=5, boxes=0)],
+        box_for_piece={EAN: (ITF, 5, "ELKA короб 5 шт.")},
+        name_for_barcode={EAN: "ELKA"},
+    )
+    assert warnings == []
+    assert len(lines) == 1
+    assert lines[0].is_box is False
+    assert lines[0].barcode == EAN
+    assert lines[0].quantity == 40
+
+
+def test_build_opis_boxes_none_keeps_legacy_behavior():
+    """Регресс: boxes=None — максимум коробов + некратный остаток россыпью с warning."""
+    lines, warnings = svc.build_opis_lines_from_packing(
+        [MigfullPackingLine(barcode=EAN, qty=40, units_per_box=12, boxes=None)],
+        box_for_piece={},
+        name_for_barcode={EAN: "ELKA"},
+    )
+    box = next(line for line in lines if line.is_box)
+    loose = next(line for line in lines if not line.is_box)
+    assert box.quantity == 3  # 40 // 12 — максимум
+    assert loose.quantity == 4
+    assert any("не кратно коробу (12)" in w for w in warnings)
+
+
+async def test_send_with_explicit_boxes_split(db_session, env, monkeypatch):
+    """Send с явным сплитом: ровно N коробов + остаток россыпью, без warning о некратности."""
+    fake = FakePortalClient()
+    _use_fake_client(monkeypatch, fake)
+
+    req = MigfullInboundSendRequest(packing=[MigfullPackingLine(barcode=EAN, qty=40, units_per_box=5, boxes=4)])
+    res = await svc.send_submission(db_session, env.project_id, env.receipt.id, req)
+    assert res.ok is True
+
+    order = (
+        await db_session.execute(
+            select(MigfullShipmentOrder).where(MigfullShipmentOrder.inbound_receipt_id == env.receipt.id)
+        )
+    ).scalar_one()
+    ols = order.payload["opis_lines"]
+    box = next(line for line in ols if line["is_box"])
+    loose = next(line for line in ols if not line["is_box"])
+    assert box["barcode"] == ITF
+    assert box["quantity"] == 4  # ровно 4 короба, не максимум (8)
+    assert box["pieces"] == 20
+    assert loose["barcode"] == EAN
+    assert loose["quantity"] == 20  # 40 − 4×5 россыпью
+    assert not any("не кратно коробу" in w for w in order.payload["warnings"])
+    assert order.payload["packing"] == [{"barcode": EAN, "qty": 40, "units_per_box": 5, "boxes": 4}]
+
+
 @pytest.mark.parametrize(
     "packing",
     [
@@ -370,6 +446,9 @@ async def test_send_with_packing_loose_overrides_natali(db_session, env, monkeyp
         # дубль ШК
         [{"barcode": EAN, "qty": 20, "units_per_box": None},
          {"barcode": EAN, "qty": 20, "units_per_box": None}],
+        [{"barcode": EAN, "qty": 40, "units_per_box": 5, "boxes": -1}],  # boxes < 0
+        [{"barcode": EAN, "qty": 40, "units_per_box": 12, "boxes": 4}],  # 4×12=48 > 40
+        [{"barcode": EAN, "qty": 40, "units_per_box": None, "boxes": 2}],  # короба без кратности
     ],
 )
 async def test_send_invalid_packing_is_400(db_session, env, monkeypatch, packing):

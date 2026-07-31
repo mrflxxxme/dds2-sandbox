@@ -21,7 +21,16 @@ import type {
 interface PackRowState {
     boxMode: boolean;   // true — коробом, false — россыпью
     units: string;      // «шт в коробе» (input; валидно при boxMode: целое >= 2)
+    boxes: string;      // «коробов» — явный сплит (input; валидно: 0..floor(qty/units))
 }
+
+const EMPTY_ROW: PackRowState = { boxMode: false, units: '', boxes: '' };
+
+/** Максимум коробов при данной кратности (пустая/невалидная кратность → ''). */
+const maxBoxesStr = (qty: number, unitsStr: string): string => {
+    const u = parseInt(unitsStr, 10);
+    return Number.isFinite(u) && u >= 2 ? String(Math.floor(qty / u)) : '';
+};
 
 interface Props {
     /** id нашей приёмки машины (InboundReceipt) — источник поставки */
@@ -64,12 +73,15 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
             setNumber(d.prefill.number ?? '');
             setSubmissionDate(d.prefill.submission_date ?? '');
             setNotes(d.prefill.notes ?? '');
-            // Prefill упаковки: строки с известной кратностью — коробом, прочие — россыпью.
+            // Prefill упаковки: строки с известной кратностью — коробом (коробов = максимум),
+            // прочие — россыпью.
             const rows: Record<string, PackRowState> = {};
             for (const it of d.items) {
+                const units = it.units_per_box != null ? String(it.units_per_box) : '';
                 rows[it.barcode] = {
                     boxMode: it.units_per_box != null && it.units_per_box >= 2,
-                    units: it.units_per_box != null ? String(it.units_per_box) : '',
+                    units,
+                    boxes: maxBoxesStr(it.qty, units),
                 };
             }
             setPackRows(rows);
@@ -86,19 +98,25 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
     useEffect(() => loadDraft(), [loadDraft]);
 
     // ─── Производные упаковки: per-строка (короба/остаток) + итоги ──────────────
-    const packOf = (barcode: string): PackRowState => packRows[barcode] ?? { boxMode: false, units: '' };
-    /** Разбор строки: unitsNum (NaN — пусто/мусор), короба/остаток при валидном коробе. */
+    const packOf = (barcode: string): PackRowState => packRows[barcode] ?? EMPTY_ROW;
+    /** Разбор строки: unitsNum/boxesNum (NaN — пусто/мусор), короба/остаток при валидном коробе. */
     const rowCalc = (barcode: string, qty: number) => {
         const r = packOf(barcode);
         const unitsNum = parseInt(r.units, 10);
         const unitsOk = Number.isFinite(unitsNum) && unitsNum >= 2;
-        const asBox = r.boxMode && unitsOk;
+        // Явный сплит: «коробов» валидно в 0..floor(qty/units); остаток едет россыпью.
+        const boxesNum = parseInt(r.boxes, 10);
+        const boxesOk = unitsOk && Number.isFinite(boxesNum) && boxesNum >= 0 && boxesNum * unitsNum <= qty;
+        const asBox = r.boxMode && unitsOk && boxesOk;
         return {
             boxMode: r.boxMode,
             unitsNum,
-            invalid: r.boxMode && !unitsOk,           // коробом, но «шт в коробе» не задано/некорректно
-            boxes: asBox ? Math.floor(qty / unitsNum) : 0,
-            rest: asBox ? qty % unitsNum : qty,       // при россыпи — вся строка
+            boxesNum,
+            invalidUnits: r.boxMode && !unitsOk,      // коробом, но «шт в коробе» не задано/некорректно
+            invalidBoxes: r.boxMode && unitsOk && !boxesOk, // «коробов» вне 0..максимума
+            invalid: r.boxMode && (!unitsOk || !boxesOk),
+            boxes: asBox ? boxesNum : 0,
+            rest: asBox ? qty - boxesNum * unitsNum : qty, // при россыпи — вся строка
         };
     };
     const items = draft?.items ?? [];
@@ -108,15 +126,16 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
     const knownCount = items.filter(it => it.units_per_box != null).length;
 
     const setRow = (barcode: string, patch: Partial<PackRowState>) =>
-        setPackRows(prev => ({ ...prev, [barcode]: { ...(prev[barcode] ?? { boxMode: false, units: '' }), ...patch } }));
+        setPackRows(prev => ({ ...prev, [barcode]: { ...(prev[barcode] ?? EMPTY_ROW), ...patch } }));
 
-    /** Массово: коробом по prefill-кратности все строки, где она известна. */
+    /** Массово: коробом по prefill-кратности (коробов = максимум) все строки, где она известна. */
     const applyKnownMultiplicity = () => {
         setPackRows(prev => {
             const next = { ...prev };
             for (const it of items) {
                 if (it.units_per_box != null && it.units_per_box >= 2) {
-                    next[it.barcode] = { boxMode: true, units: String(it.units_per_box) };
+                    const units = String(it.units_per_box);
+                    next[it.barcode] = { boxMode: true, units, boxes: maxBoxesStr(it.qty, units) };
                 }
             }
             return next;
@@ -125,7 +144,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
     const applyAllLoose = () => {
         setPackRows(prev => {
             const next = { ...prev };
-            for (const it of items) next[it.barcode] = { ...(next[it.barcode] ?? { units: '' }), boxMode: false };
+            for (const it of items) next[it.barcode] = { ...(next[it.barcode] ?? EMPTY_ROW), boxMode: false };
             return next;
         });
     };
@@ -140,10 +159,13 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
         // Per-line packing по текущему состоянию модалки — опись строится ПО НЕМУ.
         const packing: MigfullPackingLine[] = items.map(it => {
             const c = rowCalc(it.barcode, it.qty);
+            const asBox = c.boxMode && !c.invalid;
             return {
                 barcode: it.barcode,
                 qty: it.qty,
-                units_per_box: c.boxMode && !c.invalid ? c.unitsNum : null,
+                units_per_box: asBox ? c.unitsNum : null,
+                // Явный сплит: ровно N коробов, остаток россыпью (бэк не пересчитывает и не ворнит).
+                boxes: asBox ? c.boxesNum : null,
             };
         });
         const body: MigfullInboundSendRequest = {
@@ -356,7 +378,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                     <span>Россыпью: <strong>{formatNumber(totalLoose, 0)}</strong> шт</span>
                                     {invalidCount > 0 && (
                                         <span style={{ color: 'var(--color-danger)' }}>
-                                            ⚠ Заполните «шт в коробе» (мин. 2) в {formatNumber(invalidCount, 0)} стр.
+                                            ⚠ Проверьте «шт в коробе» / «коробов» в {formatNumber(invalidCount, 0)} стр.
                                         </span>
                                     )}
                                 </div>
@@ -408,11 +430,15 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                                 <button
                                                                     className={`btn btn-sm ${r.boxMode ? 'btn-primary' : 'btn-secondary'}`}
                                                                     style={{ padding: '2px 8px', fontSize: 12 }}
-                                                                    onClick={() => setRow(it.barcode, {
-                                                                        boxMode: true,
-                                                                        // При включении короба без units — подставить prefill.
-                                                                        units: r.units || (it.units_per_box != null ? String(it.units_per_box) : ''),
-                                                                    })}
+                                                                    onClick={() => {
+                                                                        // При включении короба без units — подставить prefill; коробов — максимум.
+                                                                        const units = r.units || (it.units_per_box != null ? String(it.units_per_box) : '');
+                                                                        setRow(it.barcode, {
+                                                                            boxMode: true,
+                                                                            units,
+                                                                            boxes: r.boxes || maxBoxesStr(it.qty, units),
+                                                                        });
+                                                                    }}
                                                                 >
                                                                     короб
                                                                 </button>
@@ -424,25 +450,50 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                                     россыпь
                                                                 </button>
                                                                 {r.boxMode && (
-                                                                    <input
-                                                                        type="number"
-                                                                        min={2}
-                                                                        value={r.units}
-                                                                        onChange={e => setRow(it.barcode, { units: e.target.value })}
-                                                                        placeholder="шт"
-                                                                        title="Штук в коробе"
-                                                                        style={{
-                                                                            width: 58, padding: '3px 6px', borderRadius: 8, fontSize: 13,
-                                                                            border: `1px solid ${c.invalid ? 'var(--color-danger)' : 'var(--color-border)'}`,
-                                                                            background: 'var(--color-bg-card)', color: 'var(--color-text)',
-                                                                        }}
-                                                                    />
+                                                                    <>
+                                                                        <input
+                                                                            type="number"
+                                                                            min={2}
+                                                                            value={r.units}
+                                                                            // Смена кратности → «коробов» пересчитывается на максимум.
+                                                                            onChange={e => setRow(it.barcode, {
+                                                                                units: e.target.value,
+                                                                                boxes: maxBoxesStr(it.qty, e.target.value),
+                                                                            })}
+                                                                            placeholder="шт"
+                                                                            title="Штук в коробе"
+                                                                            style={{
+                                                                                width: 58, padding: '3px 6px', borderRadius: 8, fontSize: 13,
+                                                                                border: `1px solid ${c.invalidUnits ? 'var(--color-danger)' : 'var(--color-border)'}`,
+                                                                                background: 'var(--color-bg-card)', color: 'var(--color-text)',
+                                                                            }}
+                                                                        />
+                                                                        <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>×</span>
+                                                                        <input
+                                                                            type="number"
+                                                                            min={0}
+                                                                            max={Number.isFinite(c.unitsNum) && c.unitsNum >= 2 ? Math.floor(it.qty / c.unitsNum) : undefined}
+                                                                            value={r.boxes}
+                                                                            onChange={e => setRow(it.barcode, { boxes: e.target.value })}
+                                                                            placeholder="кор."
+                                                                            title="Коробов (остаток qty − коробов × шт едет россыпью)"
+                                                                            style={{
+                                                                                width: 58, padding: '3px 6px', borderRadius: 8, fontSize: 13,
+                                                                                border: `1px solid ${c.invalidBoxes ? 'var(--color-danger)' : 'var(--color-border)'}`,
+                                                                                background: 'var(--color-bg-card)', color: 'var(--color-text)',
+                                                                            }}
+                                                                        />
+                                                                    </>
                                                                 )}
                                                             </div>
                                                         </td>
                                                         <td style={{ padding: '8px 10px', whiteSpace: 'nowrap', fontSize: 12 }}>
                                                             {c.invalid ? (
-                                                                <span style={{ color: 'var(--color-danger)' }}>укажите шт в коробе</span>
+                                                                <span style={{ color: 'var(--color-danger)' }}>
+                                                                    {c.invalidUnits
+                                                                        ? 'укажите шт в коробе'
+                                                                        : `коробов: 0–${formatNumber(Math.floor(it.qty / c.unitsNum), 0)}`}
+                                                                </span>
                                                             ) : c.boxMode ? (
                                                                 <>
                                                                     <strong>{formatNumber(c.boxes, 0)}</strong> кор. × {formatNumber(c.unitsNum, 0)} шт

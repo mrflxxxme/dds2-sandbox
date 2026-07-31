@@ -2807,6 +2807,8 @@ export interface MigfullPackingLine {
   barcode: string;
   qty: number;                      // > 0
   units_per_box: number | null;     // >= 1
+  /** Явный сплит: сколько КОРОБОВ (остаток россыпью без warning); 0 — всё россыпью; null — максимум коробов. */
+  boxes?: number | null;            // >= 0, boxes×units_per_box <= qty
 }
 
 export interface MigfullInboundDraft {

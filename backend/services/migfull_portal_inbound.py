@@ -190,7 +190,9 @@ def build_opis_lines_from_packing(
 
     ``units_per_box`` >= 2 → целые короба (ШК короба: карта Натали, иначе
     выведенный GTIN-14) + некратный остаток россыпью (с warning). None/1 —
-    вся строка россыпью. Опись строится ПО packing — сервис не пересчитывает.
+    вся строка россыпью. ``boxes`` — явный сплит: ровно N коробов, остаток
+    россыпью БЕЗ warning (осознанный выбор в модалке); 0 — вся строка
+    россыпью. Опись строится ПО packing — сервис не пересчитывает.
     """
     lines: list[MigfullOpisLine] = []
     warnings: list[str] = []
@@ -200,7 +202,7 @@ def build_opis_lines_from_packing(
             continue
         name = name_for_barcode.get(p.barcode)
         upb = int(p.units_per_box or 1)
-        if upb > 1:
+        if upb > 1 and p.boxes != 0:
             natali = box_for_piece.get(p.barcode)
             box_barcode = natali[0] if natali is not None else ean13_to_itf14(p.barcode)
             if box_barcode is None:
@@ -215,7 +217,12 @@ def build_opis_lines_from_packing(
                     if natali is not None and natali[1] == upb
                     else (f"{name} — короб {upb} шт." if name else None)
                 )
-                boxes, rest = divmod(pieces, upb)
+                if p.boxes is not None:
+                    # Явный сплит из модалки: ровно N коробов, остаток россыпью без warning.
+                    boxes = int(p.boxes)
+                    rest = pieces - boxes * upb
+                else:
+                    boxes, rest = divmod(pieces, upb)
                 if boxes > 0:
                     lines.append(
                         MigfullOpisLine(
@@ -224,7 +231,10 @@ def build_opis_lines_from_packing(
                         )
                     )
                 if rest > 0:
-                    warnings.append(f"{name or p.barcode}: {pieces} шт не кратно коробу ({upb}) — {rest} шт россыпью")
+                    if p.boxes is None:
+                        warnings.append(
+                            f"{name or p.barcode}: {pieces} шт не кратно коробу ({upb}) — {rest} шт россыпью"
+                        )
                     lines.append(
                         MigfullOpisLine(
                             barcode=p.barcode, name=name, quantity=rest,
@@ -246,7 +256,8 @@ def _validated_packing(
 ) -> list[MigfullPackingLine]:
     """Валидация packing из модалки (нарушение → 400, не 422).
 
-    qty > 0, units_per_box >= 1, ШК без дублей и строго совпадают с составом
+    qty > 0, units_per_box >= 1, boxes >= 0 и boxes×units_per_box <= qty (явный
+    сплит требует кратности >= 2), ШК без дублей и строго совпадают с составом
     приёмки (ни лишних, ни пропущенных — опись обязана покрыть весь состав).
     """
     seen: set[str] = set()
@@ -261,6 +272,19 @@ def _validated_packing(
             raise MigfullPortalServiceError(f"Packing: количество по ШК {bc} должно быть > 0", status_code=400)
         if p.units_per_box is not None and p.units_per_box < 1:
             raise MigfullPortalServiceError(f"Packing: шт в коробе по ШК {bc} должно быть >= 1", status_code=400)
+        if p.boxes is not None:
+            if p.boxes < 0:
+                raise MigfullPortalServiceError(f"Packing: число коробов по ШК {bc} должно быть >= 0", status_code=400)
+            upb = p.units_per_box or 1
+            if p.boxes > 0 and upb < 2:
+                raise MigfullPortalServiceError(
+                    f"Packing: по ШК {bc} задано число коробов без «шт в коробе» (>= 2)", status_code=400
+                )
+            if p.boxes * upb > p.qty:
+                raise MigfullPortalServiceError(
+                    f"Packing: по ШК {bc} короба {p.boxes} × {upb} шт превышают количество {p.qty}",
+                    status_code=400,
+                )
     missing = sorted(set(qty_by_bc) - seen)
     if missing:
         raise MigfullPortalServiceError(

@@ -142,11 +142,17 @@ class MigfullPackingLine(BaseModel):
 
     ``units_per_box``: None/1 — россыпь; >=2 — короба по N шт, некратный
     остаток уходит россыпью. Сервис строит опись ПО ЭТИМ строкам, не пересчитывая.
+
+    ``boxes`` — ЯВНЫЙ сплит: сколько КОРОБОВ отправить (остаток qty − boxes×units
+    едет россыпью БЕЗ warning — осознанный выбор в модалке); 0 — вся строка
+    россыпью даже при заданной кратности; None — прежнее поведение (максимум
+    коробов, некратный остаток с warning).
     """
 
     barcode: str = Field(min_length=1, max_length=100)
     qty: int  # >0 (валидация в сервисе → 400, не 422)
     units_per_box: int | None = None  # >=1 (валидация в сервисе)
+    boxes: int | None = None  # >=0, boxes×units_per_box <= qty (валидация в сервисе)
 
 
 class MigfullInboundPrefill(BaseModel):
