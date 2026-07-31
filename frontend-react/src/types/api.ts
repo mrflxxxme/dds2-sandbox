@@ -504,6 +504,31 @@ export interface FunnelAbcRow {
     stock_trend_pct?: number;
 }
 
+/** Узел дерева произвольной группировки (/funnel/tree). */
+export interface FunnelTreeNode extends FunnelGroupRow {
+  /** Подпись узла: дата, «13.07–19.07», предмет, бренд, артикул… */
+  label: string;
+  /** Измерение уровня: day | week | month | subject | brand | nm | size | tag | imt */
+  dim: string;
+  /** Сортируемый ключ уровня (ISO-дата, «2026-07» и т.п.) — подпись недели для сортировки не годится. */
+  sort_key?: string;
+  date?: string;
+  children?: FunnelTreeNode[];
+}
+
+export interface FunnelTreeResponse {
+  data: FunnelTreeNode[];
+  tax_info: Record<string, number | string | boolean>;
+  has_bdr: boolean;
+  detailed: boolean;
+  group_by: string[];
+}
+
+export interface FunnelDimensionsResponse {
+  dimensions: { key: string; label: string }[];
+  max_chain: number;
+}
+
 export interface FunnelGroupRow extends Omit<FunnelSkuRow, 'nm_id' | 'vendor_code' | 'brand' | 'subject'> {
     brand?: string | null;
     subject?: string | null;

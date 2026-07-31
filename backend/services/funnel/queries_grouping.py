@@ -313,11 +313,23 @@ def _finalize_children(children_map: dict[int, dict], tax_rate: float) -> list[d
     return children
 
 
-async def _load_funnel_rows(db: AsyncSession, pid: int, date_from, date_to, brand, subject, nm_ids=None):
-    """Load filtered funnel rows."""
+async def _load_funnel_rows(db: AsyncSession, pid: int, date_from, date_to, brand, subject, nm_ids=None, vendor_code=None):
+    """Load filtered funnel rows.
+
+    vendor_code — тот же матч, что и в одноуровневой воронке: подстрока по
+    артикулу продавца либо точный nm_id, если передали число.
+    """
+    from sqlalchemy import or_
+
     q = select(WbFunnelDaily).where(WbFunnelDaily.project_id == pid)
     if nm_ids is not None:
         q = q.where(WbFunnelDaily.nm_id.in_(nm_ids))
+    if vendor_code:
+        _vc = vendor_code.replace("%", r"\%").replace("_", r"\_")
+        vc_filter = WbFunnelDaily.vendor_code.ilike(f"%{_vc}%", escape="\\")
+        if vendor_code.isdigit():
+            vc_filter = or_(vc_filter, WbFunnelDaily.nm_id == int(vendor_code))
+        q = q.where(vc_filter)
     if date_from:
         q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
     if date_to:

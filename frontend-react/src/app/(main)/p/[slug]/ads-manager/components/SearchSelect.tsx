@@ -1,5 +1,5 @@
 'use client';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { IcSearch } from './icons';
 
 /** Раскрывающийся фильтр с поисковой строкой сверху (одиночный выбор). */
@@ -22,10 +22,21 @@ export default function SearchSelect({ value, onChange, options, placeholder, al
     const close = () => { setOpen(false); setQ(''); };
     const pick = (v: string) => { onChange(v); close(); };
 
+    // Esc закрывает список — вместе с кликом мимо и повторным кликом по кнопке
+    // это три привычных способа свернуть, чтобы не искать единственный верный
+    useEffect(() => {
+        if (!open) return;
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+    }, [open]);
+
     return (
         <div style={{ position: 'relative', display: 'inline-block' }}>
-            <button type="button" onClick={() => setOpen(o => !o)}
-                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, width: '100%', minWidth, maxWidth, background: 'var(--color-bg-card)', border: `1px solid ${open ? 'var(--color-accent)' : 'var(--color-border)'}`, borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)', cursor: 'pointer' }}>
+            {/* Рамка (обычная, наведение, открытый список) — на классе .filter-trigger:
+                inline-border перебивал бы :hover и подсветки не было бы */}
+            <button type="button" className="filter-trigger" aria-expanded={open} onClick={() => setOpen(o => !o)}
+                style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, width: '100%', minWidth, maxWidth, background: 'var(--color-bg-card)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)', cursor: 'pointer' }}>
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selected ? selected.label : placeholder}</span>
                 <span style={{ color: 'var(--color-text-dim)', fontSize: 11, flexShrink: 0 }}>⌄</span>
             </button>

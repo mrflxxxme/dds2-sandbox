@@ -56,10 +56,12 @@ from backend.services.funnel.queries_grouping import (
 )
 
 # ─── Stock costs (расширенный режим воронки) ─────────────────────────────────
+from backend.services.funnel.grouping_tree import get_funnel_tree
 from backend.services.funnel.stock_costs import (
     apply_min_orders,
     get_stock_cost_map,
     merge_stock_costs,
+    merge_stock_costs_tree,
 )
 
 # ─── Sync ────────────────────────────────────────────────────────────────────
@@ -114,6 +116,8 @@ __all__ = [
     "get_funnel_by_category_size",
     # stock costs
     "get_stock_cost_map",
+    "get_funnel_tree",
     "merge_stock_costs",
+    "merge_stock_costs_tree",
     "apply_min_orders",
 ]

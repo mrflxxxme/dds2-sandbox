@@ -303,3 +303,31 @@ def merge_stock_costs(rows: list[dict], stock_map: dict[int, dict], group_by: st
         for row in rows:
             key = row.get(group_by) or ""
             _merge_nm_ids(row, by_key.get(key, []), stock_map)
+
+
+# Временны́е уровни дерева: остаток — снимок на сегодня, приписывать его
+# конкретному прошлому дню/неделе/месяцу нельзя, поэтому такие узлы оставляем пустыми.
+_TIME_DIMS = frozenset({"day", "week", "month"})
+
+
+def merge_stock_costs_tree(rows: list[dict], stock_map: dict[int, dict]) -> None:
+    """Мёрж складских полей в дерево произвольной цепочки группировок (in-place).
+
+    Узел получает сумму стока по nm_id всех артикулов своей ветки; один и тот же
+    артикул внутри узла учитывается один раз (иначе разрез по неделям умножил бы
+    остаток на число недель). Узлы временны́х измерений пропускаются — см. _TIME_DIMS.
+    """
+
+    def walk(node: dict) -> set[int]:
+        nm_ids: set[int] = set()
+        own = node.get("nm_id")
+        if isinstance(own, int):
+            nm_ids.add(own)
+        for child in node.get("children") or []:
+            nm_ids |= walk(child)
+        if node.get("dim") not in _TIME_DIMS:
+            _merge_nm_ids(node, sorted(nm_ids), stock_map)
+        return nm_ids
+
+    for row in rows:
+        walk(row)
