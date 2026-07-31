@@ -7,6 +7,7 @@ import logging
 from datetime import date
 
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import noload, selectinload
 
@@ -327,7 +328,17 @@ async def _attach_transfer_labels(
         t.from_warehouse_name = names.get(t.from_warehouse_id)
         t.to_warehouse_name = names.get(t.to_warehouse_id)
         t.counterparty_name = cp_names.get(t.counterparty_id) if t.counterparty_id else None
-        units, skus = totals.get(t.id, (0, 0))
+        if with_totals:
+            units, skus = totals.get(t.id, (0, 0))
+        else:
+            # Деталка: состав уже загружен — считаем по нему, лишнего запроса не
+            # нужно. Безусловное обнуление здесь показывало «0 SKU / 0 шт» в
+            # шапке карточки под полной таблицей состава.
+            # `unloaded` — защита от ленивой подгрузки в async-сессии (взорвалась
+            # бы MissingGreenlet на путях, где состав не грузили).
+            items = [] if "items" in sa_inspect(t).unloaded else list(t.items or [])
+            units = sum(int(i.quantity or 0) for i in items)
+            skus = len({i.nomenclature_id for i in items})
         t.units_total = units
         t.sku_count = skus
 
