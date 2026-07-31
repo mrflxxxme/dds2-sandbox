@@ -1,12 +1,12 @@
 'use client';
 import React, { useEffect, useLayoutEffect, useState } from 'react';
 import { IcX } from '../../ads-manager/components/icons';
-import { SHADING_OPTIONS, textScaleColor, type Shading } from './columns';
+import { SHADING_OPTIONS, type Shading } from './columns';
 
 /* ─── Подсветка значений ───────────────────────────────────────────────────
- * Цвет цифр — условное форматирование внутри своей колонки (каждая сравнивается
- * сама с собой). Здесь выбирается, показывать ли величину дополнительно
- * полоской или заливкой. Панель выезжает из своей кнопки.
+ * Цвет цифры задаёт сама метрика (как в прежнем разделе): ДРР, маржа, СПП, CTR,
+ * прибыль и расход держат свой светофор, остальные цифры чёрные. Здесь выбирается
+ * только, показывать ли рядом величину полоской. Панель выезжает из своей кнопки.
  * ─────────────────────────────────────────────────────────────────────── */
 
 const WIDTH = 340;
@@ -56,15 +56,10 @@ export default function ShadingPopover({ anchor, value, onChange, onClose }: {
                 </div>
 
                 <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--color-border)', background: '#f8fafc' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 12, fontWeight: 600 }}>
-                        {[0, 0.25, 0.5, 0.75, 1].map(p => (
-                            <span key={p} style={{ color: textScaleColor(p) }}>1 234</span>
-                        ))}
-                    </div>
                     <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
-                        Цвет цифр — положение значения в своей колонке: красные худшие, оранжевые средние, зелёные лучшие.
-                        Каждый столбец сравнивается сам с собой. Там, где меньше значит лучше
-                        (расход, ДРР, себестоимость), шкала перевёрнута.
+                        Цвет цифры задаёт сама метрика: ДРР, маржа, СПП, CTR, прибыль и расход горят
+                        своим светофором, крупные значения дня подсвечиваются мягкой заливкой,
+                        остальные цифры остаются чёрными.
                     </div>
                 </div>
 

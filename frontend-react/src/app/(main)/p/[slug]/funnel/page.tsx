@@ -1,5 +1,6 @@
 'use client';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { exportToExcel } from '@/lib/utils';
@@ -812,7 +813,13 @@ export default function FunnelPage() {
                         {periodDays} {plural(periodDays, 'день', 'дня', 'дней')}
                     </span>
                 )}
-                <span style={{ marginLeft: 'auto' }}>
+                {/* Прежняя воронка осталась отдельным маршрутом — на время привыкания */}
+                <Link href={`/p/${slug}/funnel/legacy`} className="btn btn-secondary btn-sm"
+                    title="Открыть прежний вид раздела"
+                    style={{ marginLeft: 'auto', fontSize: 12, textDecoration: 'none', whiteSpace: 'nowrap' }}>
+                    Старый вариант
+                </Link>
+                <span>
                     <Segmented value={tab} onChange={key => {
                         if (key === 'funnel') {
                             setTab('funnel');
