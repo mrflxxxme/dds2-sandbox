@@ -22,7 +22,8 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "fbsasm01_fbs_mirror"
-down_revision = "rbac01_pages_upd"
+# Перецеплено при выделении FBS-среза: rbac01 остался в непушенной ветке.
+down_revision = "loan07_debt_plan"
 branch_labels = None
 depends_on = None
 
