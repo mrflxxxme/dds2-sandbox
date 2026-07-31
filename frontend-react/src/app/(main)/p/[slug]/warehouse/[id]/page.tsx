@@ -11,6 +11,7 @@ import type {
     DefectMarkOperation, VehicleStatus,
     FulfillmentStatus, FulfillmentProviderId, FfStocksResponse, FfStockRow, FfBoxPack, FfNomenclatureOption, FfRequestRow, FfRequestKind, FfStatusEvent, FfSyncRun, FfUnlinkedAssembly,
     FfBulkCreateResult, FfBulkCreateAssemblyResult, FfRepackCandidate, FfRepackCandidatesOut,
+    ExpectedVehicleRow,
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 import Toast from '@/components/Toast';
@@ -181,7 +182,7 @@ export default function WarehouseDetailPage() {
             </div>
 
             {/* Expected vehicles */}
-            <ExpectedVehicles warehouseId={warehouseId} slug={slug} />
+            <ExpectedVehicles warehouseId={warehouseId} slug={slug} ffConnected={ffConnected} />
 
             {/* Tabs with counts */}
             <div style={{ display: 'flex', gap: 4, marginBottom: 20, borderBottom: '1px solid var(--color-border)', paddingBottom: 0 }}>
@@ -731,9 +732,12 @@ const NEXT_VEHICLE_ACTION: Record<string, { status: string; label: string; color
     // DISPATCHED: приёмка через InboundReceipt (таб "Приёмки")
 };
 
-function ExpectedVehicles({ warehouseId, slug }: { warehouseId: number; slug: string }) {
+function ExpectedVehicles({ warehouseId, slug, ffConnected }: { warehouseId: number; slug: string; ffConnected: boolean }) {
     const router = useRouter();
-    const [vehicles, setVehicles] = useState<any[]>([]);
+    const [vehicles, setVehicles] = useState<ExpectedVehicleRow[]>([]);
+    // Модалка «Связать заявки ФФ» — машина, к чьей приёмке привязываем
+    const [linkFor, setLinkFor] = useState<ExpectedVehicleRow | null>(null);
+    const [toast, setToast] = useState('');
 
     const loadVehicles = useCallback(() => {
         api.getExpectedVehicles(warehouseId).then(setVehicles).catch(() => {});
@@ -804,9 +808,176 @@ function ExpectedVehicles({ warehouseId, slug }: { warehouseId: number; slug: st
                                     <span style={{ fontSize: 11, color: 'var(--color-success)', fontWeight: 600 }}>→ Приёмки</span>
                                 ) : null}
                             </div>
+                            {ffConnected && v.receipt_id != null && (
+                                <div style={{ marginTop: 8 }}>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        style={{ fontSize: 11, padding: '3px 10px' }}
+                                        onClick={e => { e.stopPropagation(); setLinkFor(v); }}
+                                        title="Связать несвязанные заявки ФФ (kind=приёмка) с нашей приёмкой этой машины"
+                                    >
+                                        Связать заявки ФФ
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     );
                 })}
+            </div>
+
+            {linkFor && linkFor.receipt_id != null && (
+                <FfVehicleLinkModal
+                    warehouseId={warehouseId}
+                    vehicle={linkFor}
+                    onClose={() => setLinkFor(null)}
+                    onLinked={linkedNumbers => {
+                        setLinkFor(null);
+                        setToast(`Связано с приёмкой машины ${linkFor.order_no}: ${linkedNumbers.join(', ')}`);
+                        loadVehicles();
+                    }}
+                />
+            )}
+            {toast && <Toast message={toast} onClose={() => setToast('')} />}
+        </div>
+    );
+}
+
+/* ─── Модалка «Связать заявки ФФ» с приёмкой машины (мульти-выбор) ────────── */
+
+function FfVehicleLinkModal({ warehouseId, vehicle, onClose, onLinked }: {
+    warehouseId: number;
+    /** машина (receipt_id — наша приёмка, цель связки) */
+    vehicle: ExpectedVehicleRow;
+    onClose: () => void;
+    /** успешно связали все выбранные: номера заявок (для тоста родителя) */
+    onLinked: (linkedNumbers: string[]) => void;
+}) {
+    const [rows, setRows] = useState<FfRequestRow[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [selected, setSelected] = useState<Set<number>>(new Set());
+    const [rowErrors, setRowErrors] = useState<Record<number, string>>({});
+    const [acting, setActing] = useState(false);
+
+    useEffect(() => {
+        const controller = new AbortController();
+        setLoading(true);
+        setError('');
+        api.getFulfillmentRequests(warehouseId, 'inbound')
+            .then(r => {
+                if (controller.signal.aborted) return;
+                // Только свободные приёмки ФФ: без нашей приёмки/перемещения и не пара «вскрытия коробов»
+                setRows(r.filter(x =>
+                    !x.archived
+                    && x.inbound_receipt_id == null
+                    && x.stock_transfer_id == null
+                    && x.repack_return_id == null
+                ));
+            })
+            .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка загрузки заявок ФФ'); })
+            .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+        return () => controller.abort();
+    }, [warehouseId]);
+
+    const toggle = (id: number) => {
+        setSelected(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    };
+
+    const handleLink = async () => {
+        if (vehicle.receipt_id == null || selected.size === 0) return;
+        setActing(true);
+        setError('');
+        // Последовательно, ошибки — по-заявочно (мульти-связка N→1 разрешена бэком для migfull)
+        const errs: Record<number, string> = {};
+        const linked: string[] = [];
+        const okIds = new Set<number>();
+        for (const row of rows.filter(r => selected.has(r.id))) {
+            try {
+                await api.linkFulfillmentRequest(warehouseId, row.id, { inbound_receipt_id: vehicle.receipt_id });
+                linked.push(row.number || row.external_id);
+                okIds.add(row.id);
+            } catch (e: unknown) {
+                errs[row.id] = e instanceof Error ? e.message : 'Ошибка связывания';
+            }
+        }
+        setActing(false);
+        if (Object.keys(errs).length === 0) {
+            onLinked(linked);
+            return;
+        }
+        // Частичный успех: связанные убираем из списка, ошибки показываем в строках
+        setRowErrors(errs);
+        if (okIds.size > 0) {
+            setRows(prev => prev.filter(r => !okIds.has(r.id)));
+            setSelected(prev => new Set([...prev].filter(id => !okIds.has(id))));
+        }
+        setError(linked.length > 0
+            ? `Связано: ${linked.join(', ')}. Остальные — с ошибками (см. строки)`
+            : 'Связать не удалось — ошибки указаны в строках');
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-card modal-card-wide modal-card-solid" onClick={e => e.stopPropagation()}>
+                <h2 className="modal-title" style={{ marginBottom: 8 }}>
+                    Связать заявки ФФ — {vehicle.order_no}
+                </h2>
+                <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                    Выбранные заявки ФФ (приёмки) будут связаны с нашей приёмкой этой машины.
+                    Можно выбрать несколько — например, штуки и короба одной поставки.
+                </p>
+
+                {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
+
+                {loading ? (
+                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка...</div>
+                ) : rows.length === 0 ? (
+                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                        Несвязанных заявок ФФ (приёмок) нет
+                    </div>
+                ) : (
+                    <div className="ff-link-list">
+                        {rows.map(row => (
+                            <label key={row.id} className="ff-link-row" style={{ cursor: 'pointer' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={selected.has(row.id)}
+                                    onChange={() => toggle(row.id)}
+                                    disabled={acting}
+                                />
+                                {/* flex:1 — .ff-link-row даёт space-between, прижимаем контент влево */}
+                                <div className="ff-link-row-main" style={{ flex: 1 }}>
+                                    <div className="ff-link-row-head">
+                                        <span className="ff-link-row-number">{row.number || row.external_id}</span>
+                                        {(row.stage_title || row.status) && (
+                                            <span className="badge badge-secondary" style={{ fontSize: 11, padding: '2px 8px' }}>
+                                                {row.stage_title || row.status}
+                                            </span>
+                                        )}
+                                        <span className="ff-link-row-meta">
+                                            {row.external_created_at ? `${formatDate(row.external_created_at)} · ` : ''}
+                                            {formatNumber(row.total_qty_units ?? row.total_qty ?? 0, 0)} шт
+                                        </span>
+                                    </div>
+                                    {rowErrors[row.id] && (
+                                        <div style={{ color: 'var(--color-danger)', fontSize: 12, marginTop: 4 }}>{rowErrors[row.id]}</div>
+                                    )}
+                                </div>
+                            </label>
+                        ))}
+                    </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+                    <button className="btn btn-secondary" onClick={onClose} disabled={acting}>Отмена</button>
+                    <button className="btn btn-primary" onClick={handleLink} disabled={acting || selected.size === 0 || rows.length === 0}>
+                        {acting ? 'Связывание...' : `Связать выбранные (${formatNumber(selected.size, 0)})`}
+                    </button>
+                </div>
             </div>
         </div>
     );

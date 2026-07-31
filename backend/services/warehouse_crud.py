@@ -11,6 +11,8 @@ from backend.models.cost import CostOrder
 from backend.models.counterparty import Counterparty
 from backend.models.enums import VehicleStatus
 from backend.models.warehouse import (
+    InboundReceipt,
+    InboundStatus,
     Warehouse,
     WarehouseCounterparty,
     WarehouseDeliveryTime,
@@ -392,6 +394,38 @@ async def get_expected_vehicles(db: AsyncSession, project_id: int, warehouse_id:
         .order_by(CostOrder.ship_date.desc().nulls_last())
     )
     return list(result.scalars().all())
+
+
+async def get_vehicle_receipt_map(
+    db: AsyncSession, project_id: int, vehicle_ids: list[int]
+) -> dict[int, int]:
+    """Наша приёмка каждой машины: {cost_order_id: inbound_receipt_id}.
+
+    Приёмку создаёт отгрузка машины (InboundReceipt.cost_order_id = vehicle.id,
+    status=EXPECTED); пост-отгрузочные доборы могут добавить DRAFT-дубль.
+    Предпочитаем EXPECTED, иначе — свежайшую по id.
+    """
+    if not vehicle_ids:
+        return {}
+    result = await db.execute(
+        select(InboundReceipt.id, InboundReceipt.cost_order_id, InboundReceipt.status)
+        .where(
+            InboundReceipt.project_id == project_id,
+            InboundReceipt.cost_order_id.in_(vehicle_ids),
+            InboundReceipt.is_deleted == False,  # noqa: E712
+        )
+        .order_by(InboundReceipt.id)
+        .limit(1000)
+    )
+    mapping: dict[int, int] = {}
+    frozen: set[int] = set()  # машины, у которых уже найдена EXPECTED-приёмка
+    for receipt_id, cost_order_id, status in result.all():
+        if cost_order_id in frozen:
+            continue
+        mapping[cost_order_id] = receipt_id  # среди прочих — последняя (макс. id)
+        if status == InboundStatus.EXPECTED.value:
+            frozen.add(cost_order_id)
+    return mapping
 
 
 async def delete_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -> bool:

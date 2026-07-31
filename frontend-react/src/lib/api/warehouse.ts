@@ -3,6 +3,7 @@ import { ApiClient } from './client';
 import type {
     AcceptanceCheckRequest,
     InTransitResponse,
+    ExpectedVehicleRow,
     AcceptanceCheckResponse,
     AcceptanceLimitsResponse,
     SupplyAcceptanceSlotsResponse,
@@ -138,7 +139,7 @@ export function addWarehouseMethods(api: ApiClient) {
         },
 
         // ─── Stock ───────────────────────────────────────────────────
-        getExpectedVehicles(warehouseId: number) { return api.request<any[]>('GET', `/api/v1/warehouse/${warehouseId}/expected-vehicles`); },
+        getExpectedVehicles(warehouseId: number) { return api.request<ExpectedVehicleRow[]>('GET', `/api/v1/warehouse/${warehouseId}/expected-vehicles`); },
         getWarehouseStock(warehouseId: number, excludeAssemblyId?: number) {
             // excludeAssemblyId: экран редактирования сборки — её собственный резерв не вычитается из available
             const params = new URLSearchParams();

@@ -396,8 +396,10 @@ async def get_expected_vehicles(
 ):
     """Get vehicles in transit (SHIPPED/CUSTOMS) targeting this warehouse."""
     from backend.services.warehouse_crud import get_expected_vehicles as _get_expected
+    from backend.services.warehouse_crud import get_vehicle_receipt_map
 
     vehicles = await _get_expected(db, project.id, warehouse_id)
+    receipt_map = await get_vehicle_receipt_map(db, project.id, [v.id for v in vehicles])
     result = []
     for v in vehicles:
         # selectinload(CostOrder.items) грузит и soft-deleted строки (перезаливки
@@ -407,6 +409,7 @@ async def get_expected_vehicles(
         active = [i for i in v.items if not i.is_deleted]
         result.append(
             {
+                "id": v.id,
                 "order_no": v.order_no,
                 "status": v.status,
                 "invoice_no": v.invoice_no,
@@ -417,6 +420,8 @@ async def get_expected_vehicles(
                 "total_qty": sum(i.qty for i in active),
                 "container_type": v.container_type,
                 "transport_type": v.transport_type,
+                # id нашей приёмки этой машины — для связки заявок ФФ из карточки
+                "receipt_id": receipt_map.get(v.id),
             }
         )
     return result

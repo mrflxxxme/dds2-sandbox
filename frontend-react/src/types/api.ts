@@ -1197,6 +1197,23 @@ export interface InboundReceipt {
   items: InboundReceiptItem[];
 }
 
+/** Машина в пути на склад — карточка блока «Ожидаемые поставки» */
+export interface ExpectedVehicleRow {
+  id: number;
+  order_no: string;
+  status: string;
+  invoice_no: string | null;
+  ship_date: string | null;
+  estimated_arrival_date: string | null;
+  actual_ship_date: string | null;
+  items_count: number;
+  total_qty: number;
+  container_type: string | null;
+  transport_type: string | null;
+  /** id нашей приёмки этой машины (InboundReceipt.cost_order_id) — цель связки заявок ФФ */
+  receipt_id: number | null;
+}
+
 export interface OutboundShipmentItem {
   id: number;
   shipment_id: number;
