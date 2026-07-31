@@ -1257,8 +1257,29 @@ export interface StockTransferItem {
   quantity: number;
 }
 
-/** Статусы переезда: черновик → в пути → принято (ступени «машина назначена» НЕТ). */
-export type StockTransferStatus = 'DRAFT' | 'IN_TRANSIT' | 'COMPLETED';
+/**
+ * Статусы переезда — ЗЕРКАЛО `AssemblyStatus`: переезд между складами ведётся
+ * как заявка на сборку, теми же ступенями.
+ *
+ * PENDING → IN_PROGRESS → READY → VEHICLE_ASSIGNED → SHIPPED → DELIVERED,
+ * плюс RETURNED → CLOSED и CANCELLED.
+ *
+ * Сток двигают РОВНО два перехода: → SHIPPED списывает со склада-источника,
+ * → DELIVERED приходует на получателе (и → RETURNED возвращает источнику).
+ *
+ * Старая тонкая шкала переведена миграцией `trv04`: DRAFT → PENDING,
+ * IN_TRANSIT → SHIPPED, COMPLETED → DELIVERED.
+ */
+export type StockTransferStatus =
+  | 'PENDING'
+  | 'IN_PROGRESS'
+  | 'READY'
+  | 'VEHICLE_ASSIGNED'
+  | 'SHIPPED'
+  | 'DELIVERED'
+  | 'RETURNED'
+  | 'CLOSED'
+  | 'CANCELLED';
 
 export interface StockTransfer {
   id: number;
@@ -1282,6 +1303,15 @@ export interface StockTransfer {
   units_total?: number;
   /** Позиций (SKU) — тоже с бэкенда, состав для этого больше не нужен. */
   sku_count?: number;
+  /**
+   * Уже зачислено получателю, штук (движения TRANSFER_IN + DEFECT_TRANSFER_IN).
+   * Знаменатель прогресса — `units_total`, отдельного «плана» НЕТ.
+   *
+   * 🔴 Заполняется ТОЛЬКО в СПИСКЕ (`GET /warehouse/transfers`). В карточке
+   * всегда 0 — там за фактом идут в состав, поэтому «принято X из Y» рисуем
+   * в списках и только у SHIPPED (у DELIVERED равно units_total, до отгрузки 0).
+   */
+  received_units?: number;
 
   // ─── Машина и логистика переезда (зеркало блока «Назначить машину» заявки) ───
   vehicle_info?: string | null;
@@ -1298,6 +1328,16 @@ export interface StockTransfer {
   pickup_cost?: string | number | null;
   delivery_date?: string | null;
   vehicle_assigned_at?: string | null;
+  /**
+   * Вехи цепочки — зеркало `AssemblyRequest.actual_ready_date` / `shipped_at`.
+   * Из статуса НЕ выводятся: он хранит только текущее состояние, а сводному
+   * списку нужны сами даты («висит готовым N дней»).
+   * `actual_ready_date` ставится на переходе в READY (кнопкой, синком ФФ или
+   * наследованием от заявки при конвертации) и переживает возврат;
+   * `shipped_at` — на отгрузке, при возврате обнуляется.
+   */
+  actual_ready_date?: string | null;
+  shipped_at?: string | null;
   /** Заявка на сборку, из которой переделали этот переезд (кнопка «Переделать в перемещение»). */
   converted_from_assembly_id?: number | null;
 

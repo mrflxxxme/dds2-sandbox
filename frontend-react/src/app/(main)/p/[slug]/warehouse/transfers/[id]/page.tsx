@@ -3,11 +3,15 @@
  * Деталка перемещения — переезд между нашими складами как полноценная поездка.
  *
  * Что важно помнить про контракт:
- *  • Ступени статуса «машина назначена» НЕТ (DRAFT → IN_TRANSIT → COMPLETED):
- *    назначенная машина — это признак черновика (vehicle_assigned_at), поэтому
- *    бейдж «машина назначена» рисуется отдельно от статуса.
- *  • Назначать машину и править переезд бэкенд разрешает ТОЛЬКО в DRAFT;
- *    в пути/принято — 400, поэтому кнопок там нет вовсе.
+ *  • Статус — ЗЕРКАЛО заявки на сборку: PENDING → IN_PROGRESS → READY →
+ *    VEHICLE_ASSIGNED → SHIPPED → DELIVERED, плюс RETURNED → CLOSED и CANCELLED.
+ *    Сток двигают ровно два перехода: «Отправить» списывает с источника,
+ *    «Принять» приходует на получателе («Вернуть на склад» — обратно источнику).
+ *  • Кнопка есть ТОЛЬКО там, где переход разрешён: мёртвая кнопка, отвечающая
+ *    400, хуже отсутствующей. Гейты — в lib/transfer.ts (canSendTransfer и др.),
+ *    одни на все экраны переездов.
+ *  • Править переезд можно до отгрузки (PENDING / IN_PROGRESS / READY): состав
+ *    живой, пока сток не списан. Машину назначают из READY, снятие вернёт туда же.
  *  • Имена концов маршрута приходят в самой схеме; справочник складов грузим
  *    ради контрагента склада забора (и как фолбэк имени). ФФ-связки приходят
  *    в самой схеме (`ff_links`) — раньше карточка ради них тянула ВСЕ заявки
@@ -37,11 +41,20 @@ import type {
 } from '@/types/api';
 import {
     TRANSFER_STATUS_MAP,
+    canAssignTransferVehicle,
+    canCloseTransfer,
+    canCompleteTransfer,
+    canEditTransfer,
+    canMarkTransferReady,
+    canReturnTransfer,
+    canSendTransfer,
+    canUnassignTransferVehicle,
     ffLinkLabel,
     ffLinkStage,
     splitTransferFfLinks,
     toMoney,
     transferDriverName,
+    transferReceiveProgress,
     transferSkuCount,
     transferUnits,
     transferVehicleAssigned,
@@ -249,10 +262,14 @@ export default function TransferDetailPage() {
     // контрагента для тумблера «логистику оказывает склад»).
     const fromWhName = transfer.from_warehouse_name || fromWh?.name || null;
     const toWhName = transfer.to_warehouse_name || warehouseById.get(transfer.to_warehouse_id)?.name || null;
-    // Единый гард правок черновика: и машина, и PUT разрешены бэкендом только
-    // в DRAFT — в остальных статусах кнопок нет, а не «есть, но с 400».
-    const canDraftEdit = canEdit() && transfer.status === 'DRAFT';
-    const canAssignVehicle = canDraftEdit;
+    // Гейты действий — из общего словаря (lib/transfer.ts), а не сравнением
+    // статуса строкой здесь: иначе экраны переездов разъедутся между собой.
+    // Права редактора — отдельный множитель: у viewer'а нет ни одной кнопки.
+    const editor = canEdit();
+    const canDraftEdit = editor && canEditTransfer(transfer.status);
+    const canAssignVehicle = editor && canAssignTransferVehicle(transfer.status);
+    const canUnassignVehicle = editor && canUnassignTransferVehicle(transfer.status);
+    const receiveProgress = transferReceiveProgress(transfer);
 
     const itemColumns: Column[] = [
         {
@@ -288,9 +305,13 @@ export default function TransferDetailPage() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                         <h1 className="page-title" style={{ margin: 0 }}>{transfer.number}</h1>
                         <span className={`badge ${status.className}`}>{status.label}</span>
-                        {vehicleAssigned && transfer.status === 'DRAFT' && (
-                            <span className="badge badge-info" title="Машина назначена — отдельного статуса у этой ступени нет">
-                                🚚 машина назначена
+                        {/* Отдельного бейджа «машина назначена» больше нет — это
+                            самостоятельная ступень статуса. Но у уехавшего
+                            переезда статус её уже не покажет, а госномер логисту
+                            нужен и там: напоминаем машиной, а не статусом. */}
+                        {vehicleAssigned && transfer.status !== 'VEHICLE_ASSIGNED' && transfer.vehicle_info && (
+                            <span className="badge badge-info" title="Машина этого переезда">
+                                🚚 {transfer.vehicle_info}
                             </span>
                         )}
                         {transfer.is_defect && (
@@ -304,6 +325,23 @@ export default function TransferDetailPage() {
                         {' · '}
                         {formatNumber(transferSkuCount(transfer), 0)} SKU / {formatNumber(transferUnits(transfer), 0)} шт
                     </p>
+                    {/* Прогресс приёмки — главный вопрос по уехавшему переезду:
+                        «доехало ли всё». Есть только у SHIPPED (см. хелпер). */}
+                    {receiveProgress && (
+                        <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <span
+                                className={`badge ${receiveProgress.received >= receiveProgress.total ? 'badge-success' : 'badge-warning'}`}
+                                title="Сколько единиц склад-получатель уже зачислил себе"
+                            >
+                                принято {formatNumber(receiveProgress.received, 0)} из {formatNumber(receiveProgress.total, 0)}
+                            </span>
+                            {receiveProgress.received > 0 && receiveProgress.received < receiveProgress.total && (
+                                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                    остаток в пути: {formatNumber(receiveProgress.total - receiveProgress.received, 0)} шт
+                                </span>
+                            )}
+                        </div>
+                    )}
                 </div>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                     <Link href={`/p/${slug}/warehouse/assembly?tab=transfers`}>
@@ -314,22 +352,32 @@ export default function TransferDetailPage() {
                             className="btn btn-secondary"
                             onClick={() => { setSaveError(''); setShowEditModal(true); }}
                             disabled={actionLoading}
-                            title="Маршрут, комментарий, брак, транспортная единица и состав — пока переезд в черновике"
+                            title="Маршрут, комментарий, брак, транспортная единица и состав — пока переезд не уехал"
                         >
                             Редактировать
                         </button>
                     )}
-                    {canEdit() && transfer.status === 'DRAFT' && (
+                    {editor && canMarkTransferReady(transfer.status) && (
+                        <button
+                            className="btn btn-primary"
+                            onClick={() => runAction(() => api.markTransferReady(transfer.id), 'Переезд отмечен собранным')}
+                            disabled={actionLoading}
+                            title="Отметить, что переезд собран и готов к назначению машины. Сток не двигает"
+                        >
+                            Готов
+                        </button>
+                    )}
+                    {editor && canSendTransfer(transfer.status) && (
                         <button
                             className="btn btn-primary"
                             onClick={() => runAction(() => api.sendTransfer(transfer.id), 'Перемещение отправлено — товар в пути')}
                             disabled={actionLoading}
-                            title="Списать товар со склада-источника и перевести переезд в «В пути»"
+                            title="Списать товар со склада-источника и повесить транзитом на получателя"
                         >
                             Отправить
                         </button>
                     )}
-                    {canEdit() && transfer.status === 'IN_TRANSIT' && (
+                    {editor && canCompleteTransfer(transfer.status) && (
                         <button
                             className="btn btn-success"
                             onClick={() => runAction(() => api.completeTransfer(transfer.id), 'Перемещение принято')}
@@ -337,6 +385,36 @@ export default function TransferDetailPage() {
                             title="Оприходовать товар на складе-получателе"
                         >
                             Принять
+                        </button>
+                    )}
+                    {editor && canReturnTransfer(transfer.status) && (
+                        <button
+                            className="btn btn-secondary"
+                            style={{ color: 'var(--color-danger)' }}
+                            disabled={actionLoading}
+                            title="Получатель не принял: товар вернётся на склад-источник"
+                            onClick={() => {
+                                // Возврат ДВИГАЕТ сток обратно на источник —
+                                // спрашиваем прямо, а не «вы уверены?».
+                                if (!confirm(
+                                    `Вернуть ${transfer.number} на склад-источник (${fromWhName || `склад ${transfer.from_warehouse_id}`})?\n\n`
+                                    + 'Товар вернётся на склад-источник: транзит на получателе снимется, '
+                                    + 'а если переезд уже был принят — единицы спишутся с получателя обратно.'
+                                )) return;
+                                runAction(() => api.returnTransfer(transfer.id), 'Переезд вернулся на склад-источник');
+                            }}
+                        >
+                            Вернуть на склад
+                        </button>
+                    )}
+                    {editor && canCloseTransfer(transfer.status) && (
+                        <button
+                            className="btn btn-secondary"
+                            onClick={() => runAction(() => api.closeTransfer(transfer.id), 'Переезд закрыт')}
+                            disabled={actionLoading}
+                            title="Закрыть переезд: дальше по нему действий не будет. Сток не двигает"
+                        >
+                            Закрыть
                         </button>
                     )}
                 </div>
@@ -356,8 +434,16 @@ export default function TransferDetailPage() {
                     <InfoField label="Создано" value={formatDateTime(transfer.created_at)} />
                     <InfoField label="Дата забора" value={formatDate(transfer.pickup_date)} />
                     <InfoField label="Дата доставки" value={formatDate(transfer.delivery_date)} />
+                    {/* Вехи цепочки. Их НЕ вывести из статуса — он хранит только
+                        текущее состояние, а «когда собрали» нужно и после отгрузки. */}
+                    {transfer.actual_ready_date && (
+                        <InfoField label="Собран" value={formatDate(transfer.actual_ready_date)} />
+                    )}
                     {transfer.vehicle_assigned_at && (
                         <InfoField label="Машина назначена" value={formatDateTime(transfer.vehicle_assigned_at)} />
+                    )}
+                    {transfer.shipped_at && (
+                        <InfoField label="Отгружен" value={formatDateTime(transfer.shipped_at)} />
                     )}
                     {transfer.converted_from_assembly_id != null && (
                         <InfoField
@@ -393,14 +479,14 @@ export default function TransferDetailPage() {
                     {/* Паритет с секцией Листа логиста: снять машину можно и
                         оттуда, и с карточки — иначе логист, зашедший в переезд,
                         вынужден возвращаться на другой экран ради одной кнопки. */}
-                    {canAssignVehicle && vehicleAssigned && (
+                    {canUnassignVehicle && (
                         <button
                             className="btn btn-secondary btn-sm"
                             style={{ color: 'var(--color-danger)' }}
                             disabled={actionLoading}
-                            title="Транспортную единицу груза не трогает"
+                            title="Переезд вернётся в «Готово». Транспортную единицу груза не трогает"
                             onClick={() => {
-                                if (!confirm(`Снять машину с ${transfer.number}? Транспортная единица груза останется как есть.`)) return;
+                                if (!confirm(`Снять машину с ${transfer.number}? Переезд вернётся в «Готово», транспортная единица груза останется как есть.`)) return;
                                 runAction(() => api.unassignTransferVehicle(transfer.id), 'Машина снята');
                             }}
                         >
@@ -431,9 +517,11 @@ export default function TransferDetailPage() {
                 {!vehicleAssigned ? (
                     <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
                         Машина не назначена.
-                        {transfer.status === 'DRAFT'
+                        {canAssignTransferVehicle(transfer.status)
                             ? ' Назначьте машину — госномер, водитель, перевозчик, дата и слот забора.'
-                            : ' Переезд уже в пути — назначение машины закрыто (правки только в черновике).'}
+                            : canEditTransfer(transfer.status)
+                                ? ' Машину назначают после того, как переезд собран, — нажмите «Готов».'
+                                : ' Переезд уже уехал — назначение машины закрыто.'}
                     </div>
                 ) : (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 16 }}>
@@ -532,6 +620,15 @@ export default function TransferDetailPage() {
 
             {/* ─── Состав ─────────────────────────────────────────────── */}
             <div style={{ marginBottom: 16 }}>
+                {/* Почему кнопки «Редактировать» нет. Молчаливое исчезновение
+                    кнопки читается как баг прав доступа, а не как «поезд ушёл». */}
+                {editor && !canEditTransfer(transfer.status) && (
+                    <div style={{ color: 'var(--color-text-muted)', fontSize: 13, marginBottom: 8 }}>
+                        {transfer.status === 'CANCELLED'
+                            ? 'Переезд отменён — правка закрыта.'
+                            : 'После отправки сток уже списан со склада-источника — правка закрыта.'}
+                    </div>
+                )}
                 {(transfer.items?.length ?? 0) === 0 ? (
                     <div className="glass-card" style={{ padding: 48, textAlign: 'center' }}>
                         <div style={{ fontSize: 40, marginBottom: 12 }}>📦</div>

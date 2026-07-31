@@ -361,7 +361,7 @@ async def _make_transfer(
     from_warehouse_id,
     to_warehouse_id,
     *,
-    status=TransferStatus.COMPLETED.value,
+    status=TransferStatus.DELIVERED.value,
     created_at=None,
     items=(),
 ):
@@ -441,7 +441,7 @@ async def test_candidates_inbound_include_incoming_transfers(
         project.id,
         source_warehouse.id,
         warehouse.id,
-        status=TransferStatus.DRAFT.value,
+        status=TransferStatus.PENDING.value,
         items=[(bc, nom.id, 6)],
     )
     # Уже связанное с другой ФФ-заявкой — исключается.

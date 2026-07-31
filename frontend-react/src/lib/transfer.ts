@@ -4,14 +4,38 @@ import { formatNumber, pluralRu } from '@/lib/utils';
 /**
  * Общий словарь и хелперы перемещения (переезда между нашими складами).
  *
- * Цепочка коротка и ступени «машина назначена» в ней НЕТ: назначенная машина —
- * это признак черновика (непустой `vehicle_assigned_at`), а не отдельный статус.
- * Поэтому «есть машина» считаем по vehicleAssigned(), а не по status.
+ * Переезд — ЗЕРКАЛО заявки на сборку: те же ступени, та же машина внутри
+ * цепочки, поэтому и словарь строится от `ASSEMBLY_STATUS_MAP`
+ * (`src/lib/assembly-status.ts`).
+ *
+ * 🔴 ЦВЕТА — 1:1 с заявкой, без исключений: одинаковая ступень обязана
+ * выглядеть одинаково на обоих экранах.
+ *
+ * ПОДПИСИ — тоже 1:1, кроме четырёх мест, где заявочная формулировка на
+ * переезде прямо врёт (каждое объяснено построчно ниже).
  */
 export const TRANSFER_STATUS_MAP: Record<StockTransferStatus, { label: string; className: string }> = {
-    DRAFT:      { label: 'Черновик', className: 'badge-secondary' },
-    IN_TRANSIT: { label: 'В пути',   className: 'badge-info' },
-    COMPLETED:  { label: 'Принято',  className: 'badge-success' },
+    // ≠ заявки («В сборке»). У заявки PENDING — legacy-ступень, схлопнутая на
+    // IN_PROGRESS одной подписью. У переезда PENDING живой и означает ДРУГОЕ:
+    // «создан, работа не начата». Одинаковая подпись на двух соседних
+    // статусах сделала бы бейдж и фильтр неразличимыми.
+    PENDING:          { label: 'Создан',            className: 'badge-info' },
+    IN_PROGRESS:      { label: 'В сборке',          className: 'badge-info' },
+    READY:            { label: 'Готово',            className: 'badge-success' },
+    VEHICLE_ASSIGNED: { label: 'Машина назначена',  className: 'badge-info' },
+    // ≠ заявки («Отгружена»). Во-первых род: заявка отгружена, а переезд —
+    // мужской. Во-вторых смысл: «отгрузка» между СВОИМИ складами читается как
+    // отгрузка наружу, тогда как товар физически едет между нашими складами.
+    // Это состояние весь склад и Лист логиста уже называют «В пути» — и так же
+    // назывался прежний статус IN_TRANSIT, который сюда и переехал.
+    SHIPPED:          { label: 'В пути',            className: 'badge-success' },
+    // ≠ заявки («Принята WB»). Никакого WB здесь нет — принимает НАШ
+    // склад-получатель, и «Принято на складе» говорит ровно это.
+    DELIVERED:        { label: 'Принято на складе', className: 'badge-success' },
+    RETURNED:         { label: 'Возврат на склад',  className: 'badge-warning' },
+    CLOSED:           { label: 'Закрыт',            className: 'badge-warning' },
+    // ≠ заявки («Отменена») — только род: переезд отменён.
+    CANCELLED:        { label: 'Отменён',           className: 'badge-secondary' },
 };
 
 /** Подпись статуса; неизвестный статус отдаём как есть, а не пустой строкой. */
@@ -21,6 +45,115 @@ export function transferStatusLabel(status: StockTransferStatus | string): strin
 
 export function transferStatusClass(status: StockTransferStatus | string): string {
     return TRANSFER_STATUS_MAP[status as StockTransferStatus]?.className ?? 'badge-secondary';
+}
+
+// ─── Гейты действий по статусу ──────────────────────────────────────────────
+// ЕДИНЫЙ источник «что сейчас можно»: карточка, вкладка «Перемещения», Лист
+// логиста и вкладка склада спрашивают этот файл, а не сравнивают статус
+// строкой у себя. Разъедься гейты — часть экранов показала бы кнопку, которая
+// вернёт 400 («мёртвая кнопка»), а часть спрятала бы живое действие.
+//
+// Набор зеркалит серверный TRANSFER_TRANSITIONS (backend/models/warehouse.py).
+// Он намеренно НЕ пытается предсказать 400 по другим причинам (пустой состав,
+// нехватка стока) — это забота бэкенда, текст ошибки показываем как есть.
+
+/** Правка и удаление черновика: до отгрузки сток ещё не тронут. */
+export const TRANSFER_EDITABLE_STATUSES: ReadonlySet<StockTransferStatus> =
+    new Set<StockTransferStatus>(['PENDING', 'IN_PROGRESS', 'READY']);
+
+/** Статусы, из которых переезд ещё может уехать (кнопка «Отправить»). */
+export const TRANSFER_SENDABLE_STATUSES: ReadonlySet<StockTransferStatus> =
+    new Set<StockTransferStatus>(['READY', 'VEHICLE_ASSIGNED']);
+
+/**
+ * Правка состава и маршрута. Раньше это был один DRAFT, теперь три ступени:
+ * ФФ может собирать переезд (IN_PROGRESS) и уже собрать его (READY) — состав
+ * при этом ещё живой, потому что сток списывается только на отгрузке.
+ */
+export function canEditTransfer(status: StockTransferStatus | string): boolean {
+    return TRANSFER_EDITABLE_STATUSES.has(status as StockTransferStatus);
+}
+
+/** «Готов» — отметить сборку переезда законченной. */
+export function canMarkTransferReady(status: StockTransferStatus | string): boolean {
+    return status === 'PENDING' || status === 'IN_PROGRESS';
+}
+
+/**
+ * Назначить/изменить машину. Из READY — назначение, из VEHICLE_ASSIGNED —
+ * замена реквизитов уже назначенной. В PENDING/IN_PROGRESS машины нет: пока
+ * ФФ не собрал, везти нечего.
+ */
+export function canAssignTransferVehicle(status: StockTransferStatus | string): boolean {
+    return status === 'READY' || status === 'VEHICLE_ASSIGNED';
+}
+
+/** Снять машину — только когда она назначена; переезд вернётся в READY. */
+export function canUnassignTransferVehicle(status: StockTransferStatus | string): boolean {
+    return status === 'VEHICLE_ASSIGNED';
+}
+
+/** «Отправить»: списывает сток с источника и вешает транзит на получателя. */
+export function canSendTransfer(status: StockTransferStatus | string): boolean {
+    return TRANSFER_SENDABLE_STATUSES.has(status as StockTransferStatus);
+}
+
+/** «Принять» — оприходовать на складе-получателе. */
+export function canCompleteTransfer(status: StockTransferStatus | string): boolean {
+    return status === 'SHIPPED';
+}
+
+/** «Вернуть на склад» — получатель не принял, товар едет обратно на источник. */
+export function canReturnTransfer(status: StockTransferStatus | string): boolean {
+    return status === 'SHIPPED' || status === 'DELIVERED';
+}
+
+/** «Закрыть» — терминал: после возврата либо после нормальной приёмки. */
+export function canCloseTransfer(status: StockTransferStatus | string): boolean {
+    return status === 'RETURNED' || status === 'DELIVERED';
+}
+
+/**
+ * Отмена (DELETE = CANCELLED + soft-delete). Шире правки: машину сняли не
+ * обязательно — отменить назначенный переезд бэкенд разрешает. А вот
+ * отгруженный уже нет: сток списан, отмена его не вернёт (для этого «Вернуть
+ * на склад»).
+ */
+export function canCancelTransfer(status: StockTransferStatus | string): boolean {
+    return canEditTransfer(status) || status === 'VEHICLE_ASSIGNED';
+}
+
+/**
+ * Прогресс приёмки «принято X из Y».
+ *
+ * Считает бэкенд (`received_units`) — и в списке, и в карточке: один GROUP BY
+ * по журналу движений на пачку, запроса на строку нет.
+ *
+ * Показываем ТОЛЬКО у SHIPPED, и это не косметика: у DELIVERED прогресс равен
+ * единица-в-единицу (там его место занимает сам статус), а до отгрузки он
+ * всегда нулевой — «принято 0 из 500» на несобранном переезде читалось бы как
+ * потерянный товар. null — показывать нечего.
+ */
+export function transferReceiveProgress(t: StockTransfer): { received: number; total: number } | null {
+    if (t.status !== 'SHIPPED') return null;
+    const total = t.units_total ?? 0;
+    if (total <= 0) return null;
+    const received = t.received_units ?? 0;
+    return { received, total };
+}
+
+/**
+ * Сколько дней переезд ВИСИТ собранным, но не уехал. Полный аналог `daysStuck`
+ * для заявки (Лист логиста): считаем от `actual_ready_date` (полночь).
+ * null — не применимо (ещё не собран, уже уехал либо даты нет).
+ */
+export function transferDaysStuck(t: StockTransfer): number | null {
+    if (t.status !== 'READY' && t.status !== 'VEHICLE_ASSIGNED') return null;
+    if (!t.actual_ready_date) return null;
+    const ready = new Date(`${t.actual_ready_date}T00:00:00`);
+    if (Number.isNaN(ready.getTime())) return null;
+    const days = Math.floor((Date.now() - ready.getTime()) / 86_400_000);
+    return days >= 0 ? days : null;
 }
 
 /**
@@ -34,7 +167,15 @@ export function toMoney(v: string | number | null | undefined): number | null {
     return Number.isFinite(n) ? n : null;
 }
 
-/** Машина назначена — по факту заполнения, а не по статусу (ступени статуса нет). */
+/**
+ * Машина назначена — по ФАКТУ заполнения реквизитов, а не по статусу.
+ *
+ * Ступень VEHICLE_ASSIGNED теперь есть, но статус и реквизиты — разные вопросы:
+ * у отгруженного (SHIPPED) и принятого (DELIVERED) переезда машина тоже была,
+ * и карточка обязана её показать. Плюс старые записи до бэкфилла несут только
+ * `vehicle_info` без `vehicle_assigned_at`.
+ * Для «можно ли сейчас назначить/снять» — canAssignTransferVehicle().
+ */
 export function transferVehicleAssigned(t: StockTransfer): boolean {
     return !!(t.vehicle_assigned_at || t.vehicle_info);
 }
@@ -62,6 +203,20 @@ export function transferUnits(t: StockTransfer): number {
 export function transferSkuCount(t: StockTransfer): number {
     if (t.sku_count != null) return t.sku_count;
     return (t.items ?? []).length;
+}
+
+/**
+ * Общий вес груза, кг. Отдельного поля у переезда НЕТ (в отличие от заявки с
+ * её `total_weight_kg`): `pallet_weight_kg` — вес ОДНОЙ единицы, поэтому
+ * считаем сами.
+ *
+ * Нет любого из двух множителей → null («не взвешивали»), а не 0: ноль в
+ * колонке веса читается как «взвесили и получилось ничего».
+ */
+export function transferTotalWeight(t: StockTransfer): number | null {
+    const one = toMoney(t.pallet_weight_kg);
+    if (one === null || t.pallets_count == null) return null;
+    return one * t.pallets_count;
 }
 
 /**

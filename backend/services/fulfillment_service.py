@@ -356,6 +356,41 @@ async def _other_linked_ff_all_ready(
     return all(_assembly_ready_signal(r.provider, r.stage_code, r.stage_title, r.is_completed) for r in result.all())
 
 
+async def _other_linked_transfer_ff_all_ready(
+    db: AsyncSession,
+    project_id: int,
+    stock_transfer_id: int,
+    *,
+    exclude_id: int,
+) -> bool:
+    """Все ОСТАЛЬНЫЕ активные ОТГРУЗОЧНЫЕ ФФ-заявки переезда готовы?
+
+    Твин `_other_linked_ff_all_ready` для переезда: тот же вопрос, но по
+    `stock_transfer_id` и ТОЛЬКО по стороне источника (`kind=assembly`) —
+    приёмочное зеркало получателя про сборку груза ничего не говорит. Нужен для
+    авто-READY при ручной привязке (migfull/«Натали», N:1 — «короба» + «штучные»).
+    """
+    result = await db.execute(
+        select(
+            FulfillmentRequest.provider,
+            FulfillmentRequest.stage_code,
+            FulfillmentRequest.stage_title,
+            FulfillmentRequest.is_completed,
+        ).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.stock_transfer_id == stock_transfer_id,
+            FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
+            FulfillmentRequest.id != exclude_id,
+            FulfillmentRequest.archived == False,  # noqa: E712
+            FulfillmentRequest.local_archived == False,  # noqa: E712
+        )
+    )
+    return all(
+        _assembly_ready_signal(r.provider, r.stage_code, r.stage_title, r.is_completed)
+        for r in result.all()
+    )
+
+
 async def _other_linked_inbound_all_done(
     db: AsyncSession,
     project_id: int,
@@ -889,6 +924,36 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     # OutboundShipment и коммитит сам — внутри открытой транзакции его звать нельзя).
     assembly_ship_ids = await _collect_assembly_ship_candidates(db, project_id, linked_assembly_reqs)
 
+    # ── Те же две ступени для ПЕРЕЕЗДОВ ────────────────────────────────────
+    # Переезд между складами ФФ ведётся как заявка на сборку: провайдер видит
+    # его сборкой у себя (kind=assembly + stock_transfer_id), поэтому те же два
+    # сигнала двигают его так же — «груз собран» → READY, «заявка закрыта» +
+    # назначенная машина → SHIPPED. Переезд БЕЗ связки с ФФ синк не трогает
+    # вообще: у него нет ни одной строки в этой выборке.
+    linked_transfer_result = await db.execute(
+        select(FulfillmentRequest)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.provider == provider,
+            FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
+            FulfillmentRequest.stock_transfer_id.is_not(None),
+            # Как у сборок: завершённые-и-заархивированные нужны для авто-отгрузки,
+            # отменённые (archived без is_completed) отсеются в коллекторах.
+            or_(
+                FulfillmentRequest.archived == False,  # noqa: E712
+                FulfillmentRequest.is_completed == True,  # noqa: E712
+            ),
+            FulfillmentRequest.local_archived == False,  # noqa: E712
+        )
+        .limit(_MIRROR_SELECT_LIMIT)
+    )
+    linked_transfer_reqs = list(linked_transfer_result.scalars().all())
+    transfers_marked_ready = await _mark_linked_transfers_ready(db, project_id, linked_transfer_reqs)
+    transfer_ship_ids = await _collect_transfer_ship_candidates(
+        db, project_id, linked_transfer_reqs
+    )
+
     # Кандидаты на авто-ACCEPT приёмок собираем ПОД синк-транзакцией (нужны
     # свежие is_completed после UPSERT), но сам приём — после commit (ниже):
     # accept_receipt постит сток, лочит строку и коммитит сам, внутри открытой
@@ -1021,6 +1086,24 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             except Exception as e:  # — best-effort, синк уже зафиксирован
                 logger.warning("FF auto-ship: сборка %s пропущена (%s)", asm_id, e)
 
+    # Авто-ОТГРУЗКА переездов: ФФ закрыл связанную заявку, а у нас назначена
+    # машина (VEHICLE_ASSIGNED) → переезд уезжает. send_transfer списывает сток
+    # со склада забора, вешает транзит на получателя, создаёт забор и коммитит
+    # сам — ПОСЛЕ commit синка, своей сессией; дефицит стока/прочая ошибка синк
+    # НЕ валит (best-effort, ровно как авто-шип сборок выше).
+    transfers_shipped = 0
+    if transfer_ship_ids:
+        from backend.database import AsyncSessionLocal
+        from backend.services.warehouse_outbound import send_transfer
+
+        for tr_id in transfer_ship_ids:
+            try:
+                async with AsyncSessionLocal() as tr_db:
+                    await send_transfer(tr_db, project_id, tr_id)
+                transfers_shipped += 1
+            except Exception as e:  # — best-effort, синк уже зафиксирован
+                logger.warning("FF auto-ship: переезд %s пропущен (%s)", tr_id, e)
+
     # Авто-приём ПЕРЕМЕЩЕНИЙ по факту завершённой ФФ-приёмки — после commit
     # синка, каждое своей сессией (receive_transfer_fact лочит и коммитит сам).
     # Пока только migfull (кейс натали: PVB-* ← TR-*): у него факт по баркодам
@@ -1114,7 +1197,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
 
     logger.info(
         "Fulfillment sync: project=%s warehouse=%s stocks=%d requests=%d unmatched=%d "
-        "marked_ready=%d inbound_accepted=%d shipped=%d",
+        "marked_ready=%d inbound_accepted=%d shipped=%d transfers_ready=%d transfers_shipped=%d",
         project_id,
         warehouse_id,
         stocks_synced,
@@ -1123,6 +1206,8 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         assemblies_marked_ready,
         inbound_receipts_accepted,
         assemblies_shipped,
+        transfers_marked_ready,
+        transfers_shipped,
     )
     return {
         "stocks_synced": stocks_synced,
@@ -1131,6 +1216,8 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         "assemblies_marked_ready": assemblies_marked_ready,
         "inbound_receipts_accepted": inbound_receipts_accepted,
         "assemblies_shipped": assemblies_shipped,
+        "transfers_marked_ready": transfers_marked_ready,
+        "transfers_shipped": transfers_shipped,
         "synced_at": synced_at,
     }
 
@@ -2218,6 +2305,120 @@ async def _mark_linked_assemblies_ready(
     return transitioned
 
 
+def _ff_by_transfer(ff_requests: list[FulfillmentRequest]) -> dict[int, list[FulfillmentRequest]]:
+    """{stock_transfer_id: [активные ОТГРУЗОЧНЫЕ ФФ-заявки переезда]}.
+
+    Только `kind=assembly`: у переезда две стороны, и приёмочное зеркало
+    получателя (`kind=inbound`) про сборку груза у ИСТОЧНИКА ничего не говорит —
+    его сигналы читает авто-приём по факту (`_collect_transfer_fact_candidates`).
+    Отменённые (archived без is_completed) отбрасываем, просроченные — активны.
+    """
+    by_transfer: dict[int, list[FulfillmentRequest]] = {}
+    for req in ff_requests:
+        if req.kind != FfRequestKind.ASSEMBLY.value or req.stock_transfer_id is None:
+            continue
+        if req.archived and not req.is_completed:
+            continue
+        by_transfer.setdefault(req.stock_transfer_id, []).append(req)
+    return by_transfer
+
+
+async def _mark_linked_transfers_ready(
+    db: AsyncSession,
+    project_id: int,
+    ff_requests: list[FulfillmentRequest],
+) -> int:
+    """Переезды PENDING/IN_PROGRESS → READY по сигналу стадии ФФ — зеркало
+    `_mark_linked_assemblies_ready`.
+
+    Сигнал берём тем же `_assembly_ready_signal`: для провайдера наш переезд и
+    есть сборка — он собирает груз у себя на складе-источнике и отдаёт машине.
+    Гейт «завершены ВСЕ активные заявки» встроен в группировку (у Натали на один
+    документ бывает пара «короба + штучные»), отдельный запрос не нужен.
+
+    PENDING тоже переводим, в отличие от заявки: заявки рождаются сразу в
+    IN_PROGRESS, а переезд — в PENDING, и ждать ручного «взял в работу» значило
+    бы, что связанный с ФФ переезд не доедет до READY никогда.
+    `TRANSFER_TRANSITIONS` этот прямой ход разрешает. Сток не двигается,
+    откат обратим (READY → IN_PROGRESS). Commit — на стороне вызывающего.
+    """
+    from backend.services.warehouse_outbound import _log_transfer_status_change
+
+    by_transfer = _ff_by_transfer(ff_requests)
+    ready_by_transfer = {
+        tid: reqs
+        for tid, reqs in by_transfer.items()
+        if all(
+            _assembly_ready_signal(r.provider, r.stage_code, r.stage_title, r.is_completed)
+            for r in reqs
+        )
+    }
+    # «ФФ взял в работу»: есть живая связанная заявка, но сигнала «собран» ещё
+    # нет. Без этой ступени связанный переезд стоял бы в «Создан» до самого
+    # READY, и ступень «В сборке» — та, ради которой шкалу и приводили к
+    # заявочной, — в интерфейсе не появлялась бы никогда. Сток не двигает,
+    # переход обратим.
+    in_progress_ids = [tid for tid in by_transfer if tid not in ready_by_transfer]
+    if in_progress_ids:
+        wip = await db.execute(
+            select(StockTransfer)
+            .where(
+                StockTransfer.project_id == project_id,
+                StockTransfer.id.in_(in_progress_ids),
+                StockTransfer.is_deleted == False,  # noqa: E712
+                StockTransfer.status == TransferStatus.PENDING.value,
+            )
+            .with_for_update(of=StockTransfer)
+        )
+        for doc in wip.scalars().all():
+            ff = by_transfer[doc.id][0]
+            doc.status = TransferStatus.IN_PROGRESS.value
+            _log_transfer_status_change(
+                db,
+                project_id,
+                doc.id,
+                TransferStatus.PENDING.value,
+                TransferStatus.IN_PROGRESS.value,
+                changed_by="ff_sync",
+                comment=f"ФФ {ff.number or ff.external_id}: взят в работу",
+            )
+    if not ready_by_transfer:
+        return 0
+
+    result = await db.execute(
+        select(StockTransfer)
+        .where(
+            StockTransfer.project_id == project_id,
+            StockTransfer.id.in_(list(ready_by_transfer)),
+            StockTransfer.is_deleted == False,  # noqa: E712
+            StockTransfer.status.in_(
+                [TransferStatus.PENDING.value, TransferStatus.IN_PROGRESS.value]
+            ),
+        )
+        # row-lock: ручной переход в параллельной транзакции не должен дать
+        # lost update или дубль строки истории (симметрично сборкам).
+        .with_for_update(of=StockTransfer)
+    )
+    docs = list(result.scalars().all())
+    for doc in docs:
+        ff = ready_by_transfer[doc.id][0]  # представитель для истории
+        old_status = doc.status
+        doc.status = TransferStatus.READY.value
+        doc.actual_ready_date = date.today()
+        _log_transfer_status_change(
+            db,
+            project_id,
+            doc.id,
+            old_status,
+            TransferStatus.READY.value,
+            changed_by="ff_sync",
+            comment=(
+                f"ФФ {ff.number or ff.external_id}: стадия «{ff.stage_title or 'завершена'}»"
+            ),
+        )
+    return len(docs)
+
+
 async def get_ff_request_goods(db: AsyncSession, project_id: int, ff_request_id: int) -> str | None:
     """HTML-список позиций ФФ-заявки (ШК · артикул продавца · кол-во) для кнопки «Состав».
 
@@ -2672,6 +2873,44 @@ async def _collect_assembly_ship_candidates(
         gazelka_ready = await _gazelka_linked_ids(db, project_id, ready_ids)
         ship_ids.extend(rid for rid in ready_ids if rid in gazelka_ready)
     return ship_ids
+
+
+async def _collect_transfer_ship_candidates(
+    db: AsyncSession,
+    project_id: int,
+    ff_requests: list[FulfillmentRequest],
+) -> list[int]:
+    """id переездов в VEHICLE_ASSIGNED, чьи отгрузочные ФФ-заявки закрыты.
+
+    Зеркало `_collect_assembly_ship_candidates`: только СБОР id под синк-
+    транзакцией, сам `send_transfer` (списывает сток, создаёт забор, коммитит) —
+    ПОСЛЕ commit синка, своей сессией.
+
+    🔴 СТРОГО из VEHICLE_ASSIGNED, и карв-аута «READY» здесь НЕТ (в отличие от
+    ручного `send_transfer`, где переезд возят и без оформления машины). ФФ
+    закрывает свою заявку, когда груз уехал ОТ НЕГО, — но переезд, которым
+    никто не занимался, отгружать по чужому сигналу нельзя: списание стока
+    произошло бы на документе, где не назначен ни перевозчик, ни дата забора, и
+    забор родился бы пустым. Назначенная машина — единственное доказательство,
+    что переездом занимается наш логист. Аналога Газельки у переездов нет
+    (агрегатор возит только сборки на WB).
+    """
+    shipped_ids = {
+        tid
+        for tid, reqs in _ff_by_transfer(ff_requests).items()
+        if all(_assembly_shipped_signal(r.is_completed) for r in reqs)
+    }
+    if not shipped_ids:
+        return []
+    result = await db.execute(
+        select(StockTransfer.id).where(
+            StockTransfer.project_id == project_id,
+            StockTransfer.id.in_(shipped_ids),
+            StockTransfer.is_deleted == False,  # noqa: E712
+            StockTransfer.status == TransferStatus.VEHICLE_ASSIGNED.value,
+        )
+    )
+    return [row[0] for row in result.all()]
 
 
 def _parse_date(value: object) -> date | None:
@@ -5444,10 +5683,10 @@ async def _collect_transfer_fact_candidates(
             FulfillmentRequest.number,
             FulfillmentRequest.is_completed,
         )
-        # Только живые IN_TRANSIT перемещения: закрытый руками / удалённый TR
-        # дал бы ValueError в receive_transfer_fact на каждом синке (маркер не
-        # встаёт) и вечно жёг HTTP к провайдеру. Отменённые заявки (archived
-        # без is_completed) не принимаем — их факт не финален и не растёт.
+        # Только живые SHIPPED перемещения: закрытый руками / возвращённый /
+        # удалённый TR дал бы ValueError в receive_transfer_fact на каждом синке
+        # (маркер не встаёт) и вечно жёг HTTP к провайдеру. Отменённые заявки
+        # (archived без is_completed) не принимаем — их факт не финален и не растёт.
         .join(StockTransfer, StockTransfer.id == FulfillmentRequest.stock_transfer_id)
         .where(
             FulfillmentRequest.project_id == project_id,
@@ -5466,7 +5705,7 @@ async def _collect_transfer_fact_candidates(
             # guard страхует от будущей ручной привязки.
             FulfillmentRequest.repack_return_id.is_(None),
             StockTransfer.project_id == project_id,
-            StockTransfer.status == TransferStatus.IN_TRANSIT,
+            StockTransfer.status == TransferStatus.SHIPPED,
             StockTransfer.is_deleted == False,  # noqa: E712
         )
         .limit(_MIRROR_SELECT_LIMIT)
@@ -6617,11 +6856,15 @@ async def link_request(
                 "stock_transfer_id можно привязать только к ФФ-заявке типа inbound или assembly"
             )
         tr_result = await db.execute(
-            select(StockTransfer).where(
+            select(StockTransfer)
+            .where(
                 StockTransfer.id == stock_transfer_id,
                 StockTransfer.project_id == project_id,
                 StockTransfer.is_deleted == False,  # noqa: E712 — SQLAlchemy expression
             )
+            # row-lock: привязка может двинуть статус в READY (ниже) — сериализуем
+            # с авто-READY синка и ручными переходами, как сделано у сборки.
+            .with_for_update()
         )
         tr_doc = tr_result.scalar_one_or_none()
         if not tr_doc:
@@ -6652,9 +6895,43 @@ async def link_request(
             if conflict.scalar_one_or_none() is not None:
                 raise ValueError("Перемещение уже связано с другой ФФ-заявкой этой стороны")
         req.stock_transfer_id = stock_transfer_id
-        # Приёмку перемещения (`complete_transfer`) НЕ автоматизируем, в отличие
+        # Авто-READY при привязке ОТГРУЗОЧНОЙ стороны — зеркало авто-READY сборки
+        # ниже: стадия ФФ уже «собран», а переезд ещё до готовности → переводим
+        # сразу, не дожидаясь синка (иначе бейдж «Собран» на карточке есть, а
+        # ступень появится только через 10 минут). Сток не двигается, откат
+        # обратим. Для migfull (N:1) — только если ВСЕ остальные привязанные
+        # отгрузочные заявки этого переезда тоже готовы.
+        #
+        # Приёмочную сторону (`complete_transfer`) НЕ автоматизируем, в отличие
         # от авто-ACCEPT приёмки ниже: перемещение постит сток на ОБА склада, и
-        # его проводит человек, сверив факт. Связь — только факт привязки.
+        # его проводит человек либо авто-приём ПО ФАКТУ, сверив количества.
+        if (
+            req.kind == FfRequestKind.ASSEMBLY.value
+            and not req.archived
+            and tr_doc.status
+            in (TransferStatus.PENDING.value, TransferStatus.IN_PROGRESS.value)
+            and _assembly_ready_signal(req.provider, req.stage_code, req.stage_title, req.is_completed)
+            and await _other_linked_transfer_ff_all_ready(
+                db, project_id, stock_transfer_id, exclude_id=ff_request_id
+            )
+        ):
+            from backend.services.warehouse_outbound import _log_transfer_status_change
+
+            old_status = tr_doc.status
+            tr_doc.status = TransferStatus.READY.value
+            tr_doc.actual_ready_date = date.today()
+            _log_transfer_status_change(
+                db,
+                project_id,
+                tr_doc.id,
+                old_status,
+                TransferStatus.READY.value,
+                changed_by="ff_sync",
+                comment=(
+                    f"ФФ {req.number or req.external_id}: "
+                    f"стадия «{req.stage_title or 'завершена'}» (привязка)"
+                ),
+            )
         transfer_map = {tr_doc.id: (tr_doc.number, tr_doc.status)}
     elif assembly_request_id is not None:
         if req.kind != FfRequestKind.ASSEMBLY.value:
@@ -7202,13 +7479,14 @@ async def _transfer_candidates(
     """Перемещения склада, не связанные с ДРУГИМИ ФФ-заявками той же стороны, + позиции.
 
     `outgoing=False` (приёмка, kind=inbound) — ВХОДЯЩИЕ (`to_warehouse_id`) и
-    только отправленные: черновик ещё не выехал, физически приходовать
-    провайдеру нечего — предлагать его в кандидаты значит звать связать заявку
-    с несуществующим переездом.
+    только уже уехавшие (SHIPPED/DELIVERED): до отгрузки физически приходовать
+    провайдеру нечего — предлагать такой переезд в кандидаты значит звать
+    связать заявку с несуществующим грузом.
 
     `outgoing=True` (сборка, kind=assembly) — ИСХОДЯЩИЕ (`from_warehouse_id`) и
-    наоборот, ещё не приехавшие: ФФ собирает переезд ДО отправки, поэтому
-    черновик здесь законный кандидат, а COMPLETED — уже закрытая история.
+    наоборот, ещё не уехавшие (все ступени ДО SHIPPED): ФФ собирает переезд ДО
+    отправки, поэтому и PENDING здесь законный кандидат, а SHIPPED и дальше —
+    уже закрытая для сборки история.
 
     Занятость считается ПО СВОЕЙ СТОРОНЕ: отгрузочное зеркало источника не
     должно прятать переезд от приёмочного зеркала получателя, и наоборот.
@@ -7226,9 +7504,14 @@ async def _transfer_candidates(
         else StockTransfer.to_warehouse_id == warehouse_id
     )
     statuses = (
-        (TransferStatus.DRAFT.value, TransferStatus.IN_TRANSIT.value)
+        (
+            TransferStatus.PENDING.value,
+            TransferStatus.IN_PROGRESS.value,
+            TransferStatus.READY.value,
+            TransferStatus.VEHICLE_ASSIGNED.value,
+        )
         if outgoing
-        else (TransferStatus.IN_TRANSIT.value, TransferStatus.COMPLETED.value)
+        else (TransferStatus.SHIPPED.value, TransferStatus.DELIVERED.value)
     )
     result = await db.execute(
         select(StockTransfer)
@@ -7337,6 +7620,50 @@ async def list_transfer_ff_links(
         .limit(_LINK_CANDIDATES_LIMIT)
     )
     return [_transfer_ff_link_row(r, _transfer_ff_side(transfer, r)) for r in result.scalars().all()]
+
+
+#: Потолок строк на ОДИН батч связок для списка переездов. 500 переездов × 2-3
+#: зеркала — сотни строк; кап нужен не ради нормы, а чтобы патологический проект
+#: не вытащил всё зеркало ФФ одним списком.
+_TRANSFER_LINKS_BATCH_LIMIT = 2000
+
+
+async def list_transfer_ff_links_batch(
+    db: AsyncSession, project_id: int, transfers: list[StockTransfer]
+) -> dict[int, list[dict]]:
+    """{transfer_id: [связки ФФ]} для ПАЧКИ переездов — ОДНОЙ выборкой.
+
+    Батч-твин `list_transfer_ff_links`: список переездов рисует бейдж «ФФ:
+    PVB-…» на каждой строке, и поштучный вызов дал бы ровно тот N+1, ради
+    отсутствия которого `_attach_transfer_labels` вообще существует.
+    Правила те же: обе стороны переезда, `local_archived` не фильтруем.
+    """
+    if not transfers:
+        return {}
+    by_id = {t.id: t for t in transfers}
+    result = await db.execute(
+        select(FulfillmentRequest)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.stock_transfer_id.in_(list(by_id)),
+        )
+        .order_by(
+            FulfillmentRequest.stock_transfer_id,
+            FulfillmentRequest.external_created_at.desc().nullslast(),
+            FulfillmentRequest.id.desc(),
+        )
+        .limit(_TRANSFER_LINKS_BATCH_LIMIT)
+    )
+    out: dict[int, list[dict]] = {}
+    for req in result.scalars().all():
+        tid = req.stock_transfer_id
+        transfer = by_id.get(tid) if tid is not None else None
+        if transfer is None or tid is None:  # — не бывает (IN-фильтр), но не падаем
+            continue
+        out.setdefault(tid, []).append(
+            _transfer_ff_link_row(req, _transfer_ff_side(transfer, req))
+        )
+    return out
 
 
 async def list_transfer_ff_candidates(

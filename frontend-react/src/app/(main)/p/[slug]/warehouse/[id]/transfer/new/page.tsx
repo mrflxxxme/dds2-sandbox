@@ -111,17 +111,25 @@ export default function NewTransferPage() {
                 shipped_as_boxes: shippedAsBoxes,
             });
             if (transfer?.id) {
-                // Auto-send (source deducted immediately, destination gets in_transit).
-                // Destination must accept via "Принять": брак — вкладка «Брак»,
-                // обычные — вкладка «Перемещения»
+                // Экран «создать и увезти»: кладовщик физически отдаёт груз
+                // здесь и сейчас, промежуточных ступеней у него нет.
+                //
+                // 🔴 Поэтому ДВА вызова, а не один: переезд создаётся в PENDING,
+                // а «Отправить» бэкенд принимает только из READY /
+                // VEHICLE_ASSIGNED. Один send отсюда вернул бы 400 — и форма
+                // создания перестала бы работать вовсе.
+                // Сток спишется со склада-источника и повиснет транзитом на
+                // получателе; принять надо на его стороне («Принять»): брак —
+                // вкладка «Брак», обычные — вкладка «Перемещения».
                 try {
+                    await api.markTransferReady(transfer.id);
                     await api.sendTransfer(transfer.id);
                 } catch (sendErr: unknown) {
-                    // Откат черновика, чтобы не оставлять сироту (ретрай создал бы дубль)
+                    // Откат, чтобы не оставлять сироту (ретрай создал бы дубль)
                     try {
                         await api.cancelTransfer(transfer.id);
                     } catch {
-                        setError(`Отправка не удалась, черновик ${transfer.number} остался — управляйте им на вкладке «Перемещения». ` +
+                        setError(`Отправка не удалась, переезд ${transfer.number} остался — управляйте им на вкладке «Перемещения». ` +
                             (sendErr instanceof Error ? sendErr.message : ''));
                         setSaving(false);
                         return;

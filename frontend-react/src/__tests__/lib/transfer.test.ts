@@ -6,18 +6,29 @@
  *     задано» (null) и «ноль» (0) значимая — 0 ₽ забора это бесплатный
  *     переезд, а null это «стоимость ещё не заводили». Наивный Number(v)
  *     схлопывает null/''/мусор в 0/NaN и врёт в обе стороны;
- *  2. transferVehicleAssigned: ступени статуса «машина назначена» в цепочке
- *     НЕТ (DRAFT → IN_TRANSIT → COMPLETED). Признак — vehicle_assigned_at,
- *     а на старых записях (до бэкфилла) только vehicle_info;
+ *  2. transferVehicleAssigned: признак — заполненные реквизиты машины
+ *     (vehicle_assigned_at, а на старых записях только vehicle_info), а НЕ
+ *     статус: у уехавшего переезда машина тоже была, и карточка её показывает;
  *  3. словарь статусов покрывает ровно коды бэкенда, а неизвестный код
  *     отдаётся как есть, а не пустой строкой;
- *  4. состав считается по items: SKU — строки, штуки — сумма quantity.
+ *  4. гейты действий разрешают ровно то, что разрешает TRANSFER_TRANSITIONS
+ *     бэкенда: кнопка, отвечающая 400, хуже отсутствующей;
+ *  5. состав считается по items: SKU — строки, штуки — сумма quantity.
  */
 import { describe, expect, it } from 'vitest';
 import type { StockTransfer, TransferFfLink } from '@/types/api';
+import { ASSEMBLY_STATUS_MAP } from '@/lib/assembly-status';
 import {
     TRANSFER_REPORT_DEFAULT_DAYS,
     TRANSFER_STATUS_MAP,
+    canAssignTransferVehicle,
+    canCloseTransfer,
+    canCompleteTransfer,
+    canEditTransfer,
+    canMarkTransferReady,
+    canReturnTransfer,
+    canSendTransfer,
+    canUnassignTransferVehicle,
     ffLinkLabel,
     ffLinkStage,
     filterTransferFfLinks,
@@ -27,7 +38,9 @@ import {
     transferEditError,
     transferReportDefaultRange,
     unitModeToFlag,
+    transferDaysStuck,
     transferDriverName,
+    transferReceiveProgress,
     transferSkuCount,
     transferStatusLabel,
     transferUnits,
@@ -38,8 +51,18 @@ import {
     unitWeightLabel,
 } from '@/lib/transfer';
 
-/** Статусы, которые реально отдаёт backend (TransferStatus). */
-const BACKEND_STATUSES = ['DRAFT', 'IN_TRANSIT', 'COMPLETED'];
+/** Статусы, которые реально отдаёт backend (TransferStatus) — зеркало заявки. */
+const BACKEND_STATUSES = [
+    'PENDING',
+    'IN_PROGRESS',
+    'READY',
+    'VEHICLE_ASSIGNED',
+    'SHIPPED',
+    'DELIVERED',
+    'RETURNED',
+    'CLOSED',
+    'CANCELLED',
+];
 
 function makeTransfer(patch: Partial<StockTransfer> = {}): StockTransfer {
     return {
@@ -48,7 +71,7 @@ function makeTransfer(patch: Partial<StockTransfer> = {}): StockTransfer {
         from_warehouse_id: 2,
         to_warehouse_id: 14,
         number: 'TR-31',
-        status: 'DRAFT',
+        status: 'PENDING',
         is_defect: false,
         items: [],
         ...patch,
@@ -79,17 +102,25 @@ describe('toMoney', () => {
 });
 
 describe('transferVehicleAssigned', () => {
-    it('черновик без машины — не назначена', () => {
+    it('новый переезд без машины — не назначена', () => {
         expect(transferVehicleAssigned(makeTransfer())).toBe(false);
     });
 
-    it('назначение видно по vehicle_assigned_at, а не по статусу', () => {
-        const t = makeTransfer({ status: 'DRAFT', vehicle_assigned_at: '2026-07-31T10:00:00Z' });
+    it('назначение видно по vehicle_assigned_at', () => {
+        const t = makeTransfer({ status: 'VEHICLE_ASSIGNED', vehicle_assigned_at: '2026-07-31T10:00:00Z' });
         expect(transferVehicleAssigned(t)).toBe(true);
     });
 
     it('старая запись без vehicle_assigned_at, но с госномером — тоже назначена', () => {
         expect(transferVehicleAssigned(makeTransfer({ vehicle_info: 'В874УА37' }))).toBe(true);
+    });
+
+    it('у уехавшего переезда машина остаётся видимой', () => {
+        // Статус ушёл вперёд, но госномер логисту нужен и в пути, и после
+        // приёмки: признак — реквизиты, а не ступень.
+        const t = makeTransfer({ status: 'SHIPPED', vehicle_info: 'В874УА37' });
+        expect(transferVehicleAssigned(t)).toBe(true);
+        expect(canAssignTransferVehicle(t.status)).toBe(false);
     });
 });
 
@@ -100,7 +131,106 @@ describe('TRANSFER_STATUS_MAP', () => {
 
     it('неизвестный статус отдаётся как есть', () => {
         expect(transferStatusLabel('WAT')).toBe('WAT');
-        expect(transferStatusLabel('IN_TRANSIT')).toBe('В пути');
+    });
+
+    it('цвета — 1:1 с заявкой на сборку', () => {
+        // Одинаковая ступень обязана выглядеть одинаково на обоих экранах:
+        // разъедься классы — пользователь считает переезд «другим» документом.
+        for (const status of BACKEND_STATUSES) {
+            const key = status as keyof typeof TRANSFER_STATUS_MAP;
+            expect(TRANSFER_STATUS_MAP[key].className)
+                .toBe(ASSEMBLY_STATUS_MAP[status as keyof typeof ASSEMBLY_STATUS_MAP].className);
+        }
+    });
+
+    it('подписи повторяют заявку всюду, кроме четырёх осознанных мест', () => {
+        // 1:1 — там, где заявочная формулировка на переезде верна.
+        expect(transferStatusLabel('IN_PROGRESS')).toBe('В сборке');
+        expect(transferStatusLabel('READY')).toBe('Готово');
+        expect(transferStatusLabel('VEHICLE_ASSIGNED')).toBe('Машина назначена');
+        expect(transferStatusLabel('RETURNED')).toBe('Возврат на склад');
+        expect(transferStatusLabel('CLOSED')).toBe('Закрыт');
+
+        // PENDING: у заявки это legacy-ступень с подписью IN_PROGRESS,
+        // у переезда — живой отдельный статус, и одинаковая подпись сделала бы
+        // бейдж и фильтр неразличимыми.
+        expect(transferStatusLabel('PENDING')).toBe('Создан');
+        expect(transferStatusLabel('PENDING')).not.toBe(transferStatusLabel('IN_PROGRESS'));
+
+        // SHIPPED: «отгрузка» между СВОИМИ складами читается как отгрузка
+        // наружу; товар физически едет — это состояние весь склад и Лист
+        // логиста называют «В пути» (так же назывался прежний IN_TRANSIT).
+        expect(transferStatusLabel('SHIPPED')).toBe('В пути');
+
+        // DELIVERED: никакого WB здесь нет — принимает наш склад-получатель.
+        expect(transferStatusLabel('DELIVERED')).toBe('Принято на складе');
+
+        // CANCELLED: только род — переезд отменён, а не заявка отменена.
+        expect(transferStatusLabel('CANCELLED')).toBe('Отменён');
+    });
+});
+
+/**
+ * Гейты действий. Показываем кнопку ТОЛЬКО там, где переход разрешён:
+ * мёртвая кнопка, отвечающая 400, хуже отсутствующей. Набор зеркалит
+ * TRANSFER_TRANSITIONS из backend/models/warehouse.py.
+ */
+describe('гейты действий по статусу', () => {
+    it('правка — до отгрузки: сток ещё не списан', () => {
+        expect(BACKEND_STATUSES.filter(canEditTransfer))
+            .toEqual(['PENDING', 'IN_PROGRESS', 'READY']);
+    });
+
+    it('«Готов» — пока переезд собирают', () => {
+        expect(BACKEND_STATUSES.filter(canMarkTransferReady))
+            .toEqual(['PENDING', 'IN_PROGRESS']);
+    });
+
+    it('машина — из «Готово», замена — из «Машина назначена»', () => {
+        expect(BACKEND_STATUSES.filter(canAssignTransferVehicle))
+            .toEqual(['READY', 'VEHICLE_ASSIGNED']);
+        // Снятие возвращает переезд в READY, поэтому доступно ровно там,
+        // где машина уже назначена.
+        expect(BACKEND_STATUSES.filter(canUnassignTransferVehicle))
+            .toEqual(['VEHICLE_ASSIGNED']);
+    });
+
+    it('«Отправить» — из «Готово» и «Машина назначена»', () => {
+        expect(BACKEND_STATUSES.filter(canSendTransfer))
+            .toEqual(['READY', 'VEHICLE_ASSIGNED']);
+        // Из PENDING отправить нельзя: форма создания поэтому делает ready+send.
+        expect(canSendTransfer('PENDING')).toBe(false);
+    });
+
+    it('«Принять» — только из «В пути»', () => {
+        expect(BACKEND_STATUSES.filter(canCompleteTransfer)).toEqual(['SHIPPED']);
+    });
+
+    it('«Вернуть на склад» — из «В пути» и после приёмки', () => {
+        expect(BACKEND_STATUSES.filter(canReturnTransfer)).toEqual(['SHIPPED', 'DELIVERED']);
+    });
+
+    it('«Закрыть» — после возврата либо после приёмки', () => {
+        expect(BACKEND_STATUSES.filter(canCloseTransfer)).toEqual(['DELIVERED', 'RETURNED']);
+    });
+
+    it('терминальные статусы не предлагают ничего', () => {
+        for (const status of ['CLOSED', 'CANCELLED']) {
+            expect(canEditTransfer(status)).toBe(false);
+            expect(canMarkTransferReady(status)).toBe(false);
+            expect(canAssignTransferVehicle(status)).toBe(false);
+            expect(canSendTransfer(status)).toBe(false);
+            expect(canCompleteTransfer(status)).toBe(false);
+            expect(canReturnTransfer(status)).toBe(false);
+            expect(canCloseTransfer(status)).toBe(false);
+        }
+    });
+
+    it('неизвестный статус ничего не разрешает', () => {
+        // Чужой код в поле не должен открывать действие «на всякий случай».
+        expect(canEditTransfer('WAT')).toBe(false);
+        expect(canSendTransfer('WAT')).toBe(false);
+        expect(canCloseTransfer('WAT')).toBe(false);
     });
 });
 
@@ -179,6 +309,59 @@ describe('режим транспортной единицы (bulk)', () => {
         // логист не нажмёт кнопку единицы. Ввод чисел на режим не влияет.
         const mode = initialUnitMode(null);
         expect(unitModeToFlag(mode)).toBeNull();
+    });
+});
+
+describe('прогресс приёмки', () => {
+    it('у уехавшего показываем «принято X из Y»', () => {
+        const t = makeTransfer({ status: 'SHIPPED', units_total: 500, received_units: 120 });
+        expect(transferReceiveProgress(t)).toEqual({ received: 120, total: 500 });
+    });
+
+    it('поля ещё нет (окно деплоя) — ноль принятых, а не падение', () => {
+        const t = makeTransfer({ status: 'SHIPPED', units_total: 500 });
+        expect(transferReceiveProgress(t)).toEqual({ received: 0, total: 500 });
+    });
+
+    it('до отгрузки и после приёмки прогресса нет', () => {
+        // До SHIPPED он всегда нулевой («принято 0 из 500» на несобранном
+        // переезде читается как потерянный товар), после — равен единица-в-единицу
+        // и его место занимает сам статус.
+        for (const status of ['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED', 'DELIVERED', 'RETURNED', 'CLOSED', 'CANCELLED'] as const) {
+            expect(transferReceiveProgress(makeTransfer({ status, units_total: 500, received_units: 500 }))).toBeNull();
+        }
+    });
+
+    it('пустой переезд не делит на ноль', () => {
+        expect(transferReceiveProgress(makeTransfer({ status: 'SHIPPED', units_total: 0 }))).toBeNull();
+    });
+});
+
+describe('«висит собранным N дней»', () => {
+    const daysAgo = (n: number) => {
+        const d = new Date();
+        d.setDate(d.getDate() - n);
+        return d.toISOString().slice(0, 10);
+    };
+
+    it('считает от даты готовности, а не от создания', () => {
+        const t = makeTransfer({ status: 'READY', actual_ready_date: daysAgo(3), created_at: daysAgo(30) });
+        expect(transferDaysStuck(t)).toBe(3);
+    });
+
+    it('машина назначена — всё ещё висит: он не уехал', () => {
+        const t = makeTransfer({ status: 'VEHICLE_ASSIGNED', actual_ready_date: daysAgo(5) });
+        expect(transferDaysStuck(t)).toBe(5);
+    });
+
+    it('уехавший и несобранный не висят', () => {
+        expect(transferDaysStuck(makeTransfer({ status: 'SHIPPED', actual_ready_date: daysAgo(9) }))).toBeNull();
+        expect(transferDaysStuck(makeTransfer({ status: 'PENDING' }))).toBeNull();
+    });
+
+    it('нет даты или дата битая — null, а не NaN дней', () => {
+        expect(transferDaysStuck(makeTransfer({ status: 'READY' }))).toBeNull();
+        expect(transferDaysStuck(makeTransfer({ status: 'READY', actual_ready_date: 'вчера' }))).toBeNull();
     });
 });
 
