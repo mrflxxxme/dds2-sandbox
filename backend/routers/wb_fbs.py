@@ -39,6 +39,7 @@ from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.wb_fbs import (
     ALLOWED_ORDER_STATUS_FILTERS,
+    ALLOWED_STAGE_BUCKETS,
     ALLOWED_STICKER_TYPES,
     ALLOWED_SUPPLY_STATUSES,
     FbsActionOut,
@@ -48,14 +49,16 @@ from backend.schemas.wb_fbs import (
     FbsOrderBackfillOut,
     FbsOrderBackfillRequest,
     FbsOrderListOut,
-    FbsOrderStatsOut,
     FbsOrderOut,
+    FbsOrderStatsOut,
     FbsOrderTimelineOut,
     FbsOverrideSet,
     FbsPickListOut,
     FbsReconcileApply,
     FbsMatrixOut,
+    FbsGeoAnalyticsOut,
     FbsReconcileOut,
+    FbsStageAnalyticsOut,
     FbsStickerOut,
     FbsStickerRequest,
     FbsStockPreviewOut,
@@ -82,6 +85,8 @@ from backend.services.wb_fbs import (
     warehouse_service,
 )
 from backend.services.wb_fbs import orders_stats as orders_stats_service
+from backend.services.wb_fbs import geo_analytics as geo_analytics_service
+from backend.services.wb_fbs import stage_analytics as stage_analytics_service
 from backend.services.wb_fbs.client_factory import (
     FBS_SANDBOX_SERVICE,
     FBS_SERVICE,
@@ -663,6 +668,104 @@ async def orders_stats(
             date_to=date_to,
             wb_warehouse_id=wb_warehouse_id,
         )
+
+
+@router.get("/orders/stage-analytics", response_model=FbsStageAnalyticsOut)
+async def orders_stage_analytics(
+    date_from: date | None = Query(None, description="МСК-дата начала; по умолчанию — 30 дней назад"),
+    date_to: date | None = Query(None, description="МСК-дата конца включительно; по умолчанию — сегодня"),
+    wb_warehouse_id: int | None = Query(None, ge=1),
+    bucket: str | None = Query(None, description="Шаг динамики: day / week / month; по умолчанию — по длине периода"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Сколько времени задание проводит на каждом этапе пути — с разрезом по складам.
+
+    Этап засчитывается в сутки, когда он ЗАВЕРШИЛСЯ. Блок `queue` — про
+    настоящее (что висит сейчас и как давно) и период намеренно игнорирует.
+    Путь статический — объявлен до path-параметров.
+    """
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(422, "date_from позже date_to")
+    if bucket is not None and bucket not in ALLOWED_STAGE_BUCKETS:
+        raise HTTPException(422, f"bucket: допустимо {', '.join(ALLOWED_STAGE_BUCKETS)}")
+    with _fbs_errors():
+        return await stage_analytics_service.stage_analytics(
+            db,
+            project.id,
+            date_from=date_from,
+            date_to=date_to,
+            wb_warehouse_id=wb_warehouse_id,
+            bucket=bucket,
+        )
+
+
+@router.get("/orders/geo-analytics", response_model=FbsGeoAnalyticsOut)
+async def orders_geo_analytics(
+    date_from: date | None = Query(None, description="МСК-дата начала; по умолчанию — 30 дней назад"),
+    date_to: date | None = Query(None, description="МСК-дата конца включительно; по умолчанию — сегодня"),
+    wb_warehouse_id: int | None = Query(None, ge=1),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Куда едут заказы и как быстро: направления, маршруты, узлы, перевалки.
+
+    Округ покупателя берётся сшивкой с зеркалом статистики по `rid = srid`;
+    покрытие неполное и отдаётся в `coverage`. Путь считается по истории
+    кабинета, поэтому глубина ограничена догоном (`/orders/history/sync`).
+    """
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(422, "date_from позже date_to")
+    with _fbs_errors():
+        return await geo_analytics_service.geo_analytics(
+            db,
+            project.id,
+            date_from=date_from,
+            date_to=date_to,
+            wb_warehouse_id=wb_warehouse_id,
+        )
+
+
+@router.post(
+    "/orders/history/sync",
+    response_model=FbsActionOut,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def sync_order_history(
+    limit: int = Query(200, ge=1, le=300, description="Сколько заданий догнать за прогон"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Догнать историю статусов заданий из КАБИНЕТА WB (точные вехи для этапов).
+
+    Публичный Marketplace API истории не отдаёт — ходим портальной сессией.
+    Ручка нужна для ПЕРВИЧНОЙ заливки: фоновый джоб берёт по 200 заданий раз в
+    полчаса, и три месяца истории он догоняет полсуток. ⚠️ Потолок 300 за вызов
+    намеренно низкий: ручка исполняется в API-контейнере рядом с uvicorn, и
+    длинный прогон здесь выедает память (локально 5600 заданий одним заходом
+    словили OOM-kill). Массовый догон — дело джоба в worker-контейнере. `affected` — сколько
+    заданий обработано за этот прогон.
+
+    Запись в WB не делается (это GET к кабинету), но ручка write-типа: она
+    тратит лимит хоста (150 запросов/мин), и дёргать её конкурентно нельзя.
+    """
+    from backend.services import integrations_service
+    from backend.services.wb_fbs.order_history import sync_order_history as run_history
+
+    with _fbs_errors():
+        client = await integrations_service.get_wb_portal_client(db, project.id)
+        try:
+            stats = await run_history(db, project.id, client=client, limit=limit)
+        finally:
+            await client.aclose()
+    return FbsActionOut(
+        ok=True,
+        affected=stats["orders"],
+        message=(
+            f"История: обработано {stats['orders']} заданий, "
+            f"новых строк {stats['rows']}, ошибок {stats['failed']}"
+        ),
+    )
 
 
 @router.get("/orders/writeoff-issues", response_model=FbsWriteoffIssuesOut)
