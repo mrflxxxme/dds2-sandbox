@@ -8397,6 +8397,8 @@ export type FbsStageBucket = 'day' | 'week' | 'month';
 export interface FbsStageRow {
   key: string;
   title: string;
+  /** Короткое имя для узкой колонки таблицы; полное — в подсказке. */
+  short: string;
   zone: FbsStageZone;
   precision: FbsStagePrecision;
   /** Сводный этап перекрывает соседние — складывать с обычными нельзя. */
@@ -8498,6 +8500,20 @@ export interface FbsGeoDirectionRow {
   sla_in_time: number;
 }
 
+/**
+ * Город назначения — последний узел маршрута перед готовностью к вручению.
+ *
+ * 🔴 Это точка сети WB (СЦ/ПВЗ), а не адрес покупателя. Зато известна для всех
+ * заданий с завершённым путём, тогда как округ берётся сшивкой с зеркалом
+ * статистики и покрывает не всё.
+ */
+export interface FbsGeoDestinationRow {
+  label: string;
+  orders: number;
+  median_days: number | null;
+  p90_days: number | null;
+}
+
 /** Клетка матрицы «склад отгрузки × округ назначения». */
 export interface FbsGeoMatrixRow {
   wb_warehouse_id?: number | null;
@@ -8540,6 +8556,8 @@ export interface FbsGeoAnalytics {
   wb_warehouse_id?: number | null;
   maturity_days: number;
   directions: FbsGeoDirectionRow[];
+  /** Города назначения по маршруту — покрытие 100%, в отличие от округов. */
+  destinations: FbsGeoDestinationRow[];
   matrix: FbsGeoMatrixRow[];
   nodes: FbsGeoNodeRow[];
   hops: FbsGeoHopsRow[];

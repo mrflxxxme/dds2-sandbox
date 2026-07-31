@@ -17,17 +17,27 @@ import StockTab from './StockTab';
 import FbsMatrixTab from './FbsMatrixTab';
 import OrdersTab from './OrdersTab';
 import SuppliesTab from './SuppliesTab';
+import StagesTab from './StagesTab';
+import GeoTab from './GeoTab';
 
-type Tab = 'supplies' | 'orders' | 'stock' | 'matrix' | 'warehouses';
+type Tab = 'supplies' | 'orders' | 'stages' | 'geo' | 'stock' | 'matrix' | 'warehouses';
 
 /**
  * Порядок вкладок повторяет кабинет WB: единица работы — ПОСТАВКА, поэтому
  * она первая и открывается по умолчанию. «Заказы» — источник, из которого
  * поставки набираются; остальное — настройка трансляции остатков.
+ *
+ * «Этапы» стоят сразу за «Заказами»: это тот же поток заданий, но в разрезе
+ * времени — сколько путь занимает и где стоит. Отдельной вкладкой, а не блоком
+ * внутри «Заказов», потому что у них разный период (там — дата заказа, здесь —
+ * дата завершения этапа), и два контрола периода на одном экране уже однажды
+ * путали (селект глубины истории пришлось убрать как ложный фильтр списка).
  */
 const TABS: { key: Tab; label: string }[] = [
     { key: 'supplies', label: 'Поставки' },
     { key: 'orders', label: 'Заказы' },
+    { key: 'stages', label: 'Этапы' },
+    { key: 'geo', label: 'География' },
     { key: 'stock', label: 'Остатки' },
     { key: 'matrix', label: 'Матрица складов' },
     { key: 'warehouses', label: 'Склады' },
@@ -197,6 +207,18 @@ function FbsContent() {
                     refreshTick={auto.tick}
                 />
             )}
+
+            {tab === 'stages' && (
+                <StagesTab
+                    warehouses={warehouses}
+                    refreshTick={auto.tick}
+                    writeEnabled={writeEnabled}
+                    writeHint={writeHint}
+                    onToast={setToast}
+                />
+            )}
+
+            {tab === 'geo' && <GeoTab warehouses={warehouses} refreshTick={auto.tick} />}
 
             {tab === 'matrix' && <FbsMatrixTab refreshTick={auto.tick} />}
 
