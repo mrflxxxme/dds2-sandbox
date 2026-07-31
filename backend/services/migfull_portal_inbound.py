@@ -267,9 +267,11 @@ def _validated_packing(
 ) -> list[MigfullPackingLine]:
     """Валидация packing из модалки (нарушение → 400, не 422).
 
-    qty > 0, units_per_box >= 1, boxes >= 0 и boxes×units_per_box <= qty (явный
-    сплит требует кратности >= 2), ШК без дублей и строго совпадают с составом
-    приёмки (ни лишних, ни пропущенных — опись обязана покрыть весь состав).
+    0 <= qty <= кол-во строки приёмки (частичная отправка разрешена, больше
+    состава — 400; qty=0 — строка не едет, опись её пропустит), units_per_box
+    >= 1, boxes >= 0 и boxes×units_per_box <= qty (явный сплит требует
+    кратности >= 2), ШК без дублей и строго совпадают с составом приёмки
+    (ни лишних, ни пропущенных — packing обязан покрыть весь состав).
     """
     seen: set[str] = set()
     for p in packing:
@@ -279,8 +281,13 @@ def _validated_packing(
         if bc in seen:
             raise MigfullPortalServiceError(f"Packing: ШК {bc} передан дважды", status_code=400)
         seen.add(bc)
-        if p.qty <= 0:
-            raise MigfullPortalServiceError(f"Packing: количество по ШК {bc} должно быть > 0", status_code=400)
+        if p.qty < 0:
+            raise MigfullPortalServiceError(f"Packing: количество по ШК {bc} должно быть >= 0", status_code=400)
+        if p.qty > qty_by_bc[bc]:
+            raise MigfullPortalServiceError(
+                f"Packing: по ШК {bc} количество {p.qty} больше состава приёмки ({qty_by_bc[bc]})",
+                status_code=400,
+            )
         if p.units_per_box is not None and p.units_per_box < 1:
             raise MigfullPortalServiceError(f"Packing: шт в коробе по ШК {bc} должно быть >= 1", status_code=400)
         if p.boxes is not None:

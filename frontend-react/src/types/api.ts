@@ -2812,7 +2812,7 @@ export interface MigfullInboundItem {
 /** Per-line packing из модалки: units_per_box null/1 — россыпь; >=2 — короба + остаток россыпью. */
 export interface MigfullPackingLine {
   barcode: string;
-  qty: number;                      // > 0
+  qty: number;                      // 0..кол-во строки приёмки (0 — строка не едет)
   units_per_box: number | null;     // >= 1
   /** Явный сплит: сколько КОРОБОВ (остаток россыпью без warning); 0 — всё россыпью; null — максимум коробов. */
   boxes?: number | null;            // >= 0, boxes×units_per_box <= qty

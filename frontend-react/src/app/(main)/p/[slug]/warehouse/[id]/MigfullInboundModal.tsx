@@ -1,9 +1,10 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
-import { formatNumber } from '@/lib/utils';
+import { exportToExcel, formatNumber } from '@/lib/utils';
 import type {
     MigfullInboundDraft,
+    MigfullInboundItem,
     MigfullInboundSendRequest,
     MigfullPackingLine,
     MigfullSendResult,
@@ -11,10 +12,14 @@ import type {
 
 /**
  * Confirm-модалка «Создать поставку у Натали»: РЕДАКТИРУЕМЫЙ состав нашей
- * приёмки машины (per-строка: коробом/россыпью + шт в коробе, prefill по
- * цепочке кратность Натали → наша кратность → россыпь) → РЕАЛЬНОЕ создание
- * поставки (приёмки) в портале ФФ «Натали» (migfull). Создание НЕОБРАТИМО —
- * портал не даёт удалить/отменить документ, повтор требует подтверждения.
+ * приёмки машины (per-строка: коробом/россыпью + шт в коробе + отправляемое
+ * кол-во ≤ состава приёмки, prefill по цепочке кратность Натали → наша
+ * кратность → россыпь) → РЕАЛЬНОЕ создание поставки (приёмки) в портале ФФ
+ * «Натали» (migfull). Создание НЕОБРАТИМО — портал не даёт удалить/отменить
+ * документ, повтор требует подтверждения.
+ *
+ * Массовое редактирование: Excel-экспорт текущей раскладки + вставка из
+ * буфера «ШК → короб/россыпь → кол-во» (Tab/«;»-разделитель, отчёт об ошибках).
  */
 
 /** Состояние упаковки одной строки состава (ключ — ШК товара). */
@@ -22,9 +27,10 @@ interface PackRowState {
     boxMode: boolean;   // true — коробом, false — россыпью
     units: string;      // «шт в коробе» (input; валидно при boxMode: целое >= 2)
     boxes: string;      // «коробов» — явный сплит (input; валидно: 0..floor(qty/units))
+    qty: string;        // отправляемое кол-во (input; валидно: 0..qty приёмки; 0 — строка не едет)
 }
 
-const EMPTY_ROW: PackRowState = { boxMode: false, units: '', boxes: '' };
+const EMPTY_ROW: PackRowState = { boxMode: false, units: '', boxes: '', qty: '' };
 
 /** Сегмент-фильтр состава (быстрый срез по текущему состоянию упаковки). */
 type SegmentFilter = 'all' | 'box' | 'loose' | 'no_mult' | 'mismatch';
@@ -34,6 +40,20 @@ const maxBoxesStr = (qty: number, unitsStr: string): string => {
     const u = parseInt(unitsStr, 10);
     return Number.isFinite(u) && u >= 2 ? String(Math.floor(qty / u)) : '';
 };
+
+/** Эффективное отправляемое кол-во строки (невалидный input → весь состав приёмки). */
+const effQty = (it: MigfullInboundItem, r: PackRowState): number => {
+    const n = parseInt(r.qty, 10);
+    return Number.isFinite(n) && n >= 0 && n <= it.qty ? n : it.qty;
+};
+
+/** Отчёт применения массовой вставки из буфера. */
+interface PasteReport {
+    applied: number;
+    errors: string[];
+}
+
+const PASTE_PLACEHOLDER = '2049985828273\tкороб\t120\n2049985828280\tроссыпь\n2049985828297;к;40';
 
 interface Props {
     /** id нашей приёмки машины (InboundReceipt) — источник поставки */
@@ -71,6 +91,11 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
     const [selected, setSelected] = useState<Set<string>>(new Set());
     const [bulkUnits, setBulkUnits] = useState('');
 
+    // Массовая вставка из буфера (панель с textarea + отчёт о применении).
+    const [pasteOpen, setPasteOpen] = useState(false);
+    const [pasteText, setPasteText] = useState('');
+    const [pasteReport, setPasteReport] = useState<PasteReport | null>(null);
+
     const [submitting, setSubmitting] = useState(false);
     const [submitError, setSubmitError] = useState('');
     const [result, setResult] = useState<MigfullSendResult | null>(null);
@@ -95,6 +120,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                     boxMode: it.units_per_box != null && it.units_per_box >= 2,
                     units,
                     boxes: maxBoxesStr(it.qty, units),
+                    qty: String(it.qty),
                 };
             }
             setPackRows(rows);
@@ -113,9 +139,13 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
 
     // ─── Производные упаковки: per-строка (короба/остаток) + итоги ──────────────
     const packOf = (barcode: string): PackRowState => packRows[barcode] ?? EMPTY_ROW;
-    /** Разбор строки: unitsNum/boxesNum (NaN — пусто/мусор), короба/остаток при валидном коробе. */
-    const rowCalc = (barcode: string, qty: number) => {
+    /** Разбор строки: sendQty/unitsNum/boxesNum (NaN — пусто/мусор), короба/остаток при валидном коробе. */
+    const rowCalc = (barcode: string, maxQty: number) => {
         const r = packOf(barcode);
+        // Отправляемое кол-во: валидно 0..maxQty (состав приёмки); 0 — строка не едет.
+        const qtyNum = parseInt(r.qty, 10);
+        const qtyOk = Number.isFinite(qtyNum) && qtyNum >= 0 && qtyNum <= maxQty;
+        const qty = qtyOk ? qtyNum : maxQty; // fallback для расчётов; invalidQty блокирует submit
         const unitsNum = parseInt(r.units, 10);
         const unitsOk = Number.isFinite(unitsNum) && unitsNum >= 2;
         // Явный сплит: «коробов» валидно в 0..floor(qty/units); остаток едет россыпью.
@@ -124,18 +154,22 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
         const asBox = r.boxMode && unitsOk && boxesOk;
         return {
             boxMode: r.boxMode,
+            sendQty: qty,
             unitsNum,
             boxesNum,
+            invalidQty: !qtyOk,                       // кол-во пусто/мусор/вне 0..maxQty
             invalidUnits: r.boxMode && !unitsOk,      // коробом, но «шт в коробе» не задано/некорректно
             invalidBoxes: r.boxMode && unitsOk && !boxesOk, // «коробов» вне 0..максимума
-            invalid: r.boxMode && (!unitsOk || !boxesOk),
+            invalid: !qtyOk || (r.boxMode && (!unitsOk || !boxesOk)),
             boxes: asBox ? boxesNum : 0,
-            rest: asBox ? qty - boxesNum * unitsNum : qty, // при россыпи — вся строка
+            rest: asBox ? qty - boxesNum * unitsNum : qty, // при россыпи — всё отправляемое кол-во
         };
     };
     const items = draft?.items ?? [];
     const totalBoxes = items.reduce((s, it) => s + rowCalc(it.barcode, it.qty).boxes, 0);
     const totalLoose = items.reduce((s, it) => s + rowCalc(it.barcode, it.qty).rest, 0);
+    const totalSendQty = items.reduce((s, it) => s + rowCalc(it.barcode, it.qty).sendQty, 0);
+    const totalReceiptQty = items.reduce((s, it) => s + it.qty, 0);
     const invalidCount = items.reduce((s, it) => s + (rowCalc(it.barcode, it.qty).invalid ? 1 : 0), 0);
     const knownCount = items.filter(it => it.units_per_box != null).length;
 
@@ -148,8 +182,9 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
             const next = { ...prev };
             for (const it of items) {
                 if (it.units_per_box != null && it.units_per_box >= 2) {
+                    const r = next[it.barcode] ?? { ...EMPTY_ROW, qty: String(it.qty) };
                     const units = String(it.units_per_box);
-                    next[it.barcode] = { boxMode: true, units, boxes: maxBoxesStr(it.qty, units) };
+                    next[it.barcode] = { ...r, boxMode: true, units, boxes: maxBoxesStr(effQty(it, r), units) };
                 }
             }
             return next;
@@ -158,7 +193,9 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
     const applyAllLoose = () => {
         setPackRows(prev => {
             const next = { ...prev };
-            for (const it of items) next[it.barcode] = { ...(next[it.barcode] ?? EMPTY_ROW), boxMode: false };
+            for (const it of items) {
+                next[it.barcode] = { ...(next[it.barcode] ?? { ...EMPTY_ROW, qty: String(it.qty) }), boxMode: false };
+            }
             return next;
         });
     };
@@ -168,9 +205,9 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
         it => it.units_natali != null && it.units_ours != null && it.units_natali !== it.units_ours,
     );
     /** «Взять нашу»/«взять Натали»: подставить кратность в units строки (коробом, коробов = максимум). */
-    const applyUnits = (barcode: string, qty: number, units: number) => {
+    const applyUnits = (it: MigfullInboundItem, units: number) => {
         const u = String(units);
-        setRow(barcode, { boxMode: true, units: u, boxes: maxBoxesStr(qty, u) });
+        setRow(it.barcode, { boxMode: true, units: u, boxes: maxBoxesStr(effQty(it, packOf(it.barcode)), u) });
     };
 
     // ─── Поиск + сегмент-фильтр (видимый срез; итоги и массовые кнопки — по ВСЕМ) ─
@@ -221,9 +258,9 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
         setPackRows(prev => {
             const next = { ...prev };
             for (const it of selectedItems) {
-                const r = next[it.barcode] ?? EMPTY_ROW;
+                const r = next[it.barcode] ?? { ...EMPTY_ROW, qty: String(it.qty) };
                 const units = r.units || (it.units_per_box != null ? String(it.units_per_box) : '');
-                next[it.barcode] = { boxMode: true, units, boxes: r.boxes || maxBoxesStr(it.qty, units) };
+                next[it.barcode] = { ...r, boxMode: true, units, boxes: r.boxes || maxBoxesStr(effQty(it, r), units) };
             }
             return next;
         });
@@ -231,7 +268,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
         setPackRows(prev => {
             const next = { ...prev };
             for (const it of selectedItems) {
-                next[it.barcode] = { ...(next[it.barcode] ?? EMPTY_ROW), boxMode: false };
+                next[it.barcode] = { ...(next[it.barcode] ?? { ...EMPTY_ROW, qty: String(it.qty) }), boxMode: false };
             }
             return next;
         });
@@ -244,26 +281,114 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
         setPackRows(prev => {
             const next = { ...prev };
             for (const it of selectedItems) {
-                next[it.barcode] = { boxMode: true, units: u, boxes: maxBoxesStr(it.qty, u) };
+                const r = next[it.barcode] ?? { ...EMPTY_ROW, qty: String(it.qty) };
+                next[it.barcode] = { ...r, boxMode: true, units: u, boxes: maxBoxesStr(effQty(it, r), u) };
             }
             return next;
         });
     };
 
+    // ─── Excel-экспорт текущей раскладки (ВЕСЬ состав, не видимый срез) ─────────
+    const exportExcel = () => {
+        exportToExcel(
+            items.map(it => {
+                const c = rowCalc(it.barcode, it.qty);
+                const r = packOf(it.barcode);
+                return {
+                    'ШК': it.barcode,
+                    'Наш артикул': it.article_seller ?? '',
+                    'Наименование': it.name ?? '',
+                    'Кол-во': c.sendQty,
+                    'Упаковка': r.boxMode ? 'короб' : 'россыпь',
+                    'Шт в коробе': r.boxMode && Number.isFinite(c.unitsNum) ? c.unitsNum : '',
+                    'Коробов': c.boxes,
+                    'Россыпью (остаток)': c.rest,
+                    'ШК короба': r.boxMode ? (it.box_barcode ?? '') : '',
+                };
+            }),
+            `natali-postavka-${vehicleOrderNo}`,
+        );
+    };
+
+    // ─── Массовая вставка из буфера: ШК <TAB|;> короб|россыпь <TAB|;> кол-во ────
+    // Кол-во опционально (без него — текущее). Матч по ШК; нераспознанные/ошибочные
+    // строки — в видимый отчёт, незатронутые строки состава не меняются.
+    const applyPaste = () => {
+        const byBarcode = new Map(items.map(it => [it.barcode, it]));
+        const errors: string[] = [];
+        const patches: Record<string, PackRowState> = {};
+        let applied = 0;
+        pasteText.split(/\r?\n/).forEach((raw, idx) => {
+            const line = raw.trim();
+            if (!line) return;
+            const no = idx + 1;
+            const parts = line.split(/[\t;]/).map(s => s.trim()).filter(s => s !== '');
+            if (parts.length < 2 || parts.length > 3) {
+                errors.push(`стр. ${no}: не распознан формат «${line}» (ожидается: ШК → короб/россыпь → кол-во)`);
+                return;
+            }
+            const bc = parts[0];
+            const it = byBarcode.get(bc);
+            if (!it) {
+                errors.push(`стр. ${no}: ШК «${bc}» не найден в составе приёмки`);
+                return;
+            }
+            const modeRaw = parts[1].toLowerCase();
+            let boxMode: boolean;
+            if (['короб', 'коробом', 'к'].includes(modeRaw)) boxMode = true;
+            else if (['россыпь', 'россыпью', 'р'].includes(modeRaw)) boxMode = false;
+            else {
+                errors.push(`стр. ${no} (${bc}): упаковка «${parts[1]}» не распознана — ожидается «короб»/«россыпь» (или «к»/«р»)`);
+                return;
+            }
+            const prev = patches[bc] ?? packRows[bc] ?? { ...EMPTY_ROW, qty: String(it.qty) };
+            let qty = effQty(it, prev); // без кол-ва в строке — берётся текущее
+            if (parts.length === 3) {
+                if (!/^\d+$/.test(parts[2])) {
+                    errors.push(`стр. ${no} (${bc}): кол-во «${parts[2]}» — не число`);
+                    return;
+                }
+                const n = parseInt(parts[2], 10);
+                if (n > it.qty) {
+                    errors.push(`стр. ${no} (${bc}): кол-во ${formatNumber(n, 0)} больше состава приёмки (${formatNumber(it.qty, 0)})`);
+                    return;
+                }
+                qty = n;
+            }
+            // «короб» — короб-режим (units: текущее → prefill-кратность, коробов = максимум
+            // под новое кол-во); «россыпь» — россыпь (units/boxes не трогаем).
+            const units = boxMode
+                ? (prev.units || (it.units_per_box != null ? String(it.units_per_box) : ''))
+                : prev.units;
+            patches[bc] = {
+                boxMode,
+                units,
+                boxes: boxMode ? maxBoxesStr(qty, units) : prev.boxes,
+                qty: String(qty),
+            };
+            applied++;
+        });
+        if (Object.keys(patches).length > 0) setPackRows(prev => ({ ...prev, ...patches }));
+        setPasteReport({ applied, errors });
+    };
+
     const hasItems = items.length > 0;
     // Кнопка требует подтверждения, если поставка уже создавалась/связана.
     const needsConfirm = !!draft?.already_sent;
-    const canSubmit = !!draft && draft.eligible && hasItems && invalidCount === 0 && (!needsConfirm || confirmResend);
+    const canSubmit = !!draft && draft.eligible && hasItems && invalidCount === 0
+        && totalSendQty > 0 && (!needsConfirm || confirmResend);
 
     const doSend = async (forceResend: boolean) => {
         if (!draft) return;
         // Per-line packing по текущему состоянию модалки — опись строится ПО НЕМУ.
+        // qty — отправляемое кол-во (может быть меньше состава приёмки; 0 — строка
+        // не едет, но в packing присутствует: бэк требует покрыть весь состав).
         const packing: MigfullPackingLine[] = items.map(it => {
             const c = rowCalc(it.barcode, it.qty);
             const asBox = c.boxMode && !c.invalid;
             return {
                 barcode: it.barcode,
-                qty: it.qty,
+                qty: c.sendQty,
                 units_per_box: asBox ? c.unitsNum : null,
                 // Явный сплит: ровно N коробов, остаток россыпью (бэк не пересчитывает и не ворнит).
                 boxes: asBox ? c.boxesNum : null,
@@ -490,7 +615,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                             <button
                                                                 className={`btn btn-sm ${current === ours ? 'btn-primary' : 'btn-secondary'}`}
                                                                 style={{ padding: '2px 8px', fontSize: 12 }}
-                                                                onClick={() => applyUnits(it.barcode, it.qty, ours)}
+                                                                onClick={() => applyUnits(it, ours)}
                                                                 title={`Коробом по нашей кратности: ${formatNumber(ours, 0)} шт`}
                                                             >
                                                                 взять нашу
@@ -498,7 +623,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                             <button
                                                                 className={`btn btn-sm ${current === natali ? 'btn-primary' : 'btn-secondary'}`}
                                                                 style={{ padding: '2px 8px', fontSize: 12 }}
-                                                                onClick={() => applyUnits(it.barcode, it.qty, natali)}
+                                                                onClick={() => applyUnits(it, natali)}
                                                                 title={`Коробом по кратности Натали: ${formatNumber(natali, 0)} шт`}
                                                             >
                                                                 взять Натали
@@ -518,7 +643,21 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                     Состав поставки
                                 </div>
                                 {hasItems && (
-                                    <div style={{ display: 'flex', gap: 8 }}>
+                                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            onClick={exportExcel}
+                                            title="Выгрузить текущую раскладку в Excel (весь состав)"
+                                        >
+                                            📥 Excel
+                                        </button>
+                                        <button
+                                            className={`btn btn-sm ${pasteOpen ? 'btn-primary' : 'btn-secondary'}`}
+                                            onClick={() => setPasteOpen(o => !o)}
+                                            title="Массовое редактирование: вставить строки «ШК → короб/россыпь → кол-во» из Excel/буфера"
+                                        >
+                                            📋 Вставить из буфера
+                                        </button>
                                         <button
                                             className="btn btn-secondary btn-sm"
                                             onClick={applyKnownMultiplicity}
@@ -533,6 +672,64 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                     </div>
                                 )}
                             </div>
+
+                            {/* Панель массовой вставки из буфера */}
+                            {hasItems && pasteOpen && (
+                                <div style={{
+                                    border: '1px solid var(--color-border)', borderRadius: 8,
+                                    background: 'var(--color-bg-card)', padding: 12, marginBottom: 12,
+                                }}>
+                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                                        Формат строки: <strong>ШК</strong> → <strong>короб / россыпь</strong> (можно «к» / «р») →{' '}
+                                        <strong>кол-во</strong> (опционально — без него берётся текущее; не больше состава приёмки).
+                                        Разделитель — Tab (вставка из Excel) или «;». Незатронутые строки состава не меняются.
+                                    </div>
+                                    <textarea
+                                        value={pasteText}
+                                        onChange={e => setPasteText(e.target.value)}
+                                        rows={6}
+                                        placeholder={PASTE_PLACEHOLDER}
+                                        style={{
+                                            width: '100%', padding: '8px 10px', borderRadius: 8,
+                                            border: '1px solid var(--color-border)',
+                                            background: 'var(--color-bg)', color: 'var(--color-text)',
+                                            fontSize: 13, fontFamily: 'monospace', resize: 'vertical', boxSizing: 'border-box',
+                                        }}
+                                    />
+                                    <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                                        <button
+                                            className="btn btn-primary btn-sm"
+                                            onClick={applyPaste}
+                                            disabled={!pasteText.trim()}
+                                        >
+                                            Применить
+                                        </button>
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            onClick={() => { setPasteOpen(false); setPasteText(''); setPasteReport(null); }}
+                                        >
+                                            Закрыть
+                                        </button>
+                                    </div>
+                                    {pasteReport && (
+                                        <div style={{ marginTop: 8, fontSize: 13 }}>
+                                            <div style={{ color: pasteReport.applied > 0 ? 'var(--color-success)' : 'var(--color-text-muted)' }}>
+                                                ✓ Применено строк: {formatNumber(pasteReport.applied, 0)}
+                                            </div>
+                                            {pasteReport.errors.length > 0 && (
+                                                <div style={{ color: 'var(--color-danger)', marginTop: 4 }}>
+                                                    <div style={{ fontWeight: 600 }}>
+                                                        Не применено ({formatNumber(pasteReport.errors.length, 0)}):
+                                                    </div>
+                                                    {pasteReport.errors.map((er, i) => (
+                                                        <div key={i}>• {er}</div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
 
                             {/* Поиск + сегмент-фильтр (правки при фильтрации не теряются — state по ШК) */}
                             {hasItems && (
@@ -568,9 +765,20 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                     <span>Позиций: <strong>{formatNumber(items.length, 0)}</strong></span>
                                     <span>Коробов: <strong>{formatNumber(totalBoxes, 0)}</strong></span>
                                     <span>Россыпью: <strong>{formatNumber(totalLoose, 0)}</strong> шт</span>
+                                    <span>
+                                        Отправляем: <strong>{formatNumber(totalSendQty, 0)}</strong>
+                                        {totalSendQty !== totalReceiptQty && (
+                                            <span style={{ color: 'var(--color-text-muted)' }}> из {formatNumber(totalReceiptQty, 0)}</span>
+                                        )} шт
+                                    </span>
                                     {invalidCount > 0 && (
                                         <span style={{ color: 'var(--color-danger)' }}>
-                                            ⚠ Проверьте «шт в коробе» / «коробов» в {formatNumber(invalidCount, 0)} стр.
+                                            ⚠ Проверьте «кол-во» / «шт в коробе» / «коробов» в {formatNumber(invalidCount, 0)} стр.
+                                        </span>
+                                    )}
+                                    {invalidCount === 0 && totalSendQty === 0 && (
+                                        <span style={{ color: 'var(--color-danger)' }}>
+                                            ⚠ Отправляемое количество нулевое — поставку создать нельзя
                                         </span>
                                     )}
                                 </div>
@@ -636,7 +844,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                             <col style={{ width: 36 }} />
                                             <col style={{ width: 170 }} />
                                             <col />
-                                            <col style={{ width: 90 }} />
+                                            <col style={{ width: 120 }} />
                                             <col style={{ width: 160 }} />
                                             <col style={{ width: 90 }} />
                                             <col style={{ width: 90 }} />
@@ -655,7 +863,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                 </th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }}>ШК</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }}>Наименование</th>
-                                                <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Кол-во</th>
+                                                <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }} title="Отправляемое количество (не больше состава приёмки; 0 — строка не едет)">Кол-во</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }}>Упаковка</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }} title="Штук в коробе">Шт в коробе</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }} title="Коробов (остаток едет россыпью)">Коробов</th>
@@ -724,9 +932,32 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                                 </div>
                                                             )}
                                                         </td>
-                                                        <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 500, whiteSpace: 'nowrap' }}>
-                                                            {formatNumber(it.qty, 0)}
-                                                            <span style={{ color: 'var(--color-text-muted)', fontWeight: 400 }}> шт</span>
+                                                        <td style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                                            <input
+                                                                type="number"
+                                                                min={0}
+                                                                max={it.qty}
+                                                                value={r.qty}
+                                                                // Смена кол-ва при коробе → «коробов» пересчитывается на максимум.
+                                                                onChange={e => {
+                                                                    const v = e.target.value;
+                                                                    const n = parseInt(v, 10);
+                                                                    const ok = Number.isFinite(n) && n >= 0 && n <= it.qty;
+                                                                    setRow(it.barcode, r.boxMode && ok
+                                                                        ? { qty: v, boxes: maxBoxesStr(n, r.units) }
+                                                                        : { qty: v });
+                                                                }}
+                                                                title={`Отправляемое количество (из ${formatNumber(it.qty, 0)} в приёмке; 0 — строка не едет)`}
+                                                                style={{
+                                                                    width: 62, padding: '3px 6px', borderRadius: 8, fontSize: 13,
+                                                                    textAlign: 'right',
+                                                                    border: `1px solid ${c.invalidQty ? 'var(--color-danger)' : 'var(--color-border)'}`,
+                                                                    background: 'var(--color-bg-card)', color: 'var(--color-text)',
+                                                                }}
+                                                            />
+                                                            <div style={{ color: 'var(--color-text-muted)', fontSize: 11, marginTop: 2 }}>
+                                                                из {formatNumber(it.qty, 0)}
+                                                            </div>
                                                         </td>
                                                         <td style={{ padding: '8px 10px', whiteSpace: 'nowrap' }}>
                                                             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -739,7 +970,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                                         setRow(it.barcode, {
                                                                             boxMode: true,
                                                                             units,
-                                                                            boxes: r.boxes || maxBoxesStr(it.qty, units),
+                                                                            boxes: r.boxes || maxBoxesStr(effQty(it, r), units),
                                                                         });
                                                                     }}
                                                                 >
@@ -763,7 +994,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                                     // Смена кратности → «коробов» пересчитывается на максимум.
                                                                     onChange={e => setRow(it.barcode, {
                                                                         units: e.target.value,
-                                                                        boxes: maxBoxesStr(it.qty, e.target.value),
+                                                                        boxes: maxBoxesStr(effQty(it, r), e.target.value),
                                                                     })}
                                                                     placeholder="шт"
                                                                     title="Штук в коробе"
@@ -782,7 +1013,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                                 <input
                                                                     type="number"
                                                                     min={0}
-                                                                    max={Number.isFinite(c.unitsNum) && c.unitsNum >= 2 ? Math.floor(it.qty / c.unitsNum) : undefined}
+                                                                    max={Number.isFinite(c.unitsNum) && c.unitsNum >= 2 ? Math.floor(c.sendQty / c.unitsNum) : undefined}
                                                                     value={r.boxes}
                                                                     onChange={e => setRow(it.barcode, { boxes: e.target.value })}
                                                                     placeholder="кор."
@@ -800,10 +1031,14 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                         <td style={{ padding: '8px 10px', whiteSpace: 'nowrap', fontSize: 12 }}>
                                                             {c.invalid ? (
                                                                 <span style={{ color: 'var(--color-danger)' }}>
-                                                                    {c.invalidUnits
-                                                                        ? 'укажите шт в коробе'
-                                                                        : `коробов: 0–${formatNumber(Math.floor(it.qty / c.unitsNum), 0)}`}
+                                                                    {c.invalidQty
+                                                                        ? `кол-во: 0–${formatNumber(it.qty, 0)}`
+                                                                        : c.invalidUnits
+                                                                            ? 'укажите шт в коробе'
+                                                                            : `коробов: 0–${formatNumber(Math.floor(c.sendQty / c.unitsNum), 0)}`}
                                                                 </span>
+                                                            ) : c.sendQty === 0 ? (
+                                                                <span style={{ color: 'var(--color-text-muted)' }}>не отправляется (0 шт)</span>
                                                             ) : c.boxMode ? (
                                                                 <>
                                                                     <strong>{formatNumber(c.boxes, 0)}</strong> кор. × {formatNumber(c.unitsNum, 0)} шт
@@ -812,7 +1047,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                                     )}
                                                                 </>
                                                             ) : (
-                                                                <span style={{ color: 'var(--color-text-muted)' }}>{formatNumber(it.qty, 0)} шт россыпью</span>
+                                                                <span style={{ color: 'var(--color-text-muted)' }}>{formatNumber(c.rest, 0)} шт россыпью</span>
                                                             )}
                                                         </td>
                                                     </tr>

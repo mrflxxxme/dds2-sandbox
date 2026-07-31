@@ -510,10 +510,57 @@ async def test_send_with_explicit_boxes_split(db_session, env, monkeypatch):
     assert order.payload["packing"] == [{"barcode": EAN, "qty": 40, "units_per_box": 5, "boxes": 4}]
 
 
+# ─── Частичная отправка: qty строки packing <= строки приёмки ────────────────
+
+
+def test_build_opis_zero_qty_line_skipped():
+    """qty=0 — строка не едет: опись её пропускает (частичная отправка)."""
+    lines, warnings = svc.build_opis_lines_from_packing(
+        [MigfullPackingLine(barcode=EAN, qty=0, units_per_box=5, boxes=0)],
+        box_for_piece={},
+        name_for_barcode={EAN: "ELKA"},
+    )
+    assert lines == []
+    assert warnings == []
+
+
+async def test_send_with_partial_qty(db_session, env, monkeypatch):
+    """Отправить МЕНЬШЕ состава приёмки можно: qty=30 из 40 → 6 коробов × 5, total_qty=30."""
+    fake = FakePortalClient()
+    _use_fake_client(monkeypatch, fake)
+
+    req = MigfullInboundSendRequest(packing=[MigfullPackingLine(barcode=EAN, qty=30, units_per_box=5)])
+    res = await svc.send_submission(db_session, env.project_id, env.receipt.id, req)
+    assert res.ok is True
+
+    order = (
+        await db_session.execute(
+            select(MigfullShipmentOrder).where(MigfullShipmentOrder.inbound_receipt_id == env.receipt.id)
+        )
+    ).scalar_one()
+    ols = order.payload["opis_lines"]
+    assert len(ols) == 1
+    assert ols[0]["is_box"] is True
+    assert ols[0]["quantity"] == 6  # 30 // 5 — по packing, не по составу приёмки
+    assert ols[0]["pieces"] == 30
+    req_row = (
+        await db_session.execute(
+            select(FulfillmentRequest).where(
+                FulfillmentRequest.project_id == env.project_id,
+                FulfillmentRequest.external_id == GUID,
+            )
+        )
+    ).scalar_one()
+    assert req_row.total_qty == 30
+
+
 @pytest.mark.parametrize(
     "packing",
     [
-        [{"barcode": EAN, "qty": 0, "units_per_box": 5}],  # qty <= 0
+        # qty=0 по ЕДИНСТВЕННОЙ строке валиден, но опись пуста → «нет позиций» 400
+        [{"barcode": EAN, "qty": 0, "units_per_box": 5}],
+        [{"barcode": EAN, "qty": -1, "units_per_box": None}],  # qty < 0
+        [{"barcode": EAN, "qty": 41, "units_per_box": None}],  # qty больше состава приёмки (40)
         [{"barcode": EAN, "qty": 40, "units_per_box": 0}],  # units < 1
         # лишний ШК, которого нет в приёмке
         [{"barcode": "9999999999999", "qty": 1, "units_per_box": None},
@@ -524,6 +571,7 @@ async def test_send_with_explicit_boxes_split(db_session, env, monkeypatch):
          {"barcode": EAN, "qty": 20, "units_per_box": None}],
         [{"barcode": EAN, "qty": 40, "units_per_box": 5, "boxes": -1}],  # boxes < 0
         [{"barcode": EAN, "qty": 40, "units_per_box": 12, "boxes": 4}],  # 4×12=48 > 40
+        [{"barcode": EAN, "qty": 30, "units_per_box": 5, "boxes": 8}],  # 8×5=40 > частичного qty 30
         [{"barcode": EAN, "qty": 40, "units_per_box": None, "boxes": 2}],  # короба без кратности
     ],
 )
