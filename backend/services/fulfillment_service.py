@@ -356,6 +356,40 @@ async def _other_linked_ff_all_ready(
     return all(_assembly_ready_signal(r.provider, r.stage_code, r.stage_title, r.is_completed) for r in result.all())
 
 
+async def _other_linked_inbound_all_done(
+    db: AsyncSession,
+    project_id: int,
+    inbound_receipt_id: int,
+    *,
+    exclude_id: int,
+) -> bool:
+    """Все ОСТАЛЬНЫЕ активные привязанные inbound-ФФ-заявки приёмки завершены?
+
+    Для авто-ACCEPT при ручной привязке (migfull/«Натали», N:1 — машина V-0035
+    порождает ДВЕ приёмки WMS на один наш InboundReceipt: штуками и коробами):
+    принимать приёмку можно, только когда ФФ принял ВСЕ связанные заявки —
+    иначе первая завершившаяся из пары зачислит сток раньше времени. Отменённые
+    (archived) не блокируют — фильтруются здесь же, как в _other_linked_ff_all_ready
+    (завершённая-и-архивная тоже не блокирует: у неё is_completed → сигнал есть).
+    Для прочих провайдеров других привязанных заявок нет → all([]) == True.
+    """
+    result = await db.execute(
+        select(
+            FulfillmentRequest.provider,
+            FulfillmentRequest.stage_code,
+            FulfillmentRequest.stage_title,
+            FulfillmentRequest.is_completed,
+        ).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.inbound_receipt_id == inbound_receipt_id,
+            FulfillmentRequest.id != exclude_id,
+            FulfillmentRequest.archived == False,
+            FulfillmentRequest.local_archived == False,
+        )
+    )
+    return all(_inbound_accept_signal(r.provider, r.stage_code, r.stage_title, r.is_completed) for r in result.all())
+
+
 # skladbot: приёмка (тип 852/2644), доведённая до ТЕРМИНАЛЬНОЙ стадии
 # «Завершение» = принята на остатки. Живой кейс (FR 202523 / IN-186, склад
 # «Газпром»): stage_code='completion', stage_title='Завершение', но
@@ -2542,6 +2576,32 @@ async def _collect_inbound_accept_candidates(
     }
     if not receipt_ids:
         return []
+    # N:1 (migfull/«Натали»: машина даёт 2 приёмки WMS на один наш InboundReceipt):
+    # приёмка валидна, только когда завершены ВСЕ связанные заявки — иначе первая
+    # завершившаяся из пары зачислила бы сток раньше времени. Незавершённые сёстры
+    # в ff_requests не приходят (выборка синка фильтрует is_completed) → смотрим в
+    # БД. Отменённые (archived) не блокируют; local_archived — тоже вне учёта.
+    blockers = await db.execute(
+        select(
+            FulfillmentRequest.inbound_receipt_id,
+            FulfillmentRequest.provider,
+            FulfillmentRequest.stage_code,
+            FulfillmentRequest.stage_title,
+            FulfillmentRequest.is_completed,
+        ).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.inbound_receipt_id.in_(receipt_ids),
+            FulfillmentRequest.archived == False,
+            FulfillmentRequest.local_archived == False,
+            # repack-пара не участвует в учёте — её незавершённость не блокирует
+            FulfillmentRequest.repack_return_id.is_(None),
+        )
+    )
+    for rid, prov, code, title, done in blockers.all():
+        if not _inbound_accept_signal(prov, code, title, done):
+            receipt_ids.discard(rid)
+    if not receipt_ids:
+        return []
     result = await db.execute(
         select(InboundReceipt.id).where(
             InboundReceipt.project_id == project_id,
@@ -4657,6 +4717,20 @@ def _migfull_composition_lines(req: FulfillmentRequest) -> list[dict]:
     return _migfull_line_rows(raw.get("planned_lines"))
 
 
+def _migfull_mismatch_lines(req: FulfillmentRequest) -> list[dict]:
+    """Строки состава migfull-заявки для сверки с нашим документом (оба вида).
+
+    Отгрузка (assembly) — как _migfull_composition_lines (факт закрытой, иначе
+    план); приёмка (inbound) — заявленный состав `incoming_lines` из зеркального
+    raw (кладёт _enrich_migfull_submissions). Прочие kind — пусто.
+    """
+    if req.kind == FfRequestKind.ASSEMBLY.value:
+        return _migfull_composition_lines(req)
+    if req.kind == FfRequestKind.INBOUND.value:
+        return _migfull_line_rows((req.raw or {}).get("incoming_lines"))
+    return []
+
+
 def _migfull_products_from_lines(
     base_lines: list[dict],
     fact_lines: list[dict],
@@ -5551,13 +5625,18 @@ def _build_match(
 def _ff_unit_total(req: FulfillmentRequest, mig_guid_map: dict[str, tuple[str, int]]) -> int:
     """ФФ-итог в ШТУКАХ россыпи для сводки расхождения (фолбэк mode=total).
 
-    migfull-отгрузка: `total_qty` хранит число КОРОБОВ — пересчитываем в штуки
-    (короба × штук в коробе из mig_guid_map; неразрезолвленный guid → ×1, лучше
-    чем короб). Прочие провайдеры — `total_qty` уже в штуках.
+    migfull: строки состава (отгрузка — план/факт, приёмка — incoming_lines)
+    могут нести КОРОБА — пересчитываем в штуки (кол-во × штук в коробе из
+    mig_guid_map; неразрезолвленный guid → ×1, лучше чем короб). Приёмка без
+    строк в raw (ещё не обогащена) → фолбэк на total_qty. Прочие провайдеры —
+    `total_qty` уже в штуках.
     """
-    if req.provider == "migfull" and req.kind == FfRequestKind.ASSEMBLY.value:
+    if req.provider == "migfull" and req.kind in (FfRequestKind.ASSEMBLY.value, FfRequestKind.INBOUND.value):
+        lines = _migfull_mismatch_lines(req)
+        if req.kind == FfRequestKind.INBOUND.value and not lines:
+            return req.total_qty or 0
         total = 0
-        for p in _migfull_products_from_lines(_migfull_composition_lines(req), [], fact_field="delivery_qty"):
+        for p in _migfull_products_from_lines(lines, [], fact_field="delivery_qty"):
             if p["qty"] > 0:
                 _bc, units = mig_guid_map.get(p["guid"], (None, 1))
                 total += p["qty"] * units
@@ -5569,7 +5648,8 @@ def _mirror_ff_composition(req: FulfillmentRequest, mig_guid_map: dict[str, tupl
     """Состав ФФ-заявки {barcode: qty>0} ИЗ ЗЕРКАЛА (без HTTP). None — недоступно.
 
     wmscelicom — из raw (assembly: items/Packages, inbound: items); migfull —
-    из raw planned_lines + guid→barcode (mig_guid_map склада); skladbot — состава
+    из raw (assembly: planned/shipped_lines, inbound: incoming_lines) +
+    guid→barcode (mig_guid_map склада); skladbot — состава
     в зеркале нет (только в живой деталке) → None. Это «лёгкая» версия
     _fetch_ff_composition без HTTP — для пакетного флага расхождения по списку.
     """
@@ -5588,10 +5668,13 @@ def _mirror_ff_composition(req: FulfillmentRequest, mig_guid_map: dict[str, tupl
         return comp or None
 
     if req.provider == "migfull":
-        if req.kind != FfRequestKind.ASSEMBLY.value:
+        if req.kind not in (FfRequestKind.ASSEMBLY.value, FfRequestKind.INBOUND.value):
             return None
+        # Приёмка (inbound) — из incoming_lines зеркала (машина V-0035: пара
+        # PVB штуками + коробами на один наш InboundReceipt суммируется как
+        # объединённый состав; короба сводятся к россыпи через mig_guid_map).
         guid_qty: dict[str, int] = {}
-        for p in _migfull_products_from_lines(_migfull_composition_lines(req), [], fact_field="delivery_qty"):
+        for p in _migfull_products_from_lines(_migfull_mismatch_lines(req), [], fact_field="delivery_qty"):
             if p["qty"] > 0:
                 guid_qty[p["guid"]] = guid_qty.get(p["guid"], 0) + p["qty"]
         if not guid_qty:
@@ -5759,11 +5842,11 @@ async def compute_doc_ff_mismatch(
         elif r.inbound_receipt_id in inbound_ids:
             ff_by_inb.setdefault(r.inbound_receipt_id, []).append(r)
 
-    # 3) migfull guid→barcode по складам (батч, без HTTP)
+    # 3) migfull guid→barcode по складам (батч, без HTTP) — и отгрузки, и приёмки
     mig_guids_by_wh: dict[int, set[str]] = {}
     for r in ff_reqs:
-        if r.provider == "migfull" and r.kind == FfRequestKind.ASSEMBLY.value:
-            for p in _migfull_products_from_lines(_migfull_composition_lines(r), [], fact_field="delivery_qty"):
+        if r.provider == "migfull":
+            for p in _migfull_products_from_lines(_migfull_mismatch_lines(r), [], fact_field="delivery_qty"):
                 if p["qty"] > 0:
                     mig_guids_by_wh.setdefault(r.warehouse_id, set()).add(p["guid"])
     mig_maps: dict[int, dict[str, tuple[str, int]]] = {}
@@ -6480,22 +6563,30 @@ async def link_request(
             raise ValueError("Приёмка не найдена в проекте")
         if inb_doc.warehouse_id != req.warehouse_id:
             raise ValueError("Приёмка принадлежит другому складу")
-        conflict = await db.execute(
-            select(FulfillmentRequest.id)
-            .where(
-                FulfillmentRequest.project_id == project_id,
-                FulfillmentRequest.inbound_receipt_id == inbound_receipt_id,
-                FulfillmentRequest.id != ff_request_id,
+        # migfull/«Натали»: одному нашему InboundReceipt (машина, V-0035) у склада
+        # соответствуют 2+ приёмки WMS (штуками + коробами, N:1) → двойную привязку
+        # РАЗРЕШАЕМ, симметрично сборкам выше. Прочие провайдеры — строгий 1:1.
+        # Повторная привязка ТОЙ ЖЕ заявки к той же приёмке — идемпотентный no-op
+        # (conflict-запрос исключает саму заявку, присвоение ниже ничего не меняет).
+        if req.provider != "migfull":
+            conflict = await db.execute(
+                select(FulfillmentRequest.id)
+                .where(
+                    FulfillmentRequest.project_id == project_id,
+                    FulfillmentRequest.inbound_receipt_id == inbound_receipt_id,
+                    FulfillmentRequest.id != ff_request_id,
+                )
+                .limit(1)
             )
-            .limit(1)
-        )
-        if conflict.scalar_one_or_none() is not None:
-            raise ValueError("Приёмка уже связана с другой ФФ-заявкой")
+            if conflict.scalar_one_or_none() is not None:
+                raise ValueError("Приёмка уже связана с другой ФФ-заявкой")
         req.inbound_receipt_id = inbound_receipt_id
         # Авто-ACCEPT при привязке (симметрично авто-READY сборки выше): ФФ уже
         # принял приёмку на остатки (is_completed) и наша приёмка ещё EXPECTED/
         # DRAFT → принимаем сразу, не дожидаясь синка. Сам accept_receipt — ПОСЛЕ
         # commit, своей сессией (постит сток и коммитит сам), как в sync_warehouse.
+        # N:1 — только когда завершены и ВСЕ ОСТАЛЬНЫЕ привязанные заявки приёмки
+        # (иначе первая завершившаяся из пары зачислит сток раньше времени).
         accept_inbound = (
             # archived НЕ блокирует, если заявка завершена (is_completed): ФФ
             # принял приёмку и сдал заявку в архив — принять надо (как в синке).
@@ -6503,6 +6594,9 @@ async def link_request(
             and not req.local_archived
             and _inbound_accept_signal(req.provider, req.stage_code, req.stage_title, req.is_completed)
             and inb_doc.status in (InboundStatus.DRAFT.value, InboundStatus.EXPECTED.value)
+            and await _other_linked_inbound_all_done(
+                db, project_id, inb_doc.id, exclude_id=ff_request_id
+            )
         )
         inbound_map = {inb_doc.id: (inb_doc.number, inb_doc.status)}
 
@@ -6864,27 +6958,41 @@ async def _inbound_candidates(
     project_id: int,
     warehouse_id: int,
     ff_request_id: int,
-) -> tuple[list[InboundReceipt], dict[int, dict[str, int]]]:
-    """Приёмки склада, не связанные с ДРУГИМИ ФФ-заявками, + их позиции (expected_qty)."""
-    linked_subq = select(FulfillmentRequest.inbound_receipt_id).where(
-        FulfillmentRequest.project_id == project_id,
-        FulfillmentRequest.inbound_receipt_id.is_not(None),
-        FulfillmentRequest.id != ff_request_id,
-    )
-    result = await db.execute(
+    *,
+    provider: str,
+) -> tuple[list[InboundReceipt], dict[int, dict[str, int]], dict[int, int]]:
+    """Приёмки склада + их позиции (expected_qty) + сколько ДРУГИХ ФФ-заявок связано.
+
+    migfull/«Натали» (N:1 — машина V-0035 порождает 2+ приёмки WMS на один наш
+    InboundReceipt) НЕ исключает уже связанные приёмки: их можно привязать к ещё
+    одной ФФ-заявке (linked_ff_count показывает, со сколькими другими ФФ-заявками
+    приёмка уже связана). Для прочих провайдеров связанные с другой ФФ-заявкой
+    приёмки из кандидатов исключаются (1:1). Симметрично _assembly_candidates.
+    """
+    allow_multi = provider == "migfull"
+    q = (
         select(InboundReceipt)
         .where(
             InboundReceipt.project_id == project_id,
             InboundReceipt.warehouse_id == warehouse_id,
             InboundReceipt.is_deleted == False,
-            InboundReceipt.id.not_in(linked_subq),
         )
         .order_by(InboundReceipt.created_at.desc(), InboundReceipt.id.desc())
         .limit(_LINK_CANDIDATES_LIMIT)
     )
+    if not allow_multi:
+        linked_subq = select(FulfillmentRequest.inbound_receipt_id).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.inbound_receipt_id.is_not(None),
+            FulfillmentRequest.id != ff_request_id,
+        )
+        q = q.where(InboundReceipt.id.not_in(linked_subq))
+    result = await db.execute(q)
     docs = list(result.scalars().all())
     items_by_doc: dict[int, dict[str, int]] = {}
+    linked_by_doc: dict[int, int] = {}
     if docs:
+        doc_ids = [d.id for d in docs]
         items_result = await db.execute(
             select(
                 InboundReceiptItem.receipt_id,
@@ -6893,13 +7001,25 @@ async def _inbound_candidates(
             )
             .where(
                 InboundReceiptItem.project_id == project_id,
-                InboundReceiptItem.receipt_id.in_([d.id for d in docs]),
+                InboundReceiptItem.receipt_id.in_(doc_ids),
             )
             .group_by(InboundReceiptItem.receipt_id, InboundReceiptItem.barcode)
         )
         for doc_id, barcode, qty in items_result.all():
             items_by_doc.setdefault(doc_id, {})[barcode] = int(qty or 0)
-    return docs, items_by_doc
+        if allow_multi:
+            # Сколько ДРУГИХ ФФ-заявок уже связано с каждой приёмкой-кандидатом
+            linked_result = await db.execute(
+                select(FulfillmentRequest.inbound_receipt_id, func.count(FulfillmentRequest.id))
+                .where(
+                    FulfillmentRequest.project_id == project_id,
+                    FulfillmentRequest.inbound_receipt_id.in_(doc_ids),
+                    FulfillmentRequest.id != ff_request_id,
+                )
+                .group_by(FulfillmentRequest.inbound_receipt_id)
+            )
+            linked_by_doc = {rid: int(cnt or 0) for rid, cnt in linked_result.all()}
+    return docs, items_by_doc, linked_by_doc
 
 
 async def _warehouse_names(db: AsyncSession, project_id: int, ids: set[int]) -> dict[int, str]:
@@ -6977,7 +7097,8 @@ async def get_link_candidates(
     kind=assembly → наши заявки на сборку склада; kind=inbound → приёмки И
     входящие перемещения (товар мог приехать не от поставщика, а с нашего же
     склада — приёмки для такого переезда не существует). Уже связанные с
-    другими ФФ-заявками — исключаются. Скоринг: при доступном составе —
+    другими ФФ-заявками — исключаются (кроме migfull N:1: сборки/приёмки
+    остаются кандидатами с linked_ff_count). Скоринг: при доступном составе —
     пересечение ШК (см. _score_by_composition), иначе фолбэк по датам.
     None — ФФ-заявка не найдена; ValueError — kind=other.
 
@@ -7017,7 +7138,9 @@ async def get_link_candidates(
             db, project_id, warehouse_id, ff_request_id, provider=req.provider
         )
     else:
-        docs, items_by_doc = await _inbound_candidates(db, project_id, warehouse_id, ff_request_id)
+        docs, items_by_doc, linked_by_doc = await _inbound_candidates(
+            db, project_id, warehouse_id, ff_request_id, provider=req.provider
+        )
         transfers, transfer_items = await _transfer_candidates(
             db, project_id, warehouse_id, ff_request_id
         )
@@ -7061,7 +7184,7 @@ async def get_link_candidates(
                 "reason": reason,
                 # Совпадение склада сдачи — только для сборок (у приёмок склада сдачи нет → не фильтруем)
                 "warehouse_match": _wh_names_match(ff_dest, dest_warehouse) if is_assembly else True,
-                # >0 только для migfull (сборка уже связана с N другими ФФ-заявками)
+                # >0 только для migfull (сборка/приёмка уже связана с N другими ФФ-заявками)
                 "linked_ff_count": linked_by_doc.get(doc.id, 0) if not is_transfer else 0,
             }
         )

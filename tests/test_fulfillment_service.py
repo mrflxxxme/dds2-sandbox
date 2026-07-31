@@ -5725,3 +5725,308 @@ async def test_repack_matcher_respects_manual_pair(db_session, project, warehous
     await db_session.refresh(inb)
     assert inb.repack_return_id == ret.id
     assert inb.repack_matched_at == manual_ts  # ручная пометка не перезаписана
+
+
+# ─── Мульти-связка приёмок: N заявок ФФ (migfull) на один наш InboundReceipt ──
+# Кейс машины V-0035: «Натали» заводит на одну нашу приёмку ДВЕ приёмки WMS —
+# штуками (PVB-…128) и коробами (PVB-…129). Симметрично natali_multilink сборок.
+
+
+async def _mk_mig_inbound(
+    db_session,
+    project,
+    warehouse,
+    *,
+    provider="migfull",
+    stage_code="processing",
+    is_completed=False,
+    archived=False,
+    inbound_receipt_id=None,
+    lines=None,
+    total_qty=None,
+    number=None,
+):
+    """migfull-приёмка (kind=inbound) в зеркале; lines → raw.incoming_lines."""
+    req = FulfillmentRequest(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        provider=provider,
+        external_id=_uid(),
+        number=number or f"PVB-{_uid()[:6]}",
+        kind="inbound",
+        status="Приёмка",
+        stage_code=stage_code,
+        stage_title=stage_code,
+        is_completed=is_completed,
+        archived=archived,
+        inbound_receipt_id=inbound_receipt_id,
+        total_qty=total_qty,
+        raw={"incoming_lines": lines} if lines is not None else {},
+    )
+    db_session.add(req)
+    await db_session.commit()
+    await db_session.refresh(req)
+    return req
+
+
+async def _mk_expected_receipt(db_session, project, warehouse, items=()):
+    """Наша EXPECTED-приёмка + позиции [(nom, barcode, expected_qty)]."""
+    receipt = InboundReceipt(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        number=f"IN-{_uid()[:6]}",
+        status=InboundStatus.EXPECTED,
+    )
+    db_session.add(receipt)
+    await db_session.flush()
+    for nom, bc, qty in items:
+        db_session.add(
+            InboundReceiptItem(
+                project_id=project.id,
+                receipt_id=receipt.id,
+                nomenclature_id=nom.id,
+                barcode=bc,
+                expected_qty=qty,
+                actual_qty=0,
+            )
+        )
+    await db_session.commit()
+    await db_session.refresh(receipt)
+    return receipt
+
+
+@pytest.mark.asyncio
+async def test_migfull_allows_second_inbound_link_to_same_receipt(db_session, project, warehouse):
+    """Две migfull-приёмки WMS (штучная + коробовая) связываются с одной нашей."""
+    receipt = await _mk_expected_receipt(db_session, project, warehouse)
+    ff1 = await _mk_mig_inbound(db_session, project, warehouse)
+    ff2 = await _mk_mig_inbound(db_session, project, warehouse)
+
+    r1 = await fulfillment_service.link_request(
+        db_session, project.id, ff1.id, inbound_receipt_id=receipt.id, warehouse_id=warehouse.id
+    )
+    r2 = await fulfillment_service.link_request(
+        db_session, project.id, ff2.id, inbound_receipt_id=receipt.id, warehouse_id=warehouse.id
+    )
+    assert r1 is not None and r2 is not None
+    await db_session.refresh(ff1)
+    await db_session.refresh(ff2)
+    assert ff1.inbound_receipt_id == receipt.id
+    assert ff2.inbound_receipt_id == receipt.id
+
+    # повторная привязка ТОЙ ЖЕ заявки — идемпотентный no-op, не ошибка
+    r1b = await fulfillment_service.link_request(
+        db_session, project.id, ff1.id, inbound_receipt_id=receipt.id, warehouse_id=warehouse.id
+    )
+    assert r1b["inbound_receipt_id"] == receipt.id
+
+    # unlink одной НЕ рвёт вторую
+    await fulfillment_service.unlink_request(db_session, project.id, ff1.id)
+    await db_session.refresh(ff1)
+    await db_session.refresh(ff2)
+    assert ff1.inbound_receipt_id is None
+    assert ff2.inbound_receipt_id == receipt.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["skladbot", "wmscelicom"])
+async def test_non_migfull_second_inbound_link_still_conflicts(db_session, project, warehouse, provider):
+    receipt = await _mk_expected_receipt(db_session, project, warehouse)
+    ff1 = await _mk_mig_inbound(db_session, project, warehouse, provider=provider, stage_code=None)
+    ff2 = await _mk_mig_inbound(db_session, project, warehouse, provider=provider, stage_code=None)
+
+    await fulfillment_service.link_request(
+        db_session, project.id, ff1.id, inbound_receipt_id=receipt.id, warehouse_id=warehouse.id
+    )
+    with pytest.raises(ValueError, match="уже связана"):
+        await fulfillment_service.link_request(
+            db_session, project.id, ff2.id, inbound_receipt_id=receipt.id, warehouse_id=warehouse.id
+        )
+
+
+@pytest.mark.asyncio
+async def test_link_inbound_no_autoaccept_while_sibling_incomplete(db_session, project, warehouse):
+    """Первая из пары завершилась → сток НЕ зачисляется, ждём вторую."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    receipt = await _mk_expected_receipt(db_session, project, warehouse, items=[(nom, bc, 10)])
+    # PVB#1 уже привязана, ещё в работе
+    await _mk_mig_inbound(db_session, project, warehouse, inbound_receipt_id=receipt.id)
+    # PVB#2 завершена (closed) — привязываем сейчас
+    ff2 = await _mk_mig_inbound(db_session, project, warehouse, stage_code="closed", is_completed=True)
+
+    row = await fulfillment_service.link_request(
+        db_session, project.id, ff2.id, inbound_receipt_id=receipt.id, warehouse_id=warehouse.id
+    )
+    assert row["linked_status"] == InboundStatus.EXPECTED.value
+    await db_session.refresh(receipt)
+    assert receipt.status == InboundStatus.EXPECTED
+    stock = (
+        await db_session.execute(
+            select(WarehouseStock).where(
+                WarehouseStock.project_id == project.id,
+                WarehouseStock.barcode == bc,
+            )
+        )
+    ).scalar_one_or_none()
+    assert stock is None  # сток не постился
+
+
+@pytest.mark.asyncio
+async def test_link_inbound_autoaccepts_when_all_linked_complete(db_session, project, warehouse):
+    """Обе заявки пары завершены → привязка второй принимает приёмку + сток."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    receipt = await _mk_expected_receipt(db_session, project, warehouse, items=[(nom, bc, 10)])
+    await _mk_mig_inbound(
+        db_session, project, warehouse, stage_code="closed", is_completed=True, inbound_receipt_id=receipt.id
+    )
+    ff2 = await _mk_mig_inbound(db_session, project, warehouse, stage_code="closed", is_completed=True)
+
+    row = await fulfillment_service.link_request(
+        db_session, project.id, ff2.id, inbound_receipt_id=receipt.id, warehouse_id=warehouse.id
+    )
+    assert row["linked_status"] == InboundStatus.ACCEPTED.value
+    await db_session.refresh(receipt)
+    assert receipt.status == InboundStatus.ACCEPTED
+    stock = (
+        await db_session.execute(
+            select(WarehouseStock).where(
+                WarehouseStock.project_id == project.id,
+                WarehouseStock.warehouse_id == warehouse.id,
+                WarehouseStock.barcode == bc,
+            )
+        )
+    ).scalar_one()
+    assert stock.quantity == 10
+
+
+@pytest.mark.asyncio
+async def test_link_inbound_archived_sibling_does_not_block_accept(db_session, project, warehouse):
+    """Отменённая (archived без is_completed) связанная заявка приём НЕ блокирует."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    receipt = await _mk_expected_receipt(db_session, project, warehouse, items=[(nom, bc, 7)])
+    await _mk_mig_inbound(
+        db_session, project, warehouse, stage_code="canceled", archived=True, inbound_receipt_id=receipt.id
+    )
+    ff2 = await _mk_mig_inbound(db_session, project, warehouse, stage_code="closed", is_completed=True)
+
+    row = await fulfillment_service.link_request(
+        db_session, project.id, ff2.id, inbound_receipt_id=receipt.id, warehouse_id=warehouse.id
+    )
+    assert row["linked_status"] == InboundStatus.ACCEPTED.value
+    await db_session.refresh(receipt)
+    assert receipt.status == InboundStatus.ACCEPTED
+
+
+@pytest.mark.asyncio
+async def test_collect_inbound_accept_candidates_gated_by_incomplete_sibling(db_session, project, warehouse):
+    """Синковый сбор кандидатов: приёмка не валидна, пока жива незавершённая сестра."""
+    receipt = await _mk_expected_receipt(db_session, project, warehouse)
+    ff_wip = await _mk_mig_inbound(db_session, project, warehouse, inbound_receipt_id=receipt.id)
+    ff_done = await _mk_mig_inbound(
+        db_session, project, warehouse, stage_code="closed", is_completed=True, inbound_receipt_id=receipt.id
+    )
+
+    # сестра ещё в работе → кандидатов нет
+    ids = await fulfillment_service._collect_inbound_accept_candidates(db_session, project.id, [ff_done])
+    assert ids == []
+
+    # сестра завершилась → приёмка валидный кандидат
+    ff_wip.stage_code = "closed"
+    ff_wip.is_completed = True
+    await db_session.commit()
+    ids = await fulfillment_service._collect_inbound_accept_candidates(db_session, project.id, [ff_done])
+    assert ids == [receipt.id]
+
+
+@pytest.mark.asyncio
+async def test_collect_inbound_accept_candidates_archived_sibling_not_blocking(db_session, project, warehouse):
+    receipt = await _mk_expected_receipt(db_session, project, warehouse)
+    await _mk_mig_inbound(
+        db_session, project, warehouse, stage_code="canceled", archived=True, inbound_receipt_id=receipt.id
+    )
+    ff_done = await _mk_mig_inbound(
+        db_session, project, warehouse, stage_code="closed", is_completed=True, inbound_receipt_id=receipt.id
+    )
+    ids = await fulfillment_service._collect_inbound_accept_candidates(db_session, project.id, [ff_done])
+    assert ids == [receipt.id]
+
+
+@pytest.mark.asyncio
+async def test_inbound_candidates_migfull_include_linked_with_count(db_session, project, warehouse):
+    """Кандидаты модалки «Связать»: migfull НЕ исключает связанную приёмку (+linked_ff_count)."""
+    receipt = await _mk_expected_receipt(db_session, project, warehouse)
+    await _mk_mig_inbound(db_session, project, warehouse, inbound_receipt_id=receipt.id)
+    ff2 = await _mk_mig_inbound(db_session, project, warehouse)
+
+    data = await fulfillment_service.get_link_candidates(db_session, project.id, warehouse.id, ff2.id)
+    assert data is not None
+    cand = {(c["doc_kind"], c["doc_id"]): c for c in data["candidates"]}
+    key = ("inbound", receipt.id)
+    assert key in cand, "связанная приёмка должна оставаться кандидатом для migfull"
+    assert cand[key]["linked_ff_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_inbound_candidates_non_migfull_exclude_linked(db_session, project, warehouse):
+    receipt = await _mk_expected_receipt(db_session, project, warehouse)
+    await _mk_mig_inbound(
+        db_session, project, warehouse, provider="wmscelicom", stage_code=None, inbound_receipt_id=receipt.id
+    )
+    ff2 = await _mk_mig_inbound(db_session, project, warehouse, provider="wmscelicom", stage_code=None)
+
+    data = await fulfillment_service.get_link_candidates(db_session, project.id, warehouse.id, ff2.id)
+    assert data is not None
+    doc_ids = {c["doc_id"] for c in data["candidates"] if c["doc_kind"] == "inbound"}
+    assert receipt.id not in doc_ids
+
+
+@pytest.mark.asyncio
+async def test_inbound_mismatch_sums_all_linked_migfull_pvbs(db_session, project, warehouse):
+    """Сверка состава приёмки: Σ строк ВСЕХ связанных PVB (штучная + коробовая),
+    короба сведены к россыпи через guid→ШК зеркала остатков."""
+    base_a, box_a, bc_b = f"20{_uid()}", f"10{_uid()}", f"20{_uid()}"
+    guid_a, guid_b = _uid(), _uid()
+    # зеркало остатков: guid_a — короб 10 шт (base_barcode = россыпь), guid_b — россыпь
+    db_session.add_all(
+        [
+            FulfillmentStock(
+                project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+                barcode=box_a, base_barcode=base_a, units_per_box=10, external_product_id=guid_a,
+            ),
+            FulfillmentStock(
+                project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+                barcode=bc_b, units_per_box=1, external_product_id=guid_b,
+            ),
+        ]
+    )
+    await db_session.commit()
+    nom_a = await _make_nomenclature(db_session, project.id, base_a)
+    nom_b = await _make_nomenclature(db_session, project.id, bc_b)
+    receipt = await _mk_expected_receipt(
+        db_session, project, warehouse, items=[(nom_a, base_a, 30), (nom_b, bc_b, 5)]
+    )
+    # PVB коробовая: 3 короба guid_a (=30 шт); PVB штучная: 5 шт guid_b
+    await _mk_mig_inbound(
+        db_session, project, warehouse, inbound_receipt_id=receipt.id,
+        lines=[{"product_guid": guid_a, "quantity": 3, "product": {"guid": guid_a, "name": "Т короб 10 шт."}}],
+    )
+    ff_units = await _mk_mig_inbound(
+        db_session, project, warehouse, inbound_receipt_id=receipt.id,
+        lines=[{"product_guid": guid_b, "quantity": 5, "product": {"guid": guid_b, "name": "Т россыпь"}}],
+    )
+
+    mm = await fulfillment_service.compute_doc_ff_mismatch(db_session, project.id, set(), {receipt.id})
+    assert mm[("inbound", receipt.id)] is False  # 3×10 + 5 == наш состав
+
+    # штучная PVB недозаявила → расхождение
+    ff_units.raw = {
+        "incoming_lines": [
+            {"product_guid": guid_b, "quantity": 3, "product": {"guid": guid_b, "name": "Т россыпь"}}
+        ]
+    }
+    await db_session.commit()
+    mm = await fulfillment_service.compute_doc_ff_mismatch(db_session, project.id, set(), {receipt.id})
+    assert mm[("inbound", receipt.id)] is True
