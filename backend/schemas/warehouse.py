@@ -218,6 +218,85 @@ class StockTransferCreate(BaseModel):
     shipped_as_boxes: bool = False
 
 
+class StockTransferUpdate(BaseModel):
+    """Правка перемещения (`PUT /warehouse/transfers/{id}`) — только до отгрузки.
+
+    Разрешена в `TRANSFER_EDITABLE_STATUSES` (PENDING / IN_PROGRESS / READY):
+    после `SHIPPED` сток уже списан, и правка состава разъехалась бы с движениями.
+
+    Применяются ТОЛЬКО явно переданные поля: роутер отдаёт сервису
+    `model_dump(exclude_unset=True)`. Форма карточки шлёт тело целиком, но
+    частичный вызов (например «поменять только комментарий») не должен обнулить
+    маршрут и транспортную единицу дефолтами схемы.
+
+    `items` — ПОЛНАЯ ЗАМЕНА состава (как в `StockTransferCreate`, резолв по
+    баркодам). Не передан — состав не трогаем; передан пустым — отказ: переезд
+    без позиций всё равно не отправить (`send_transfer`), а молча стереть
+    состав по недосмотру формы страшнее, чем вернуть 400.
+
+    🔴 `shipped_as_boxes` здесь ОБЫЧНЫЙ bool, а не трёхзначный как у
+    `TransferAssignVehicle`: там `None` значит «логист не уточнял единицу и не
+    хочет затирать унаследованную от заявки», здесь форма карточки всегда знает,
+    что выбрал пользователь. Границы числовых полей — те же, что у Create
+    (`ge=0` + `Numeric(10, 2)`): отрицательный вес доехал бы снимком в забор при
+    отправке и занизил бы ₽/паллета в отчёте логистики переездов.
+    """
+
+    from_warehouse_id: int | None = None
+    to_warehouse_id: int | None = None
+    comment: str | None = None
+    is_defect: bool = False
+    defect_reason: str | None = None
+    items: list[StockTransferItemCreate] | None = None
+    pallets_count: int | None = Field(default=None, ge=0)
+    pallet_weight_kg: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+    shipped_as_boxes: bool = False
+
+
+class TransferStatusAction(BaseModel):
+    """Тело ручных ступеней переезда (`/return`, `/close`) — только комментарий.
+
+    Отдельная схема, а не голый `str`: комментарий уходит в историю статусов
+    (кто/когда/почему), и тело обязано быть расширяемым — у возврата рано или
+    поздно появится причина и склад возврата, как у заявки. Необязательное:
+    роутер принимает и пустое тело.
+    """
+
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+class TransferFfLink(BaseModel):
+    """Заявка ФФ в связке с ПЕРЕЕЗДОМ — и уже привязанная, и кандидат в привязку.
+
+    Одна схема на оба места (`StockTransferSchema.ff_links` и
+    `GET /warehouse/transfers/{id}/ff-candidates`): карточке переезда нужен
+    ровно один набор полей — показать строку и собрать вызов link/unlink. Ручки
+    ФФ скоуплены складом (`/warehouse/{warehouse_id}/fulfillment/...`), поэтому
+    `warehouse_id` обязателен: без него фронт не построит ни ссылку на заявку,
+    ни отвязку.
+
+    🔴 НЕ ПУТАТЬ с `FfLinkCandidate` (`backend/schemas/fulfillment.py`) — та про
+    ОБРАТНОЕ направление: наш документ как кандидат для ФФ-заявки (модал
+    «Связать» со стороны заявки). Здесь направление от карточки переезда.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int  # fulfillment_requests.id
+    warehouse_id: int  # наш склад ФФ-заявки — для ссылки и для unlink
+    #: Сторона переезда: source — склад ЗАБОРА (ФФ собирает переезд у себя, для
+    #: него это сборка, kind=assembly); dest — склад ПОЛУЧАТЕЛЯ (ФФ приходует,
+    #: kind=inbound). Тот же расклад, что проверяет `link_request`.
+    side: str
+    number: str | None = None
+    external_id: str
+    kind: str  # assembly | inbound | return | other
+    status: str | None = None
+    stage_title: str | None = None
+    total_qty: int | None = None  # заявлено всего, шт
+    external_created_at: date | None = None
+
+
 class StockTransferSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -246,6 +325,13 @@ class StockTransferSchema(BaseModel):
     pickup_cost: Decimal | None = None
     delivery_date: date | None = None
     vehicle_assigned_at: datetime | None = None
+    #: Вехи цепочки — зеркало `AssemblyRequest.actual_ready_date` / `shipped_at`.
+    #: Нужны сводному списку, где переезды идут вперемешку с заявками и обязаны
+    #: заполнять те же колонки «Готовность» / «Отгружен». Из статуса не выводятся:
+    #: он хранит только текущее состояние. `shipped_at` обнуляется при возврате
+    #: (следующая попытка проставит свой).
+    actual_ready_date: date | None = None
+    shipped_at: datetime | None = None
     converted_from_assembly_id: int | None = None
     pallets_count: int | None = None
     pallet_weight_kg: Decimal | None = None
@@ -261,6 +347,21 @@ class StockTransferSchema(BaseModel):
     # числа. За составом — `GET /warehouse/transfers/{id}`.
     units_total: int = 0
     sku_count: int = 0
+    #: Сколько единиц из `units_total` УЖЕ зачислено складу-получателю (сумма
+    #: приходных движений переезда: TRANSFER_IN + DEFECT_TRANSFER_IN). Питает
+    #: «принято X из Y» на строке SHIPPED-переезда: приём бывает порционным
+    #: (авто-приём по факту ФФ добирает дельту каждым синком), и без этой
+    #: цифры отличить «доехало полностью» от «доехала половина» нельзя.
+    #: Y — это `units_total`, отдельного `plan_units` НЕТ (был бы дублем).
+    #: Заполняется И в списке, И в карточке.
+    received_units: int = 0
+    # Уже связанные заявки ФФ обеих сторон — и в карточке (`get_transfer` /
+    # ответ `PUT`), и в СПИСКЕ (строка переезда живёт вперемешку с заявками на
+    # сборку и рисует бейдж «ФФ: PVB-…»). В обоих случаях одна батч-выборка:
+    # раньше карточка ради этих 0-2 строк тянула ДВА полных списка заявок ФФ по
+    # обоим складам (~300 КБ), а на складе «Натали» уже 432 заявки при лимите
+    # 500 — связка вот-вот перестала бы находиться вовсе.
+    ff_links: list[TransferFfLink] = []
 
 
 class TransferAssignVehicle(BaseModel):

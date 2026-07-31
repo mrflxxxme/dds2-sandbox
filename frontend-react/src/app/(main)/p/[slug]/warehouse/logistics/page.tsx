@@ -8,7 +8,8 @@ import { formatDate, formatNumber, exportToExcel } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import KpiCard from '@/components/KpiCard';
 import type { Column } from '@/components/DataTable';
-import type { AssemblyRequest, AssemblyStatus, LogisticsAnalyticsResponse, LogisticsRouteStat, LogisticsShipmentRow, LogisticsAnomalyType, CostForecastResponse, CostForecastWarehouse, GazelkaConfig, Warehouse } from '@/types/api';
+import type { AssemblyRequest, AssemblyStatus, LogisticsAnalyticsResponse, LogisticsRouteStat, LogisticsShipmentRow, LogisticsAnomalyType, CostForecastResponse, CostForecastWarehouse, GazelkaConfig, StockTransfer, Warehouse } from '@/types/api';
+import { transferTotalWeight } from '@/lib/transfer';
 import LogisticsCostByPallets from './components/LogisticsCostByPallets';
 import LogisticsCostPerUnit from './components/LogisticsCostPerUnit';
 import LogisticsCarriers from './components/LogisticsCarriers';
@@ -18,7 +19,7 @@ import ShipmentPaymentsTab from './components/ShipmentPaymentsTab';
 import GazelkaModal from './components/GazelkaModal';
 import GazelkaOrdersTab from './components/GazelkaOrdersTab';
 import TransferLogisticsTab from './components/TransferLogisticsTab';
-import TransfersWorkSection from './components/TransfersWorkSection';
+import { TransferWorkCard, TransferWorkTableRow, isTransferSelectable } from './components/TransferWorkRow';
 
 // Сегменты аналитики истории отправок.
 type AnalyticsView = 'overview' | 'pallets' | 'per_unit' | 'carriers' | 'anomalies' | 'matrix';
@@ -313,6 +314,15 @@ export default function LogisticsPage() {
     // Checkboxes for bulk selection
     const [checkedIds, setCheckedIds] = useState<Set<number>>(new Set());
 
+    // ─── Перемещения в ОБЩЕМ рабочем списке ────────────────────────────────
+    // Канон юзера 31.07.2026: переезд едет в том же списке, что и заявки, и
+    // отличается тегом «Перемещение». Своё состояние — потому что это ДРУГАЯ
+    // сущность с другими эндпоинтами; общее у них — список, чекбоксы и машина.
+    const [transfers, setTransfers] = useState<StockTransfer[]>([]);
+    const [checkedTransferIds, setCheckedTransferIds] = useState<Set<number>>(new Set());
+    /** Тип строки в списке: заявки, перемещения или всё вперемешку. */
+    const [typeFilter, setTypeFilter] = useState<'all' | 'assembly' | 'transfer'>('all');
+
     // Gazelka
     const [gazelkaConfig, setGazelkaConfig] = useState<GazelkaConfig | null>(null);
     const [gazelkaAssemblyId, setGazelkaAssemblyId] = useState<number | null>(null);
@@ -333,6 +343,13 @@ export default function LogisticsPage() {
     const [carrierInn, setCarrierInn] = useState('');
     const [carrierName, setCarrierName] = useState('');
     const [selectedIds, setSelectedIds] = useState<number[]>([]);
+    // Переезды, попавшие в ту же модалку. Реквизиты у них ОБЩИЕ на пачку
+    // (контракт bulk-эндпоинта переездов), поэтому не пер-строчная карта, как
+    // у заявок, а один набор полей.
+    const [selectedTransferIds, setSelectedTransferIds] = useState<number[]>([]);
+    const [transferParams, setTransferParams] = useState({
+        pickup_date: '', pickup_time_slot: '', pickup_cost: '' as number | '', delivery_date: '',
+    });
     const [actionLoading, setActionLoading] = useState(false);
 
     // Per-request params in modal: { [requestId]: { pickup_date, pickup_time_slot, pickup_cost, delivery_date } }
@@ -417,6 +434,30 @@ export default function LogisticsPage() {
     }, [showSoonReady, showInProgress]);
 
     useEffect(() => { load(); }, [load]);
+
+    /**
+     * Переезды рабочего списка: READY (ждут машину) + VEHICLE_ASSIGNED (машина
+     * уже назначена). Два запроса, а не один без фильтра: `status` на бэкенде
+     * одно­значный, а тянуть ВСЕ переезды (кап 500) значит вымыть свежие READY
+     * давно принятыми. VEHICLE_ASSIGNED обязателен: без него строка исчезала бы
+     * из списка ровно в момент назначения, унося «Изменить/Снять машину».
+     */
+    const loadTransfers = useCallback(async () => {
+        try {
+            const [ready, assigned] = await Promise.all([
+                api.getTransfers(false, undefined, { status: 'READY' }),
+                api.getTransfers(false, undefined, { status: 'VEHICLE_ASSIGNED' }),
+            ]);
+            const rows = [...ready, ...assigned].sort((a, b) => b.id - a.id);
+            setTransfers(rows);
+            // Выбор чистим: строка могла уехать из среза (отправлена другим окном).
+            setCheckedTransferIds(prev => new Set([...prev].filter(id => rows.some(r => r.id === id))));
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка загрузки перемещений');
+        }
+    }, []);
+
+    useEffect(() => { loadTransfers(); }, [loadTransfers]);
 
     // Прогнозная модель грузится один раз (не зависит от фильтров).
     useEffect(() => { api.getCostForecast().then(setForecast).catch(() => {}); }, []);
@@ -519,9 +560,46 @@ export default function LogisticsPage() {
 
     const displayItems = collapseJoint(filteredItems);
 
+    // ─── Перемещения: те же фильтры, что и у заявок ───────────────────────
+    // Имена концов маршрута отдаёт сам список; справочник складов — фолбэк.
+    const transferWhName = (id: number, name?: string | null) =>
+        name || warehousesDir.find(w => w.id === id)?.name || `Склад ${id}`;
+    const transferFromName = (t: StockTransfer) => transferWhName(t.from_warehouse_id, t.from_warehouse_name);
+    const transferToName = (t: StockTransfer) => transferWhName(t.to_warehouse_id, t.to_warehouse_name);
+    /** Ключ группировки переезда: аналог WB-склада — склад-ПОЛУЧАТЕЛЬ. */
+    const transferGroupKey = (t: StockTransfer) =>
+        groupBy === 'wb_warehouse' ? transferToName(t) : transferFromName(t);
+
+    const filteredTransfers = typeFilter === 'assembly' ? [] : transfers.filter(t => {
+        if (warehouseFilter && transferGroupKey(t) !== warehouseFilter) return false;
+        // Коды статусов у переезда и заявки общие (READY / VEHICLE_ASSIGNED),
+        // поэтому один дропдаун фильтрует и то, и другое без перевода.
+        if (statusFilter && t.status !== statusFilter) return false;
+        if (searchNorm && !t.number.toLowerCase().includes(searchNorm)) return false;
+        return true;
+    });
+
     // ─── Grouping ─────────────────────────────────────────────────────────
 
-    const grouped = groupItems(displayItems, groupBy);
+    const grouped = groupItems(typeFilter === 'transfer' ? [] : displayItems, groupBy);
+    // Переезды подмешиваем в ТЕ ЖЕ группы. Группы, которых у заявок нет
+    // (переезд на склад, куда сборок сейчас нет), добавляем — иначе строка
+    // молча исчезла бы из списка, хотя фильтры её пропустили.
+    const groupedAll: (Group & { transfers: StockTransfer[] })[] = (() => {
+        const out = grouped.map(g => ({ ...g, transfers: [] as StockTransfer[] }));
+        const byKey = new Map(out.map(g => [g.key, g]));
+        for (const t of filteredTransfers) {
+            const key = transferGroupKey(t);
+            let g = byKey.get(key);
+            if (!g) {
+                g = { key, label: key, items: [], subGroups: [], transfers: [] };
+                byKey.set(key, g);
+                out.push(g);
+            }
+            g.transfers.push(t);
+        }
+        return out;
+    })();
 
     // ─── Summary ──────────────────────────────────────────────────────────
     // Для совместного якоря считаем по всей поставке (joint-итоги), а не по одной сборке.
@@ -531,6 +609,28 @@ export default function LogisticsPage() {
     const totalWeight = displayItems.reduce((s, i) => s + (i.joint_supply ? jointTotalWeight(i) : (Number(i.total_weight_kg) || 0)), 0);
 
     // ─── Checked items summary ──────────────────────────────────────────
+
+    // Итоги списка включают переезды: логисту важен весь объём, который он
+    // сегодня сажает на машины, а не только WB-часть.
+    const totalTransfers = filteredTransfers.length;
+    const transferPallets = filteredTransfers.reduce((s, t) => s + (t.pallets_count || 0), 0);
+    const transferWeight = filteredTransfers.reduce((s, t) => s + (transferTotalWeight(t) || 0), 0);
+
+    const checkedTransfers = filteredTransfers.filter(t => checkedTransferIds.has(t.id));
+    // Страховка от рассинхрона выбор↔данные: переезд могли отметить в READY, а
+    // затем отправить из другого окна — в назначение машины он уже не годится.
+    const assignableCheckedTransferIds = checkedTransfers.filter(isTransferSelectable).map(t => t.id);
+    const checkedTransferPallets = checkedTransfers.reduce((s, t) => s + (t.pallets_count || 0), 0);
+    const checkedTransferWeight = checkedTransfers.reduce((s, t) => s + (transferTotalWeight(t) || 0), 0);
+
+    const toggleCheckedTransfer = (id: number) => {
+        setCheckedTransferIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
 
     const checkedItems = displayItems.filter(i => checkedIds.has(i.id));
     // Страховка от рассинхрона checkedIds↔данные: заявку могли отметить в READY, затем
@@ -550,17 +650,30 @@ export default function LogisticsPage() {
 
     // ─── Actions ──────────────────────────────────────────────────────────
 
-    const openVehicleModal = (ids: number[]) => {
+    const openVehicleModal = (ids: number[], transferIds: number[] = []) => {
         setSelectedIds(ids);
+        setSelectedTransferIds(transferIds);
+        // Префилл переездов: если у выбранных машина уже есть — подставляем её
+        // реквизиты, чтобы «Изменить машину» не начиналась с пустой формы.
+        const preT = transfers.find(t => transferIds.includes(t.id) && t.vehicle_info);
+        setTransferParams({
+            pickup_date: preT?.pickup_date || '',
+            pickup_time_slot: preT?.pickup_time_slot || '',
+            pickup_cost: preT?.pickup_cost != null ? Number(preT.pickup_cost) : '',
+            delivery_date: preT?.delivery_date || '',
+        });
         // Префилл: если пропуск уже заведён (вручную в панели «Поставка WB» или
         // подтянут из кабинета) — подставляем его данные в ячейки, чтобы логист
         // не перевводил номер/марку/телефон.
         const pre = vehiclePrefill(items.filter(i => ids.includes(i.id)));
-        setVehicleInfo(pre.info);
-        setVehicleBrand(pre.brand);
-        setDriverPhone(pre.phone);
-        setDriverFirstName(pre.firstName);
-        setDriverLastName(pre.lastName);
+        // Выбраны только переезды — префилл берём с их машины: иначе форма
+        // пустая там, где данные уже есть.
+        const preFromTransfer = ids.length === 0 && preT;
+        setVehicleInfo(preFromTransfer ? (preT.vehicle_info || '') : pre.info);
+        setVehicleBrand(preFromTransfer ? (preT.vehicle_brand || '') : pre.brand);
+        setDriverPhone(preFromTransfer ? (preT.driver_phone || '') : pre.phone);
+        setDriverFirstName(preFromTransfer ? (preT.driver_first_name || '') : pre.firstName);
+        setDriverLastName(preFromTransfer ? (preT.driver_last_name || '') : pre.lastName);
         const params: Record<number, PerRequestParams> = {};
         for (const id of ids) {
             params[id] = { pickup_date: '', pickup_time_slot: '', pickup_cost: '', delivery_date: '' };
@@ -571,12 +684,17 @@ export default function LogisticsPage() {
 
     // Все поля водителя/машины обязательны — их состав совпадает с WB-пропуском,
     // который WB не примет без единого пропущенного поля.
-    const vehicleFormValid = vehicleInfo.trim() && vehicleBrand.trim() && driverPhone.trim()
+    // Параметры ПЕРЕЕЗДА обязательными не делаем: бэкенд принимает назначение
+    // без даты и стоимости (переезд между своими складами возят и без забора),
+    // а выдумывать более строгую валидацию, чем контракт, — прятать рабочий
+    // сценарий. Заявочная часть проверяется как раньше, построчно.
+    const vehicleFormValid = !!(vehicleInfo.trim() && vehicleBrand.trim() && driverPhone.trim()
         && driverFirstName.trim() && driverLastName.trim()
+        && (selectedIds.length > 0 || selectedTransferIds.length > 0)
         && selectedIds.every(id => {
             const p = perRequestParams[id];
             return p && p.pickup_date && p.pickup_time_slot && p.pickup_cost !== '' && p.delivery_date;
-        });
+        }));
 
     const updateParam = (id: number, field: keyof PerRequestParams, value: string | number) => {
         setPerRequestParams(prev => ({
@@ -585,10 +703,20 @@ export default function LogisticsPage() {
         }));
     };
 
+    /**
+     * Назначение машины на СМЕШАННЫЙ выбор: заявки + перемещения.
+     *
+     * Бэкенд про смесь не знает и знать не должен — разводим на клиенте и
+     * зовём два существующих bulk-эндпоинта. Каждый вызов ловим отдельно:
+     * частичный отказ («заявки прошли, переезды нет») обязан быть виден, иначе
+     * логист уверен, что посадил на машину всё, а половина осталась ждать.
+     */
     const handleAssignVehicle = async () => {
-        if (!vehicleFormValid || selectedIds.length === 0) return;
+        if (!vehicleFormValid) return;
         setActionLoading(true);
         setError('');
+        const done: string[] = [];
+        const failed: string[] = [];
         try {
             const bulkItems = selectedIds.map(id => {
                 const p = perRequestParams[id];
@@ -611,28 +739,97 @@ export default function LogisticsPage() {
                 driver_first_name: driverFirstName.trim(),
                 driver_last_name: driverLastName.trim(),
             };
-            if (selectedIds.length === 1) {
-                await api.assignVehicle(selectedIds[0], {
-                    ...driverPayload,
-                    ...carrierPayload,
-                    ...bulkItems[0],
-                });
-            } else {
-                await api.assignVehicleBulk({
-                    ...driverPayload,
-                    ...carrierPayload,
-                    items: bulkItems,
-                });
+            if (selectedIds.length > 0) {
+                try {
+                    if (selectedIds.length === 1) {
+                        await api.assignVehicle(selectedIds[0], {
+                            ...driverPayload,
+                            ...carrierPayload,
+                            ...bulkItems[0],
+                        });
+                    } else {
+                        await api.assignVehicleBulk({
+                            ...driverPayload,
+                            ...carrierPayload,
+                            items: bulkItems,
+                        });
+                    }
+                    done.push(`заявок: ${selectedIds.length}`);
+                } catch (e: unknown) {
+                    failed.push(`заявки (${selectedIds.length}) — ${e instanceof Error ? e.message : 'ошибка'}`);
+                }
             }
-            setShowVehicleModal(false);
-            setCheckedIds(new Set());
-            setCarrierInn('');
-            setCarrierName('');
-            await load();
+            if (selectedTransferIds.length > 0) {
+                // Реквизиты переездов общие на пачку, пер-строчных полей у них
+                // нет. Транспортную единицу шлём null во всех трёх: «не трогать»
+                // (иначе дефолт «паллеты» перевернул бы коробочный переезд).
+                const transferPayload = {
+                    ...driverPayload,
+                    ...carrierPayload,
+                    logistics_by_warehouse: false,
+                    pickup_date: transferParams.pickup_date,
+                    pickup_time_slot: transferParams.pickup_time_slot,
+                    pickup_cost: transferParams.pickup_cost === '' ? 0 : Number(transferParams.pickup_cost),
+                    delivery_date: transferParams.delivery_date,
+                    pallets_count: null,
+                    pallet_weight_kg: null,
+                    shipped_as_boxes: null,
+                };
+                try {
+                    if (selectedTransferIds.length === 1) {
+                        await api.assignTransferVehicle(selectedTransferIds[0], transferPayload);
+                    } else {
+                        await api.assignTransferVehicleBulk(selectedTransferIds, transferPayload);
+                    }
+                    done.push(`перемещений: ${selectedTransferIds.length}`);
+                } catch (e: unknown) {
+                    failed.push(`перемещения (${selectedTransferIds.length}) — ${e instanceof Error ? e.message : 'ошибка'}`);
+                }
+            }
+            if (failed.length === 0) {
+                setShowVehicleModal(false);
+                setCheckedIds(new Set());
+                setCheckedTransferIds(new Set());
+                setCarrierInn('');
+                setCarrierName('');
+            } else {
+                // Часть прошла — говорим ЧТО именно, и оставляем модалку
+                // открытой, чтобы можно было повторить только неудавшееся.
+                setError(done.length > 0
+                    ? `Назначено — ${done.join(', ')}. Не удалось: ${failed.join('; ')}`
+                    : `Не удалось назначить: ${failed.join('; ')}`);
+            }
+            await Promise.all([load(), loadTransfers()]);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
         setActionLoading(false);
+    };
+
+    // ─── Действия по перемещению (строка общего списка) ────────────────────
+
+    const runTransferAction = async (fn: () => Promise<unknown>, errPrefix: string) => {
+        setActionLoading(true);
+        setError('');
+        try {
+            await fn();
+            await loadTransfers();
+        } catch (e: unknown) {
+            setError(`${errPrefix}: ${e instanceof Error ? e.message : 'ошибка'}`);
+        }
+        setActionLoading(false);
+    };
+
+    const handleUnassignTransfer = (id: number) => {
+        const t = transfers.find(x => x.id === id);
+        if (!confirm(`Снять машину с ${t?.number || `#${id}`}? Переезд вернётся в «Готово», транспортная единица груза останется как есть.`)) return;
+        runTransferAction(() => api.unassignTransferVehicle(id), 'Снятие машины');
+    };
+
+    const handleSendTransfer = (id: number) => {
+        const t = transfers.find(x => x.id === id);
+        if (!confirm(`Отправить ${t?.number || `#${id}`}? Товар спишется со склада-источника и повиснет транзитом на получателе.`)) return;
+        runTransferAction(() => api.sendTransfer(id), 'Отправка перемещения');
     };
 
     const handleShip = async (id: number) => {
@@ -923,12 +1120,27 @@ export default function LogisticsPage() {
                                 </select>
                             </div>
                             <div className="form-group" style={{ margin: 0 }}>
+                                {/* Тип строки: список общий, поэтому фильтр по типу
+                                    обязателен — иначе «покажи только переезды»
+                                    делается глазами. */}
+                                <select
+                                    className="form-input"
+                                    value={typeFilter}
+                                    onChange={e => setTypeFilter(e.target.value as 'all' | 'assembly' | 'transfer')}
+                                    title="Заявки на сборку и перемещения между нашими складами идут одним списком"
+                                >
+                                    <option value="all">Заявки и перемещения</option>
+                                    <option value="assembly">Только заявки</option>
+                                    <option value="transfer">Только перемещения</option>
+                                </select>
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
                                 <input
                                     className="form-input"
                                     type="search"
                                     value={activeSearch}
                                     onChange={e => setActiveSearch(e.target.value)}
-                                    placeholder="Поиск: № заявки или поставка ФБО"
+                                    placeholder="Поиск: № заявки, переезда или поставка ФБО"
                                     style={{ minWidth: 240 }}
                                 />
                             </div>
@@ -952,17 +1164,25 @@ export default function LogisticsPage() {
                     </div>
 
                     {/* Summary */}
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
+                    {/* Итоги считаем по ОБОИМ типам: логист сажает на машины и то,
+                        и другое, и «сколько всего палет сегодня» — общий вопрос. */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 16 }}>
                         <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
                             <div style={{ fontSize: 24, fontWeight: 600 }}>{totalRequests}</div>
                             <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Заявок</div>
                         </div>
                         <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                            <div style={{ fontSize: 24, fontWeight: 600 }}>{totalPallets}</div>
+                            <div style={{ fontSize: 24, fontWeight: 600 }}>{totalTransfers}</div>
+                            <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Перемещений</div>
+                        </div>
+                        <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                            <div style={{ fontSize: 24, fontWeight: 600 }}>{totalPallets + transferPallets}</div>
                             <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Палет</div>
                         </div>
                         <div className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                            <div style={{ fontSize: 24, fontWeight: 600 }}>{totalWeight > 0 ? formatNumber(totalWeight, 0) : '0'}</div>
+                            <div style={{ fontSize: 24, fontWeight: 600 }}>
+                                {(totalWeight + transferWeight) > 0 ? formatNumber(totalWeight + transferWeight, 0) : '0'}
+                            </div>
                             <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Общий вес (кг)</div>
                         </div>
                     </div>
@@ -970,12 +1190,12 @@ export default function LogisticsPage() {
                     {/* Content */}
                     {loading ? (
                         <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>
-                    ) : items.length === 0 ? (
+                    ) : groupedAll.length === 0 ? (
                         <div className="glass-card" style={{ padding: 64, textAlign: 'center' }}>
                             <div style={{ fontSize: 48, marginBottom: 16 }}>🚛</div>
-                            <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 8 }}>Нет заявок для логистики</div>
+                            <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 8 }}>Нет работы для логиста</div>
                             <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
-                                Здесь появятся заявки в статусе &laquo;Готово&raquo; и &laquo;Машина назначена&raquo;
+                                Здесь появятся заявки и перемещения в статусе &laquo;Готово&raquo; и &laquo;Машина назначена&raquo;
                             </div>
                         </div>
                     ) : viewMode === 'table' ? (
@@ -1001,13 +1221,13 @@ export default function LogisticsPage() {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {grouped.map(group => (
+                                    {groupedAll.map(group => (
                                         <React.Fragment key={group.key}>
                                             <tr>
                                                 <td colSpan={13} style={{ background: 'var(--color-bg-secondary)', fontWeight: 600, fontSize: 13, padding: '8px 12px' }}>
                                                     {group.label || 'Без склада'}
                                                     <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8 }}>
-                                                        {group.items.length} заявок, {group.items.reduce((s, i) => s + (i.joint_supply ? jointTotalPallets(i) : i.pallets_count), 0)} палет
+                                                        {group.items.length} заявок{group.transfers.length > 0 ? ` + ${group.transfers.length} перемещений` : ''}, {group.items.reduce((s, i) => s + (i.joint_supply ? jointTotalPallets(i) : i.pallets_count), 0) + group.transfers.reduce((s, t) => s + (t.pallets_count || 0), 0)} палет
                                                     </span>
                                                 </td>
                                             </tr>
@@ -1145,6 +1365,25 @@ export default function LogisticsPage() {
                                                     </tr>
                                                 );
                                             })}
+                                            {/* Перемещения — те же группы, тот же чекбокс,
+                                                отличие ровно в теге «Перемещение». */}
+                                            {group.transfers.map(t => (
+                                                <TransferWorkTableRow
+                                                    key={`t${t.id}`}
+                                                    transfer={t}
+                                                    slug={slug}
+                                                    fromName={transferFromName(t)}
+                                                    toName={transferToName(t)}
+                                                    checked={checkedTransferIds.has(t.id)}
+                                                    canEdit
+                                                    busy={actionLoading}
+                                                    onToggle={toggleCheckedTransfer}
+                                                    onAssign={id => openVehicleModal([], [id])}
+                                                    onUnassign={handleUnassignTransfer}
+                                                    onSend={handleSendTransfer}
+                                                    stuckThresholdDays={STUCK_THRESHOLD_DAYS}
+                                                />
+                                            ))}
                                         </React.Fragment>
                                     ))}
                                 </tbody>
@@ -1153,12 +1392,12 @@ export default function LogisticsPage() {
                     ) : (
                         /* ─── Cards view ─── */
                         <div>
-                            {grouped.map(group => (
+                            {groupedAll.map(group => (
                                 <div key={group.key} style={{ marginBottom: 24 }}>
                                     <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12, padding: '0 4px' }}>
                                         {group.label || 'Без склада'}
                                         <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8, fontSize: 14 }}>
-                                            ({group.items.length} заявок, {group.items.reduce((s, i) => s + (i.joint_supply ? jointTotalPallets(i) : i.pallets_count), 0)} палет)
+                                            ({group.items.length} заявок{group.transfers.length > 0 ? ` + ${group.transfers.length} перемещений` : ''}, {group.items.reduce((s, i) => s + (i.joint_supply ? jointTotalPallets(i) : i.pallets_count), 0) + group.transfers.reduce((s, t) => s + (t.pallets_count || 0), 0)} палет)
                                         </span>
                                     </h2>
 
@@ -1351,6 +1590,25 @@ export default function LogisticsPage() {
                                                 </div>
                                             );
                                         })}
+                                        {/* Перемещения — карточки в ТОЙ ЖЕ сетке, что и
+                                            заявки: один список, тег «Перемещение». */}
+                                        {group.transfers.map(t => (
+                                            <TransferWorkCard
+                                                key={`t${t.id}`}
+                                                transfer={t}
+                                                slug={slug}
+                                                fromName={transferFromName(t)}
+                                                toName={transferToName(t)}
+                                                checked={checkedTransferIds.has(t.id)}
+                                                canEdit
+                                                busy={actionLoading}
+                                                onToggle={toggleCheckedTransfer}
+                                                onAssign={id => openVehicleModal([], [id])}
+                                                onUnassign={handleUnassignTransfer}
+                                                onSend={handleSendTransfer}
+                                                stuckThresholdDays={STUCK_THRESHOLD_DAYS}
+                                            />
+                                        ))}
                                     </div>
 
                                     {/* Bulk assign buttons per sub-group */}
@@ -1377,10 +1635,6 @@ export default function LogisticsPage() {
                         </div>
                     )}
 
-                    {/* Переезды между нашими складами — тот же рабочий процесс
-                        (машина на выделенные), но отдельным блоком: это не
-                        заявки на сборку и в их группировку они не ложатся. */}
-                    <TransfersWorkSection warehouses={warehousesDir} />
                 </>
             ) : (
                 /* History tab */
@@ -1602,7 +1856,7 @@ export default function LogisticsPage() {
             )}
 
             {/* Floating action bar */}
-            {checkedIds.size > 0 && (
+            {(checkedIds.size > 0 || checkedTransfers.length > 0) && (
                 <div style={{
                     position: 'fixed',
                     bottom: 0,
@@ -1620,14 +1874,17 @@ export default function LogisticsPage() {
                 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14 }}>
                         <span style={{ color: 'var(--color-success)' }}>&#10003;</span>
-                        Выбрано: {checkedItems.length} заявки &middot; {checkedPallets} палет &middot; {checkedWeight > 0 ? formatNumber(checkedWeight, 0) : 0} кг
+                        Выбрано: {checkedItems.length} заявок
+                        {checkedTransfers.length > 0 && <> &middot; {checkedTransfers.length} перемещений</>}
+                        &middot; {checkedPallets + checkedTransferPallets} палет
+                        &middot; {(checkedWeight + checkedTransferWeight) > 0 ? formatNumber(checkedWeight + checkedTransferWeight, 0) : 0} кг
                     </div>
                     <button
                         className="btn btn-primary"
-                        onClick={() => openVehicleModal(assignableCheckedIds)}
-                        disabled={actionLoading || assignableCheckedIds.length === 0}
+                        onClick={() => openVehicleModal(assignableCheckedIds, assignableCheckedTransferIds)}
+                        disabled={actionLoading || (assignableCheckedIds.length === 0 && assignableCheckedTransferIds.length === 0)}
                     >
-                        Назначить машину
+                        Назначить машину ({assignableCheckedIds.length + assignableCheckedTransferIds.length})
                     </button>
                 </div>
             )}
@@ -1695,7 +1952,9 @@ export default function LogisticsPage() {
                             </div>
                         </div>
 
-                        {/* Block 2: Per-request params */}
+                        {/* Block 2: Per-request params (только заявки: у них
+                            дата/слот/стоимость задаются ПОСТРОЧНО) */}
+                        {selectedIds.length > 0 && (
                         <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: 12 }}>
                             <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 8 }}>Параметры по заявкам ({selectedIds.length})</div>
                             <div style={{ maxHeight: 300, overflow: 'auto' }}>
@@ -1740,11 +1999,72 @@ export default function LogisticsPage() {
                                 </table>
                             </div>
                         </div>
+                        )}
+
+                        {/* Block 3: перемещения. Реквизиты ОБЩИЕ на всю пачку —
+                            таков контракт bulk-эндпоинта переездов, пер-строчных
+                            дат и стоимостей у них нет. Поля необязательные:
+                            переезд между своими складами возят и без забора. */}
+                        {selectedTransferIds.length > 0 && (
+                            <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: 12, marginTop: 12 }}>
+                                <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>
+                                    Параметры по перемещениям ({selectedTransferIds.length})
+                                </div>
+                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                                    Уйдут ОБЩИМИ на все выбранные перемещения. Можно оставить пустыми —
+                                    тогда назначится только машина и водитель.
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+                                    <div className="form-group" style={{ margin: 0 }}>
+                                        <label className="form-label">Дата забора</label>
+                                        <input
+                                            className="form-input" type="date" value={transferParams.pickup_date}
+                                            onChange={e => setTransferParams(prev => ({ ...prev, pickup_date: e.target.value }))}
+                                        />
+                                    </div>
+                                    <div className="form-group" style={{ margin: 0 }}>
+                                        <label className="form-label">Интервал</label>
+                                        <select
+                                            className="form-input" value={transferParams.pickup_time_slot}
+                                            onChange={e => setTransferParams(prev => ({ ...prev, pickup_time_slot: e.target.value }))}
+                                        >
+                                            <option value="">...</option>
+                                            <option value="08:00-12:00">08-12</option>
+                                            <option value="12:00-16:00">12-16</option>
+                                            <option value="16:00-20:00">16-20</option>
+                                            <option value="20:00-00:00">20-00</option>
+                                        </select>
+                                    </div>
+                                    <div className="form-group" style={{ margin: 0 }}>
+                                        <label className="form-label">Стоимость, ₽</label>
+                                        <input
+                                            className="form-input" type="number" min={0} placeholder="0"
+                                            value={transferParams.pickup_cost}
+                                            onChange={e => setTransferParams(prev => ({ ...prev, pickup_cost: e.target.value ? Number(e.target.value) : '' }))}
+                                        />
+                                    </div>
+                                    <div className="form-group" style={{ margin: 0 }}>
+                                        <label className="form-label">Дата доставки</label>
+                                        <input
+                                            className="form-input" type="date" value={transferParams.delivery_date}
+                                            onChange={e => setTransferParams(prev => ({ ...prev, delivery_date: e.target.value }))}
+                                        />
+                                    </div>
+                                </div>
+                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 8 }}>
+                                    {selectedTransferIds
+                                        .map(id => transfers.find(t => t.id === id))
+                                        .filter((t): t is StockTransfer => !!t)
+                                        .map(t => `${t.number} (${transferFromName(t)} → ${transferToName(t)})`)
+                                        .join(', ')}
+                                </div>
+                            </div>
+                        )}
 
                         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
                             <button className="btn btn-secondary" onClick={() => setShowVehicleModal(false)}>Отмена</button>
                             <button className="btn btn-primary" onClick={handleAssignVehicle} disabled={actionLoading || !vehicleFormValid}>
-                                {actionLoading ? 'Назначение...' : `Назначить (${selectedIds.length})`}
+                                {actionLoading ? 'Назначение...' : `Назначить (${selectedIds.length + selectedTransferIds.length})`}
                             </button>
                         </div>
                     </div>

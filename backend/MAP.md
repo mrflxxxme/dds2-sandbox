@@ -40,6 +40,7 @@ from backend.models.mixins import SoftDeleteMixin
 | Режим склада продавца (`observe` — не писать в WB / `translate`) | `models/wb_fbs.py:FbsWarehouseMode`, гейт — `services/wb_fbs/stock_service.py:_push_stocks_locked` |
 | Обратный гейт FBS → сборка | `services/warehouse_stock_engine.py:get_open_fbs_reserved` → `services/assembly/crud.py:_validate_available_for_assembly` |
 | Логистика переездов между складами | `services/transfer_logistics.py` — отчёт стоимости и расходов по маршрутам (₽/паллета паллетных, отдельный счётчик коробочных) |
+| Переезд как заявка на сборку (статусная модель) | Шкала и таблица переходов — `models/warehouse.py:TransferStatus` / `TRANSFER_TRANSITIONS` / `TRANSFER_EDITABLE_STATUSES`, журнал — `StockTransferStatusHistory`. Ступени — `services/warehouse_outbound.py`: `_check_transfer_transition` (единая валидация), `mark_transfer_ready` / `send_transfer` / `complete_transfer` / `return_transfer` / `close_transfer` / `cancel_transfer`, машина — `assign_vehicle_transfer` (+`_bulk`) / `unassign_vehicle_transfer`. Сигналы синка ФФ — `services/fulfillment_service.py`: `_mark_linked_transfers_ready` (авто-READY) и `_collect_transfer_ship_candidates` (авто-SHIPPED, строго из VEHICLE_ASSIGNED) поверх общих с заявкой `_assembly_ready_signal` / `_assembly_shipped_signal` |
 | Telegram-бот | `integrations/telegram_bot.py` |
 | Фоновые задачи | `scheduler/jobs/` |
 | Кэш | `cache.py` |

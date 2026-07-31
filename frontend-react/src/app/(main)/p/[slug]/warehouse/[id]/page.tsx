@@ -4,11 +4,21 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
-import { transferSkuCount, transferUnits } from '@/lib/transfer';
+import {
+    TRANSFER_STATUS_MAP,
+    canCancelTransfer,
+    canCompleteTransfer,
+    canEditTransfer,
+    canMarkTransferReady,
+    canSendTransfer,
+    transferReceiveProgress,
+    transferSkuCount,
+    transferUnits,
+} from '@/lib/transfer';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type {
     Warehouse, InboundReceipt, OutboundShipment, AssemblyRequest,
-    WarehouseStockRow, StockMovement, StockTransfer, DeliveryTimesResponse,
+    WarehouseStockRow, StockMovement, StockTransfer, StockTransferStatus, DeliveryTimesResponse,
     DefectMarkOperation, VehicleStatus,
     FulfillmentStatus, FulfillmentProviderId, FfStocksResponse, FfStockRow, FfBoxPack, FfNomenclatureOption, FfRequestRow, FfRequestKind, FfStatusEvent, FfSyncRun, FfUnlinkedAssembly,
     FfBulkCreateResult, FfBulkCreateAssemblyResult, FfRepackCandidate, FfRepackCandidatesOut,
@@ -24,17 +34,17 @@ import { whNamesMatch } from '@/lib/utils/ffLinkCandidates';
 
 /* ─── Transfers helpers (общие для страницы и вкладки) ───────────────────── */
 
-const TRANSFER_STATUS_LABELS: Record<string, string> = {
-    DRAFT: 'Черновик',
-    IN_TRANSIT: 'В пути',
-    COMPLETED: 'Завершено',
-};
+// Подписи статусов — ОБЩИЕ (lib/transfer.ts). Своя копия здесь уже разъезжалась
+// с остальными экранами («Завершено» против «Принято»), и пользователь читал
+// два разных слова про один и тот же документ.
+const transferStatusLabel = (s: string) => TRANSFER_STATUS_MAP[s as StockTransferStatus]?.label ?? s;
 
-// Требуют действия: входящие «в пути» (принять) + исходящие черновики (отправить/удалить)
+// Требуют действия: входящие в пути (принять) + исходящие до отгрузки
+// (собрать / отправить / удалить).
 function countActionableTransfers(transfers: StockTransfer[], warehouseId: number): number {
     return transfers.filter(t =>
-        (t.status === 'IN_TRANSIT' && t.to_warehouse_id === warehouseId) ||
-        (t.status === 'DRAFT' && t.from_warehouse_id === warehouseId)
+        (canCompleteTransfer(t.status) && t.to_warehouse_id === warehouseId) ||
+        (canEditTransfer(t.status) && t.from_warehouse_id === warehouseId)
     ).length;
 }
 
@@ -1315,8 +1325,9 @@ function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
                 return tb - ta;
             });
             setDocs(unified);
+            // Едет к нам, но ещё не принято — SHIPPED (бывший IN_TRANSIT).
             const incoming = transfers.filter((t: StockTransfer) =>
-                t.is_defect && t.to_warehouse_id === warehouseId && t.status === 'IN_TRANSIT'
+                t.is_defect && t.to_warehouse_id === warehouseId && t.status === 'SHIPPED'
             );
             setIncomingDefects(incoming);
             onCountChange(unified.length + incoming.length);
@@ -1624,6 +1635,20 @@ function TransfersTab({ warehouseId, onCountChange }: {
         }
     };
 
+    // «Готов» без подтверждения: сток не двигает, а откат — «Снять машину»
+    // или правка на карточке.
+    const handleReady = async (t: StockTransfer) => {
+        setActingId(t.id);
+        try {
+            await api.markTransferReady(t.id);
+            await load();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка');
+        } finally {
+            setActingId(null);
+        }
+    };
+
     const handleAccept = async (t: StockTransfer) => {
         if (!confirm(`Принять ${t.number}? Товар зачислится на этот склад.`)) return;
         setActingId(t.id);
@@ -1638,7 +1663,7 @@ function TransfersTab({ warehouseId, onCountChange }: {
     };
 
     const handleCancel = async (t: StockTransfer) => {
-        if (!confirm(`Удалить черновик ${t.number}?`)) return;
+        if (!confirm(`Удалить ${t.number}? Переезд ещё не уезжал — сток не тронут.`)) return;
         setActingId(t.id);
         try {
             await api.cancelTransfer(t.id);
@@ -1650,15 +1675,11 @@ function TransfersTab({ warehouseId, onCountChange }: {
         }
     };
 
+    // Цвет — по классу из общего словаря, а не по своему списку статусов:
+    // иначе каждая новая ступень приезжала бы сюда бесцветной.
     const statusBadge = (s: string) => {
-        const styleMap: Record<string, { bg: string; color: string }> = {
-            DRAFT: { bg: 'rgba(0,0,0,0.06)', color: 'var(--color-text-muted)' },
-            IN_TRANSIT: { bg: 'rgba(245,158,11,0.1)', color: '#b45309' },
-            COMPLETED: { bg: 'rgba(34,197,94,0.1)', color: '#16a34a' },
-        };
-        const label = TRANSFER_STATUS_LABELS[s] || s;
-        const { bg, color } = styleMap[s] || { bg: 'transparent', color: 'inherit' };
-        return <span style={{ color, background: bg, padding: '2px 8px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>{label}</span>;
+        const cls = TRANSFER_STATUS_MAP[s as StockTransferStatus]?.className ?? 'badge-secondary';
+        return <span className={`badge ${cls}`} style={{ fontSize: 12 }}>{transferStatusLabel(s)}</span>;
     };
 
     const directionText = (row: StockTransfer) => row.from_warehouse_id === warehouseId
@@ -1667,8 +1688,15 @@ function TransfersTab({ warehouseId, onCountChange }: {
     // Состав в ответе СПИСКА перемещений больше не приходит (его убрали —
     // тянул мегабайты ради двух чисел); считаем через общие хелперы, которые
     // берут готовые units_total/sku_count, а на состав падают только в деталке.
-    const itemsText = (row: StockTransfer) =>
-        `${formatNumber(transferSkuCount(row), 0)} поз., ${formatNumber(transferUnits(row))} шт.`;
+    const itemsText = (row: StockTransfer) => {
+        const base = `${formatNumber(transferSkuCount(row), 0)} поз., ${formatNumber(transferUnits(row))} шт.`;
+        // «Принято X из Y» — только у уехавшего и только в списке (бэкенд
+        // считает received_units именно там). Приёмщику это главное число.
+        const progress = transferReceiveProgress(row);
+        return progress
+            ? `${base} · принято ${formatNumber(progress.received, 0)} из ${formatNumber(progress.total, 0)}`
+            : base;
+    };
 
     const cols: Column[] = [
         { key: 'number', label: '№' },
@@ -1680,7 +1708,7 @@ function TransfersTab({ warehouseId, onCountChange }: {
         {
             key: 'status', label: 'Статус',
             render: (v: string) => statusBadge(v),
-            exportValue: (row: StockTransfer) => TRANSFER_STATUS_LABELS[row.status] || row.status,
+            exportValue: (row: StockTransfer) => transferStatusLabel(row.status),
         },
         {
             key: 'is_defect', label: 'Тип',
@@ -1703,19 +1731,50 @@ function TransfersTab({ warehouseId, onCountChange }: {
             exportValue: () => '',
             render: (_v: number, row: StockTransfer) => {
                 const acting = actingId === row.id;
-                if (row.status === 'DRAFT' && row.from_warehouse_id === warehouseId) {
+                // Исходящие: до отгрузки — «Готов» либо «Отправить» (что именно,
+                // решает статус) плюс удаление. Кнопку, которую бэкенд встретит
+                // четырёхсоткой, не показываем: гейты общие, из lib/transfer.ts.
+                if (canEditTransfer(row.status) && row.from_warehouse_id === warehouseId) {
                     return (
                         <span style={{ display: 'inline-flex', gap: 6 }}>
-                            <button className="btn btn-sm btn-primary" onClick={() => handleSend(row)} disabled={acting}>
-                                {acting ? '...' : 'Отправить'}
-                            </button>
-                            <button className="btn btn-sm btn-danger" onClick={() => handleCancel(row)} disabled={acting} title="Удалить черновик">
+                            {canMarkTransferReady(row.status) && (
+                                <button
+                                    className="btn btn-sm btn-secondary"
+                                    onClick={() => handleReady(row)}
+                                    disabled={acting}
+                                    title="Переезд собран — можно назначать машину"
+                                >
+                                    {acting ? '...' : 'Готов'}
+                                </button>
+                            )}
+                            {canSendTransfer(row.status) && (
+                                <button className="btn btn-sm btn-primary" onClick={() => handleSend(row)} disabled={acting}>
+                                    {acting ? '...' : 'Отправить'}
+                                </button>
+                            )}
+                            <button className="btn btn-sm btn-danger" onClick={() => handleCancel(row)} disabled={acting} title="Отменить переезд">
                                 ×
                             </button>
                         </span>
                     );
                 }
-                if (row.status === 'IN_TRANSIT' && row.to_warehouse_id === warehouseId) {
+                // Машина назначена — везти уже можно, но правки закрыты
+                // (состав посчитан под машину). Отмена ещё доступна.
+                if (canSendTransfer(row.status) && row.from_warehouse_id === warehouseId) {
+                    return (
+                        <span style={{ display: 'inline-flex', gap: 6 }}>
+                            <button className="btn btn-sm btn-primary" onClick={() => handleSend(row)} disabled={acting}>
+                                {acting ? '...' : 'Отправить'}
+                            </button>
+                            {canCancelTransfer(row.status) && (
+                                <button className="btn btn-sm btn-danger" onClick={() => handleCancel(row)} disabled={acting} title="Отменить переезд">
+                                    ×
+                                </button>
+                            )}
+                        </span>
+                    );
+                }
+                if (canCompleteTransfer(row.status) && row.to_warehouse_id === warehouseId) {
                     return (
                         <button className="btn btn-sm btn-success" onClick={() => handleAccept(row)} disabled={acting}>
                             {acting ? '...' : 'Принять'}
@@ -1904,7 +1963,7 @@ function DefectsTab({ warehouseId, onCountChange }: {
             });
             setStock(enriched);
             const outgoing = transfers.filter((t: StockTransfer) =>
-                t.is_defect && t.from_warehouse_id === warehouseId && t.status === 'IN_TRANSIT'
+                t.is_defect && t.from_warehouse_id === warehouseId && t.status === 'SHIPPED'
             );
             setOutgoingTransfers(outgoing);
             setDefectShipments(shipments);

@@ -3,21 +3,30 @@
  * Деталка перемещения — переезд между нашими складами как полноценная поездка.
  *
  * Что важно помнить про контракт:
- *  • Ступени статуса «машина назначена» НЕТ (DRAFT → IN_TRANSIT → COMPLETED):
- *    назначенная машина — это признак черновика (vehicle_assigned_at), поэтому
- *    бейдж «машина назначена» рисуется отдельно от статуса.
- *  • Назначать машину бэкенд разрешает ТОЛЬКО в DRAFT; в пути/принято — 400.
+ *  • Статус — ЗЕРКАЛО заявки на сборку: PENDING → IN_PROGRESS → READY →
+ *    VEHICLE_ASSIGNED → SHIPPED → DELIVERED, плюс RETURNED → CLOSED и CANCELLED.
+ *    Сток двигают ровно два перехода: «Отправить» списывает с источника,
+ *    «Принять» приходует на получателе («Вернуть на склад» — обратно источнику).
+ *  • Кнопка есть ТОЛЬКО там, где переход разрешён: мёртвая кнопка, отвечающая
+ *    400, хуже отсутствующей. Гейты — в lib/transfer.ts (canSendTransfer и др.),
+ *    одни на все экраны переездов.
+ *  • Править переезд можно до отгрузки (PENDING / IN_PROGRESS / READY): состав
+ *    живой, пока сток не списан. Машину назначают из READY, снятие вернёт туда же.
  *  • Имена концов маршрута приходят в самой схеме; справочник складов грузим
- *    ради контрагента склада забора (и как фолбэк имени). ФФ-связки берём со
- *    стороны ФФ (в заявке ФФ есть stock_transfer_id) — в схеме перемещения их
- *    нет. Все эти блоки обязаны переживать отсутствие данных.
+ *    ради контрагента склада забора (и как фолбэк имени). ФФ-связки приходят
+ *    в самой схеме (`ff_links`) — раньше карточка ради них тянула ВСЕ заявки
+ *    обоих складов. Все эти блоки обязаны переживать отсутствие данных.
  *  • Оплата забора (OUT-xx) в схему перемещения ещё не приехала — блок
  *    показывает то, что есть (стоимость забора), и честно говорит про остальное.
  *  • «Создать поставку у Натали» — тот же контур, что на карточке машины, но
  *    состав берётся из строк ЭТОГО переезда: своей приёмки перемещение не
  *    создаёт, приход у ФФ заводит именно созданная поставка (PVB-…). Кнопка
  *    живёт только когда получатель — склад migfull-портала и переезд ещё не
- *    принят; бэкенд повторно проверяет и то, и другое.
+ *    принят (до DELIVERED, см. canPushTransferToFf); бэкенд повторно проверяет
+ *    и то, и другое. Созданная PVB связана с переездом и потому появляется в
+ *    блоке «Фулфилмент» — это ДОПОЛНЕНИЕ к связке уже существующих заявок, а
+ *    не её дубль: там связывают документ, который у ФФ уже есть, здесь —
+ *    заводят новый.
  */
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -25,17 +34,38 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
-import { Toast, AssignVehicleModal } from '@/components';
+import { Toast, AssignVehicleModal, TransferEditModal, TransferFfLinkModal } from '@/components';
 import type { AssignVehicleValues } from '@/components';
 import MigfullInboundModal from '../../[id]/MigfullInboundModal';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
-import type { FfRequestRow, Nomenclature, StockTransfer, StockTransferItem, Warehouse } from '@/types/api';
+import type {
+    Nomenclature,
+    StockTransfer,
+    StockTransferItem,
+    TransferFfLink,
+    TransferFfSide,
+    TransferUpdatePayload,
+    Warehouse,
+} from '@/types/api';
 import {
     TRANSFER_STATUS_MAP,
+    canAssignTransferVehicle,
+    canCloseTransfer,
+    canCompleteTransfer,
+    canEditTransfer,
+    canMarkTransferReady,
+    canPushTransferToFf,
+    canReturnTransfer,
+    canSendTransfer,
+    canUnassignTransferVehicle,
+    ffLinkLabel,
+    ffLinkStage,
+    splitTransferFfLinks,
     toMoney,
     transferDriverName,
+    transferReceiveProgress,
     transferSkuCount,
     transferUnits,
     transferVehicleAssigned,
@@ -58,17 +88,19 @@ export default function TransferDetailPage() {
 
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [nomenclature, setNomenclature] = useState<Nomenclature[]>([]);
-    // Заявки ФФ, привязанные к этому переезду (slot stock_transfer_id).
-    const [ffLinks, setFfLinks] = useState<{ row: FfRequestRow; warehouseId: number }[]>([]);
-    const [ffLoading, setFfLoading] = useState(false);
-    // Явный триггер перечитывания связок: эффект ниже намеренно НЕ зависит от
-    // объекта переезда, поэтому после создания поставки у Натали (новая PVB со
-    // stock_transfer_id) обновить блок можно только так.
-    const [ffReloadKey, setFfReloadKey] = useState(0);
 
     const [showVehicleModal, setShowVehicleModal] = useState(false);
     const [assigning, setAssigning] = useState(false);
     const [assignError, setAssignError] = useState('');
+
+    const [showEditModal, setShowEditModal] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [saveError, setSaveError] = useState('');
+
+    /** Сторона, для которой открыт пикер заявок ФФ (null — закрыт). */
+    const [ffLinkSide, setFfLinkSide] = useState<TransferFfSide | null>(null);
+    /** id заявки ФФ, которую сейчас отвязываем — блокирует только её кнопку. */
+    const [unlinkingId, setUnlinkingId] = useState<number | null>(null);
 
     // Склад migfull-портала: кнопка «Создать поставку у Натали» только когда
     // получатель переезда — именно он. Портал не подключён → кнопки просто нет.
@@ -103,36 +135,12 @@ export default function TransferDetailPage() {
         return () => { cancelled = true; };
     }, []);
 
-    // ФФ-связки: в схеме перемещения их нет, поэтому спрашиваем оба склада
-    // маршрута и оставляем заявки с нашим stock_transfer_id. Склад без ФФ
-    // отдаёт пустой список — ошибки глушим, блок необязательный.
-    // Зависимости — только id переезда и его маршрут, а НЕ весь объект: любое
-    // действие («Отправить», «Назначить машину») кладёт новый объект в стейт, и
-    // с [transfer] связки перезапрашивались бы по обоим складам после каждого
-    // клика, хотя маршрут не менялся.
-    const transferId = transfer?.id;
-    const fromWhId = transfer?.from_warehouse_id;
-    const toWhId = transfer?.to_warehouse_id;
-    useEffect(() => {
-        if (transferId == null || fromWhId == null || toWhId == null) return;
-        let cancelled = false;
-        const whIds = Array.from(new Set([fromWhId, toWhId]));
-        setFfLoading(true);
-        Promise.all(whIds.map(whId =>
-            api.getFulfillmentRequests(whId)
-                .then(rows => rows.map(row => ({ row, warehouseId: whId })))
-                .catch(() => [] as { row: FfRequestRow; warehouseId: number }[]),
-        ))
-            .then(chunks => {
-                if (cancelled) return;
-                const flat = chunks.flat().filter(x => x.row.stock_transfer_id === transferId);
-                // Один и тот же ФФ-документ мог прийти из обоих складов маршрута.
-                const seen = new Set<number>();
-                setFfLinks(flat.filter(x => (seen.has(x.row.id) ? false : (seen.add(x.row.id), true))));
-            })
-            .finally(() => { if (!cancelled) setFfLoading(false); });
-        return () => { cancelled = true; };
-    }, [transferId, fromWhId, toWhId, ffReloadKey]);
+    // ФФ-связки приезжают в самой схеме переезда (`ff_links`) — отдельных
+    // запросов больше нет: карточка тянула ВСЕ заявки обоих складов маршрута
+    // ради нескольких строк. Отдельный триггер перечитывания связок тоже не
+    // нужен: после создания поставки у Натали хватает reloadTransfer() — новая
+    // PVB приезжает в `ff_links` вместе с самим переездом.
+    const ffLinks = useMemo(() => splitTransferFfLinks(transfer?.ff_links), [transfer?.ff_links]);
 
     const warehouseById = useMemo(() => {
         const map = new Map<number, Warehouse>();
@@ -163,6 +171,45 @@ export default function TransferDetailPage() {
             setToast({ message: e instanceof Error ? e.message : 'Ошибка', type: 'error' });
         } finally {
             setActionLoading(false);
+        }
+    };
+
+    const handleSave = async (payload: TransferUpdatePayload) => {
+        setSaving(true);
+        setSaveError('');
+        try {
+            // Ответ PUT — полная схема с items и ff_links: перезапрашивать нечего.
+            const updated = await api.updateTransfer(id, payload);
+            setTransfer(updated);
+            setShowEditModal(false);
+            setToast({ message: 'Перемещение обновлено', type: 'success' });
+        } catch (e: unknown) {
+            setSaveError(e instanceof Error ? e.message : 'Ошибка сохранения');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    /** Перечитать карточку после связки/отвязки ФФ — ff_links живут в схеме. */
+    const reloadTransfer = useCallback(async () => {
+        try {
+            setTransfer(await api.getTransfer(id));
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Не удалось обновить связки', type: 'error' });
+        }
+    }, [id]);
+
+    const handleUnlinkFf = async (link: TransferFfLink) => {
+        if (!confirm(`Отвязать заявку ФФ ${ffLinkLabel(link)} от перемещения? Сама заявка у ФФ останется — исчезнет только связь.`)) return;
+        setUnlinkingId(link.id);
+        try {
+            await api.unlinkFulfillmentRequest(link.warehouse_id, link.id);
+            await reloadTransfer();
+            setToast({ message: 'Заявка ФФ отвязана', type: 'success' });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка отвязки', type: 'error' });
+        } finally {
+            setUnlinkingId(null);
         }
     };
 
@@ -237,14 +284,22 @@ export default function TransferDetailPage() {
     // Имя склада забора берём из выдачи, справочник — фолбэк (и источник
     // контрагента для тумблера «логистику оказывает склад»).
     const fromWhName = transfer.from_warehouse_name || fromWh?.name || null;
-    const canAssignVehicle = canEdit() && transfer.status === 'DRAFT';
-    // Поставку у Натали заводим, пока переезд не принят (после COMPLETED товар уже
-    // оприходован — бэк вернёт 400). Черновик тоже годится: поставку у ФФ обычно
-    // создают заранее, до фактической отправки машины.
-    const canPushToNatali = canEdit()
+    const toWhName = transfer.to_warehouse_name || warehouseById.get(transfer.to_warehouse_id)?.name || null;
+    // Гейты действий — из общего словаря (lib/transfer.ts), а не сравнением
+    // статуса строкой здесь: иначе экраны переездов разъедутся между собой.
+    // Права редактора — отдельный множитель: у viewer'а нет ни одной кнопки.
+    const editor = canEdit();
+    const canDraftEdit = editor && canEditTransfer(transfer.status);
+    const canAssignVehicle = editor && canAssignTransferVehicle(transfer.status);
+    const canUnassignVehicle = editor && canUnassignTransferVehicle(transfer.status);
+    const receiveProgress = transferReceiveProgress(transfer);
+    // Поставку у Натали заводим, пока переезд не принят (после DELIVERED товар
+    // уже оприходован — бэк вернёт блокировку). Ранние ступени тоже годятся:
+    // поставку у ФФ обычно создают заранее, до фактической отправки машины.
+    const canPushToNatali = editor
         && migfullWhId != null
         && transfer.to_warehouse_id === migfullWhId
-        && transfer.status !== 'COMPLETED'
+        && canPushTransferToFf(transfer.status)
         && (transfer.items?.length ?? 0) > 0;
 
     const itemColumns: Column[] = [
@@ -281,9 +336,13 @@ export default function TransferDetailPage() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                         <h1 className="page-title" style={{ margin: 0 }}>{transfer.number}</h1>
                         <span className={`badge ${status.className}`}>{status.label}</span>
-                        {vehicleAssigned && transfer.status === 'DRAFT' && (
-                            <span className="badge badge-info" title="Машина назначена — отдельного статуса у этой ступени нет">
-                                🚚 машина назначена
+                        {/* Отдельного бейджа «машина назначена» больше нет — это
+                            самостоятельная ступень статуса. Но у уехавшего
+                            переезда статус её уже не покажет, а госномер логисту
+                            нужен и там: напоминаем машиной, а не статусом. */}
+                        {vehicleAssigned && transfer.status !== 'VEHICLE_ASSIGNED' && transfer.vehicle_info && (
+                            <span className="badge badge-info" title="Машина этого переезда">
+                                🚚 {transfer.vehicle_info}
                             </span>
                         )}
                         {transfer.is_defect && (
@@ -297,22 +356,59 @@ export default function TransferDetailPage() {
                         {' · '}
                         {formatNumber(transferSkuCount(transfer), 0)} SKU / {formatNumber(transferUnits(transfer), 0)} шт
                     </p>
+                    {/* Прогресс приёмки — главный вопрос по уехавшему переезду:
+                        «доехало ли всё». Есть только у SHIPPED (см. хелпер). */}
+                    {receiveProgress && (
+                        <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <span
+                                className={`badge ${receiveProgress.received >= receiveProgress.total ? 'badge-success' : 'badge-warning'}`}
+                                title="Сколько единиц склад-получатель уже зачислил себе"
+                            >
+                                принято {formatNumber(receiveProgress.received, 0)} из {formatNumber(receiveProgress.total, 0)}
+                            </span>
+                            {receiveProgress.received > 0 && receiveProgress.received < receiveProgress.total && (
+                                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                    остаток в пути: {formatNumber(receiveProgress.total - receiveProgress.received, 0)} шт
+                                </span>
+                            )}
+                        </div>
+                    )}
                 </div>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                     <Link href={`/p/${slug}/warehouse/assembly?tab=transfers`}>
                         <button className="btn btn-secondary">← К списку</button>
                     </Link>
-                    {canEdit() && transfer.status === 'DRAFT' && (
+                    {canDraftEdit && (
+                        <button
+                            className="btn btn-secondary"
+                            onClick={() => { setSaveError(''); setShowEditModal(true); }}
+                            disabled={actionLoading}
+                            title="Маршрут, комментарий, брак, транспортная единица и состав — пока переезд не уехал"
+                        >
+                            Редактировать
+                        </button>
+                    )}
+                    {editor && canMarkTransferReady(transfer.status) && (
+                        <button
+                            className="btn btn-primary"
+                            onClick={() => runAction(() => api.markTransferReady(transfer.id), 'Переезд отмечен собранным')}
+                            disabled={actionLoading}
+                            title="Отметить, что переезд собран и готов к назначению машины. Сток не двигает"
+                        >
+                            Готов
+                        </button>
+                    )}
+                    {editor && canSendTransfer(transfer.status) && (
                         <button
                             className="btn btn-primary"
                             onClick={() => runAction(() => api.sendTransfer(transfer.id), 'Перемещение отправлено — товар в пути')}
                             disabled={actionLoading}
-                            title="Списать товар со склада-источника и перевести переезд в «В пути»"
+                            title="Списать товар со склада-источника и повесить транзитом на получателя"
                         >
                             Отправить
                         </button>
                     )}
-                    {canEdit() && transfer.status === 'IN_TRANSIT' && (
+                    {editor && canCompleteTransfer(transfer.status) && (
                         <button
                             className="btn btn-success"
                             onClick={() => runAction(() => api.completeTransfer(transfer.id), 'Перемещение принято')}
@@ -322,6 +418,40 @@ export default function TransferDetailPage() {
                             Принять
                         </button>
                     )}
+                    {editor && canReturnTransfer(transfer.status) && (
+                        <button
+                            className="btn btn-secondary"
+                            style={{ color: 'var(--color-danger)' }}
+                            disabled={actionLoading}
+                            title="Получатель не принял: товар вернётся на склад-источник"
+                            onClick={() => {
+                                // Возврат ДВИГАЕТ сток обратно на источник —
+                                // спрашиваем прямо, а не «вы уверены?».
+                                if (!confirm(
+                                    `Вернуть ${transfer.number} на склад-источник (${fromWhName || `склад ${transfer.from_warehouse_id}`})?\n\n`
+                                    + 'Товар вернётся на склад-источник: транзит на получателе снимется, '
+                                    + 'а если переезд уже был принят — единицы спишутся с получателя обратно.'
+                                )) return;
+                                runAction(() => api.returnTransfer(transfer.id), 'Переезд вернулся на склад-источник');
+                            }}
+                        >
+                            Вернуть на склад
+                        </button>
+                    )}
+                    {editor && canCloseTransfer(transfer.status) && (
+                        <button
+                            className="btn btn-secondary"
+                            onClick={() => runAction(() => api.closeTransfer(transfer.id), 'Переезд закрыт')}
+                            disabled={actionLoading}
+                            title="Закрыть переезд: дальше по нему действий не будет. Сток не двигает"
+                        >
+                            Закрыть
+                        </button>
+                    )}
+                    {/* Не переход статуса, а действие у ФФ — поэтому стоит ПОСЛЕ
+                        цепочки переходов, отдельным хвостом. Результат кнопки
+                        (новая PVB) приезжает в блок «Фулфилмент» ниже, в
+                        подсекцию приёмки у склада-получателя. */}
                     {canPushToNatali && (
                         <button
                             className="btn btn-secondary"
@@ -348,8 +478,16 @@ export default function TransferDetailPage() {
                     <InfoField label="Создано" value={formatDateTime(transfer.created_at)} />
                     <InfoField label="Дата забора" value={formatDate(transfer.pickup_date)} />
                     <InfoField label="Дата доставки" value={formatDate(transfer.delivery_date)} />
+                    {/* Вехи цепочки. Их НЕ вывести из статуса — он хранит только
+                        текущее состояние, а «когда собрали» нужно и после отгрузки. */}
+                    {transfer.actual_ready_date && (
+                        <InfoField label="Собран" value={formatDate(transfer.actual_ready_date)} />
+                    )}
                     {transfer.vehicle_assigned_at && (
                         <InfoField label="Машина назначена" value={formatDateTime(transfer.vehicle_assigned_at)} />
+                    )}
+                    {transfer.shipped_at && (
+                        <InfoField label="Отгружен" value={formatDateTime(transfer.shipped_at)} />
                     )}
                     {transfer.converted_from_assembly_id != null && (
                         <InfoField
@@ -385,14 +523,14 @@ export default function TransferDetailPage() {
                     {/* Паритет с секцией Листа логиста: снять машину можно и
                         оттуда, и с карточки — иначе логист, зашедший в переезд,
                         вынужден возвращаться на другой экран ради одной кнопки. */}
-                    {canAssignVehicle && vehicleAssigned && (
+                    {canUnassignVehicle && (
                         <button
                             className="btn btn-secondary btn-sm"
                             style={{ color: 'var(--color-danger)' }}
                             disabled={actionLoading}
-                            title="Транспортную единицу груза не трогает"
+                            title="Переезд вернётся в «Готово». Транспортную единицу груза не трогает"
                             onClick={() => {
-                                if (!confirm(`Снять машину с ${transfer.number}? Транспортная единица груза останется как есть.`)) return;
+                                if (!confirm(`Снять машину с ${transfer.number}? Переезд вернётся в «Готово», транспортная единица груза останется как есть.`)) return;
                                 runAction(() => api.unassignTransferVehicle(transfer.id), 'Машина снята');
                             }}
                         >
@@ -423,9 +561,11 @@ export default function TransferDetailPage() {
                 {!vehicleAssigned ? (
                     <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
                         Машина не назначена.
-                        {transfer.status === 'DRAFT'
+                        {canAssignTransferVehicle(transfer.status)
                             ? ' Назначьте машину — госномер, водитель, перевозчик, дата и слот забора.'
-                            : ' Переезд уже в пути — назначение машины закрыто (правки только в черновике).'}
+                            : canEditTransfer(transfer.status)
+                                ? ' Машину назначают после того, как переезд собран, — нажмите «Готов».'
+                                : ' Переезд уже уехал — назначение машины закрыто.'}
                     </div>
                 ) : (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 16 }}>
@@ -491,34 +631,53 @@ export default function TransferDetailPage() {
             </div>
 
             {/* ─── Фулфилмент ─────────────────────────────────────────── */}
+            {/* Две стороны маршрута — РАЗНЫЕ склады и разные документы ФФ:
+                у источника сборка (отгрузка), у получателя приёмка. На одну
+                сторону может приходиться несколько заявок (у Натали короба и
+                штучные — отдельные документы), поэтому всюду списки. */}
             <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
                 <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 16px' }}>Фулфилмент</h2>
-                {ffLoading ? (
-                    <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>Загрузка связок…</div>
-                ) : ffLinks.length === 0 ? (
-                    <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
-                        Связанных заявок ФФ нет. Зеркала ФФ переносятся на перемещение только если при
-                        переделке заявки включить «перенести связку ФФ» — по умолчанию они остаются историей заявки.
-                    </div>
-                ) : (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-                        {ffLinks.map(({ row, warehouseId }) => (
-                            <Link
-                                key={row.id}
-                                href={`/p/${slug}/warehouse/${warehouseId}/ff-request/${row.id}`}
-                                style={{ color: 'var(--color-accent)' }}
-                                title={`${whName(warehouseId)}${row.stage_title ? ` · ${row.stage_title}` : ''}`}
-                            >
-                                {row.number || `Заявка #${row.id}`}
-                                {row.stage_title ? ` (${row.stage_title})` : ''} →
-                            </Link>
-                        ))}
-                    </div>
-                )}
+                <FfSideSection
+                    title="Отгрузка у склада-источника"
+                    warehouseName={fromWhName}
+                    links={ffLinks.source}
+                    slug={slug}
+                    // У переезда, сделанного из заявки, пустота объясняется не
+                    // «ещё не связали», а дефолтом конвертации: зеркала ФФ
+                    // остаются историей заявки, если галку не включили.
+                    emptyText={transfer.converted_from_assembly_id != null
+                        ? 'Заявок ФФ на отгрузку не связано: зеркала ФФ переносятся на переезд только если при переделке заявки включить «перенести связку ФФ» — по умолчанию они остаются историей заявки. Нажмите «Связать» — покажем свободные сборки этого склада.'
+                        : 'Заявок ФФ на отгрузку не связано. Нажмите «Связать» — покажем свободные сборки этого склада.'}
+                    canEdit={canEdit()}
+                    unlinkingId={unlinkingId}
+                    onLink={() => setFfLinkSide('source')}
+                    onUnlink={handleUnlinkFf}
+                />
+                <div style={{ height: 1, background: 'var(--color-border)', margin: '16px 0' }} />
+                <FfSideSection
+                    title="Приёмка у склада-получателя"
+                    warehouseName={toWhName}
+                    links={ffLinks.dest}
+                    slug={slug}
+                    emptyText="Заявок ФФ на приёмку не связано. У транзитных складов-получателей ФФ-интеграции обычно нет — тогда и связывать нечего."
+                    canEdit={canEdit()}
+                    unlinkingId={unlinkingId}
+                    onLink={() => setFfLinkSide('dest')}
+                    onUnlink={handleUnlinkFf}
+                />
             </div>
 
             {/* ─── Состав ─────────────────────────────────────────────── */}
             <div style={{ marginBottom: 16 }}>
+                {/* Почему кнопки «Редактировать» нет. Молчаливое исчезновение
+                    кнопки читается как баг прав доступа, а не как «поезд ушёл». */}
+                {editor && !canEditTransfer(transfer.status) && (
+                    <div style={{ color: 'var(--color-text-muted)', fontSize: 13, marginBottom: 8 }}>
+                        {transfer.status === 'CANCELLED'
+                            ? 'Переезд отменён — правка закрыта.'
+                            : 'После отправки сток уже списан со склада-источника — правка закрыта.'}
+                    </div>
+                )}
                 {(transfer.items?.length ?? 0) === 0 ? (
                     <div className="glass-card" style={{ padding: 48, textAlign: 'center' }}>
                         <div style={{ fontSize: 40, marginBottom: 12 }}>📦</div>
@@ -565,6 +724,30 @@ export default function TransferDetailPage() {
                 />
             )}
 
+            {showEditModal && (
+                <TransferEditModal
+                    transfer={transfer}
+                    warehouses={warehouses}
+                    nomenclature={nomenclature}
+                    submitting={saving}
+                    error={saveError}
+                    onSubmit={handleSave}
+                    onClose={() => { setShowEditModal(false); setSaveError(''); }}
+                />
+            )}
+
+            {ffLinkSide && (
+                <TransferFfLinkModal
+                    transferId={transfer.id}
+                    transferNumber={transfer.number}
+                    side={ffLinkSide}
+                    warehouseId={ffLinkSide === 'source' ? transfer.from_warehouse_id : transfer.to_warehouse_id}
+                    warehouseName={ffLinkSide === 'source' ? fromWhName : toWhName}
+                    onClose={() => setFfLinkSide(null)}
+                    onLinked={reloadTransfer}
+                />
+            )}
+
             {showNatPush && (
                 <MigfullInboundModal
                     source={{ kind: 'transfer', id: transfer.id }}
@@ -576,9 +759,10 @@ export default function TransferDetailPage() {
                             message: `Поставка у Натали создана: ${res.shipment_number || res.shipment_guid || '—'}`,
                             type: 'success',
                         });
-                        // PVB уже связана с переездом (stock_transfer_id) — перечитываем
-                        // блок ФФ-связок, чтобы она появилась без перезагрузки страницы.
-                        setFfReloadKey(k => k + 1);
+                        // PVB уже связана с переездом (stock_transfer_id), а связки
+                        // живут в самой схеме переезда — перечитываем карточку,
+                        // чтобы поставка появилась в блоке «Фулфилмент» без F5.
+                        reloadTransfer();
                     }}
                 />
             )}
@@ -591,6 +775,89 @@ function InfoField({ label, value }: { label: string; value: React.ReactNode }) 
         <div>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{label}</div>
             <div style={{ fontSize: 14, fontWeight: 500 }}>{value}</div>
+        </div>
+    );
+}
+
+/**
+ * Одна сторона блока «Фулфилмент»: заголовок со складом, список связанных
+ * заявок ФФ и кнопка «Связать». Пустое состояние у каждой стороны СВОЁ — на
+ * стороне получателя отсутствие заявок это норма (у транзитных складов
+ * ФФ-интеграции нет), и общий текст на весь блок читался бы как ошибка.
+ */
+function FfSideSection({
+    title,
+    warehouseName,
+    links,
+    slug,
+    emptyText,
+    canEdit,
+    unlinkingId,
+    onLink,
+    onUnlink,
+}: {
+    title: string;
+    warehouseName: string | null;
+    links: TransferFfLink[];
+    slug: string;
+    emptyText: string;
+    canEdit: boolean;
+    unlinkingId: number | null;
+    onLink: () => void;
+    onUnlink: (link: TransferFfLink) => void;
+}) {
+    return (
+        <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
+                <div style={{ fontSize: 14, fontWeight: 600 }}>{title}</div>
+                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                    {warehouseName || '—'}
+                </span>
+                <span style={{ flex: 1 }} />
+                {canEdit && (
+                    <button className="btn btn-secondary btn-sm" onClick={onLink}>Связать</button>
+                )}
+            </div>
+            {links.length === 0 ? (
+                <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>{emptyText}</div>
+            ) : (
+                <div className="ff-link-list" style={{ maxHeight: 'none' }}>
+                    {links.map(link => (
+                        <div key={link.id} className="ff-link-row">
+                            <div className="ff-link-row-main">
+                                <div className="ff-link-row-head">
+                                    <Link
+                                        href={`/p/${slug}/warehouse/${link.warehouse_id}/ff-request/${link.id}`}
+                                        className="ff-link-row-number"
+                                        style={{ color: 'var(--color-accent)' }}
+                                        title="Открыть заявку ФФ"
+                                    >
+                                        {ffLinkLabel(link)} →
+                                    </Link>
+                                    <span className="badge badge-info" style={{ fontSize: 11, padding: '2px 8px' }}>
+                                        {ffLinkStage(link)}
+                                    </span>
+                                </div>
+                                <span className="ff-link-row-meta">
+                                    {link.external_created_at ? `${formatDate(link.external_created_at)} · ` : ''}
+                                    {link.total_qty == null ? 'количество неизвестно' : `${formatNumber(link.total_qty, 0)} шт`}
+                                </span>
+                            </div>
+                            {canEdit && (
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    style={{ color: 'var(--color-danger)' }}
+                                    disabled={unlinkingId === link.id}
+                                    onClick={() => onUnlink(link)}
+                                    title="Убрать связь с перемещением; сама заявка у ФФ останется"
+                                >
+                                    {unlinkingId === link.id ? '...' : 'Отвязать'}
+                                </button>
+                            )}
+                        </div>
+                    ))}
+                </div>
+            )}
         </div>
     );
 }

@@ -90,7 +90,7 @@ async def env(db_session, project):
         from_warehouse_id=source_wh.id,
         to_warehouse_id=natali.id,
         number=_transfer_number(),
-        status=TransferStatus.IN_TRANSIT.value,
+        status=TransferStatus.SHIPPED.value,
         delivery_date=date(2026, 8, 12),
     )
     db_session.add(transfer)
@@ -471,7 +471,7 @@ async def test_transfer_to_foreign_warehouse_blocked(db_session, env, monkeypatc
         from_warehouse_id=env.source_wh.id,
         to_warehouse_id=other_wh.id,
         number=_transfer_number(),
-        status=TransferStatus.DRAFT.value,
+        status=TransferStatus.PENDING.value,
     )
     db_session.add(foreign)
     await db_session.commit()
@@ -493,7 +493,7 @@ async def test_completed_transfer_blocked(db_session, env, monkeypatch):
     """Переезд уже принят — товар оприходован, поставка у ФФ не нужна → 400."""
     fake = FakePortalClient()
     _use_fake_client(monkeypatch, fake)
-    env.transfer.status = TransferStatus.COMPLETED.value
+    env.transfer.status = TransferStatus.DELIVERED.value
     await db_session.commit()
 
     with pytest.raises(MigfullPortalServiceError) as exc:
@@ -514,7 +514,7 @@ async def test_empty_transfer_blocked(db_session, env, monkeypatch):
         from_warehouse_id=env.source_wh.id,
         to_warehouse_id=env.warehouse.id,
         number=_transfer_number(),
-        status=TransferStatus.DRAFT.value,
+        status=TransferStatus.PENDING.value,
     )
     db_session.add(empty)
     await db_session.commit()

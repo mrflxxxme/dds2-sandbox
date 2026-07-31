@@ -5175,7 +5175,7 @@ class TestCollectTransferFactCandidates:
 
         tr = StockTransfer(
             project_id=project.id, from_warehouse_id=warehouse.id,
-            to_warehouse_id=warehouse.id, number=f"TR-T-{project.id}", status="IN_TRANSIT",
+            to_warehouse_id=warehouse.id, number=f"TR-T-{project.id}", status="SHIPPED",
         )
         db_session.add(tr)
         await db_session.commit()
@@ -5536,7 +5536,9 @@ async def test_accept_and_transfer_fact_guards_skip_repack(db_session, project, 
 
     tr = StockTransfer(
         project_id=project.id, from_warehouse_id=warehouse.id,
-        to_warehouse_id=warehouse.id, number=f"TR-R-{project.id}", status="IN_TRANSIT",
+        # Именно SHIPPED: на другом статусе переезд отсеется по статусу, и тест
+        # «repack-поступление не постит факт» проходил бы по неверной причине.
+        to_warehouse_id=warehouse.id, number=f"TR-R-{project.id}", status="SHIPPED",
     )
     db_session.add(tr)
     await db_session.commit()

@@ -267,11 +267,15 @@ async def _source_from_transfer(db: AsyncSession, project_id: int, transfer_id: 
         raise MigfullPortalServiceError("Перемещение не найдено", status_code=404)
     qty_by_bc, nom_by_bc = _transfer_qty_maps(transfer)
 
-    # Отменённого статуса у переезда нет: отмена = soft-delete (отсечена выше).
-    # COMPLETED — товар уже оприходован у получателя, поставка у ФФ не нужна.
+    # Отмена переезда = CANCELLED + soft-delete, а удалённый отсечён выше.
+    # DELIVERED (бывший COMPLETED, миграция `trv04`) — товар уже оприходован у
+    # получателя, поставка у ФФ не нужна. RETURNED/CLOSED — терминалы после
+    # возврата: везти к Натали тоже нечего.
     block = (
         "Перемещение уже принято — поставка у ФФ не нужна"
-        if transfer.status == TransferStatus.COMPLETED.value
+        if transfer.status == TransferStatus.DELIVERED.value
+        else "Перемещение вернулось на склад-источник — поставка у ФФ не нужна"
+        if transfer.status in (TransferStatus.RETURNED.value, TransferStatus.CLOSED.value)
         else None
     )
     names = await _warehouse_names(db, project_id, {transfer.from_warehouse_id, transfer.to_warehouse_id})

@@ -9,6 +9,7 @@
 """
 
 import uuid
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -28,24 +29,66 @@ from backend.models.warehouse import (
     OutboundStatus,
     StockMovement,
     StockTransfer,
+    StockTransferItem,
     TransferStatus,
 )
-from backend.schemas.warehouse import AssemblyToTransfer, TransferAssignVehicle
+from backend.schemas.warehouse import (
+    AssemblyToTransfer,
+    StockTransferUpdate,
+    TransferAssignVehicle,
+)
 from backend.services.warehouse_crud import create_warehouse
 from backend.services.warehouse_inbound import accept_receipt, create_receipt
 from backend.services.warehouse_outbound import (
-    assign_vehicle_transfer,
+    assign_vehicle_transfer as _assign_vehicle_raw,
     cancel_shipment,
+    complete_transfer,
     convert_assembly_to_transfer,
     create_transfer,
+    get_transfer,
+    get_transfer_ff_candidates,
     list_shipments,
-    send_transfer,
+    list_transfers,
+    mark_transfer_ready,
+    send_transfer as _send_transfer_raw,
+    update_transfer,
 )
 from backend.services.warehouse_stock_engine import _update_stock
 
 
 def _uid() -> str:
     return uuid.uuid4().hex[:8]
+
+
+# ─── Шорткаты статусной лестницы ───────────────────────────────────────────
+#
+# С переходом переезда на статусную модель заявки (`TRANSFER_TRANSITIONS`)
+# машина назначается из READY, а отправка идёт из READY/VEHICLE_ASSIGNED —
+# свежесозданный переезд рождается в PENDING. Тесты этого файла проверяют НЕ
+# лестницу (её матрица и ступени — в `tests/test_transfer_status.py`), а сток,
+# забор, логистику и конвертацию, поэтому здесь `assign_vehicle_transfer` и
+# `send_transfer` — тонкие обёртки, которые сначала доводят переезд до READY.
+# Из уже отгруженных статусов обёртка НИЧЕГО не делает — отказы, которые
+# проверяют тесты «нельзя из SHIPPED», доходят до сервиса как есть.
+
+
+async def _ensure_ready(db_session, project_id: int, transfer_id: int) -> None:
+    transfer = await db_session.get(StockTransfer, transfer_id)
+    if transfer is not None and TransferStatus(transfer.status) in (
+        TransferStatus.PENDING,
+        TransferStatus.IN_PROGRESS,
+    ):
+        await mark_transfer_ready(db_session, project_id, transfer_id)
+
+
+async def assign_vehicle_transfer(db_session, project_id, transfer_id, payload):
+    await _ensure_ready(db_session, project_id, transfer_id)
+    return await _assign_vehicle_raw(db_session, project_id, transfer_id, payload)
+
+
+async def send_transfer(db_session, project_id, transfer_id):
+    await _ensure_ready(db_session, project_id, transfer_id)
+    return await _send_transfer_raw(db_session, project_id, transfer_id)
 
 
 @pytest_asyncio.fixture
@@ -434,8 +477,8 @@ class TestAssignVehicleTransfer:
         assert updated.counterparty_id == cp.id
         assert updated.logistics_by_warehouse is True
         assert updated.vehicle_assigned_at is not None
-        # Ступени VEHICLE_ASSIGNED у перемещений нет — статус остаётся черновиком.
-        assert updated.status == TransferStatus.DRAFT
+        # Назначение машины — ступень статуса (зеркало заявки): READY → VEHICLE_ASSIGNED.
+        assert updated.status == TransferStatus.VEHICLE_ASSIGNED
 
     @pytest.mark.asyncio
     async def test_logistics_by_warehouse_without_counterparty_fails(
@@ -463,7 +506,7 @@ class TestAssignVehicleTransfer:
         await _stock(db_session, project, src_wh, barcode, 100)
         transfer = await _transfer_with_vehicle(db_session, project, src_wh, dst_wh, barcode, 10)
         await send_transfer(db_session, project.id, transfer.id)
-        with pytest.raises(ValueError, match="черновик"):
+        with pytest.raises(ValueError, match="SHIPPED → VEHICLE_ASSIGNED запрещён"):
             await assign_vehicle_transfer(
                 db_session,
                 project.id,
@@ -547,7 +590,9 @@ class TestConvertAssemblyToTransfer:
         assert result.assembly_number == assembly.number
 
         transfer = await db_session.get(StockTransfer, result.transfer_id)
-        assert transfer.status == TransferStatus.DRAFT
+        # Заявка была RETURNED — то есть ФФ её собрал (и WB даже не принял):
+        # готовность наследуется, гонять переезд по ступеням заново незачем.
+        assert transfer.status == TransferStatus.READY
         assert transfer.from_warehouse_id == src_wh.id
         assert transfer.to_warehouse_id == dst_wh.id
         assert transfer.converted_from_assembly_id == assembly.id
@@ -1174,7 +1219,12 @@ class TestTransferTransportUnit:
 
 class TestLogisticianList:
     async def _draft(self, db_session, project, src, dst, barcode, qty: int = 10) -> StockTransfer:
-        return await create_transfer(
+        """Переезд, ГОТОВЫЙ к посадке на машину (READY).
+
+        Лист логиста работает именно с этим срезом: машину назначают из READY,
+        а `?status=READY&has_vehicle=false` — его основной запрос.
+        """
+        transfer = await create_transfer(
             db_session,
             project.id,
             {
@@ -1183,6 +1233,7 @@ class TestLogisticianList:
                 "items": [{"barcode": barcode, "quantity": qty}],
             },
         )
+        return await mark_transfer_ready(db_session, project.id, transfer.id)
 
     @pytest.mark.asyncio
     async def test_bulk_assigns_one_vehicle_to_many(
@@ -1207,7 +1258,7 @@ class TestLogisticianList:
         assert {r.vehicle_info for r in rows} == {"М777ММ77"}
         assert len({r.counterparty_id for r in rows}) == 1  # один перевозчик на все
         assert all(r.vehicle_assigned_at is not None for r in rows)
-        assert all(r.status == TransferStatus.DRAFT for r in rows)
+        assert all(r.status == TransferStatus.VEHICLE_ASSIGNED for r in rows)
 
     @pytest.mark.asyncio
     async def test_bulk_fails_entirely_on_bad_id(
@@ -1289,7 +1340,7 @@ class TestLogisticianList:
         await _stock(db_session, project, src_wh, barcode, 100)
         transfer = await _transfer_with_vehicle(db_session, project, src_wh, dst_wh, barcode, 10)
         await send_transfer(db_session, project.id, transfer.id)
-        with pytest.raises(ValueError, match="уже отправлен"):
+        with pytest.raises(ValueError, match="машина не назначена"):
             await unassign_vehicle_transfer(db_session, project.id, transfer.id)
 
     @pytest.mark.asyncio
@@ -1304,12 +1355,18 @@ class TestLogisticianList:
             db_session, project.id, assigned.id, TransferAssignVehicle(vehicle_info="Ж111ЖЖ77")
         )
 
-        free = await list_transfers(db_session, project.id, status="DRAFT", has_vehicle=False)
+        # Основной запрос Листа логиста: «собраны, но без машины».
+        free = await list_transfers(db_session, project.id, status="READY", has_vehicle=False)
         assert [t.id for t in free] == [waiting.id]
-        busy = await list_transfers(db_session, project.id, status="DRAFT", has_vehicle=True)
+        # Назначенный уехал на ступень VEHICLE_ASSIGNED — в срезе READY его больше
+        # нет вовсе, и это правильно: логисту он в работе уже не нужен.
+        assert await list_transfers(db_session, project.id, status="READY", has_vehicle=True) == []
+        busy = await list_transfers(
+            db_session, project.id, status="VEHICLE_ASSIGNED", has_vehicle=True
+        )
         assert [t.id for t in busy] == [assigned.id]
-        both = await list_transfers(db_session, project.id, status="DRAFT")
-        assert {t.id for t in both} == {waiting.id, assigned.id}
+        both = await list_transfers(db_session, project.id)
+        assert {t.id for t in both} >= {waiting.id, assigned.id}
 
         # Имена концов маршрута едут в выдаче — Лист логиста не догружает справочник.
         assert free[0].from_warehouse_name == src_wh.name
@@ -1768,3 +1825,577 @@ class TestAssignVehicleValidation:
             "/api/v1/warehouse/transfers/1/assign-vehicle", json={}, headers=headers
         )
         assert resp.status_code == 422, resp.text
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 13. Правка перемещения: только черновик
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _upd(**kwargs) -> dict:
+    """Тело PUT так, как его собирает роутер: только явно переданные поля.
+
+    Гоняем именно через схему, а не голым словарём: половина инварианта правки
+    («частичное тело не обнуляет остальное») живёт как раз в `exclude_unset`,
+    и сервисный тест на голом dict её бы не проверил.
+    """
+    return StockTransferUpdate(**kwargs).model_dump(exclude_unset=True)
+
+
+async def _draft(db_session, project, src_wh, dst_wh, barcode, qty: int = 10) -> StockTransfer:
+    return await create_transfer(
+        db_session,
+        project.id,
+        {
+            "from_warehouse_id": src_wh.id,
+            "to_warehouse_id": dst_wh.id,
+            "items": [{"barcode": barcode, "quantity": qty}],
+        },
+    )
+
+
+async def _item_rows(db_session, project, transfer_id: int) -> list[StockTransferItem]:
+    res = await db_session.execute(
+        select(StockTransferItem)
+        .where(
+            StockTransferItem.project_id == project.id,
+            StockTransferItem.transfer_id == transfer_id,
+        )
+        .order_by(StockTransferItem.id)
+    )
+    return list(res.scalars().all())
+
+
+class TestUpdateTransferDraftOnly:
+    """Главный инвариант раздела: править можно ТОЛЬКО пока сток не двинулся."""
+
+    @pytest.mark.asyncio
+    async def test_in_transit_rejected(self, db_session, project, src_wh, dst_wh, barcode):
+        """После отправки состав уже разъехался бы с проведёнными движениями."""
+        await _stock(db_session, project, src_wh, barcode, 100)
+        transfer = await _transfer_with_vehicle(db_session, project, src_wh, dst_wh, barcode, 40)
+        await send_transfer(db_session, project.id, transfer.id)
+
+        with pytest.raises(ValueError, match="не правится"):
+            await update_transfer(db_session, project.id, transfer.id, _upd(comment="поздно"))
+
+        # Состав и маршрут не тронуты.
+        rows = await _item_rows(db_session, project, transfer.id)
+        assert [r.quantity for r in rows] == [40]
+
+    @pytest.mark.asyncio
+    async def test_completed_rejected(self, db_session, project, src_wh, dst_wh, barcode):
+        await _stock(db_session, project, src_wh, barcode, 100)
+        transfer = await _transfer_with_vehicle(db_session, project, src_wh, dst_wh, barcode, 40)
+        await send_transfer(db_session, project.id, transfer.id)
+        await complete_transfer(db_session, project.id, transfer.id)
+
+        with pytest.raises(ValueError, match="не правится"):
+            await update_transfer(
+                db_session, project.id, transfer.id, _upd(items=[{"barcode": barcode, "quantity": 1}])
+            )
+
+    @pytest.mark.asyncio
+    async def test_missing_transfer(self, db_session, project):
+        with pytest.raises(ValueError, match="не найдено"):
+            await update_transfer(db_session, project.id, 99_999_999, _upd(comment="х"))
+
+    @pytest.mark.asyncio
+    async def test_project_isolation(
+        self, db_session, project, other_project, src_wh, dst_wh, barcode
+    ):
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        with pytest.raises(ValueError, match="не найдено"):
+            await update_transfer(db_session, other_project.id, transfer.id, _upd(comment="чужой"))
+
+
+class TestUpdateTransferFields:
+    @pytest.mark.asyncio
+    async def test_route_and_meta_change_in_draft(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """В черновике маршрут менять МОЖНО — сток ещё не двигался."""
+        third = await create_warehouse(
+            db_session, project.id, {"name": f"THIRD-{_uid()}", "warehouse_type": "FULFILLMENT"}
+        )
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+
+        updated = await update_transfer(
+            db_session,
+            project.id,
+            transfer.id,
+            _upd(
+                to_warehouse_id=third.id,
+                comment="через транзит",
+                is_defect=True,
+                defect_reason="битые короба",
+                pallets_count=3,
+                pallet_weight_kg=Decimal("120.50"),
+                shipped_as_boxes=True,
+            ),
+        )
+
+        assert updated.to_warehouse_id == third.id
+        assert updated.from_warehouse_id == src_wh.id
+        assert updated.comment == "через транзит"
+        assert updated.is_defect is True
+        assert updated.defect_reason == "битые короба"
+        assert updated.pallets_count == 3
+        assert updated.pallet_weight_kg == Decimal("120.50")
+        assert updated.shipped_as_boxes is True
+        # Подписи карточки пересобраны под новый маршрут.
+        assert updated.to_warehouse_name == third.name
+
+    @pytest.mark.asyncio
+    async def test_partial_payload_keeps_untouched_fields(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """«Поменять только комментарий» не должно обнулить маршрут и единицу груза.
+
+        Дефолты схемы (`shipped_as_boxes=False`, `pallets_count=None`) в тело не
+        входят — их отсекает `exclude_unset`.
+        """
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        await update_transfer(
+            db_session,
+            project.id,
+            transfer.id,
+            _upd(pallets_count=5, pallet_weight_kg=Decimal("300.00"), shipped_as_boxes=True),
+        )
+
+        updated = await update_transfer(
+            db_session, project.id, transfer.id, _upd(comment="только коммент")
+        )
+        assert updated.comment == "только коммент"
+        assert updated.pallets_count == 5
+        assert updated.pallet_weight_kg == Decimal("300.00")
+        assert updated.shipped_as_boxes is True
+        assert (updated.from_warehouse_id, updated.to_warehouse_id) == (src_wh.id, dst_wh.id)
+        assert [r.quantity for r in await _item_rows(db_session, project, transfer.id)] == [10]
+
+    @pytest.mark.asyncio
+    async def test_shipped_as_boxes_is_plain_bool(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """Здесь False — это «паллеты», а не «не трогай» (в отличие от TransferAssignVehicle)."""
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        await update_transfer(db_session, project.id, transfer.id, _upd(shipped_as_boxes=True))
+        updated = await update_transfer(
+            db_session, project.id, transfer.id, _upd(shipped_as_boxes=False)
+        )
+        assert updated.shipped_as_boxes is False
+
+    @pytest.mark.asyncio
+    async def test_same_warehouse_rejected(self, db_session, project, src_wh, dst_wh, barcode):
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        with pytest.raises(ValueError, match="совпадают"):
+            await update_transfer(
+                db_session, project.id, transfer.id, _upd(to_warehouse_id=src_wh.id)
+            )
+        with pytest.raises(ValueError, match="совпадают"):
+            await update_transfer(
+                db_session, project.id, transfer.id, _upd(from_warehouse_id=dst_wh.id)
+            )
+
+    @pytest.mark.asyncio
+    async def test_unknown_warehouse_rejected(self, db_session, project, src_wh, dst_wh, barcode):
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        with pytest.raises(ValueError, match="Склад получателя не найден"):
+            await update_transfer(
+                db_session, project.id, transfer.id, _upd(to_warehouse_id=99_999_999)
+            )
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"pallets_count": -1},
+            {"pallet_weight_kg": Decimal("-0.01")},
+            {"pallet_weight_kg": Decimal("123456789.00")},  # > Numeric(10, 2)
+        ],
+    )
+    def test_field_bounds(self, kwargs):
+        """Границы те же, что у Create: отрицательный вес доехал бы снимком в забор."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            StockTransferUpdate(**kwargs)
+
+
+class TestUpdateTransferItems:
+    @pytest.mark.asyncio
+    async def test_items_replaced_wholesale(self, db_session, project, src_wh, dst_wh, barcode):
+        """Переданный состав ЗАМЕНЯЕТ старый целиком, а не доливается к нему."""
+        second_bc = f"BC-TRV2-{_uid()}"
+        await db_session.execute(
+            text(
+                "INSERT INTO nomenclature (project_id, barcode, subject, updated_at) "
+                "VALUES (:pid, :bc, 'Second Item', NOW())"
+            ),
+            {"pid": project.id, "bc": second_bc},
+        )
+        await db_session.commit()
+
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode, 10)
+        updated = await update_transfer(
+            db_session,
+            project.id,
+            transfer.id,
+            _upd(items=[{"barcode": second_bc, "quantity": 4}]),
+        )
+
+        rows = await _item_rows(db_session, project, transfer.id)
+        assert [(r.barcode, r.quantity) for r in rows] == [(second_bc, 4)]
+        # Итоги шапки пересчитаны по новому составу.
+        assert updated.units_total == 4
+        assert updated.sku_count == 1
+        assert [(i.barcode, i.quantity) for i in updated.items] == [(second_bc, 4)]
+
+    @pytest.mark.asyncio
+    async def test_items_absent_keeps_composition(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode, 10)
+        updated = await update_transfer(db_session, project.id, transfer.id, _upd(comment="без состава"))
+        assert [(i.barcode, i.quantity) for i in updated.items] == [(barcode, 10)]
+
+    @pytest.mark.asyncio
+    async def test_explicit_empty_items_rejected(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """Пустой состав — отказ: отправить такой переезд всё равно нельзя,
+        а молча стереть позиции по недосмотру формы страшнее 400."""
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode, 10)
+        with pytest.raises(ValueError, match="пуст"):
+            await update_transfer(db_session, project.id, transfer.id, _upd(items=[]))
+        assert [r.quantity for r in await _item_rows(db_session, project, transfer.id)] == [10]
+
+    @pytest.mark.asyncio
+    async def test_unknown_barcode_leaves_everything_intact(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """Отказ на резолве ШК не должен оставить наполовину применённую правку."""
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode, 10)
+        with pytest.raises(ValueError, match="Barcode not found"):
+            await update_transfer(
+                db_session,
+                project.id,
+                transfer.id,
+                _upd(comment="новый", items=[{"barcode": "BC-NOPE-000", "quantity": 1}]),
+            )
+        # Без rollback: если бы сервис успел что-то применить до отказа,
+        # autoflush перед SELECT'ом вкатил бы это в БД и тест бы упал.
+        fresh = await get_transfer(db_session, project.id, transfer.id)
+        assert fresh.comment is None
+        assert [(i.barcode, i.quantity) for i in fresh.items] == [(barcode, 10)]
+
+
+class TestUpdateTransferHttp:
+    @pytest.mark.asyncio
+    async def test_put_returns_full_card(self, client, auth_headers, db_session):
+        """Провод схема → роутер → сервис: PUT отвечает карточкой (items + ff_links)."""
+        headers = await _api_headers(client, auth_headers)
+        pid = int(headers["X-Project-Id"])
+
+        wh_ids = []
+        for name in (f"SRC-PUT-{_uid()}", f"DST-PUT-{_uid()}"):
+            resp = await client.post(
+                "/api/v1/warehouse",
+                json={"name": name, "warehouse_type": "FULFILLMENT"},
+                headers=headers,
+            )
+            assert resp.status_code == 200, resp.text
+            wh_ids.append(resp.json()["id"])
+
+        bc = f"BC-PUT-{_uid()}"
+        await db_session.execute(
+            text(
+                "INSERT INTO nomenclature (project_id, barcode, subject, updated_at) "
+                "VALUES (:pid, :bc, 'PUT Item', NOW())"
+            ),
+            {"pid": pid, "bc": bc},
+        )
+        await db_session.commit()
+
+        resp = await client.post(
+            "/api/v1/warehouse/transfers",
+            json={
+                "from_warehouse_id": wh_ids[0],
+                "to_warehouse_id": wh_ids[1],
+                "items": [{"barcode": bc, "quantity": 7}],
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        transfer_id = resp.json()["id"]
+
+        resp = await client.put(
+            f"/api/v1/warehouse/transfers/{transfer_id}",
+            json={
+                "from_warehouse_id": wh_ids[0],
+                "to_warehouse_id": wh_ids[1],
+                "comment": "правка с формы",
+                "is_defect": False,
+                "defect_reason": None,
+                "pallets_count": 2,
+                "pallet_weight_kg": "175.50",
+                "shipped_as_boxes": True,
+                "items": [{"barcode": bc, "quantity": 3}],
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["comment"] == "правка с формы"
+        assert body["pallet_weight_kg"] == "175.50"
+        assert body["shipped_as_boxes"] is True
+        assert [(i["barcode"], i["quantity"]) for i in body["items"]] == [(bc, 3)]
+        assert body["ff_links"] == []
+        assert body["units_total"] == 3
+
+    @pytest.mark.asyncio
+    async def test_put_missing_transfer_is_404(self, client, auth_headers):
+        headers = await _api_headers(client, auth_headers)
+        resp = await client.put(
+            "/api/v1/warehouse/transfers/99999999", json={"comment": "x"}, headers=headers
+        )
+        assert resp.status_code == 404, resp.text
+
+    @pytest.mark.asyncio
+    async def test_put_negative_pallets_is_422(self, client, auth_headers):
+        headers = await _api_headers(client, auth_headers)
+        resp = await client.put(
+            "/api/v1/warehouse/transfers/1", json={"pallets_count": -1}, headers=headers
+        )
+        assert resp.status_code == 422, resp.text
+
+    @pytest.mark.asyncio
+    async def test_ff_candidates_route_codes(self, client, auth_headers):
+        """`{transfer_id}/ff-candidates` не съедается коротким `{transfer_id}`,
+        а `side` — обязательный whitelist (мусор = 422, а не пустой список,
+        который читался бы как «кандидатов нет»)."""
+        headers = await _api_headers(client, auth_headers)
+
+        resp = await client.get(
+            "/api/v1/warehouse/transfers/99999999/ff-candidates?side=source", headers=headers
+        )
+        assert resp.status_code == 404, resp.text
+
+        resp = await client.get(
+            "/api/v1/warehouse/transfers/1/ff-candidates?side=both", headers=headers
+        )
+        assert resp.status_code == 422, resp.text
+
+        resp = await client.get(
+            "/api/v1/warehouse/transfers/1/ff-candidates", headers=headers
+        )
+        assert resp.status_code == 422, resp.text
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 14. Связка ФФ ОТ карточки переезда: кандидаты и уже связанные
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+async def _ff_request(
+    db_session,
+    project,
+    warehouse,
+    kind: str,
+    *,
+    number: str | None = None,
+    local_archived: bool = False,
+    created: date | None = None,
+) -> FulfillmentRequest:
+    req = FulfillmentRequest(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        provider="skladbot",
+        external_id=f"ff-{kind}-{_uid()}",
+        number=number,
+        kind=kind,
+        status="in_progress",
+        stage_title="В работе",
+        total_qty=42,
+        external_created_at=created,
+        local_archived=local_archived,
+    )
+    db_session.add(req)
+    await db_session.commit()
+    return req
+
+
+class TestTransferFfCandidates:
+    @pytest.mark.asyncio
+    async def test_side_picks_kind_and_warehouse(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """assembly → склад ИСТОЧНИКА, inbound → склад ПОЛУЧАТЕЛЯ. Чужая сторона не подмешивается."""
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        out_ff = await _ff_request(db_session, project, src_wh, "assembly", number="WH-OUT-1")
+        in_ff = await _ff_request(db_session, project, dst_wh, "inbound", number="WH-IN-1")
+        # Шум: правильный kind, но не тот конец маршрута; и правильный склад, но не тот kind.
+        await _ff_request(db_session, project, dst_wh, "assembly")
+        await _ff_request(db_session, project, src_wh, "inbound")
+        await _ff_request(db_session, project, src_wh, "return")
+
+        source = await get_transfer_ff_candidates(db_session, project.id, transfer.id, "source")
+        assert [c["id"] for c in source] == [out_ff.id]
+        assert source[0]["side"] == "source"
+        assert source[0]["warehouse_id"] == src_wh.id
+        assert source[0]["number"] == "WH-OUT-1"
+        assert source[0]["kind"] == "assembly"
+        assert source[0]["total_qty"] == 42
+        assert source[0]["stage_title"] == "В работе"
+
+        dest = await get_transfer_ff_candidates(db_session, project.id, transfer.id, "dest")
+        assert [c["id"] for c in dest] == [in_ff.id]
+        assert dest[0]["side"] == "dest"
+        assert dest[0]["warehouse_id"] == dst_wh.id
+
+    @pytest.mark.asyncio
+    async def test_linked_requests_excluded(self, db_session, project, src_wh, dst_wh, barcode):
+        """Уже занятые нашим документом заявки — не кандидаты: привязка их бы переписала."""
+        from backend.services.fulfillment_service import link_request
+
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        other = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        free = await _ff_request(db_session, project, src_wh, "assembly")
+        taken = await _ff_request(db_session, project, src_wh, "assembly")
+        await link_request(
+            db_session, project.id, taken.id, stock_transfer_id=other.id, warehouse_id=src_wh.id
+        )
+        # Занятая своей сборкой — тоже вне кандидатов.
+        assembly = await _assembly(db_session, project, src_wh, barcode, 5)
+        busy = await _ff_request(db_session, project, src_wh, "assembly")
+        busy.assembly_request_id = assembly.id
+        await db_session.commit()
+
+        cands = await get_transfer_ff_candidates(db_session, project.id, transfer.id, "source")
+        assert [c["id"] for c in cands] == [free.id]
+
+    @pytest.mark.asyncio
+    async def test_local_archived_excluded_and_fresh_first(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        old = await _ff_request(
+            db_session, project, src_wh, "assembly", created=date(2026, 1, 10)
+        )
+        fresh = await _ff_request(
+            db_session, project, src_wh, "assembly", created=date(2026, 7, 30)
+        )
+        await _ff_request(db_session, project, src_wh, "assembly", local_archived=True)
+
+        cands = await get_transfer_ff_candidates(db_session, project.id, transfer.id, "source")
+        assert [c["id"] for c in cands] == [fresh.id, old.id]
+
+    @pytest.mark.asyncio
+    async def test_unknown_side_and_missing_transfer(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        with pytest.raises(ValueError, match="source или dest"):
+            await get_transfer_ff_candidates(db_session, project.id, transfer.id, "both")
+        with pytest.raises(ValueError, match="не найдено"):
+            await get_transfer_ff_candidates(db_session, project.id,99_999_999, "source")
+
+    @pytest.mark.asyncio
+    async def test_project_isolation(
+        self, db_session, project, other_project, src_wh, dst_wh, barcode
+    ):
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        with pytest.raises(ValueError, match="не найдено"):
+            await get_transfer_ff_candidates(db_session, other_project.id, transfer.id, "source")
+
+
+class TestTransferFfLinksOnCard:
+    @pytest.mark.asyncio
+    async def test_card_carries_links_and_list_stays_empty(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """Карточка отдаёт обе стороны связки; в списке поле остаётся пустым."""
+        from backend.services.fulfillment_service import link_request
+
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        plain = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        out_ff = await _ff_request(db_session, project, src_wh, "assembly", number="WH-OUT-9")
+        in_ff = await _ff_request(db_session, project, dst_wh, "inbound", number="WH-IN-9")
+        await link_request(
+            db_session, project.id, out_ff.id, stock_transfer_id=transfer.id, warehouse_id=src_wh.id
+        )
+        await link_request(
+            db_session, project.id, in_ff.id, stock_transfer_id=transfer.id, warehouse_id=dst_wh.id
+        )
+
+        card = await get_transfer(db_session, project.id, transfer.id)
+        by_side = {link["side"]: link for link in card.ff_links}
+        assert set(by_side) == {"source", "dest"}
+        assert by_side["source"]["id"] == out_ff.id
+        assert by_side["source"]["warehouse_id"] == src_wh.id
+        assert by_side["source"]["number"] == "WH-OUT-9"
+        assert by_side["dest"]["id"] == in_ff.id
+        assert by_side["dest"]["warehouse_id"] == dst_wh.id
+
+        # Список ТОЖЕ несёт связки (переезды стоят вперемешку с заявками и рисуют
+        # бейдж «ФФ: PVB-…» прямо в строке) — но одной батч-выборкой на весь
+        # список, а не запросом на переезд. Переезд без связок — пустой список.
+        from backend.schemas.warehouse import StockTransferSchema
+
+        rows = await list_transfers(db_session, project.id)
+        plain_row = next(r for r in rows if r.id == plain.id)
+        assert StockTransferSchema.model_validate(plain_row).ff_links == []
+        linked_row = next(r for r in rows if r.id == transfer.id)
+        assert len(StockTransferSchema.model_validate(linked_row).ff_links) == 2
+        assert len(StockTransferSchema.model_validate(card).ff_links) == 2
+
+    @pytest.mark.asyncio
+    async def test_unlink_clears_stock_transfer_id(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """Отвязка чистит слот переезда — заявка снова становится кандидатом."""
+        from backend.services.fulfillment_service import link_request, unlink_request
+
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        ff = await _ff_request(db_session, project, src_wh, "assembly")
+        await link_request(
+            db_session, project.id, ff.id, stock_transfer_id=transfer.id, warehouse_id=src_wh.id
+        )
+        assert await get_transfer_ff_candidates(db_session, project.id, transfer.id, "source") == []
+
+        await unlink_request(db_session, project.id, ff.id, warehouse_id=src_wh.id)
+        await db_session.refresh(ff)
+        assert ff.stock_transfer_id is None
+
+        card = await get_transfer(db_session, project.id, transfer.id)
+        assert card.ff_links == []
+        cands = await get_transfer_ff_candidates(db_session, project.id, transfer.id, "source")
+        assert [c["id"] for c in cands] == [ff.id]
+
+    @pytest.mark.asyncio
+    async def test_reroute_blocked_while_ff_linked(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """Смена маршрута под живой связкой осиротила бы её: авто-приём факта
+        отбирает приёмки ПО СКЛАДУ ЗАЯВКИ и запостил бы факт чужого склада."""
+        from backend.services.fulfillment_service import link_request
+
+        third = await create_warehouse(
+            db_session, project.id, {"name": f"THIRD-{_uid()}", "warehouse_type": "FULFILLMENT"}
+        )
+        transfer = await _draft(db_session, project, src_wh, dst_wh, barcode)
+        in_ff = await _ff_request(db_session, project, dst_wh, "inbound", number="WH-IN-77")
+        await link_request(
+            db_session, project.id, in_ff.id, stock_transfer_id=transfer.id, warehouse_id=dst_wh.id
+        )
+
+        with pytest.raises(ValueError, match="WH-IN-77"):
+            await update_transfer(
+                db_session, project.id, transfer.id, _upd(to_warehouse_id=third.id)
+            )
+
+        # Конец маршрута, которого связка не касается, менять по-прежнему можно.
+        updated = await update_transfer(
+            db_session, project.id, transfer.id, _upd(from_warehouse_id=third.id)
+        )
+        assert updated.from_warehouse_id == third.id
+        assert updated.to_warehouse_id == dst_wh.id

@@ -1258,8 +1258,29 @@ export interface StockTransferItem {
   quantity: number;
 }
 
-/** Статусы переезда: черновик → в пути → принято (ступени «машина назначена» НЕТ). */
-export type StockTransferStatus = 'DRAFT' | 'IN_TRANSIT' | 'COMPLETED';
+/**
+ * Статусы переезда — ЗЕРКАЛО `AssemblyStatus`: переезд между складами ведётся
+ * как заявка на сборку, теми же ступенями.
+ *
+ * PENDING → IN_PROGRESS → READY → VEHICLE_ASSIGNED → SHIPPED → DELIVERED,
+ * плюс RETURNED → CLOSED и CANCELLED.
+ *
+ * Сток двигают РОВНО два перехода: → SHIPPED списывает со склада-источника,
+ * → DELIVERED приходует на получателе (и → RETURNED возвращает источнику).
+ *
+ * Старая тонкая шкала переведена миграцией `trv04`: DRAFT → PENDING,
+ * IN_TRANSIT → SHIPPED, COMPLETED → DELIVERED.
+ */
+export type StockTransferStatus =
+  | 'PENDING'
+  | 'IN_PROGRESS'
+  | 'READY'
+  | 'VEHICLE_ASSIGNED'
+  | 'SHIPPED'
+  | 'DELIVERED'
+  | 'RETURNED'
+  | 'CLOSED'
+  | 'CANCELLED';
 
 export interface StockTransfer {
   id: number;
@@ -1283,6 +1304,17 @@ export interface StockTransfer {
   units_total?: number;
   /** Позиций (SKU) — тоже с бэкенда, состав для этого больше не нужен. */
   sku_count?: number;
+  /**
+   * Уже зачислено получателю, штук — НЕТТО по журналу движений (приход минус
+   * откат возврата), поэтому после переотправки счётчик начинается заново, а не
+   * помнит прошлый круг. Знаменатель прогресса — `units_total`, отдельного
+   * «плана» НЕТ.
+   *
+   * Приходит и в списке, и в карточке. Прогресс рисуем только у SHIPPED:
+   * у DELIVERED он равен `units_total` и его место занимает сам статус, а до
+   * отгрузки «принято 0 из 500» читалось бы как потерянный товар.
+   */
+  received_units?: number;
 
   // ─── Машина и логистика переезда (зеркало блока «Назначить машину» заявки) ───
   vehicle_info?: string | null;
@@ -1299,6 +1331,16 @@ export interface StockTransfer {
   pickup_cost?: string | number | null;
   delivery_date?: string | null;
   vehicle_assigned_at?: string | null;
+  /**
+   * Вехи цепочки — зеркало `AssemblyRequest.actual_ready_date` / `shipped_at`.
+   * Из статуса НЕ выводятся: он хранит только текущее состояние, а сводному
+   * списку нужны сами даты («висит готовым N дней»).
+   * `actual_ready_date` ставится на переходе в READY (кнопкой, синком ФФ или
+   * наследованием от заявки при конвертации) и переживает возврат;
+   * `shipped_at` — на отгрузке, при возврате обнуляется.
+   */
+  actual_ready_date?: string | null;
+  shipped_at?: string | null;
   /** Заявка на сборку, из которой переделали этот переезд (кнопка «Переделать в перемещение»). */
   converted_from_assembly_id?: number | null;
 
@@ -1313,13 +1355,72 @@ export interface StockTransfer {
 
   // Обогащение, которое сервис заполняет пачкой (не relationship).
   // Всё, чего в схеме НЕТ, объявлять тут нельзя: «поле есть, тип верный, в
-  // рантайме вечный null» не ловится ни типами, ни ревью. Поэтому связок ФФ и
-  // данных расхода по забору здесь не будет — связки карточка берёт со стороны
-  // ФФ (stock_transfer_id заявки), оплату показывает «Лист логиста».
+  // рантайме вечный null» не ловится ни типами, ни ревью. Данных расхода по
+  // забору здесь по-прежнему нет — оплату показывает «Лист логиста».
   from_warehouse_name?: string | null;
   to_warehouse_name?: string | null;
   /** Имя перевозчика. Пока не приехало — UI честно падает на «Контрагент #id». */
   counterparty_name?: string | null;
+  /**
+   * Связанные заявки ФФ обеих сторон маршрута. Заполняется ТОЛЬКО в деталке
+   * (`GET /warehouse/transfers/{id}` и ответе PUT) — в списке всегда пусто,
+   * опираться там на него нельзя. Раньше карточка ради этого списка тянула ВСЕ
+   * заявки обоих складов (два тяжёлых запроса на открытие).
+   */
+  ff_links?: TransferFfLink[];
+}
+
+/** Сторона маршрута переезда: отгрузка у источника / приёмка у получателя. */
+export type TransferFfSide = 'source' | 'dest';
+
+/**
+ * Заявка ФФ на стороне переезда — ОДИН тип на два места:
+ *  • `StockTransfer.ff_links` — уже связанные;
+ *  • `GET /warehouse/transfers/{id}/ff-candidates?side=…` — свободные кандидаты.
+ *
+ * Имя `FfLinkCandidate` занято кандидатом ОБРАТНОГО направления (наш документ
+ * как кандидат для заявки ФФ, `{doc_id, doc_kind, score…}`) — не путать.
+ *
+ * `warehouse_id` — склад самой заявки ФФ; он нужен ручкам link/unlink (в их
+ * путях есть warehouse_id) и ссылке на деталку заявки. `side` бэкенд считает
+ * сам (склад совпал с from → source, с to → dest; на легаси-маршруте — по
+ * kind), поле всегда непустое.
+ */
+export interface TransferFfLink {
+  /** fulfillment_requests.id */
+  id: number;
+  warehouse_id: number;
+  side: TransferFfSide;
+  number: string | null;
+  external_id: string;
+  /** 'assembly' | 'inbound' | 'return' | 'other' */
+  kind: string;
+  status: string | null;
+  stage_title: string | null;
+  total_qty: number | null;
+  /** Дата (YYYY-MM-DD), не datetime. */
+  external_created_at: string | null;
+}
+
+/**
+ * Тело PUT /warehouse/transfers/{id} — правка ЧЕРНОВИКА.
+ *
+ * 🔴 `shipped_as_boxes` здесь — обычный bool (как на создании), а НЕ
+ * трёхзначный «null = не трогать» из assign-vehicle: форма правки всегда
+ * показывает текущее значение переключателем, значит всегда знает, что слать.
+ * `items` — ПОЛНАЯ замена состава; передавать частичный список нельзя.
+ * Разрешено только в статусе DRAFT — в пути/принято бэкенд вернёт 400.
+ */
+export interface TransferUpdatePayload {
+  from_warehouse_id: number;
+  to_warehouse_id: number;
+  comment: string | null;
+  is_defect: boolean;
+  defect_reason: string | null;
+  pallets_count: number | null;
+  pallet_weight_kg: number | null;
+  shipped_as_boxes: boolean;
+  items: { barcode: string; quantity: number }[] | null;
 }
 
 /** Тело POST /warehouse/transfers/{id}/assign-vehicle. */

@@ -46,10 +46,13 @@ from backend.schemas.warehouse import (
     StockMovementSchema,
     StockTransferCreate,
     StockTransferSchema,
+    StockTransferUpdate,
     SupplyAcceptanceSlotsResponse,
     TransferAssignVehicle,
     TransferAssignVehicleBulk,
+    TransferFfLink,
     TransferLogisticsReport,
+    TransferStatusAction,
     WarehouseCounterpartyLink,
     WarehouseCreate,
     WarehouseExtraCounterpartyAdd,
@@ -402,8 +405,7 @@ async def get_expected_vehicles(
     db: AsyncSession = Depends(get_db),
 ):
     """Get vehicles in transit (SHIPPED/CUSTOMS) targeting this warehouse."""
-    from backend.services.warehouse_crud import get_expected_vehicles as _get_expected
-    from backend.services.warehouse_crud import get_vehicle_receipt_map
+    from backend.services.warehouse_crud import get_expected_vehicles as _get_expected, get_vehicle_receipt_map
 
     vehicles = await _get_expected(db, project.id, warehouse_id)
     receipt_map = await get_vehicle_receipt_map(db, project.id, [v.id for v in vehicles])
@@ -671,15 +673,21 @@ async def list_transfers(
     # Whitelist статусов — симметрично `group_by` в отчёте: мусорное значение
     # честно отбивается 422, а не возвращает пустой список, который читается
     # как «переездов нет».
-    status: str | None = Query(None, pattern="^(DRAFT|IN_TRANSIT|COMPLETED)$"),
+    status: str | None = Query(
+        None,
+        pattern=(
+            "^(PENDING|IN_PROGRESS|READY|VEHICLE_ASSIGNED|SHIPPED|DELIVERED"
+            "|RETURNED|CLOSED|CANCELLED)$"
+        ),
+    ),
     has_vehicle: bool | None = Query(None),
     converted_from_assembly_id: int | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """List transfers. ?in_transit=true — только активные, ?warehouse_id= — источник ИЛИ получатель.
+    """List transfers. ?in_transit=true — только SHIPPED, ?warehouse_id= — источник ИЛИ получатель.
 
-    Срез Листа логиста: `?status=DRAFT&has_vehicle=false` — переезды, ждущие машину.
+    Срез Листа логиста: `?status=READY&has_vehicle=false` — переезды, ждущие машину.
     `?converted_from_assembly_id=` — переезды из конкретной заявки: карточка
     заявки показывает «уже переделана в TR-хх», не ловя 400 повторной попыткой.
 
@@ -763,11 +771,71 @@ async def get_transfer(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Одно перемещение с составом (карточка переезда: машина, логистика, связки)."""
+    """Одно перемещение с составом (карточка переезда: машина, логистика, связки).
+
+    В отличие от списка отдаёт `items` и `ff_links` (уже связанные заявки ФФ
+    обеих сторон).
+    """
     transfer = await warehouse_service.get_transfer(db, project.id, transfer_id)
     if not transfer:
         raise HTTPException(404, "Перемещение не найдено")
     return StockTransferSchema.model_validate(transfer)
+
+
+@router.put(
+    "/transfers/{transfer_id}",
+    response_model=StockTransferSchema,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def update_transfer(
+    transfer_id: int,
+    payload: StockTransferUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Править перемещение — в PENDING / IN_PROGRESS / READY.
+
+    Маршрут, комментарий, брак, транспортная единица и состав. `items` —
+    полная замена состава; не передан — состав не трогаем. Применяются только
+    явно переданные поля (`exclude_unset`), поэтому частичное тело не обнулит
+    остальное дефолтами схемы.
+
+    400 — переезд уже с машиной или отправлен, склады совпали, состав пуст, ШК не
+    найден или маршрут разошёлся бы со связками ФФ. Ответ — карточка целиком
+    (состав, подписи, `ff_links`), перезапрашивать переезд не нужно.
+    """
+    try:
+        transfer = await warehouse_service.update_transfer(
+            db, project.id, transfer_id, payload.model_dump(exclude_unset=True)
+        )
+    except ValueError as e:
+        raise _transfer_error(e) from None
+    return StockTransferSchema.model_validate(transfer)
+
+
+@router.get("/transfers/{transfer_id}/ff-candidates", response_model=list[TransferFfLink])
+async def transfer_ff_candidates(
+    transfer_id: int,
+    side: str = Query(..., pattern="^(source|dest)$"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Заявки ФФ, которые можно привязать к этому переезду, — связка ОТ карточки переезда.
+
+    `side=source` — отгрузочная сторона: `kind=assembly` на складе ЗАБОРА (ФФ
+    собирает переезд у себя). `side=dest` — приёмочная: `kind=inbound` на складе
+    ПОЛУЧАТЕЛЯ. Только заявки без нашего документа, свежие сверху.
+
+    Сама привязка — существующей ручкой ФФ
+    `POST /warehouse/{warehouse_id}/fulfillment/requests/{ff_id}/link` с
+    `{"stock_transfer_id": ...}`; `warehouse_id` бери из строки кандидата.
+    """
+    try:
+        return await warehouse_service.get_transfer_ff_candidates(
+            db, project.id, transfer_id, side
+        )
+    except ValueError as e:
+        raise _transfer_error(e) from None
 
 
 @router.post(
@@ -827,18 +895,40 @@ async def create_transfer(
         raise HTTPException(400, str(e)) from None
 
 
+@router.post(
+    "/transfers/{transfer_id}/ready",
+    response_model=StockTransferSchema,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def mark_transfer_ready(
+    transfer_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """PENDING | IN_PROGRESS → READY — «груз собран», можно сажать на машину.
+
+    Ручная ступень для переезда БЕЗ связки с ФФ: у переезда со связкой её
+    проставляет синк по сигналу провайдера. Сток не двигается.
+    """
+    try:
+        transfer = await warehouse_service.mark_transfer_ready(db, project.id, transfer_id)
+        return StockTransferSchema.model_validate(transfer)
+    except ValueError as e:
+        raise _transfer_error(e) from None
+
+
 @router.post("/transfers/{transfer_id}/send", dependencies=[Depends(rate_limit_write)])
 async def send_transfer(
     transfer_id: int,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Send transfer → deduct source, mark in_transit."""
+    """READY | VEHICLE_ASSIGNED → SHIPPED: списать с источника, повесить транзитом на получателя."""
     try:
         transfer = await warehouse_service.send_transfer(db, project.id, transfer_id)
         return StockTransferSchema.model_validate(transfer)
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        raise _transfer_error(e) from None
 
 
 @router.post("/transfers/{transfer_id}/complete", dependencies=[Depends(rate_limit_write)])
@@ -847,12 +937,59 @@ async def complete_transfer(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Complete transfer → add to destination."""
+    """SHIPPED → DELIVERED: зачислить получателю остаток плана и снять транзит."""
     try:
         transfer = await warehouse_service.complete_transfer(db, project.id, transfer_id)
         return StockTransferSchema.model_validate(transfer)
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        raise _transfer_error(e) from None
+
+
+@router.post(
+    "/transfers/{transfer_id}/return",
+    response_model=StockTransferSchema,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def return_transfer(
+    transfer_id: int,
+    payload: TransferStatusAction | None = None,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """SHIPPED | DELIVERED → RETURNED: получатель не принял, груз вернулся на ИСТОЧНИК.
+
+    Товар возвращается приёмкой на склад забора (сразу принятой), транзит у
+    получателя снимается, уже зачисленное ему — списывается. Забор переезда НЕ
+    удаляется: перевозка состоялась и оплачена.
+    """
+    try:
+        transfer = await warehouse_service.return_transfer(
+            db, project.id, transfer_id, comment=payload.comment if payload else None
+        )
+        return StockTransferSchema.model_validate(transfer)
+    except ValueError as e:
+        raise _transfer_error(e) from None
+
+
+@router.post(
+    "/transfers/{transfer_id}/close",
+    response_model=StockTransferSchema,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def close_transfer(
+    transfer_id: int,
+    payload: TransferStatusAction | None = None,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """RETURNED | DELIVERED → CLOSED: терминальное закрытие. Сток не двигается."""
+    try:
+        transfer = await warehouse_service.close_transfer(
+            db, project.id, transfer_id, comment=payload.comment if payload else None
+        )
+        return StockTransferSchema.model_validate(transfer)
+    except ValueError as e:
+        raise _transfer_error(e) from None
 
 
 @router.delete("/transfers/{transfer_id}", dependencies=[Depends(rate_limit_write)])
@@ -861,12 +998,16 @@ async def cancel_transfer(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Cancel DRAFT transfer (soft-delete). Sent transfers cannot be cancelled."""
+    """Отменить переезд ДО отгрузки: статус CANCELLED + soft-delete.
+
+    Из SHIPPED/DELIVERED отмены нет — сток уже уехал, обратный ход только
+    через `/return`.
+    """
     try:
         await warehouse_service.cancel_transfer(db, project.id, transfer_id)
-        return {"message": "Перемещение удалено"}
+        return {"message": "Перемещение отменено"}
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
+        raise _transfer_error(e) from None
 
 
 # ─── Stock Adjustments (Корректировка) ────────────────────────────────────

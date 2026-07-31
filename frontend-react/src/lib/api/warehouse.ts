@@ -90,7 +90,10 @@ import type {
     StockTransfer,
     StockTransferStatus,
     TransferAssignVehiclePayload,
+    TransferFfLink,
+    TransferFfSide,
     TransferLogisticsReport,
+    TransferUpdatePayload,
     AssemblyToTransferResponse,
     Warehouse,
     WarehouseStockRow,
@@ -188,7 +191,8 @@ export function addWarehouseMethods(api: ApiClient) {
         // ─── Stock Transfers ─────────────────────────────────────────
         /**
          * Список перемещений. `status`/`hasVehicle` — срез Листа логиста
-         * (`status=DRAFT&has_vehicle=false` — переезды, ждущие машину).
+         * (`status=READY` — переезды, ждущие машину: машина назначается именно
+         * из READY, и после назначения переезд уходит в VEHICLE_ASSIGNED).
          */
         getTransfers(
             inTransitOnly = false,
@@ -250,14 +254,65 @@ export function addWarehouseMethods(api: ApiClient) {
         getTransfer(transferId: number) {
             return api.request<StockTransfer>('GET', `/api/v1/warehouse/transfers/${transferId}`);
         },
+        /**
+         * PUT /warehouse/transfers/{id} — правка ЧЕРНОВИКА (маршрут, комментарий,
+         * брак, транспортная единица, состав).
+         *
+         * 🔴 `items` — ПОЛНАЯ замена состава (null — не трогать), а
+         * `shipped_as_boxes` — обычный bool, как на создании, а НЕ трёхзначный
+         * «null = не трогать» из assign-vehicle: форма правки всегда видит
+         * текущее значение и всегда знает, что слать.
+         *
+         * Только до отгрузки — PENDING / IN_PROGRESS / READY (см.
+         * TRANSFER_EDITABLE_STATUSES в lib/transfer.ts): после SHIPPED сток уже
+         * списан, и бэкенд отвечает 400 с русским текстом (показывать как есть).
+         * Ответ — полная схема с items и ff_links, так что перезапрашивать
+         * карточку после сохранения не нужно.
+         */
+        updateTransfer(transferId: number, data: TransferUpdatePayload) {
+            return api.request<StockTransfer>('PUT', `/api/v1/warehouse/transfers/${transferId}`, data);
+        },
+        /**
+         * GET /warehouse/transfers/{id}/ff-candidates?side=source|dest — свободные
+         * заявки ФФ для связки с переездом: `source` — сборки склада-ИСТОЧНИКА,
+         * `dest` — приёмки склада-ПОЛУЧАТЕЛЯ. Уже занятые чужими документами не
+         * приходят. Пустой ответ — норма: у транзитных складов ФФ-интеграции нет.
+         */
+        getTransferFfCandidates(transferId: number, side: TransferFfSide) {
+            return api.request<TransferFfLink[]>('GET', `/api/v1/warehouse/transfers/${transferId}/ff-candidates?side=${side}`);
+        },
+        /**
+         * POST /warehouse/transfers/{id}/ready — «Готов»: ФФ собрал переезд.
+         * Только из PENDING / IN_PROGRESS. Сток не двигает.
+         */
+        markTransferReady(transferId: number) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/ready`);
+        },
+        /**
+         * POST /warehouse/transfers/{id}/send — «Отправить» (READY / VEHICLE_ASSIGNED
+         * → SHIPPED). ДВИГАЕТ СТОК: списывает со склада-источника и вешает транзит
+         * на получателя, поэтому после него правка закрыта.
+         */
         sendTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/send`); },
+        /** POST /warehouse/transfers/{id}/complete — «Принять» (SHIPPED → DELIVERED): приход на получателе. */
         completeTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/complete`); },
+        /**
+         * POST /warehouse/transfers/{id}/return — «Вернуть на склад»
+         * (SHIPPED / DELIVERED → RETURNED): получатель не принял, товар
+         * возвращается на склад-ИСТОЧНИК. Двигает сток — спрашивать подтверждение.
+         */
+        returnTransfer(transferId: number, comment?: string) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/return`, { comment: comment || null });
+        },
+        /** POST /warehouse/transfers/{id}/close — «Закрыть» (RETURNED / DELIVERED → CLOSED), терминал. */
+        closeTransfer(transferId: number, comment?: string) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/close`, { comment: comment || null });
+        },
         cancelTransfer(transferId: number) { return api.request<MessageResponse>('DELETE', `/api/v1/warehouse/transfers/${transferId}`); },
         /**
          * POST /warehouse/transfers/{id}/assign-vehicle — машина и логистика переезда.
-         * Статус перемещения НЕ меняется (остаётся DRAFT): «машина назначена» —
-         * это непустой vehicle_assigned_at, отдельной ступени статуса нет.
-         * Назначать можно только в DRAFT — в пути/принято бэкенд вернёт 400.
+         * READY → VEHICLE_ASSIGNED (из VEHICLE_ASSIGNED — замена реквизитов, статус
+         * не меняется). До READY назначать нечего: ФФ ещё не собрал.
          */
         assignTransferVehicle(transferId: number, data: TransferAssignVehiclePayload) {
             return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/assign-vehicle`, data);
@@ -271,7 +326,7 @@ export function addWarehouseMethods(api: ApiClient) {
         assignTransferVehicleBulk(ids: number[], payload: TransferAssignVehiclePayload) {
             return api.request<StockTransfer[]>('POST', '/api/v1/warehouse/transfers/assign-vehicle-bulk', { ids, payload });
         },
-        /** POST /warehouse/transfers/{id}/unassign-vehicle — снять машину (только DRAFT). */
+        /** POST /warehouse/transfers/{id}/unassign-vehicle — снять машину: VEHICLE_ASSIGNED → READY. */
         unassignTransferVehicle(transferId: number) {
             return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/unassign-vehicle`);
         },

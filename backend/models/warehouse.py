@@ -49,9 +49,71 @@ class OutboundStatus(str, enum.Enum):
 
 
 class TransferStatus(str, enum.Enum):
-    DRAFT = "DRAFT"
-    IN_TRANSIT = "IN_TRANSIT"
-    COMPLETED = "COMPLETED"
+    """Статус переезда — ЗЕРКАЛО `AssemblyStatus` (канон юзера 31.07.2026).
+
+    Переезд между складами ФФ ведётся как заявка на сборку: те же ступени, те же
+    сигналы синка провайдера, машина внутри той же цепочки. Прежняя тонкая шкала
+    DRAFT / IN_TRANSIT / COMPLETED легла на новую так: DRAFT → PENDING,
+    IN_TRANSIT → SHIPPED, COMPLETED → DELIVERED (миграция `trv04`).
+
+    Сток движется РОВНО в двух переходах:
+      → SHIPPED   — списание со склада-источника (TRANSFER_OUT) + транзит на получателе;
+      → DELIVERED — приход на получателе (TRANSFER_IN) и снятие транзита.
+    Плюс → RETURNED: возврат на склад-источник, если получатель не принял.
+    """
+
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"  # ФФ собирает переезд у себя
+    READY = "READY"  # ФФ собрал (стадия «Собран») либо отмечено руками
+    VEHICLE_ASSIGNED = "VEHICLE_ASSIGNED"
+    SHIPPED = "SHIPPED"  # уехал: сток списан с источника, висит транзитом на получателе
+    DELIVERED = "DELIVERED"  # принят получателем полностью
+    RETURNED = "RETURNED"  # получатель не принял — товар вернулся на склад-источник
+    CLOSED = "CLOSED"  # терминал после возврата
+    CANCELLED = "CANCELLED"
+
+
+#: Разрешённые переходы. Отличия от `ASSEMBLY_TRANSITIONS` ровно два, оба
+#: осознанные:
+#:  • PENDING → READY напрямую: у переезда БЕЗ связки с ФФ фазы «ФФ собирает» не
+#:    существует (транзитные склады интеграции не имеют), и гонять человека через
+#:    IN_PROGRESS ради одной лишней кнопки незачем.
+#:  • SHIPPED → READY НЕТ (у заявки есть): сток уже списан, откат делает только
+#:    RETURNED, который его возвращает. Иначе переезд «вернулся» бы в готовность,
+#:    оставив единицы списанными.
+TRANSFER_TRANSITIONS: dict["TransferStatus", set["TransferStatus"]] = {
+    TransferStatus.PENDING: {
+        TransferStatus.IN_PROGRESS,
+        TransferStatus.READY,
+        TransferStatus.CANCELLED,
+    },
+    TransferStatus.IN_PROGRESS: {TransferStatus.READY, TransferStatus.CANCELLED},
+    TransferStatus.READY: {
+        TransferStatus.VEHICLE_ASSIGNED,
+        TransferStatus.IN_PROGRESS,
+        TransferStatus.CANCELLED,
+    },
+    TransferStatus.VEHICLE_ASSIGNED: {
+        TransferStatus.SHIPPED,
+        TransferStatus.READY,
+        TransferStatus.CANCELLED,
+    },
+    # CANCELLED из SHIPPED/RETURNED НЕТ намеренно: сток уже списан, а отмена его
+    # не возвращает — это делает только RETURNED. `cancel_transfer` и так рубит
+    # всё после отгрузки, но таблица подана как единственный источник истины, и
+    # первый же новый вызывающий, доверившийся ей, отменил бы переезд поверх
+    # уехавшего товара.
+    TransferStatus.SHIPPED: {TransferStatus.DELIVERED, TransferStatus.RETURNED},
+    TransferStatus.DELIVERED: {TransferStatus.RETURNED, TransferStatus.CLOSED},
+    TransferStatus.RETURNED: {TransferStatus.READY, TransferStatus.CLOSED},
+    TransferStatus.CLOSED: set(),
+    TransferStatus.CANCELLED: set(),
+}
+
+#: Статусы, в которых переезд ещё можно править и он НЕ держит движений стока.
+TRANSFER_EDITABLE_STATUSES = frozenset(
+    {TransferStatus.PENDING, TransferStatus.IN_PROGRESS, TransferStatus.READY}
+)
 
 
 class DefectMarkStatus(str, enum.Enum):
@@ -353,7 +415,7 @@ class StockTransfer(Base, TimestampMixin, SoftDeleteMixin):
     from_warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
     to_warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
     number: Mapped[str] = mapped_column(String(20), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default=TransferStatus.DRAFT, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default=TransferStatus.PENDING, nullable=False)
     comment: Mapped[str | None] = mapped_column(Text)
     is_defect: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     defect_reason: Mapped[str | None] = mapped_column(Text)
@@ -390,6 +452,12 @@ class StockTransfer(Base, TimestampMixin, SoftDeleteMixin):
     )
     pickup_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     pickup_time_slot: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Вехи цепочки — зеркало AssemblyRequest: «когда ФФ собрал» и «когда уехал».
+    # Нужны сводному списку логиста, где переезды идут вперемешку с заявками и
+    # обязаны заполнять те же колонки; вывести их из статуса нельзя — статус
+    # хранит только ТЕКУЩЕЕ состояние.
+    actual_ready_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    shipped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Транспортная единица переезда — 1:1 с заявкой на сборку (AssemblyRequest):
     # shipped_as_boxes=False → паллеты (по умолчанию), True → короба. Флаг меняет
     # только ЕДИНИЦУ измерения pallets_count/pallet_weight_kg и подписи в UI
@@ -440,6 +508,37 @@ class StockTransfer(Base, TimestampMixin, SoftDeleteMixin):
             unique=True,
             postgresql_where=text("converted_from_assembly_id IS NOT NULL AND is_deleted = false"),
         ),
+    )
+
+
+class StockTransferStatusHistory(Base):
+    """Журнал смены статусов переезда — один в один `AssemblyStatusHistory`.
+
+    Раз переезд ведётся как заявка, у него должен быть и тот же ответ на вопрос
+    «кто и когда это сделал»: статус двигают трое — человек кнопкой, синк ФФ по
+    стадии провайдера (`changed_by='ff_sync'`) и авто-переходы (`'system'`).
+    Без журнала разбор «почему сток уехал» упирался бы в пустоту: сам переезд
+    хранит только ТЕКУЩИЙ статус.
+
+    Append-only, без soft-delete; каскадно удаляется вместе с переездом.
+    """
+
+    __tablename__ = "stock_transfer_status_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    stock_transfer_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("stock_transfers.id", ondelete="CASCADE"), nullable=False
+    )
+    old_status: Mapped[str | None] = mapped_column(String(20))
+    new_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    changed_by: Mapped[str | None] = mapped_column(String(50))  # user | ff_sync | system
+    comment: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("ix_stock_transfer_status_history_project_id", "project_id"),
+        Index("ix_stock_transfer_status_history_transfer_id", "stock_transfer_id"),
     )
 
 

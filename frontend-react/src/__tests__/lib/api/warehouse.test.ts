@@ -230,9 +230,11 @@ describe('warehouse.getTransfers', () => {
     it('передаёт срез Листа логиста: status + has_vehicle', async () => {
         const spy = mockFetch([]);
         const api = makeApi();
-        await api.getTransfers(false, undefined, { status: 'DRAFT', hasVehicle: false });
+        // Срез «ждут машину» — READY: машина назначается именно оттуда
+        // (назначенная уводит переезд в VEHICLE_ASSIGNED).
+        await api.getTransfers(false, undefined, { status: 'READY', hasVehicle: false });
         const url = spy.mock.calls[0][0] as string;
-        expect(url).toContain('status=DRAFT');
+        expect(url).toContain('status=READY');
         // has_vehicle=false обязан УЙТИ в запрос: наивная проверка `if (v)`
         // выбросила бы его и превратила «без машины» в «все подряд».
         expect(url).toContain('has_vehicle=false');

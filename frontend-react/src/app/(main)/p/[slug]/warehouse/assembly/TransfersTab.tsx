@@ -3,9 +3,9 @@
  * Вкладка «Перемещения» страницы сборки — переезды между нашими складами.
  *
  * Переезд = полноценная поездка: у него такая же машина/логистика, как у заявки
- * на сборку, поэтому список показывает и машину, и стоимость забора. Ступени
- * статуса «машина назначена» НЕТ (черновик → в пути → принято): назначенная
- * машина показывается бейджем прямо на черновике (см. transferVehicleAssigned).
+ * на сборку, поэтому список показывает и машину, и стоимость забора. Статус —
+ * ЗЕРКАЛО заявки (PENDING → … → DELIVERED), включая отдельную ступень
+ * «Машина назначена»; словарь и гейты — общие, из lib/transfer.ts.
  *
  * Фильтрация — клиентская: эндпоинт списка умеет только in_transit и
  * warehouse_id (источник ИЛИ получатель), а набор мал (серверный кап 500).
@@ -15,8 +15,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
-import { Toast, AssignVehicleModal } from '@/components';
-import type { AssignVehicleValues } from '@/components';
+import { Toast } from '@/components';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
@@ -24,22 +23,32 @@ import type { StockTransfer, StockTransferStatus, TransferLogisticsSummary, Ware
 import {
     TRANSFER_REPORT_DEFAULT_DAYS,
     TRANSFER_STATUS_MAP,
+    ffLinkLabel,
     toMoney,
+    transferReceiveProgress,
     transferReportDefaultRange,
     transferDriverName,
     transferSkuCount,
+    transferTotalWeight,
     transferUnits,
     transferVehicleAssigned,
     unitCountText,
     unitShort,
 } from '@/lib/transfer';
 
+// Опции фильтра выводим ИЗ словаря: добавится ступень на бэкенде — она
+// появится и здесь, а не потеряется в руками собранном списке (ровно так
+// фильтр и разъехался бы с бейджами в таблице).
 const STATUS_OPTIONS: { value: '' | StockTransferStatus; label: string }[] = [
     { value: '', label: 'Все статусы' },
-    { value: 'DRAFT', label: 'Черновик' },
-    { value: 'IN_TRANSIT', label: 'В пути' },
-    { value: 'COMPLETED', label: 'Принято' },
+    ...(Object.entries(TRANSFER_STATUS_MAP) as [StockTransferStatus, { label: string }][])
+        .map(([value, { label }]) => ({ value, label })),
 ];
+
+/** Номера связанных заявок ФФ одной строкой — обе стороны маршрута подряд. */
+function ffNumbers(t: StockTransfer): string[] {
+    return (t.ff_links ?? []).map(ffLinkLabel).filter(n => n && n !== '—');
+}
 
 interface Props {
     slug: string;
@@ -66,11 +75,6 @@ export default function TransfersTab({ slug }: Props) {
     // живёт на складе (/warehouse/{id}/transfer/new) и без него не открывается.
     const [showCreate, setShowCreate] = useState(false);
     const [createFromId, setCreateFromId] = useState<number | ''>('');
-
-    // Назначение машины прямо из списка (кнопка в колонке «Машина»).
-    const [vehicleFor, setVehicleFor] = useState<StockTransfer | null>(null);
-    const [assigning, setAssigning] = useState(false);
-    const [assignError, setAssignError] = useState('');
 
     // Мини-сводка стоимости логистики переездов (тот же отчёт, что на «Листе
     // логиста»): необязательная — ошибку глушим, список от неё не зависит.
@@ -145,55 +149,97 @@ export default function TransfersTab({ slug }: Props) {
 
     const openDetail = (id: number) => router.push(`/p/${slug}/warehouse/transfers/${id}`);
 
-    const handleAssign = async (values: AssignVehicleValues) => {
-        if (!vehicleFor) return;
-        setAssigning(true);
-        setAssignError('');
-        try {
-            const updated = await api.assignTransferVehicle(vehicleFor.id, values);
-            setItems(prev => prev.map(t => (t.id === updated.id ? updated : t)));
-            setVehicleFor(null);
-            setToast({ message: `Машина назначена на ${updated.number}`, type: 'success' });
-        } catch (e: unknown) {
-            setAssignError(e instanceof Error ? e.message : 'Ошибка назначения машины');
-        } finally {
-            setAssigning(false);
-        }
-    };
-
+    // Набор колонок повторяет вкладку «Заявки FBO» (assembly/page.tsx, cols):
+    // № → Статус → маршрут/склад → Товары → Палеты → Общий вес → даты. Там, где
+    // у заявки WB-специфика (номер поставки WB, тип приёмки), у переезда её нет
+    // и прочерк был бы шумом — вместо неё стоят машина и стоимость забора,
+    // которые для переезда играют ту же роль «чем и почём везём».
     const columns: Column[] = [
         {
-            key: 'number', label: 'Номер', width: '110px',
+            key: 'number', label: '№', width: '150px',
+            // Теги — рядом с номером, как у заявки (совместная / предзаявка / ФФ).
             render: (_v, row: StockTransfer) => (
-                <span style={{ fontWeight: 600 }}>{row.number}</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <span style={{ fontWeight: 600 }}>{row.number}</span>
+                    {row.is_defect && (
+                        <span className="badge badge-warning" style={{ fontSize: 11 }} title={row.defect_reason || 'Переезд брака'}>
+                            Брак
+                        </span>
+                    )}
+                </span>
             ),
+            exportValue: (row: StockTransfer) => (row.is_defect ? `${row.number} (брак)` : row.number),
         },
         {
-            key: 'route', label: 'Откуда → Куда',
+            key: 'status', label: 'Статус', width: '150px',
+            getValue: (row: StockTransfer) => TRANSFER_STATUS_MAP[row.status]?.label ?? row.status,
+            render: (_v, row: StockTransfer) => {
+                const st = TRANSFER_STATUS_MAP[row.status] ?? { label: row.status, className: 'badge-secondary' };
+                return <span className={`badge ${st.className}`}>{st.label}</span>;
+            },
+            exportValue: (row: StockTransfer) => TRANSFER_STATUS_MAP[row.status]?.label ?? row.status,
+        },
+        {
+            key: 'ff', label: 'Заявка ФФ',
+            // Связки приходят прямо в списке (батч на бэкенде, N+1 нет). Обе
+            // стороны маршрута в одной ячейке: у источника сборка, у получателя
+            // приёмка — логисту важен сам факт «документ у ФФ заведён».
+            headerTitle: 'Связанные заявки фулфилмента: отгрузка у источника и приёмка у получателя',
+            getValue: (row: StockTransfer) => ffNumbers(row).join(', '),
+            render: (_v, row: StockTransfer) => {
+                const nums = ffNumbers(row);
+                return nums.length === 0
+                    ? <span style={{ color: 'var(--color-text-muted)' }}>—</span>
+                    : <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{nums.join(', ')}</span>;
+            },
+            exportValue: (row: StockTransfer) => ffNumbers(row).join(', '),
+        },
+        {
+            key: 'route', label: 'Маршрут',
+            headerTitle: 'Откуда → Куда. Аналог пары «Склад» + «WB-склад» у заявки FBO',
             getValue: (row: StockTransfer) => `${routeFrom(row)} → ${routeTo(row)}`,
             render: (_v, row: StockTransfer) => (
-                <span>
+                <span style={{ fontSize: 13 }}>
                     {routeFrom(row)}
-                    <span style={{ color: 'var(--color-text-muted)' }}> → </span>
-                    {routeTo(row)}
+                    <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                        → {routeTo(row)}
+                    </span>
                 </span>
             ),
             exportValue: (row: StockTransfer) => `${routeFrom(row)} → ${routeTo(row)}`,
         },
         {
-            key: 'items', label: 'Состав', align: 'right', width: '150px',
+            key: 'items_qty', label: 'Товары', align: 'right', width: '150px',
+            headerTitle: 'Штук всего и сколько это позиций (SKU)',
             getValue: (row: StockTransfer) => transferUnits(row),
-            render: (_v, row: StockTransfer) => (
-                <span>
-                    {formatNumber(transferSkuCount(row), 0)} SKU
-                    <span style={{ color: 'var(--color-text-muted)' }}> / </span>
-                    {formatNumber(transferUnits(row), 0)} шт
-                </span>
-            ),
-            exportValue: (row: StockTransfer) => `${transferSkuCount(row)} SKU / ${transferUnits(row)} шт`,
+            render: (_v, row: StockTransfer) => {
+                // Прогресс приёмки есть только у уехавшего переезда и только в
+                // списке (в карточке бэкенд его не считает) — см. transferReceiveProgress.
+                const progress = transferReceiveProgress(row);
+                return (
+                    <span>
+                        {formatNumber(transferUnits(row), 0)} шт
+                        <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                            {formatNumber(transferSkuCount(row), 0)} SKU
+                        </span>
+                        {progress && (
+                            <span
+                                style={{
+                                    display: 'block', fontSize: 12,
+                                    color: progress.received > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)',
+                                }}
+                                title="Сколько единиц получатель уже зачислил себе"
+                            >
+                                принято {formatNumber(progress.received, 0)} из {formatNumber(progress.total, 0)}
+                            </span>
+                        )}
+                    </span>
+                );
+            },
+            exportValue: (row: StockTransfer) => transferUnits(row),
         },
         {
-            key: 'pallets_count', label: 'Кол-во ед.', align: 'right', width: '120px',
+            key: 'pallets_count', label: 'Палеты', align: 'right', width: '120px',
             headerTitle: 'Транспортная единица переезда: паллеты или короба (как у заявки на сборку)',
             getValue: (row: StockTransfer) => row.pallets_count ?? -1,
             render: (_v, row: StockTransfer) => (
@@ -206,41 +252,33 @@ export default function TransfersTab({ slug }: Props) {
             ),
         },
         {
-            key: 'status', label: 'Статус', width: '150px',
+            key: 'total_weight_kg', label: 'Общий вес', align: 'right', width: '120px',
+            // Отдельного поля общего веса у переезда нет: считаем сами, как
+            // карточка (вес ОДНОЙ единицы × количество). Нет одного из двух — прочерк,
+            // а не ноль: «0 кг» читался бы как «взвесили и получилось ноль».
+            headerTitle: 'Вес одной единицы × количество единиц',
+            getValue: (row: StockTransfer) => transferTotalWeight(row) ?? -1,
             render: (_v, row: StockTransfer) => {
-                const st = TRANSFER_STATUS_MAP[row.status] ?? { label: row.status, className: 'badge-secondary' };
-                return (
-                    <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                        <span className={`badge ${st.className}`}>{st.label}</span>
-                        {row.is_defect && <span className="badge badge-warning" title={row.defect_reason || 'Брак'}>Брак</span>}
-                    </span>
-                );
+                const w = transferTotalWeight(row);
+                return w === null
+                    ? <span style={{ color: 'var(--color-text-muted)' }}>—</span>
+                    : <span>{formatNumber(w, 0)} кг</span>;
             },
-            exportValue: (row: StockTransfer) => TRANSFER_STATUS_MAP[row.status]?.label ?? row.status,
+            exportValue: (row: StockTransfer) => transferTotalWeight(row) ?? '',
         },
         {
             key: 'vehicle', label: 'Машина', width: '190px',
+            // Только ПОКАЗ. Назначение машины живёт на «Листе логиста» — так же,
+            // как у заявок на сборку: логист сажает на одну машину пачку
+            // документов сразу, а не по одному из карточки списка.
             getValue: (row: StockTransfer) => row.vehicle_info || '',
             render: (_v, row: StockTransfer) => {
-                if (transferVehicleAssigned(row)) {
-                    const driver = transferDriverName(row);
-                    return (
-                        <span title={[row.vehicle_brand, driver, row.driver_phone].filter(Boolean).join(' · ') || undefined}>
-                            <span className="badge badge-info">🚚 {row.vehicle_info || 'назначена'}</span>
-                        </span>
-                    );
-                }
-                // Назначать машину бэкенд разрешает только в черновике; в пути и
-                // принятое — уже история, кнопку не показываем.
-                if (row.status !== 'DRAFT') return <span style={{ color: 'var(--color-text-muted)' }}>—</span>;
-                if (!canEdit()) return <span style={{ color: 'var(--color-text-muted)' }}>—</span>;
+                if (!transferVehicleAssigned(row)) return <span style={{ color: 'var(--color-text-muted)' }}>—</span>;
+                const driver = transferDriverName(row);
                 return (
-                    <button
-                        className="btn btn-secondary btn-sm"
-                        onClick={e => { e.stopPropagation(); setAssignError(''); setVehicleFor(row); }}
-                    >
-                        Назначить
-                    </button>
+                    <span title={[row.vehicle_brand, driver, row.driver_phone].filter(Boolean).join(' · ') || undefined}>
+                        <span className="badge badge-info">🚚 {row.vehicle_info || 'назначена'}</span>
+                    </span>
                 );
             },
             exportValue: (row: StockTransfer) => row.vehicle_info || '',
@@ -257,14 +295,55 @@ export default function TransfersTab({ slug }: Props) {
             exportValue: (row: StockTransfer) => toMoney(row.pickup_cost) ?? '',
         },
         {
-            key: 'created_at', label: 'Дата', width: '130px',
-            getValue: (row: StockTransfer) => row.pickup_date || row.created_at || '',
+            key: 'pickup_date', label: 'Дата забора', width: '130px',
+            getValue: (row: StockTransfer) => row.pickup_date || '',
             render: (_v, row: StockTransfer) => (
-                <span title={row.pickup_date ? 'Дата забора' : 'Дата создания'}>
-                    {formatDate(row.pickup_date || row.created_at)}
-                </span>
+                row.pickup_date
+                    ? <span>{formatDate(row.pickup_date)}</span>
+                    : <span style={{ color: 'var(--color-text-muted)' }}>—</span>
             ),
-            exportValue: (row: StockTransfer) => row.pickup_date || row.created_at || '',
+            exportValue: (row: StockTransfer) => (row.pickup_date ? formatDate(row.pickup_date) : ''),
+        },
+        {
+            key: 'delivery_date', label: 'Дата доставки', width: '130px',
+            getValue: (row: StockTransfer) => row.delivery_date || '',
+            render: (_v, row: StockTransfer) => (
+                row.delivery_date
+                    ? <span>{formatDate(row.delivery_date)}</span>
+                    : <span style={{ color: 'var(--color-text-muted)' }}>—</span>
+            ),
+            exportValue: (row: StockTransfer) => (row.delivery_date ? formatDate(row.delivery_date) : ''),
+        },
+        {
+            // Вехи цепочки — те же колонки, что у заявки FBO («Дата готовности»).
+            // Из статуса не выводятся: он знает только текущее состояние, а
+            // «когда собрали» нужно и после отгрузки.
+            key: 'actual_ready_date', label: 'Готовность', width: '130px',
+            headerTitle: 'Когда переезд отметили собранным (кнопкой «Готов» или синком ФФ)',
+            getValue: (row: StockTransfer) => row.actual_ready_date || '',
+            render: (_v, row: StockTransfer) => (
+                row.actual_ready_date
+                    ? <span>{formatDate(row.actual_ready_date)}</span>
+                    : <span style={{ color: 'var(--color-text-muted)' }}>—</span>
+            ),
+            exportValue: (row: StockTransfer) => (row.actual_ready_date ? formatDate(row.actual_ready_date) : ''),
+        },
+        {
+            key: 'shipped_at', label: 'Отгружен', width: '130px',
+            headerTitle: 'Когда переезд уехал со склада-источника. При возврате обнуляется — следующая попытка проставит свой',
+            getValue: (row: StockTransfer) => row.shipped_at || '',
+            render: (_v, row: StockTransfer) => (
+                row.shipped_at
+                    ? <span>{formatDate(row.shipped_at)}</span>
+                    : <span style={{ color: 'var(--color-text-muted)' }}>—</span>
+            ),
+            exportValue: (row: StockTransfer) => (row.shipped_at ? formatDate(row.shipped_at) : ''),
+        },
+        {
+            key: 'created_at', label: 'Создано', width: '130px',
+            getValue: (row: StockTransfer) => row.created_at || '',
+            render: (_v, row: StockTransfer) => formatDate(row.created_at),
+            exportValue: (row: StockTransfer) => (row.created_at ? formatDate(row.created_at) : ''),
         },
     ];
 
@@ -454,34 +533,6 @@ export default function TransfersTab({ slug }: Props) {
                 </div>
             )}
 
-            {/* Назначение машины из списка */}
-            {vehicleFor && (
-                <AssignVehicleModal
-                    title={`Назначить машину · ${vehicleFor.number}`}
-                    initial={{
-                        vehicle_info: vehicleFor.vehicle_info,
-                        vehicle_brand: vehicleFor.vehicle_brand,
-                        driver_first_name: vehicleFor.driver_first_name,
-                        driver_last_name: vehicleFor.driver_last_name,
-                        driver_phone: vehicleFor.driver_phone,
-                        logistics_by_warehouse: vehicleFor.logistics_by_warehouse,
-                        pickup_date: vehicleFor.pickup_date,
-                        pickup_time_slot: vehicleFor.pickup_time_slot,
-                        pickup_cost: toMoney(vehicleFor.pickup_cost),
-                        delivery_date: vehicleFor.delivery_date,
-                        pallets_count: vehicleFor.pallets_count,
-                        pallet_weight_kg: toMoney(vehicleFor.pallet_weight_kg),
-                        shipped_as_boxes: vehicleFor.shipped_as_boxes,
-                    }}
-                    pickupWarehouseName={routeFrom(vehicleFor)}
-                    pickupWarehouseCounterpartyId={warehouseById.get(vehicleFor.from_warehouse_id)?.counterparty_id ?? null}
-                    deliveryDateLabel="Дата доставки"
-                    submitting={assigning}
-                    error={assignError}
-                    onSubmit={handleAssign}
-                    onClose={() => { setVehicleFor(null); setAssignError(''); }}
-                />
-            )}
         </div>
     );
 }
