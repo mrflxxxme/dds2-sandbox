@@ -197,6 +197,48 @@ async def _build_context(db: AsyncSession, pid: int, dims: list[Dimension]) -> d
     return ctx
 
 
+def _narrow_by_path(chain: list[Dimension], path: list[str], date_from: str | None, date_to: str | None,
+                    brand: str | None, subject: str | None, nm_ids: set[int] | None, ctx: dict) -> dict:
+    """Сужает ВЫБОРКУ строк по пути до узла, а не отбирает их потом в Python.
+
+    Раскрытие ветки иначе стоит столько же, сколько весь верхний уровень: заново
+    читаются все строки периода (на реальных данных — 31 тыс.). Измерения, которые
+    ложатся на колонки таблицы (день/неделя/месяц/предмет/бренд/артикул), уводим
+    в WHERE; склейку и ярлык — списком их товаров; размер и ABC считаются по самой
+    строке и остаются на пост-фильтре.
+    """
+    out = {"date_from": date_from, "date_to": date_to, "brand": brand, "subject": subject, "nm_ids": nm_ids}
+    for dim, key in zip(chain, path):
+        if dim.key == "day":
+            out["date_from"] = out["date_to"] = key
+        elif dim.key == "week":
+            monday = date.fromisoformat(key)
+            out["date_from"] = max(out["date_from"] or key, key)
+            out["date_to"] = min(out["date_to"] or (monday + timedelta(days=6)).isoformat(),
+                                 (monday + timedelta(days=6)).isoformat())
+        elif dim.key == "month":
+            year, month = (int(x) for x in key.split("-"))
+            first = date(year, month, 1)
+            last = date(year + (month == 12), (month % 12) + 1, 1) - timedelta(days=1)
+            out["date_from"] = max(out["date_from"] or first.isoformat(), first.isoformat())
+            out["date_to"] = min(out["date_to"] or last.isoformat(), last.isoformat())
+        elif dim.key == "subject":
+            out["subject"] = None if key == "Без предмета" else key
+        elif dim.key == "brand":
+            out["brand"] = None if key == "Без бренда" else key
+        elif dim.key == "nm" and key.isdigit():
+            _intersect(out, {int(key)})
+        elif dim.key == "imt" and key != "Без склейки":
+            _intersect(out, {nm for nm, label in ctx["nm_imt"].items() if label == key})
+        elif dim.key == "tag" and key != "Без ярлыка":
+            _intersect(out, {nm for nm, tags in ctx["nm_tags"].items() if key in tags})
+    return out
+
+
+def _intersect(out: dict, nms: set[int]) -> None:
+    out["nm_ids"] = nms if out["nm_ids"] is None else (out["nm_ids"] & nms)
+
+
 def _build_abc_map(
     rows: list[WbFunnelDaily],
     has_bdr: bool,
@@ -258,6 +300,7 @@ def _finalize(
     tax_rate: float,
     limit: int,
     levels_left: int,
+    nds_rate: float = 0.0,
 ) -> list[dict]:
     """Рекурсивно превращает узлы в строки ответа (метрики считает _finalize_groups).
 
@@ -268,7 +311,7 @@ def _finalize(
     if not nodes:
         return []
     aggs = {k: n.agg for k, n in nodes.items()}
-    rows = _finalize_groups(aggs, tax_rate, "label", limit)
+    rows = _finalize_groups(aggs, tax_rate, "label", limit, nds_rate)
 
     dim = dims[dim_index]
     deeper = dim_index + 1 < len(dims)
@@ -283,7 +326,7 @@ def _finalize(
         row.update(node.extra)
         row["has_children"] = deeper
         row["children"] = (
-            _finalize(node.children, dim_index + 1, dims, tax_rate, limit, levels_left - 1)
+            _finalize(node.children, dim_index + 1, dims, tax_rate, limit, levels_left - 1, nds_rate)
             if deeper and levels_left > 1
             else []
         )
@@ -329,12 +372,18 @@ async def get_funnel_tree(
         raise UnknownDimension("Путь длиннее цепочки группировок")
     depth = max(1, min(depth, len(chain) - len(path)))
 
-    rows = await _load_funnel_rows(db, pid, date_from, date_to, brand, subject, nm_ids=nm_ids, vendor_code=vendor_code)
+    # Справочники нужны ДО выборки: по ним сужается путь (склейка/ярлык → список товаров)
     ctx = await _build_context(db, pid, chain)
+    narrowed = _narrow_by_path(chain, path, date_from, date_to, brand, subject, nm_ids, ctx)
+    rows = await _load_funnel_rows(
+        db, pid, narrowed["date_from"], narrowed["date_to"], narrowed["brand"], narrowed["subject"],
+        nm_ids=narrowed["nm_ids"], vendor_code=vendor_code,
+    )
 
     tariff_map = await get_tariff_map(db, pid)
     buyout_map = await get_avg_buyout_map(db, pid)
     tax_rate = tax_info.get("usn_rate", 0) + tax_info.get("nds_rate", 0)
+    nds_rate = tax_info.get("nds_rate", 0)
     has_bdr = bool(bdr_rates_map)
 
     # ABC зависит от самих строк периода, а не от справочника — считаем после загрузки
@@ -381,4 +430,4 @@ async def get_funnel_tree(
                 _accumulate_row(node.agg, r, r.nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
                 level = node.children
 
-    return _finalize(roots, len(path), chain, tax_rate, limit, depth)
+    return _finalize(roots, len(path), chain, tax_rate, limit, depth, nds_rate)

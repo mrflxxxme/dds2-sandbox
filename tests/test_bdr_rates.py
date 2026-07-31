@@ -6,6 +6,8 @@ Pure computation tests (no DB required).
 
 from datetime import date
 
+import pytest
+
 from backend.services.funnel.bdr_rates import (
     BdrRates,
     BdrRatesLookup,
@@ -300,3 +302,52 @@ class TestComputeTaxInternal:
         tax_info = {"usn_rate": 0, "nds_rate": 0, "tax_regime": "usn_income", "cost_as_expense": False}
         tax = _compute_tax(income=100000, tax_info=tax_info, wb_commission=20000, adv_sum=5000, cost_total=30000)
         assert tax == 0
+
+
+# ─── Эквайринг и НДС отдельными цифрами ──────────────────────────────────────
+
+
+def test_acquiring_rate_and_amount():
+    """Эквайринг — доля от реализации; в строке отдаётся рублями."""
+    from backend.services.funnel.bdr_rates import BdrRates, _build_rates, compute_profit_bdr
+
+    rates = _build_rates(
+        realization=100_000, sales_amount=70_000, to_pay=60_000,
+        sale_qty=100, ret_qty=0, cancel_qty=0, acquiring=1_500,
+    )
+    assert rates is not None
+    assert rates.acq_rate == pytest.approx(0.015)
+
+    m = compute_profit_bdr(
+        orders_sum=100_000, orders_count=100, adv_sum=0, cost_price=0,
+        bdr=BdrRates(to_pay_rate=0.6, spp_rate=0.3, buyout_pct=1.0, acq_rate=0.015),
+        tax_info={"usn_rate": 6, "nds_rate": 0, "tax_regime": "usn_income", "cost_as_expense": False},
+    )
+    # выручка 100 000 × 1.5 % = 1 500
+    assert m["acquiring"] == pytest.approx(1_500)
+    # эквайринг уже сидит в расходе WB — прибыль от него не уменьшается второй раз
+    assert m["profit"] == pytest.approx(60_000 - m["tax"])
+
+
+def test_acquiring_defaults_to_zero_without_data():
+    """Отчёты, залитые до появления поля, дают ноль, а не ломают расчёт."""
+    from backend.services.funnel.bdr_rates import _build_rates
+
+    rates = _build_rates(realization=50_000, sales_amount=40_000, to_pay=30_000, sale_qty=10, ret_qty=0)
+    assert rates is not None
+    assert rates.acq_rate == 0.0
+
+
+def test_nds_is_reported_separately_from_tax():
+    """НДС виден своей цифрой и не теряется внутри налога."""
+    from backend.services.funnel.bdr_rates import BdrRates, compute_profit_bdr
+
+    m = compute_profit_bdr(
+        orders_sum=120_000, orders_count=100, adv_sum=0, cost_price=0,
+        bdr=BdrRates(to_pay_rate=0.6, spp_rate=0.0, buyout_pct=1.0),
+        tax_info={"usn_rate": 6, "nds_rate": 20, "tax_regime": "usn_income", "cost_as_expense": False},
+    )
+    # НДС выделяется из суммы: 120 000 × 20 / 120 = 20 000
+    assert m["nds"] == pytest.approx(20_000)
+    assert m["tax"] > m["nds"]          # сверху ещё УСН
+    assert m["nds"] <= m["tax"]

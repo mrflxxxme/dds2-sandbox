@@ -221,3 +221,29 @@ class TestRowToValues:
             row = self._make_wb_row(supplier_oper_name=oper)
             values = _row_to_values(row, project_id=1)
             assert values["supplier_oper_name"] == oper
+
+
+# ─── Лимит параметров asyncpg ────────────────────────────────────────────────
+
+
+def test_upsert_chunks_fit_asyncpg_param_limit():
+    """Строки × колонки должны влезать в 32767 параметров, иначе UPSERT падает.
+
+    С фиксированным BATCH_SIZE=1000 запас съедала каждая новая колонка: на 33-й
+    синк финотчёта переставал работать целиком (поймано при добавлении эквайринга).
+    """
+    from backend.services.wb_finance_sync import _param_safe_chunks
+
+    for cols in (26, 33, 60, 120):
+        batch = [{f"c{i}": i for i in range(cols)} for _ in range(5000)]
+        chunks = _param_safe_chunks(batch)
+        assert sum(len(c) for c in chunks) == 5000          # ничего не потеряли
+        assert all(len(c) * cols <= 32767 for c in chunks)  # и влезаем в лимит
+
+
+def test_upsert_chunks_handle_empty_and_single():
+    from backend.services.wb_finance_sync import _param_safe_chunks
+
+    assert _param_safe_chunks([]) == []
+    one = [{"a": 1}]
+    assert _param_safe_chunks(one) == [one]

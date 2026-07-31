@@ -133,7 +133,7 @@ export const daysColor = (v: number) => (v >= 999 ? C.dim : v < 7 ? C.bad : v <=
 
 export interface Totals {
     open_card: number; add_to_cart: number; orders_count: number; orders_sum: number; revenue: number;
-    adv_sum: number; adv_views: number; adv_clicks: number; tax: number; profit: number;
+    adv_sum: number; adv_views: number; adv_clicks: number; tax: number; nds: number; acquiring: number; profit: number;
     commission: number; cost_total: number;
     wb_stock_qty: number; wb_stock_cost: number; own_stock_cost: number;
     /** Взвешенные средние: сумма (ставка × вес) и сумма весов. */
@@ -143,7 +143,7 @@ export interface Totals {
 export function emptyTotals(): Totals {
     return {
         open_card: 0, add_to_cart: 0, orders_count: 0, orders_sum: 0, revenue: 0,
-        adv_sum: 0, adv_views: 0, adv_clicks: 0, tax: 0, profit: 0,
+        adv_sum: 0, adv_views: 0, adv_clicks: 0, tax: 0, nds: 0, acquiring: 0, profit: 0,
         commission: 0, cost_total: 0, wb_stock_qty: 0, wb_stock_cost: 0, own_stock_cost: 0,
         spp_w: 0, spp_wt: 0, buyout_w: 0, buyout_wt: 0,
     };
@@ -164,6 +164,8 @@ export function accumulate(rows: Row[]): Totals {
         t.adv_views += pick(r, 'adv_views', 'ad_views') ?? 0;
         t.adv_clicks += pick(r, 'adv_clicks', 'ad_clicks') ?? 0;
         t.tax += num(r.tax);
+        t.nds += num(r.nds);
+        t.acquiring += num(r.acquiring);
         t.profit += num(r.profit);
         t.commission += num(r.commission);
         t.cost_total += num(r.cost_total);
@@ -209,6 +211,9 @@ export const COLUMNS: ColumnDef[] = [
     // Себестоимость продаж
     { key: 'cost_total', label: 'Себест.', unit: '₽', w: 112, dir: 'down', value: r => pick(r, 'cost_total'), total: 'sum', format: fmtRub },
     { key: 'tax', label: 'Налог', unit: '₽', w: 110, dir: 'down', value: r => pick(r, 'tax'), total: 'sum', format: fmtRub, color: () => '#6b7280' },
+    { key: 'acquiring', label: 'Эквайринг', unit: '₽', w: 110, dir: 'down', title: 'Эквайринг WB (комиссия за организацию платежей). Уже входит в «Расход WB» — это его составляющая, а не добавка', value: r => pick(r, 'acquiring'), total: 'sum', format: fmtRub, color: v => (v > 0 ? '#6366f1' : '#9ca3af') },
+    { key: 'acquiring_rate', label: 'Эквайринг, %', unit: 'CR', w: 104, dir: 'down', title: 'Эквайринг в % от выручки', value: r => { const a = pick(r, 'acquiring'); const rev = pick(r, 'revenue', 'buyout_sum'); return a == null || !rev ? null : (a / rev) * 100; }, total: t => div(t.acquiring, t.revenue, 100), format: fmtPct, color: v => (v > 0 ? '#6366f1' : '#9ca3af') },
+    { key: 'nds', label: 'НДС', unit: '₽', w: 104, dir: 'down', title: 'НДС, выделенный из налога: цена после СПП × ставка / (1 + ставка)', value: r => pick(r, 'nds'), total: 'sum', format: fmtRub, color: () => '#6b7280' },
 
     // Остатки на FBO
     { key: 'wb_stock_cost', label: 'С/С остатков WB', unit: '₽', w: 122, extendedOnly: true, snapshot: true, title: 'Себестоимость остатков на складах WB', value: r => pick(r, 'wb_stock_cost'), total: 'sum', format: fmtRub },
@@ -230,16 +235,39 @@ export const COLUMNS: ColumnDef[] = [
 
 export const COLUMN_BY_KEY: Record<string, ColumnDef> = Object.fromEntries(COLUMNS.map(c => [c.key, c]));
 
+/** Преднастройка «Ключевые метрики» — набор Дениса от 31.07.2026.
+ *  Порядок колонок остаётся раскладочный, меняется только состав видимых. */
+export const KEY_METRICS: string[] = [
+    'orders_count',      // Заказы
+    'wb_stock_qty',      // Остатки (складская колонка: в товарных группировках)
+    'orders_sum_rub',    // Сумма
+    'revenue',           // Выручка
+    'adv_sum',           // Расходы
+    'profit',            // Прибыль
+    'margin',            // Маржа
+    'commission_rate',   // Расход WB, %
+    'drr',               // ДРР
+    'spp_rate',          // СПП
+    'price_after_spp',   // Цена после СПП
+    'cost_per_unit',     // С/С ед.
+];
+
 /** Раскладка по умолчанию — порядок и группы прежнего раздела (решение Дениса 31.07.2026).
  *  Метрики, которых в старом разделе не было (С/С ед., После СПП, CPL, CPO), стоят рядом
  *  со своими родственниками, а не отдельной группой. */
 export const DEFAULT_GROUPS: ColumnGroup[] = [
-    { key: 'funnel', label: 'Воронка', color: '#f59e0b', cols: ['open_card', 'add_to_cart', 'orders_count', 'orders_sum_rub', 'revenue'] },
-    { key: 'ads', label: 'Внутренняя реклама', color: '#f97316', cols: ['adv_sum', 'adv_views', 'adv_clicks', 'ctr', 'cpc', 'cpm', 'drr', 'cpl', 'cpo'] },
-    { key: 'fin', label: 'Финансы', color: '#6366f1', cols: ['cost_total', 'cost_per_unit', 'spp_rate', 'price_after_spp', 'buyout_percent', 'tax', 'commission_rate', 'commission', 'profit', 'margin', 'avg_price'] },
+    // Первым блоком — ключевые метрики (набор и порядок Дениса от 31.07.2026):
+    // менеджер видит главное, не листая 30 колонок. Каждая метрика живёт в одной
+    // группе, поэтому в блоках ниже этих колонок уже нет.
+    { key: 'key', label: 'Ключевые метрики', color: '#7c3aed', cols: KEY_METRICS },
+    // Цвета соседних групп разведены по тону: два оранжевых блока подряд сливались в один
+    { key: 'funnel', label: 'Воронка', color: '#f59e0b', cols: ['open_card', 'add_to_cart'] },
+    { key: 'ads', label: 'Внутренняя реклама', color: '#0ea5e9', cols: ['adv_views', 'adv_clicks', 'ctr', 'cpc', 'cpm', 'cpl', 'cpo'] },
+    { key: 'fin', label: 'Финансы', color: '#10b981', cols: ['cost_total', 'buyout_percent', 'tax', 'nds', 'acquiring', 'acquiring_rate', 'commission', 'avg_price'] },
     { key: 'conv', label: 'Конверсия', color: '#ec4899', cols: ['add_to_cart_pct', 'cart_to_order_pct'] },
-    { key: 'fbo', label: 'Остатки на FBO', color: '#8b5cf6', cols: ['wb_stock_qty', 'wb_stock_cost', 'own_stock_cost', 'total_stock_cost', 'stock_days_left'] },
+    { key: 'fbo', label: 'Остатки на FBO', color: '#8b5cf6', cols: ['wb_stock_cost', 'own_stock_cost', 'total_stock_cost', 'stock_days_left'] },
 ];
+
 
 /** Палитра для новых групп, которые создаёт пользователь. */
 export const GROUP_COLORS = ['#16a34a', '#f59e0b', '#6366f1', '#8b5cf6', '#f97316', '#ec4899', '#0ea5e9', '#14b8a6'];

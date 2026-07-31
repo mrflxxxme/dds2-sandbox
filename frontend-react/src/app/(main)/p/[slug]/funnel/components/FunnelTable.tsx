@@ -55,6 +55,8 @@ interface Props {
     childrenAt?: (path: string[]) => Row[] | undefined;
     /** Запросить детей узла по его пути. */
     onExpandPath?: (path: string[]) => void;
+    /** Тихо подгрузить ветку заранее (наведение) — чтобы клик открывался мгновенно. */
+    onPrefetchPath?: (path: string[]) => void;
     /** Сортировка по подписи (напр. по дате); без неё первая колонка не сортируется. */
     labelValue?: (row: Row) => number | string;
     sort: SortState | null;
@@ -73,11 +75,21 @@ interface Props {
     footer?: React.ReactNode;
 }
 
-const TOTAL_BG = '#f5f3ff';
+// Строка сумм и средних — розовым и жирным, как в референсе Дениса (31.07)
+const TOTAL_BG = '#fdf2f8';
+const TOTAL_INK = '#db2777';
+const TOTAL_INK_DIM = '#f9a8d4';
+const REST_COLOR = '#64748b';   // группа «Прочее» — без своего цвета
+
+/** Цвет группы с прозрачностью: шапка колонок — тот же цвет, только светлее. */
+function tint(hex: string, a: number): string {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
 
 export default function FunnelTable({
     rows, layout, extended, loading, labelHeader, labelWidth = 210, labelCell, rowKey,
-    childrenOf, nodeKey, hasChildren, childrenAt, onExpandPath,
+    childrenOf, nodeKey, hasChildren, childrenAt, onExpandPath, onPrefetchPath,
     labelValue, sort, onSort, labelColor, timeSeries, shading = 'bar', defaultOrder,
     emptyText = 'Нет данных за выбранный период', footer,
 }: Props) {
@@ -197,17 +209,20 @@ export default function FunnelTable({
     const stickyLabel = (bg: string, depth = 0, extra?: React.CSSProperties): React.CSSProperties => ({
         position: 'sticky', left: 0, zIndex: 2, background: bg,
         width: labelWidth, minWidth: labelWidth, maxWidth: labelWidth,   // ширина не зависит от раскрытия
-        padding: `0 8px 0 ${8 + depth * 14}px`, borderRight: '1px solid #d1d5db',
+        padding: `0 6px 0 ${6 + depth * 7}px`, borderRight: '1px solid #d1d5db',
         borderBottom: '1px solid rgba(15,23,42,.07)', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.06)',
         // line-height наследуется внутрь: подписи в ячейке сжимаются вместе с ней
-        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 12, lineHeight: 1, ...extra,
+        verticalAlign: 'middle', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        fontSize: 12, lineHeight: '12px', ...extra,
     });
 
     const cellStyle = (c: ColumnDef, s: Section, first: boolean, v: number | null, r: Row): React.CSSProperties => {
         // Цвет цифры и мягкая заливка — свои у каждой колонки, как в прежнем разделе
         // (решение Дениса 31.07.2026): ранговая раскраска всех цифр рябила в глазах.
         return {
-            position: 'relative', textAlign: 'right', padding: '0 8px', fontSize: 12, lineHeight: 1, fontFamily: MONO, whiteSpace: 'nowrap',
+            position: 'relative', textAlign: 'right', verticalAlign: 'middle', padding: '0 8px',
+            fontSize: 12, lineHeight: '12px', fontFamily: MONO, fontVariantNumeric: 'tabular-nums',
+            whiteSpace: 'nowrap',
             borderBottom: '1px solid rgba(15,23,42,.07)',
             borderRight: '1px solid rgba(15,23,42,.06)',
             borderLeft: first && s.group ? `2px solid ${s.group.color}` : undefined,
@@ -226,9 +241,9 @@ export default function FunnelTable({
         if (pos <= 0) return null;
         return (
             <span aria-hidden style={{
-                position: 'absolute', left: 4, right: 4, bottom: 1, height: 2, borderRadius: 1,
+                position: 'absolute', left: 5, right: 5, bottom: 0, height: 1.5, borderRadius: 1,
                 background: `linear-gradient(to right, ${s.group?.color ?? '#94a3b8'} ${(pos * 100).toFixed(1)}%, transparent ${(pos * 100).toFixed(1)}%)`,
-                opacity: .45,
+                opacity: .34,
             }} />
         );
     };
@@ -245,13 +260,18 @@ export default function FunnelTable({
         return (
             <React.Fragment key={key}>
                 <tr className="fn-row" style={{ background: bg, height: rowH, cursor: canExpand ? 'pointer' : undefined }}
+                    onMouseEnter={lazy && canExpand && kids === undefined ? () => onPrefetchPath?.(path) : undefined}
                     onClick={canExpand ? () => {
                         setExpanded(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
                         if (lazy && !open && kids === undefined) onExpandPath?.(path);
                     } : undefined}>
                     <td style={stickyLabel(bg, depth, { color: labelColor?.(r) })}>
-                        <span style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
-                            <span style={{ width: 11, flexShrink: 0, fontSize: 11, lineHeight: 1, color: canExpand ? '#64748b' : 'transparent' }}>{canExpand ? (open ? '▾' : '▶') : '·'}</span>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+                            {/* Ждём ветку — мигает сама стрелка: отдельная строка «Загрузка…» дёргала таблицу */}
+                            <span className={open && kids === undefined ? 'fn-wait' : undefined}
+                                style={{ width: canExpand ? 9 : 0, flexShrink: 0, fontSize: 9, lineHeight: 1, color: '#64748b' }}>
+                                {canExpand ? (open ? '▾' : '▶') : ''}
+                            </span>
                             <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{labelCell(r, depth)}</span>
                         </span>
                     </td>
@@ -265,11 +285,6 @@ export default function FunnelTable({
                         );
                     }))}
                 </tr>
-                {open && kids === undefined && (
-                    <tr style={{ background: '#fafbfc' }}>
-                        <td colSpan={flatCols.length + 1} style={{ padding: `2px 8px 2px ${22 + depth * 14}px`, fontSize: 11, color: 'var(--color-text-dim)' }}>Загрузка…</td>
-                    </tr>
-                )}
                 {open && kids && (() => {
                     // дети сравниваются со своими соседями: и среднее, и диапазон — по их уровню
                     const kidsRange = rangeFor(kids);
@@ -284,69 +299,91 @@ export default function FunnelTable({
             {/* Подсветка наведения кладётся background-image'ом поверх background-color:
                 цветовые тиры порогов остаются видны, а box-shadow липкой колонки не ломается */}
             <style>{`
+                /* Чёткость: цифры одинаковой ширины, сглаживание без «жирного» блюра,
+                   целые пиксели по вертикали (дробная высота строки мылит текст) */
+                .fn-table { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+                    text-rendering: optimizeLegibility; font-variant-numeric: tabular-nums; }
+                .fn-table td, .fn-table th { vertical-align: middle; }
                 .fn-row:hover > td { background-image: linear-gradient(rgba(15,23,42,.06), rgba(15,23,42,.06)); }
                 .fn-row > td:hover {
                     background-image: linear-gradient(rgba(0,113,227,.10), rgba(0,113,227,.10));
                     box-shadow: inset 0 0 0 1px rgba(0,113,227,.55);
                 }
                 /* Заголовки кликабельны — показываем это наведением */
-                .fn-th:hover { background-image: linear-gradient(rgba(255,255,255,.10), rgba(255,255,255,.10)); }
+                .fn-th:hover { background-image: linear-gradient(rgba(15,23,42,.07), rgba(15,23,42,.07)); }
+                /* Артикул — ссылка в рекламу: показываем это наведением */
+                .fn-article { border-radius: 4px; transition: color .12s, background-color .12s; }
+                .fn-article:hover { color: var(--color-accent) !important; text-decoration: underline; text-underline-offset: 2px; }
+                .fn-article:hover img, .fn-article:hover > span:first-child { box-shadow: 0 0 0 2px rgba(0,113,227,.35); border-radius: 4px; }
+                /* Ветка едет — стрелка дышит, строки на месте */
+                .fn-wait { animation: fnWait .8s ease-in-out infinite; }
+                @keyframes fnWait { 0%, 100% { opacity: 1 } 50% { opacity: .25 } }
             `}</style>
             <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
                 {loading ? <div style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-dim)' }}>Загрузка…</div> : (
-                    <table style={{ borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed', width: '100%', minWidth: totalWidth, background: '#fff' }}>
+                    <table className="fn-table" style={{ borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed', width: '100%', minWidth: totalWidth, background: '#fff' }}>
                         <colgroup>
                             <col style={{ width: labelWidth }} />
                             {flatCols.map(c => <col key={c.key} style={{ width: colWidth(c) }} />)}
                         </colgroup>
                         <thead ref={headRef}>
                             <tr ref={bandRef}>
-                                <th rowSpan={2} style={{ ...stickyLabel('#1f2937'), top: 0, zIndex: 24, verticalAlign: 'bottom', padding: '3px 8px', borderRight: '1px solid #4b5563', borderBottom: '1px solid #4b5563', cursor: labelValue ? 'pointer' : 'default', fontSize: 10.5, fontWeight: 700, letterSpacing: '.04em', color: '#e5e7eb', textAlign: 'left' }}
+                                <th rowSpan={2} style={{ ...stickyLabel('#334155'), top: 0, zIndex: 24, verticalAlign: 'middle', padding: '4px 8px', borderRight: '1px solid #475569', borderBottom: '2px solid #334155', cursor: labelValue ? 'pointer' : 'default', fontSize: 10.5, fontWeight: 700, letterSpacing: '.04em', color: '#f1f5f9', textAlign: 'left' }}
                                     onClick={labelValue ? () => onSort('__label__') : undefined}>
                                     {labelHeader}{arrow('__label__')}
                                 </th>
-                                {sections.map(s => (
-                                    <th key={s.group?.key ?? '__rest__'} colSpan={s.cols.length}
-                                        style={{
-                                            position: 'sticky', top: 0, zIndex: 20, textAlign: 'center', padding: '3px 8px', lineHeight: 1.1,
-                                            fontSize: 10, fontWeight: 700, letterSpacing: '.05em', textTransform: 'uppercase',
-                                            background: '#1f2937', color: '#cbd5e1',
-                                            borderLeft: s.group ? `2px solid ${s.group.color}` : undefined,
-                                            borderBottom: '1px solid #4b5563', whiteSpace: 'nowrap',
-                                        }}>
-                                        {s.group
-                                            ? <><span style={{ color: s.group.color }}>●</span> {s.group.label}</>
-                                            : 'Прочее'}
-                                    </th>
-                                ))}
+                                {/* Плашка группы — сплошной цвет группы: по нему глаз сразу режет
+                                    30 колонок на смысловые блоки (концепция Дениса 31.07) */}
+                                {sections.map(s => {
+                                    const color = s.group?.color ?? REST_COLOR;
+                                    return (
+                                        <th key={s.group?.key ?? '__rest__'} colSpan={s.cols.length}
+                                            style={{
+                                                position: 'sticky', top: 0, zIndex: 20, textAlign: 'center', verticalAlign: 'middle', padding: '4px 8px', lineHeight: '12px',
+                                                fontSize: 10, fontWeight: 700, letterSpacing: '.05em', textTransform: 'uppercase',
+                                                background: color, color: '#fff',
+                                                borderLeft: '2px solid #fff', borderRight: '1px solid rgba(255,255,255,.3)',
+                                                borderBottom: `1px solid ${color}`, whiteSpace: 'nowrap',
+                                            }}>
+                                            {s.group ? s.group.label : 'Прочее'}
+                                        </th>
+                                    );
+                                })}
                             </tr>
                             <tr>
-                                {sections.map(s => s.cols.map((c, ci) => (
-                                    <th key={c.key} className="fn-th" title={c.title} onClick={() => onSort(c.key)}
-                                        style={{
-                                            position: 'sticky', top: bandH, zIndex: 19, textAlign: 'right', padding: '3px 8px', lineHeight: 1.1,
-                                            fontSize: 10.5, fontWeight: 700, letterSpacing: '.02em',
-                                            background: '#374151', color: sort?.key === c.key ? '#93c5fd' : '#e5e7eb',
-                                            borderLeft: ci === 0 && s.group ? `2px solid ${s.group.color}` : undefined,
-                                            borderRight: '1px solid rgba(255,255,255,.09)',
-                                            borderBottom: '1px solid #4b5563', whiteSpace: 'nowrap', cursor: 'pointer', userSelect: 'none',
-                                        }}>
-                                        {c.label}{arrow(c.key)}
-                                    </th>
-                                )))}
+                                {/* Названия колонок — тот же цвет группы, только бледный:
+                                    видно, где кончается один блок и начинается другой */}
+                                {sections.map(s => s.cols.map((c, ci) => {
+                                    const color = s.group?.color ?? REST_COLOR;
+                                    return (
+                                        <th key={c.key} className="fn-th" title={c.title} onClick={() => onSort(c.key)}
+                                            style={{
+                                                position: 'sticky', top: bandH, zIndex: 19, textAlign: 'center', verticalAlign: 'middle', padding: '4px 8px', lineHeight: '12px',
+                                                fontSize: 10.5, fontWeight: 700, letterSpacing: '.02em',
+                                                background: tint(color, sort?.key === c.key ? 0.38 : 0.22),
+                                                color: '#1f2937',
+                                                borderLeft: ci === 0 ? '2px solid #fff' : `1px solid ${tint(color, 0.25)}`,
+                                                borderBottom: `2px solid ${color}`,
+                                                whiteSpace: 'nowrap', cursor: 'pointer', userSelect: 'none',
+                                            }}>
+                                            {c.label}{arrow(c.key)}
+                                        </th>
+                                    );
+                                }))}
                             </tr>
                         </thead>
                         <tbody>
                             {rows.length > 0 && (
                                 <tr ref={totalRef} style={{ background: TOTAL_BG }}>
-                                    <td style={stickyLabel(TOTAL_BG, 0, { fontWeight: 700, fontSize: 10.5, letterSpacing: '.05em', color: '#5b21b6' })}>ИТОГО</td>
+                                    <td style={stickyLabel(TOTAL_BG, 0, { fontWeight: 700, fontSize: 10.5, letterSpacing: '.05em', color: TOTAL_INK })}>ИТОГО</td>
                                     {sections.map(s => s.cols.map((c, ci) => {
                                         const v = totalOf.get(c.key) ?? null;
                                         return (
                                             <td key={c.key} style={{
-                                                textAlign: 'right', padding: '2px 8px', fontSize: 12, lineHeight: 1.05, fontFamily: MONO, fontWeight: 700,
-                                                whiteSpace: 'nowrap', color: v == null ? '#c4b5fd' : '#4c1d95', background: TOTAL_BG,
-                                                borderBottom: '1px solid #ddd6fe', borderRight: '1px solid rgba(76,29,149,.10)',
+                                                textAlign: 'right', verticalAlign: 'middle', padding: '2px 8px',
+                                                fontSize: 12, lineHeight: '13px', fontFamily: MONO, fontVariantNumeric: 'tabular-nums', fontWeight: 700,
+                                                whiteSpace: 'nowrap', color: v == null ? TOTAL_INK_DIM : TOTAL_INK, background: TOTAL_BG,
+                                                borderBottom: '1px solid #fbcfe8', borderRight: '1px solid rgba(219,39,119,.10)',
                                                 borderLeft: ci === 0 && s.group ? `2px solid ${s.group.color}` : undefined,
                                             }}>
                                                 {v == null ? '—' : (c.format ? c.format(v, {}) : v.toLocaleString('ru-RU'))}
