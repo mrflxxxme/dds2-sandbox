@@ -3814,6 +3814,7 @@ async def _migfull_units_by_request(
     if not targets:
         return {}
     req_guid_qty: dict[int, dict[str, int]] = {}
+    req_guid_names: dict[int, dict[str, str | None]] = {}
     req_accepted_gq: dict[int, dict[str, int]] = {}
     all_guids: set[str] = set()
     for r in targets:
@@ -3827,12 +3828,15 @@ async def _migfull_units_by_request(
         else:
             lines = _migfull_line_rows(raw.get("incoming_lines"))
         gq: dict[str, int] = {}
+        names: dict[str, str | None] = {}
         for p in _migfull_products_from_lines(lines, [], fact_field="delivery_qty"):
             guid = p["guid"]
             if p["qty"] > 0 and guid:
                 gq[guid] = gq.get(guid, 0) + p["qty"]
+                names[guid] = p.get("name")
         if gq:
             req_guid_qty[r.id] = gq
+            req_guid_names[r.id] = names
             all_guids.update(gq)
         # Факт приёмки (received_brief пишет enrich синка) — тоже в штуки.
         if r.kind == FfRequestKind.INBOUND.value and isinstance(raw.get("received_brief"), list):
@@ -3851,14 +3855,26 @@ async def _migfull_units_by_request(
         total_units = 0
         total_boxes = 0
         resolved_all = True
+        names = req_guid_names.get(rid, {})
         for guid, qty in gq.items():
             resolved = guid_barcodes.get(guid)
+            if resolved is None:
+                # Фолбэк по ИМЕНИ товара из строк документа: свежие SKU машины
+                # ещё не в зеркале (приёмки PVB-0000128/129 висели «без единиц»),
+                # но «короб N шт.» в названии определяет кратность и без ШК;
+                # имя без маркера короба — штучный SKU (units=1). Совсем без
+                # имени — состав неопределён.
+                name = names.get(guid)
+                if not name:
+                    resolved_all = False
+                    continue
+                m = _MIGFULL_BOX_UNITS_RE.search(name)
+                box_units = int(m.group(1)) if m else 1
+                resolved = ("", box_units if box_units > 1 else 1)
             if resolved:
                 total_units += qty * resolved[1]  # qty коробов/россыпи × штук в коробе
                 if resolved[1] > 1:
                     total_boxes += qty
-            else:
-                resolved_all = False
         # Пересчёт отдаём ТОЛЬКО при полностью разрезолвленном составе:
         # частичный НЕДОсчитывает (свежие SKU ещё не в зеркале — приёмка на
         # 4 707 показывала «1 119 шт»), и честнее сырое число, чем заниженные
