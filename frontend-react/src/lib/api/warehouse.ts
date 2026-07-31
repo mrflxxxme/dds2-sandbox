@@ -88,6 +88,10 @@ import type {
     StockSummaryRow,
     UnifiedStockRow,
     StockTransfer,
+    StockTransferStatus,
+    TransferAssignVehiclePayload,
+    TransferLogisticsReport,
+    AssemblyToTransferResponse,
     Warehouse,
     WarehouseStockRow,
     WbFboSupply,
@@ -182,17 +186,104 @@ export function addWarehouseMethods(api: ApiClient) {
         cancelShipment(shipmentId: number) { return api.request<OutboundShipment>('POST', `/api/v1/warehouse/shipments/${shipmentId}/cancel`); },
 
         // ─── Stock Transfers ─────────────────────────────────────────
-        getTransfers(inTransitOnly = false, warehouseId?: number) {
+        /**
+         * Список перемещений. `status`/`hasVehicle` — срез Листа логиста
+         * (`status=DRAFT&has_vehicle=false` — переезды, ждущие машину).
+         */
+        getTransfers(
+            inTransitOnly = false,
+            warehouseId?: number,
+            opts?: { status?: StockTransferStatus; hasVehicle?: boolean },
+        ) {
             const qs = new URLSearchParams({ in_transit: String(inTransitOnly) });
             if (warehouseId !== undefined) qs.set('warehouse_id', String(warehouseId));
+            if (opts?.status) qs.set('status', opts.status);
+            if (opts?.hasVehicle !== undefined) qs.set('has_vehicle', String(opts.hasVehicle));
             return api.request<StockTransfer[]>('GET', `/api/v1/warehouse/transfers?${qs.toString()}`);
         },
-        createTransfer(data: { from_warehouse_id: number; to_warehouse_id: number; comment?: string; is_defect?: boolean; defect_reason?: string; items: { barcode: string; quantity: number }[] }) {
+        /**
+         * Создание перемещения.
+         *
+         * 🔴 Семантика транспортной единицы здесь ДРУГАЯ, чем в assign-vehicle:
+         * `shipped_as_boxes` — обычный bool с дефолтом false («паллеты»), а не
+         * трёхзначный «null = не трогать». На создании трогать нечего: значения
+         * ещё нет. Количество и вес по-прежнему опциональны — переезд можно
+         * завести и без транспортной оценки.
+         */
+        createTransfer(data: {
+            from_warehouse_id: number;
+            to_warehouse_id: number;
+            comment?: string;
+            is_defect?: boolean;
+            defect_reason?: string;
+            items: { barcode: string; quantity: number }[];
+            pallets_count?: number | null;
+            pallet_weight_kg?: number | null;
+            shipped_as_boxes?: boolean;
+        }) {
             return api.request<StockTransfer>('POST', '/api/v1/warehouse/transfers', data);
+        },
+        /**
+         * GET /warehouse/transfers/logistics-report — стоимость логистики переездов
+         * между складами. Отдельный отчёт: маршруты переездов несопоставимы с
+         * отгрузками на WB и в обычные отчёты логистики не попадают.
+         */
+        getTransferLogisticsReport(params?: {
+            date_from?: string;
+            date_to?: string;
+            group_by?: 'day' | 'week' | 'month';
+            from_warehouse_id?: number;
+            to_warehouse_id?: number;
+            counterparty_id?: number;
+        }) {
+            const qs = new URLSearchParams();
+            if (params?.date_from) qs.set('date_from', params.date_from);
+            if (params?.date_to) qs.set('date_to', params.date_to);
+            if (params?.group_by) qs.set('group_by', params.group_by);
+            if (params?.from_warehouse_id != null) qs.set('from_warehouse_id', String(params.from_warehouse_id));
+            if (params?.to_warehouse_id != null) qs.set('to_warehouse_id', String(params.to_warehouse_id));
+            if (params?.counterparty_id != null) qs.set('counterparty_id', String(params.counterparty_id));
+            const q = qs.toString();
+            return api.request<TransferLogisticsReport>('GET', `/api/v1/warehouse/transfers/logistics-report${q ? `?${q}` : ''}`);
+        },
+        /** GET /warehouse/transfers/{id} — одно перемещение (деталка переезда). */
+        getTransfer(transferId: number) {
+            return api.request<StockTransfer>('GET', `/api/v1/warehouse/transfers/${transferId}`);
         },
         sendTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/send`); },
         completeTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/complete`); },
         cancelTransfer(transferId: number) { return api.request<MessageResponse>('DELETE', `/api/v1/warehouse/transfers/${transferId}`); },
+        /**
+         * POST /warehouse/transfers/{id}/assign-vehicle — машина и логистика переезда.
+         * Статус перемещения НЕ меняется (остаётся DRAFT): «машина назначена» —
+         * это непустой vehicle_assigned_at, отдельной ступени статуса нет.
+         * Назначать можно только в DRAFT — в пути/принято бэкенд вернёт 400.
+         */
+        assignTransferVehicle(transferId: number, data: TransferAssignVehiclePayload) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/assign-vehicle`, data);
+        },
+        /**
+         * POST /warehouse/transfers/assign-vehicle-bulk — одна машина на N переездов
+         * (три переезда на «транзит Питер» едут одной газелью). В отличие от заявок
+         * реквизиты ОБЩИЕ на все: `{ids, payload}`, пер-строчных дат/стоимостей нет.
+         * Первый отказ роняет весь вызов — частичное назначение логист бы не заметил.
+         */
+        assignTransferVehicleBulk(ids: number[], payload: TransferAssignVehiclePayload) {
+            return api.request<StockTransfer[]>('POST', '/api/v1/warehouse/transfers/assign-vehicle-bulk', { ids, payload });
+        },
+        /** POST /warehouse/transfers/{id}/unassign-vehicle — снять машину (только DRAFT). */
+        unassignTransferVehicle(transferId: number) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/unassign-vehicle`);
+        },
+        /**
+         * POST /warehouse/assembly/{id}/to-transfer — переделать заявку на сборку
+         * в переезд между складами. move_ff_links=false (дефолт) — зеркала ФФ
+         * остаются историей заявки. При списанном стоке бэкенд вернёт 400 с
+         * текстом про количество списанных единиц — показывать как ошибку формы.
+         */
+        convertAssemblyToTransfer(assemblyId: number, data: { to_warehouse_id: number; comment?: string; move_ff_links?: boolean }) {
+            return api.request<AssemblyToTransferResponse>('POST', `/api/v1/warehouse/assembly/${assemblyId}/to-transfer`, data);
+        },
 
         // ─── Defects ─────────────────────────────────────────────────
         getDefectStock(warehouseId: number) { return api.request<WarehouseStockRow[]>('GET', `/api/v1/warehouse/${warehouseId}/defects`); },

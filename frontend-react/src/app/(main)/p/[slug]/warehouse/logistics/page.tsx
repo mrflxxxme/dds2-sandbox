@@ -8,7 +8,7 @@ import { formatDate, formatNumber, exportToExcel } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import KpiCard from '@/components/KpiCard';
 import type { Column } from '@/components/DataTable';
-import type { AssemblyRequest, AssemblyStatus, LogisticsAnalyticsResponse, LogisticsRouteStat, LogisticsShipmentRow, LogisticsAnomalyType, CostForecastResponse, CostForecastWarehouse, GazelkaConfig } from '@/types/api';
+import type { AssemblyRequest, AssemblyStatus, LogisticsAnalyticsResponse, LogisticsRouteStat, LogisticsShipmentRow, LogisticsAnomalyType, CostForecastResponse, CostForecastWarehouse, GazelkaConfig, Warehouse } from '@/types/api';
 import LogisticsCostByPallets from './components/LogisticsCostByPallets';
 import LogisticsCostPerUnit from './components/LogisticsCostPerUnit';
 import LogisticsCarriers from './components/LogisticsCarriers';
@@ -17,6 +17,8 @@ import CreatePaymentRequestModal from './components/CreatePaymentRequestModal';
 import ShipmentPaymentsTab from './components/ShipmentPaymentsTab';
 import GazelkaModal from './components/GazelkaModal';
 import GazelkaOrdersTab from './components/GazelkaOrdersTab';
+import TransferLogisticsTab from './components/TransferLogisticsTab';
+import TransfersWorkSection from './components/TransfersWorkSection';
 
 // Сегменты аналитики истории отправок.
 type AnalyticsView = 'overview' | 'pallets' | 'per_unit' | 'carriers' | 'anomalies' | 'matrix';
@@ -242,7 +244,27 @@ export default function LogisticsPage() {
     const [error, setError] = useState('');
 
     // Tab
-    const [activeTab, setActiveTab] = useState<'active' | 'history' | 'payments' | 'gazelka'>('active');
+    // transfers — переезды между нашими складами: отдельный отчёт, в общие
+    // метрики логистики (маршруты на WB) они не ложатся принципиально.
+    const [activeTab, setActiveTab] = useState<'active' | 'history' | 'payments' | 'gazelka' | 'transfers'>('active');
+
+    // Справочник складов — один на страницу: оба блока переездов (рабочая
+    // секция и вкладка «Переезды») получают его пропом, иначе один и тот же
+    // список качался бы заново при каждом переключении вкладок.
+    const [warehousesDir, setWarehousesDir] = useState<Warehouse[]>([]);
+    useEffect(() => {
+        api.getWarehouses().then(setWarehousesDir).catch(() => {});
+    }, []);
+
+    // Диплинк на вкладку: ?tab=transfers — из сводки «Перемещения» на странице
+    // сборки. Читаем из location, а не useSearchParams: страница клиентская и
+    // тянуть за собой Suspense-границу ради одного параметра незачем.
+    useEffect(() => {
+        try {
+            const t = new URLSearchParams(window.location.search).get('tab');
+            if (t === 'transfers' || t === 'payments' || t === 'gazelka' || t === 'history') setActiveTab(t);
+        } catch { /* SSR — эффект не выполнится, дефолт остаётся */ }
+    }, []);
     // History tab — построчные отправки (источник для сортируемой таблицы)
     const [shipmentRows, setShipmentRows] = useState<LogisticsShipmentRow[]>([]);
     const [shipmentsTotal, setShipmentsTotal] = useState(0);
@@ -812,9 +834,17 @@ export default function LogisticsPage() {
                     <button
                         className={`btn ${activeTab === 'gazelka' ? 'btn-primary' : 'btn-secondary'}`}
                         onClick={() => setActiveTab('gazelka')}
-                        style={{ borderRadius: '0 8px 8px 0' }}
+                        style={{ borderRadius: 0 }}
                     >
                         🚚 Газелька
+                    </button>
+                    <button
+                        className={`btn ${activeTab === 'transfers' ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={() => setActiveTab('transfers')}
+                        style={{ borderRadius: '0 8px 8px 0' }}
+                        title="Стоимость логистики переездов между нашими складами — отдельно от маршрутов на WB"
+                    >
+                        📦 Переезды
                     </button>
                 </div>
                 {activeTab === 'active' && (
@@ -849,6 +879,8 @@ export default function LogisticsPage() {
 
             {activeTab === 'gazelka' ? (
                 <GazelkaOrdersTab />
+            ) : activeTab === 'transfers' ? (
+                <TransferLogisticsTab warehouses={warehousesDir} />
             ) : activeTab === 'payments' ? (
                 <ShipmentPaymentsTab />
             ) : activeTab === 'active' ? (
@@ -1344,6 +1376,11 @@ export default function LogisticsPage() {
                             ))}
                         </div>
                     )}
+
+                    {/* Переезды между нашими складами — тот же рабочий процесс
+                        (машина на выделенные), но отдельным блоком: это не
+                        заявки на сборку и в их группировку они не ложатся. */}
+                    <TransfersWorkSection warehouses={warehousesDir} />
                 </>
             ) : (
                 /* History tab */

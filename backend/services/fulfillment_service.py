@@ -3771,17 +3771,27 @@ async def list_requests(
     warehouse_id: int,
     kind: str | None = None,
     show_archived: bool = False,
+    stock_transfer_id: int | None = None,
 ) -> list[dict]:
     """Зеркало заявок ФФ с обогащением linked_number/linked_status (без N+1).
 
     show_archived=False (дефолт) — только НЕ архивные локально;
     show_archived=True — только локальный архив (вид «Архив»).
+
+    stock_transfer_id — связки КОНКРЕТНОГО переезда (обе стороны: отгрузочная у
+    склада-источника и приёмочная у получателя). Без него карточка переезда
+    тянула два полных списка заявок ФФ (~300 КБ) ради 0-2 связок, а на складе с
+    432 заявками при лимите 500 связка вот-вот перестала бы находиться вовсе.
+    Фильтр снимает и скоуп по складу: у переезда две стороны — два разных склада.
     """
     q = select(FulfillmentRequest).where(
         FulfillmentRequest.project_id == project_id,
-        FulfillmentRequest.warehouse_id == warehouse_id,
         FulfillmentRequest.local_archived == show_archived,
     )
+    if stock_transfer_id is not None:
+        q = q.where(FulfillmentRequest.stock_transfer_id == stock_transfer_id)
+    else:
+        q = q.where(FulfillmentRequest.warehouse_id == warehouse_id)
     if kind:
         q = q.where(FulfillmentRequest.kind == kind)
     q = q.order_by(
@@ -4385,7 +4395,14 @@ async def get_overview(
                 FulfillmentRequest.warehouse_id,
                 FulfillmentRequest.provider,
                 func.count(FulfillmentRequest.id),
-                func.count(FulfillmentRequest.id).filter(FulfillmentRequest.assembly_request_id.is_(None)),
+                # «Несвязанных» — у кого пуст ЛЮБОЙ из двух слотов сборки:
+                # своя заявка или переезд (отгрузочная сторона). Бейдж обязан
+                # совпадать с фильтром `only_unlinked` ниже, иначе счётчик
+                # показывает N, а список — пусто.
+                func.count(FulfillmentRequest.id).filter(
+                    FulfillmentRequest.assembly_request_id.is_(None),
+                    FulfillmentRequest.stock_transfer_id.is_(None),
+                ),
             )
             .where(
                 FulfillmentRequest.project_id == project_id,
@@ -4431,7 +4448,14 @@ async def get_overview(
                     FulfillmentRequest.stock_transfer_id.is_(None),
                 )
             elif kind == FfRequestKind.ASSEMBLY.value:
-                q = q.where(FulfillmentRequest.assembly_request_id.is_(None))
+                # Сборка тоже имеет ДВА слота: собственная заявка ИЛИ переезд
+                # (отгрузочная сторона переезда у ФФ-источника). Без второго
+                # условия связанная с переездом сборка навсегда оставалась бы в
+                # блоке «без нашего документа» и провоцировала повторную привязку.
+                q = q.where(
+                    FulfillmentRequest.assembly_request_id.is_(None),
+                    FulfillmentRequest.stock_transfer_id.is_(None),
+                )
             else:
                 q = q.where(
                     FulfillmentRequest.assembly_request_id.is_(None),
@@ -6468,8 +6492,14 @@ async def link_request(
     ready_notify: dict[str, object] | None = None
 
     if stock_transfer_id is not None:
-        if req.kind != FfRequestKind.INBOUND.value:
-            raise ValueError("stock_transfer_id можно привязать только к ФФ-заявке типа inbound")
+        # Переезд между нашими ФФ-складами виден провайдерам С ОБЕИХ СТОРОН:
+        # у склада-ИСТОЧНИКА он выглядит сборкой (kind=assembly — ФФ собирает и
+        # отдаёт машине), у склада-НАЗНАЧЕНИЯ приёмкой (kind=inbound). Обе
+        # стороны вяжем к одному StockTransfer; сторона определяется складом.
+        if req.kind not in (FfRequestKind.INBOUND.value, FfRequestKind.ASSEMBLY.value):
+            raise ValueError(
+                "stock_transfer_id можно привязать только к ФФ-заявке типа inbound или assembly"
+            )
         tr_result = await db.execute(
             select(StockTransfer).where(
                 StockTransfer.id == stock_transfer_id,
@@ -6480,21 +6510,31 @@ async def link_request(
         tr_doc = tr_result.scalar_one_or_none()
         if not tr_doc:
             raise ValueError("Перемещение не найдено в проекте")
-        # Склад заявки ФФ — тот, КУДА приехало. Исходящее перемещение с этого
-        # склада приёмкой у провайдера обернуться не может.
-        if tr_doc.to_warehouse_id != req.warehouse_id:
-            raise ValueError("Перемещение приходует другой склад")
-        conflict = await db.execute(
-            select(FulfillmentRequest.id)
-            .where(
-                FulfillmentRequest.project_id == project_id,
-                FulfillmentRequest.stock_transfer_id == stock_transfer_id,
-                FulfillmentRequest.id != ff_request_id,
+        if req.kind == FfRequestKind.INBOUND.value:
+            # Приёмка — сторона получателя: товар приехал на её склад.
+            if tr_doc.to_warehouse_id != req.warehouse_id:
+                raise ValueError("Перемещение приходует другой склад")
+        # Сборка — сторона отправителя: ФФ собирает переезд на складе забора.
+        elif tr_doc.from_warehouse_id != req.warehouse_id:
+            raise ValueError("Перемещение отгружает другой склад")
+        # 1:1 — ВНУТРИ СВОЕЙ СТОРОНЫ: у переезда законно живут одновременно
+        # отгрузочное зеркало источника и приёмочное зеркало получателя, поэтому
+        # конфликт ищем только среди заявок ТОГО ЖЕ kind. migfull («Натали»)
+        # дробит один наш документ на 2+ своих заявки — для него N:1 разрешаем,
+        # как уже сделано для сборок и приёмок выше.
+        if req.provider != "migfull":
+            conflict = await db.execute(
+                select(FulfillmentRequest.id)
+                .where(
+                    FulfillmentRequest.project_id == project_id,
+                    FulfillmentRequest.stock_transfer_id == stock_transfer_id,
+                    FulfillmentRequest.kind == req.kind,
+                    FulfillmentRequest.id != ff_request_id,
+                )
+                .limit(1)
             )
-            .limit(1)
-        )
-        if conflict.scalar_one_or_none() is not None:
-            raise ValueError("Перемещение уже связано с другой ФФ-заявкой")
+            if conflict.scalar_one_or_none() is not None:
+                raise ValueError("Перемещение уже связано с другой ФФ-заявкой этой стороны")
         req.stock_transfer_id = stock_transfer_id
         # Приёмку перемещения (`complete_transfer`) НЕ автоматизируем, в отличие
         # от авто-ACCEPT приёмки ниже: перемещение постит сток на ОБА склада, и
@@ -7040,27 +7080,47 @@ async def _transfer_candidates(
     project_id: int,
     warehouse_id: int,
     ff_request_id: int,
+    *,
+    outgoing: bool = False,
 ) -> tuple[list[StockTransfer], dict[int, dict[str, int]]]:
-    """Входящие перемещения склада, не связанные с ДРУГИМИ ФФ-заявками, + позиции.
+    """Перемещения склада, не связанные с ДРУГИМИ ФФ-заявками той же стороны, + позиции.
 
-    Только ВХОДЯЩИЕ (`to_warehouse_id`) и только отправленные: черновик ещё не
-    выехал, физически приходовать провайдеру нечего — предлагать его в
-    кандидаты значит звать связать заявку с несуществующим переездом.
+    `outgoing=False` (приёмка, kind=inbound) — ВХОДЯЩИЕ (`to_warehouse_id`) и
+    только отправленные: черновик ещё не выехал, физически приходовать
+    провайдеру нечего — предлагать его в кандидаты значит звать связать заявку
+    с несуществующим переездом.
+
+    `outgoing=True` (сборка, kind=assembly) — ИСХОДЯЩИЕ (`from_warehouse_id`) и
+    наоборот, ещё не приехавшие: ФФ собирает переезд ДО отправки, поэтому
+    черновик здесь законный кандидат, а COMPLETED — уже закрытая история.
+
+    Занятость считается ПО СВОЕЙ СТОРОНЕ: отгрузочное зеркало источника не
+    должно прятать переезд от приёмочного зеркала получателя, и наоборот.
     """
     linked_subq = select(FulfillmentRequest.stock_transfer_id).where(
         FulfillmentRequest.project_id == project_id,
         FulfillmentRequest.stock_transfer_id.is_not(None),
+        FulfillmentRequest.kind
+        == (FfRequestKind.ASSEMBLY.value if outgoing else FfRequestKind.INBOUND.value),
         FulfillmentRequest.id != ff_request_id,
+    )
+    side_filter = (
+        StockTransfer.from_warehouse_id == warehouse_id
+        if outgoing
+        else StockTransfer.to_warehouse_id == warehouse_id
+    )
+    statuses = (
+        (TransferStatus.DRAFT.value, TransferStatus.IN_TRANSIT.value)
+        if outgoing
+        else (TransferStatus.IN_TRANSIT.value, TransferStatus.COMPLETED.value)
     )
     result = await db.execute(
         select(StockTransfer)
         .where(
             StockTransfer.project_id == project_id,
-            StockTransfer.to_warehouse_id == warehouse_id,
+            side_filter,
             StockTransfer.is_deleted == False,  # noqa: E712 — SQLAlchemy expression
-            StockTransfer.status.in_(
-                (TransferStatus.IN_TRANSIT.value, TransferStatus.COMPLETED.value)
-            ),
+            StockTransfer.status.in_(statuses),
             StockTransfer.id.not_in(linked_subq),
         )
         .order_by(StockTransfer.created_at.desc(), StockTransfer.id.desc())
@@ -7137,6 +7197,11 @@ async def get_link_candidates(
         docs, items_by_doc, linked_by_doc = await _assembly_candidates(
             db, project_id, warehouse_id, ff_request_id, provider=req.provider
         )
+        # Сборка у ФФ-источника может быть отгрузочной стороной ПЕРЕЕЗДА (товар
+        # едет не на WB, а на наш другой склад) — предлагаем и исходящие переезды.
+        transfers, transfer_items = await _transfer_candidates(
+            db, project_id, warehouse_id, ff_request_id, outgoing=True
+        )
     else:
         docs, items_by_doc, linked_by_doc = await _inbound_candidates(
             db, project_id, warehouse_id, ff_request_id, provider=req.provider
@@ -7145,9 +7210,11 @@ async def get_link_candidates(
             db, project_id, warehouse_id, ff_request_id
         )
 
-    # Имена складов-источников перемещений — одним запросом (в строке кандидата
-    # «TR-21» без «откуда» неразличимы между собой).
-    source_names = await _warehouse_names(db, project_id, {t.from_warehouse_id for t in transfers})
+    # Имена «второго конца» перемещений — одним запросом (в строке кандидата
+    # «TR-21» без него неразличимы между собой): для приёмки это склад-источник,
+    # для сборки — склад-получатель.
+    other_end_ids = {(t.to_warehouse_id if is_assembly else t.from_warehouse_id) for t in transfers}
+    source_names = await _warehouse_names(db, project_id, other_end_ids)
 
     candidates = []
     for doc in [*docs, *transfers]:
@@ -7167,8 +7234,12 @@ async def get_link_candidates(
             dest_warehouse = doc.wb_warehouse_name_manual or (supply.warehouse_name if supply else None)
         elif is_transfer:
             # Поле мета-строки кандидата: у перемещения вместо склада сдачи
-            # осмысленно показать, ОТКУДА оно приехало.
-            dest_warehouse = f"← {source_names.get(doc.from_warehouse_id, f'#{doc.from_warehouse_id}')}"
+            # осмысленно показать второй конец маршрута — для приёмки откуда
+            # приехало, для сборки куда повезут.
+            if is_assembly:
+                dest_warehouse = f"→ {source_names.get(doc.to_warehouse_id, f'#{doc.to_warehouse_id}')}"
+            else:
+                dest_warehouse = f"← {source_names.get(doc.from_warehouse_id, f'#{doc.from_warehouse_id}')}"
 
         candidates.append(
             {
@@ -7182,8 +7253,12 @@ async def get_link_candidates(
                 "dest_warehouse": dest_warehouse,
                 "score": score,
                 "reason": reason,
-                # Совпадение склада сдачи — только для сборок (у приёмок склада сдачи нет → не фильтруем)
-                "warehouse_match": _wh_names_match(ff_dest, dest_warehouse) if is_assembly else True,
+                # Совпадение склада сдачи — только для сборок (у приёмок склада сдачи нет → не фильтруем).
+                # Переезд из фильтра выведен: его «склад сдачи» — наш собственный
+                # склад-получатель, а ff_dest у сборки-переезда обычно пуст.
+                "warehouse_match": (
+                    _wh_names_match(ff_dest, dest_warehouse) if (is_assembly and not is_transfer) else True
+                ),
                 # >0 только для migfull (сборка/приёмка уже связана с N другими ФФ-заявками)
                 "linked_ff_count": linked_by_doc.get(doc.id, 0) if not is_transfer else 0,
             }

@@ -6,7 +6,7 @@ Warehouse schemas: request/response models for warehouse module.
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ─── Warehouse ──────────────────────────────────────────────────────────────
 
@@ -180,6 +180,10 @@ class OutboundShipmentSchema(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
     items: list[OutboundShipmentItemSchema] = []
+    # Непустой → это забор ВНУТРЕННЕГО ПЕРЕЕЗДА, а не отгрузка на маркетплейс:
+    # UI обязан отличать (кнопка «Отменить отгрузку» на нём запрещена — сток
+    # принадлежит перемещению) и вести по ссылке на деталку перемещения.
+    stock_transfer_id: int | None = None
 
 
 # ─── Stock Transfer (Перемещение) ──────────────────────────────────────────
@@ -206,6 +210,12 @@ class StockTransferCreate(BaseModel):
     is_defect: bool = False
     defect_reason: str | None = None
     items: list[StockTransferItemCreate] = []
+    # Транспортная единица переезда: shipped_as_boxes меняет только ЕДИНИЦУ
+    # измерения pallets_count/pallet_weight_kg (паллеты по умолчанию, короба —
+    # при True) и подписи в UI.
+    pallets_count: int | None = Field(default=None, ge=0)
+    pallet_weight_kg: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+    shipped_as_boxes: bool = False
 
 
 class StockTransferSchema(BaseModel):
@@ -237,6 +247,20 @@ class StockTransferSchema(BaseModel):
     delivery_date: date | None = None
     vehicle_assigned_at: datetime | None = None
     converted_from_assembly_id: int | None = None
+    pallets_count: int | None = None
+    pallet_weight_kg: Decimal | None = None
+    shipped_as_boxes: bool = False
+    # Подписи — заполняются сервисом пачкой (не relationship): без них Лист
+    # логиста догружал бы справочники складов и контрагентов отдельно, а
+    # карточка показывала «Контрагент #12».
+    from_warehouse_name: str | None = None
+    to_warehouse_name: str | None = None
+    counterparty_name: str | None = None
+    # Итоги состава для СПИСКА. В списке `items` НЕ ОТДАЁТСЯ (всегда пустой) —
+    # полный состав там весит мегабайты, а потребителям нужны только эти два
+    # числа. За составом — `GET /warehouse/transfers/{id}`.
+    units_total: int = 0
+    sku_count: int = 0
 
 
 class TransferAssignVehicle(BaseModel):
@@ -245,20 +269,68 @@ class TransferAssignVehicle(BaseModel):
     logistics_by_warehouse=True → перевозчик берётся из контрагента склада-
     ИСТОЧНИКА, поля carrier_* игнорируются. Иначе перевозчик резолвится по
     carrier_inn / carrier_name.
+
+    Транспортная единица (pallets_count / pallet_weight_kg / shipped_as_boxes)
+    здесь ОПЦИОНАЛЬНА и трёхзначна: логист часто уточняет её именно в момент
+    назначения машины, но пустое поле НЕ затирает уже заданное на переезде
+    (например, унаследованное от заявки при конвертации).
     """
 
-    vehicle_info: str | None = None
-    vehicle_brand: str | None = None
-    driver_first_name: str | None = None
-    driver_last_name: str | None = None
-    driver_phone: str | None = None
+    # Границы полей — не формальность: отрицательная стоимость забора молча
+    # доехала бы снимком в OutboundShipment и занизила бы `total_cost` /
+    # `cost_per_pallet` в отчёте логистики переездов (гарда на знак там нет),
+    # а строка длиннее колонки или `Decimal` вне Numeric(18,2) даёт 500 из
+    # asyncpg (сервис ловит только ValueError).
+    vehicle_info: str | None = Field(default=None, max_length=300)
+    vehicle_brand: str | None = Field(default=None, max_length=100)
+    driver_first_name: str | None = Field(default=None, max_length=100)
+    driver_last_name: str | None = Field(default=None, max_length=100)
+    driver_phone: str | None = Field(default=None, max_length=30)
     logistics_by_warehouse: bool = False
-    carrier_inn: str | None = None
-    carrier_name: str | None = None
+    carrier_inn: str | None = Field(default=None, max_length=20)
+    carrier_name: str | None = Field(default=None, max_length=300)
     pickup_date: date | None = None
-    pickup_time_slot: str | None = None
-    pickup_cost: Decimal | None = None
+    pickup_time_slot: str | None = Field(default=None, max_length=20)
+    pickup_cost: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=2)
     delivery_date: date | None = None
+    pallets_count: int | None = Field(default=None, ge=0)
+    pallet_weight_kg: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+    shipped_as_boxes: bool | None = None
+
+    @model_validator(mode="after")
+    def _require_vehicle_identity(self) -> "TransferAssignVehicle":
+        """Пустое тело не должно «назначать» машину-призрак.
+
+        Все поля здесь опциональны (в отличие от AssignVehicle заявки), поэтому
+        `{}` проходил бы валидацию и ставил `vehicle_assigned_at`: переезд
+        попадал в срез «машина назначена», рисовал блок из сплошных «—», а при
+        отправке порождал забор БЕЗ перевозчика и БЕЗ суммы — ровно тот мусор в
+        рабочем списке оплат, против которого написан гард в `_create_transfer_pickup`.
+        Достаточно любого признака: госномер, ИНН подрядчика или «логистику
+        оказывает склад забора» (там перевозчик берётся из склада).
+        """
+        if not (self.vehicle_info or self.carrier_inn or self.carrier_name or self.logistics_by_warehouse):
+            raise ValueError(
+                "Укажите госномер машины, перевозчика или отметьте «логистику оказывает склад забора»"
+            )
+        return self
+
+
+class TransferAssignVehicleBulk(BaseModel):
+    """Одна машина на N переездов (Лист логиста: три переезда на «транзит Питер»
+    едут одной газелью). Реквизиты общие для всех — в отличие от заявок, где
+    дата/стоимость забора задаются пер-строчно."""
+
+    # Верхняя граница списка обязательна: `rate_limit_write` считает ЗАПРОСЫ, а
+    # не элементы тела, и один POST со 150k id развернулся бы в 150k циклов
+    # «SELECT FOR UPDATE → commit → invalidate_cache», где инвалидация — полный
+    # SCAN по Redis, общему для ВСЕХ проектов. Назначение машины не меняет
+    # статус, поэтому один и тот же id принимается повторно — своего черновика
+    # хватило бы для амплификации.
+    # Нижней границы намеренно нет: пустой список — законный no-op (вернёт []),
+    # отбивать его 422 значит ломать безобидный вызов ради ничего.
+    ids: list[int] = Field(default_factory=list, max_length=200)
+    payload: TransferAssignVehicle
 
 
 class AssemblyToTransfer(BaseModel):
@@ -282,6 +354,100 @@ class AssemblyToTransferResult(BaseModel):
     items_count: int
     units_total: int
     ff_links_moved: int = 0
+    #: Заявка была активной и отменена конвертацией (иначе её резерв остался бы
+    #: висеть на складе, а «Отгрузить» списала бы те же единицы второй раз).
+    #: False — заявка была терминальной, её статус не трогали.
+    assembly_cancelled: bool = False
+
+
+# ─── Отчёт «Логистика переездов» ──────────────────────────────────────────
+# Источник — ТОЛЬКО заборы переездов (`outbound_shipments.stock_transfer_id IS
+# NOT NULL`). Намеренно отдельный от логистической аналитики сборок: там INNER
+# JOIN по заявке на сборку, и маршрут «наш склад → наш склад» несопоставим с
+# маршрутами на WB — смешение испортило бы медианы и прогнозную модель.
+# ₽/паллета считается ТОЛЬКО по паллетным переездам (`shipped_as_boxes=False`):
+# у коробочных `pallets_count` — это короба, смешивать их в одну метрику нельзя.
+# Коробочный объём выборки виден отдельно (`total_boxes`).
+
+
+class TransferLogisticsSummary(BaseModel):
+    transfers_count: int
+    total_cost: Decimal
+    avg_cost: Decimal | None = None
+    total_units: int
+    cost_per_unit: Decimal | None = None
+    paid_cost: Decimal
+    unpaid_cost: Decimal
+    total_pallets: int = 0
+    cost_per_pallet: Decimal | None = None
+    #: Σ pallets_count по переездам, едущим КОРОБАМИ (shipped_as_boxes=True).
+    total_boxes: int = 0
+    #: Детализация (`rows`) усечена потолком, СВОДКА при этом полная. UI обязан
+    #: показать это явно: без флага «показано 1000 строк» читается как «всего
+    #: 1000 переездов», хотя `transfers_count` говорит другое.
+    rows_truncated: bool = False
+
+
+class TransferLogisticsRoute(BaseModel):
+    from_warehouse_id: int
+    from_warehouse: str
+    to_warehouse_id: int
+    to_warehouse: str
+    transfers_count: int
+    total_cost: Decimal
+    avg_cost: Decimal | None = None
+    total_units: int
+    cost_per_unit: Decimal | None = None
+    total_pallets: int = 0
+    cost_per_pallet: Decimal | None = None
+
+
+class TransferLogisticsCarrier(BaseModel):
+    counterparty_id: int | None = None
+    counterparty_name: str | None = None
+    transfers_count: int
+    total_cost: Decimal
+    avg_cost: Decimal | None = None
+
+
+class TransferLogisticsPeriod(BaseModel):
+    period: str
+    transfers_count: int
+    total_cost: Decimal
+    total_units: int
+    cost_per_unit: Decimal | None = None
+    total_pallets: int = 0
+    cost_per_pallet: Decimal | None = None
+
+
+class TransferLogisticsRow(BaseModel):
+    transfer_id: int
+    transfer_number: str
+    shipment_id: int
+    shipment_number: str
+    shipped_date: date | None = None
+    from_warehouse: str
+    to_warehouse: str
+    vehicle_info: str | None = None
+    counterparty_name: str | None = None
+    pickup_cost: Decimal | None = None
+    units_total: int
+    sku_count: int
+    transfer_status: str
+    payment_request_number: str | None = None
+    is_paid: bool
+    #: Транспортная единица переезда: pallets_count — паллеты, либо короба при
+    #: shipped_as_boxes=True (одно поле, две единицы — как у заявки на сборку).
+    pallets_count: int | None = None
+    shipped_as_boxes: bool = False
+
+
+class TransferLogisticsReport(BaseModel):
+    summary: TransferLogisticsSummary
+    by_route: list[TransferLogisticsRoute] = []
+    by_carrier: list[TransferLogisticsCarrier] = []
+    by_period: list[TransferLogisticsPeriod] = []
+    rows: list[TransferLogisticsRow] = []
 
 
 # ─── Stock Movement (Журнал) ──────────────────────────────────────────────

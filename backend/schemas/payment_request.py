@@ -300,6 +300,10 @@ class ShippableShipmentRow(BaseModel):
 
     outbound_shipment_id: int
     assembly_request_id: int | None = None
+    # Забор внутреннего переезда: у него assembly_request_id пуст, и строка ведёт
+    # не на заявку на сборку, а на деталку перемещения. Без этого поля рабочий
+    # список логиста показывал бы переезд некликабельной строкой.
+    stock_transfer_id: int | None = None
     number: str
     destination: str | None = None
     shipped_date: date | None = None

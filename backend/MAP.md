@@ -39,6 +39,7 @@ from backend.models.mixins import SoftDeleteMixin
 | FBO-гейт FBS («отдаём только то, чего нет на складах WB») | `services/wb_fbs/stock_service.py:_load_fbo` / `_fbo_allowed_names` / `_fbo_blocks`; порог — `WbFbsWarehouse.fbo_max_qty` |
 | Режим склада продавца (`observe` — не писать в WB / `translate`) | `models/wb_fbs.py:FbsWarehouseMode`, гейт — `services/wb_fbs/stock_service.py:_push_stocks_locked` |
 | Обратный гейт FBS → сборка | `services/warehouse_stock_engine.py:get_open_fbs_reserved` → `services/assembly/crud.py:_validate_available_for_assembly` |
+| Логистика переездов между складами | `services/transfer_logistics.py` — отчёт стоимости и расходов по маршрутам (₽/паллета паллетных, отдельный счётчик коробочных) |
 | Telegram-бот | `integrations/telegram_bot.py` |
 | Фоновые задачи | `scheduler/jobs/` |
 | Кэш | `cache.py` |

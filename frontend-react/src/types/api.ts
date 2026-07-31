@@ -1239,6 +1239,14 @@ export interface OutboundShipment {
   created_at?: string;
   updated_at?: string;
   items: OutboundShipmentItem[];
+  /**
+   * Забор внутреннего ПЕРЕЕЗДА, а не отгрузка на маркетплейс.
+   * Такой забор нельзя отменять через отгрузку: сток он никогда не списывал,
+   * и отмена вернула бы на склад несуществующие единицы — отменяется только
+   * через само перемещение (бэкенд на «Отгрузить»/«Доставлено»/«Отменить»
+   * отвечает 400 — гард UI дублирует серверный, а не заменяет его).
+   */
+  stock_transfer_id?: number | null;
 }
 
 export interface StockTransferItem {
@@ -1249,19 +1257,181 @@ export interface StockTransferItem {
   quantity: number;
 }
 
+/** Статусы переезда: черновик → в пути → принято (ступени «машина назначена» НЕТ). */
+export type StockTransferStatus = 'DRAFT' | 'IN_TRANSIT' | 'COMPLETED';
+
 export interface StockTransfer {
   id: number;
   project_id: number;
   from_warehouse_id: number;
   to_warehouse_id: number;
   number: string;
-  status: 'DRAFT' | 'IN_TRANSIT' | 'COMPLETED';
+  status: StockTransferStatus;
   comment?: string;
   is_defect: boolean;
   defect_reason?: string;
   created_at?: string;
   updated_at?: string;
-  items: StockTransferItem[];
+  /**
+   * Состав. Есть только в `GET /transfers/{id}`: из ответа СПИСКА он убран —
+   * тянуть полный состав всех переездов ради двух чисел стоило мегабайты.
+   * Для «сколько там всего» есть units_total / sku_count (см. ниже).
+   */
+  items?: StockTransferItem[];
+  /** Штук всего — считает бэкенд; в списке это единственный источник. */
+  units_total?: number;
+  /** Позиций (SKU) — тоже с бэкенда, состав для этого больше не нужен. */
+  sku_count?: number;
+
+  // ─── Машина и логистика переезда (зеркало блока «Назначить машину» заявки) ───
+  vehicle_info?: string | null;
+  vehicle_brand?: string | null;
+  driver_first_name?: string | null;
+  driver_last_name?: string | null;
+  driver_phone?: string | null;
+  /** Перевозчик: контрагент склада-источника (logistics_by_warehouse) либо подрядчик по ИНН. */
+  counterparty_id?: number | null;
+  logistics_by_warehouse?: boolean;
+  pickup_date?: string | null;
+  pickup_time_slot?: string | null;
+  /** Numeric(18,2) сериализуется СТРОКОЙ — приводить через transferPickupCost(). */
+  pickup_cost?: string | number | null;
+  delivery_date?: string | null;
+  vehicle_assigned_at?: string | null;
+  /** Заявка на сборку, из которой переделали этот переезд (кнопка «Переделать в перемещение»). */
+  converted_from_assembly_id?: number | null;
+
+  // ─── Транспортная единица (семантика 1:1 с AssemblyRequest) ─────────────
+  // Флаг меняет только ЕДИНИЦУ измерения pallets_count/pallet_weight_kg и
+  // подписи: «Палеты» / «Вес 1 палеты» против «Короба» / «Вес 1 короба».
+  // В отличие от заявки — nullable: переезд можно завести без оценки.
+  pallets_count?: number | null;
+  /** Вес ОДНОЙ единицы (Numeric → строка). */
+  pallet_weight_kg?: string | number | null;
+  shipped_as_boxes?: boolean;
+
+  // Обогащение, которое сервис заполняет пачкой (не relationship).
+  // Всё, чего в схеме НЕТ, объявлять тут нельзя: «поле есть, тип верный, в
+  // рантайме вечный null» не ловится ни типами, ни ревью. Поэтому связок ФФ и
+  // данных расхода по забору здесь не будет — связки карточка берёт со стороны
+  // ФФ (stock_transfer_id заявки), оплату показывает «Лист логиста».
+  from_warehouse_name?: string | null;
+  to_warehouse_name?: string | null;
+  /** Имя перевозчика. Пока не приехало — UI честно падает на «Контрагент #id». */
+  counterparty_name?: string | null;
+}
+
+/** Тело POST /warehouse/transfers/{id}/assign-vehicle. */
+export interface TransferAssignVehiclePayload {
+  vehicle_info: string;
+  vehicle_brand: string;
+  driver_first_name: string;
+  driver_last_name: string;
+  driver_phone: string;
+  logistics_by_warehouse: boolean;
+  carrier_inn: string | null;
+  carrier_name: string | null;
+  pickup_date: string;
+  pickup_time_slot: string;
+  pickup_cost: number;
+  delivery_date: string;
+  // Транспортная единица. null = «не трогать»: бэкенд игнорирует null и не
+  // затирает уже заданное значение (пустое поле формы ≠ обнуление).
+  // Важно для bulk: если логист единицу не трогал, шлём null во всех трёх —
+  // иначе дефолт «паллеты» перевёл бы коробочный переезд в паллетный.
+  pallets_count: number | null;
+  pallet_weight_kg: number | null;
+  shipped_as_boxes: boolean | null;
+}
+
+// ─── Отчёт логистики переездов (GET /warehouse/transfers/logistics-report) ───
+// Денежные поля — Numeric, приезжают СТРОКОЙ: приводить через toMoney().
+
+export interface TransferLogisticsSummary {
+  transfers_count: number;
+  total_cost: string | number | null;
+  avg_cost: string | number | null;
+  total_units: number;
+  cost_per_unit: string | number | null;
+  /** Стоимость заборов с проведённой оплатой / без неё. */
+  paid_cost: string | number | null;
+  unpaid_cost: string | number | null;
+  /** Паллет в ПАЛЛЕТНЫХ переездах и коробов в коробочных — единицы разные, не суммируются. */
+  total_pallets: number;
+  total_boxes: number;
+  /** ₽/паллета считается ТОЛЬКО по паллетным переездам (коробочные в знаменатель не идут). */
+  cost_per_pallet: string | number | null;
+}
+
+export interface TransferLogisticsRouteRow {
+  from_warehouse_id: number;
+  from_warehouse: string | null;
+  to_warehouse_id: number;
+  to_warehouse: string | null;
+  transfers_count: number;
+  total_cost: string | number | null;
+  avg_cost: string | number | null;
+  total_units: number;
+  cost_per_unit: string | number | null;
+  total_pallets: number;
+  cost_per_pallet: string | number | null;
+}
+
+export interface TransferLogisticsCarrierRow {
+  counterparty_id: number | null;
+  counterparty_name: string | null;
+  transfers_count: number;
+  total_cost: string | number | null;
+  avg_cost: string | number | null;
+}
+
+export interface TransferLogisticsPeriodRow {
+  period: string;
+  transfers_count: number;
+  total_cost: string | number | null;
+  total_units: number;
+  cost_per_unit: string | number | null;
+  total_pallets: number;
+  cost_per_pallet: string | number | null;
+}
+
+export interface TransferLogisticsDetailRow {
+  transfer_id: number;
+  transfer_number: string;
+  shipment_id: number | null;
+  shipment_number: string | null;
+  shipped_date: string | null;
+  from_warehouse: string | null;
+  to_warehouse: string | null;
+  vehicle_info: string | null;
+  counterparty_name: string | null;
+  pickup_cost: string | number | null;
+  units_total: number;
+  sku_count: number;
+  transfer_status: StockTransferStatus | string;
+  payment_request_number: string | null;
+  is_paid: boolean;
+  /** Транспортная единица переезда: количество + чем меряем (флаг). */
+  pallets_count: number | null;
+  shipped_as_boxes: boolean;
+}
+
+export interface TransferLogisticsReport {
+  summary: TransferLogisticsSummary;
+  by_route: TransferLogisticsRouteRow[];
+  by_carrier: TransferLogisticsCarrierRow[];
+  by_period: TransferLogisticsPeriodRow[];
+  rows: TransferLogisticsDetailRow[];
+}
+
+/** Ответ POST /warehouse/assembly/{id}/to-transfer. */
+export interface AssemblyToTransferResponse {
+  transfer_id: number;
+  transfer_number: string;
+  assembly_number: string;
+  items_count: number;
+  units_total: number;
+  ff_links_moved: number;
 }
 
 export interface StockMovement {
@@ -3393,6 +3563,13 @@ export interface PaymentRequestListResponse {
 export interface ShippableShipmentRow {
   outbound_shipment_id: number;
   assembly_request_id: number | null;
+  /**
+   * Забор внутреннего переезда: у такой строки assembly_request_id пуст, а наш
+   * документ — перемещение (переход по строке ведёт на его деталку).
+   * Заполняется в payment_request_service.list_shippable из
+   * outbound_shipments.stock_transfer_id.
+   */
+  stock_transfer_id?: number | null;
   number: string;
   destination: string | null;
   shipped_date: string | null;

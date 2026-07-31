@@ -10,6 +10,32 @@ function isPaid(s: ShippableShipmentRow): boolean {
     return s.matched_transaction_id != null || s.request_status === 'PAID';
 }
 
+/**
+ * Переход к НАШЕМУ документу забора: заявка на сборку либо перемещение.
+ * У забора переезда `assembly_request_id` пуст — до появления ветки с
+ * `stock_transfer_id` такая строка выглядела ссылкой, но клик молча ничего
+ * не делал. Функции модульные: строка забора рисуется в двух разных
+ * компонентах этого файла (таблица сверки и карточка платежа).
+ */
+function canOpenShipmentDoc(s: ShippableShipmentRow): boolean {
+    return s.assembly_request_id != null || s.stock_transfer_id != null;
+}
+
+function shipmentDocTitle(s: ShippableShipmentRow): string {
+    if (s.assembly_request_id != null) return 'Открыть заявку';
+    if (s.stock_transfer_id != null) return 'Открыть перемещение';
+    return 'Забор без нашего документа — открывать нечего';
+}
+
+function openShipmentDoc(
+    s: ShippableShipmentRow,
+    slug: string,
+    router: ReturnType<typeof useRouter>,
+): void {
+    if (s.assembly_request_id != null) router.push(`/p/${slug}/warehouse/assembly/${s.assembly_request_id}`);
+    else if (s.stock_transfer_id != null) router.push(`/p/${slug}/warehouse/transfers/${s.stock_transfer_id}`);
+}
+
 const TH: React.CSSProperties = {
     padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)',
     textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap',
@@ -61,6 +87,7 @@ export default function ReconciliationTab({ counterpartyId }: { counterpartyId: 
         setLinkTxn(prev => (prev === txnId ? null : txnId));
         setSelected(new Set());
     };
+
     const toggleSel = (id: number) => setSelected(prev => {
         const next = new Set(prev);
         if (next.has(id)) next.delete(id); else next.add(id);
@@ -202,10 +229,16 @@ export default function ReconciliationTab({ counterpartyId }: { counterpartyId: 
                                             <tr key={s.outbound_shipment_id} style={{ borderBottom: '1px solid var(--color-border)' }}>
                                                 <td style={TD}>
                                                     <button
-                                                        onClick={() => s.assembly_request_id != null && router.push(`/p/${slug}/warehouse/assembly/${s.assembly_request_id}`)}
-                                                        style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--color-accent)', fontWeight: 600, fontSize: 13 }}
+                                                        onClick={() => openShipmentDoc(s, slug, router)}
+                                                        disabled={!canOpenShipmentDoc(s)}
+                                                        title={shipmentDocTitle(s)}
+                                                        style={{
+                                                            background: 'none', border: 'none', padding: 0, fontWeight: 600, fontSize: 13,
+                                                            cursor: canOpenShipmentDoc(s) ? 'pointer' : 'default',
+                                                            color: canOpenShipmentDoc(s) ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                                                        }}
                                                     >
-                                                        {s.number} ↗
+                                                        {s.number}{canOpenShipmentDoc(s) ? ' ↗' : ''}
                                                     </button>
                                                 </td>
                                                 <td style={{ ...TD, whiteSpace: 'nowrap' }}>{s.shipped_date ? formatDate(s.shipped_date) : '—'}</td>
@@ -315,7 +348,16 @@ function PaymentCard({
                 <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                     {linkedShipments.map(s => (
                         <span key={s.outbound_shipment_id} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, background: 'rgba(52,199,89,0.12)', padding: '2px 8px', borderRadius: 8 }}>
-                            <button onClick={() => s.assembly_request_id != null && router.push(`/p/${slug}/warehouse/assembly/${s.assembly_request_id}`)} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--color-accent)', fontWeight: 600 }}>
+                            <button
+                                onClick={() => openShipmentDoc(s, slug, router)}
+                                disabled={!canOpenShipmentDoc(s)}
+                                title={shipmentDocTitle(s)}
+                                style={{
+                                    background: 'none', border: 'none', padding: 0, fontWeight: 600,
+                                    cursor: canOpenShipmentDoc(s) ? 'pointer' : 'default',
+                                    color: canOpenShipmentDoc(s) ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                                }}
+                            >
                                 {s.number}
                             </button>
                             <span style={{ color: 'var(--color-text-muted)' }}>{formatNumber(Number(s.pickup_cost ?? 0), 2)} ₽</span>

@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -301,7 +302,17 @@ class OutboundShipment(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_outbound_shipments_project_id", "project_id"),
         Index("ix_outbound_shipments_warehouse_id", "warehouse_id"),
         Index("ix_outbound_shipments_assembly_request_id", "assembly_request_id"),
-        Index("ix_outbound_shipments_stock_transfer_id", "stock_transfer_id"),
+        # Один переезд — РОВНО ОДИН живой забор. Инвариант держался только на
+        # row-lock при DRAFT → IN_TRANSIT; на уровне БД два забора на один
+        # stock_transfer_id ничем не запрещались, а это прямой путь к двойной
+        # заявке на оплату одной перевозки. Переотправки у переезда нет
+        # (в отличие от заявки с её attempt_no), поэтому уникальность честная.
+        Index(
+            "uq_outbound_shipments_stock_transfer",
+            "stock_transfer_id",
+            unique=True,
+            postgresql_where=text("stock_transfer_id IS NOT NULL AND is_deleted = false"),
+        ),
         Index("ix_outbound_shipments_wb_fbo_supply_id", "wb_fbo_supply_id"),
         Index("ix_outbound_shipments_counterparty_id", "counterparty_id"),
         Index("ix_outbound_shipments_matched_transaction_id", "matched_transaction_id"),
@@ -364,7 +375,13 @@ class StockTransfer(Base, TimestampMixin, SoftDeleteMixin):
     driver_first_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     driver_last_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     driver_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    counterparty_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=True)
+    # ondelete=SET NULL — как у counterparty_id заявки и забора: жёсткое
+    # удаление контрагента не должно ронять переезд. Слияние контрагентов
+    # перецепляет эту ссылку (counterparty_service.merge), иначе забор с мёртвым
+    # id никогда не сматчился бы с выпиской.
+    counterparty_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("counterparty.id", ondelete="SET NULL"), nullable=True
+    )
     # Логистику оказывает склад забора: перевозчик берётся из
     # Warehouse.counterparty_id склада-ИСТОЧНИКА, а не из введённого ИНН.
     # Флаг — чтобы UI помнил режим при переоткрытии (симметрично заявке).
@@ -414,7 +431,15 @@ class StockTransfer(Base, TimestampMixin, SoftDeleteMixin):
     __table_args__ = (
         Index("ix_stock_transfers_project_id", "project_id"),
         Index("ix_stock_transfers_counterparty_id", "counterparty_id"),
-        Index("ix_stock_transfers_converted_from_assembly_id", "converted_from_assembly_id"),
+        # Одна заявка — один живой переезд: проверка «уже сконвертирована» в
+        # сервисе не атомарна, двойной клик дал бы два переезда по одному
+        # составу и двойное списание при отправке.
+        Index(
+            "uq_stock_transfers_converted_from_assembly",
+            "converted_from_assembly_id",
+            unique=True,
+            postgresql_where=text("converted_from_assembly_id IS NOT NULL AND is_deleted = false"),
+        ),
     )
 
 

@@ -754,7 +754,9 @@ class TestCancelTransfer:
                 "items": [{"barcode": barcode, "quantity": 5}],
             },
         )
-        with pytest.raises(ValueError, match="not found"):
+        # Сообщение русское: логист не должен видеть «Transfer not found» среди
+        # русских ошибок, а роутер отличает по нему 404 от 400.
+        with pytest.raises(ValueError, match="не найдено"):
             await cancel_transfer(db_session, other_project.id, transfer.id)
         # И не удалён: в своём проекте всё ещё виден
         found = await get_transfer(db_session, project.id, transfer.id)
