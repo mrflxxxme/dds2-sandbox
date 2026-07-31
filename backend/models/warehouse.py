@@ -373,6 +373,20 @@ class StockTransfer(Base, TimestampMixin, SoftDeleteMixin):
     )
     pickup_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     pickup_time_slot: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Транспортная единица переезда — 1:1 с заявкой на сборку (AssemblyRequest):
+    # shipped_as_boxes=False → паллеты (по умолчанию), True → короба. Флаг меняет
+    # только ЕДИНИЦУ измерения pallets_count/pallet_weight_kg и подписи в UI
+    # («Короба» / «Вес 1 короба» vs «Палеты»). При конвертации заявки в переезд
+    # единица и её количество переносятся из заявки — иначе переезд терял бы
+    # паллеты (у всех шести заявок кейса «транзит Питер/ЕКБ» они проставлены),
+    # а ₽/паллета по переездам было бы не посчитать.
+    # Nullable (в отличие от заявки): переезд можно завести и без транспортной
+    # оценки — например когда машину ещё не считали.
+    pallets_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pallet_weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    shipped_as_boxes: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     # Стоимость забора. Деньги хранятся ЗДЕСЬ только как план переезда; фактом
     # оплаты владеет OutboundShipment (снимок логистики + связка с выпиской и
     # заявкой на оплату), который создаётся при отправке перемещения.
