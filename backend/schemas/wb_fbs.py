@@ -9,7 +9,14 @@ WB FBS schemas: склады продавца и привязки, превью/
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from backend.models.wb_fbs import (
     FBS_CANCEL_CLIENT_STATUS,
@@ -944,3 +951,263 @@ class FbsActionOut(BaseModel):
     ok: bool = True
     message: str | None = None
     affected: int = 0
+
+
+# ─── Аналитика этапов ────────────────────────────────────────────────────────
+
+#: Точность вехи. `exact` — реальные даты WB и наших операций (считаются по всей
+#: истории зеркала), `approx` — журнал переходов (± каденс синка, только с момента
+#: его наполнения). Контракт с сервисом держит тест-связка.
+ALLOWED_STAGE_PRECISION: tuple[str, ...] = ("exact", "approx")
+
+#: Зона ответственности этапа: до приёмки на СЦ вопросы к нам, после — к WB.
+ALLOWED_STAGE_ZONES: tuple[str, ...] = ("us", "wb", "total")
+
+#: Шаг динамики. Дефолт подбирается по длине периода.
+ALLOWED_STAGE_BUCKETS: tuple[str, ...] = ("day", "week", "month")
+
+
+class FbsStageRow(BaseModel):
+    """Этап пути задания: длительность за период.
+
+    `count` — сколько заданий реально ЗАМЕРЕНО (обе вехи известны, длительность
+    правдоподобна). Ноль при `precision="approx"` означает «истории ещё нет»,
+    а не «мгновенно»: журнал переходов начинается с момента своего наполнения
+    и прошлое не восстанавливает.
+    """
+
+    key: str
+    title: str
+    #: Короткое имя для узкой колонки таблицы (полное — в шапке блока и подсказке).
+    short: str = ""
+    zone: str
+    precision: str
+    #: Сводный этап перекрывает соседние (`to_handover` = `to_confirm` + `assembly`).
+    #: Складывать его с обычными в одну сумму нельзя — фронт выносит отдельно.
+    summary: bool = False
+    hint: str = ""
+    count: int = 0
+    median_hours: float | None = None
+    p90_hours: float | None = None
+    avg_hours: float | None = None
+    min_hours: float | None = None
+    max_hours: float | None = None
+    #: Замеры, выброшенные как недостоверные (отрицательная длительность из-за
+    #: рассинхрона источников разной точности либо застывший `wb_status` сверх
+    #: потолка). Видны намеренно: молчаливое усечение читалось бы как «всё чисто».
+    dropped: int = 0
+    #: Сколько из `count` опёрлись на журнал переходов вместо истории кабинета
+    #: (± каденс синка). Ноль — этап целиком посчитан по точным моментам WB.
+    approx_count: int = 0
+
+
+class FbsStageWarehouseRow(BaseModel):
+    """Этап × склад продавца, С КОТОРОГО собирают."""
+
+    stage: str
+    wb_warehouse_id: int | None = None
+    warehouse_name: str
+    count: int = 0
+    median_hours: float | None = None
+    p90_hours: float | None = None
+    avg_hours: float | None = None
+
+
+class FbsStageDynamicsRow(BaseModel):
+    """Точка динамики: этап × начало бакета по дате ЗАВЕРШЕНИЯ этапа (МСК).
+
+    🔴 Ряд РАЗРЕЖЕН: отсутствующий бакет означает «замеров не было», а не «ноль
+    часов». Клиент, дорисовывающий пропуски нулями, покажет провалы там, где
+    просто нет данных.
+
+    Поле называется `period_start`, а не `bucket`: `bucket` верхнего уровня —
+    это ШАГ (`day`/`week`/`month`), и один ключ в двух смыслах внутри одного
+    ответа читался бы как ошибка контракта.
+    """
+
+    stage: str
+    period_start: date
+    count: int = 0
+    median_hours: float | None = None
+    p90_hours: float | None = None
+    avg_hours: float | None = None
+
+
+class FbsStageQueueRow(BaseModel):
+    """Что висит на этапе ПРЯМО СЕЙЧАС и как давно. Период не применяется.
+
+    🔴 Фазы `to_ship` и `in_transit` — это РАЗБИЕНИЕ псевдо-статуса
+    `in_delivery` вкладки «Заказы» по факту скана QR: до скана груз физически
+    у нас, после — уже у перевозчика. Поэтому карточка «Едет к СЦ» здесь всегда
+    меньше «В доставке» на соседней вкладке, а совпадает СУММА двух карточек
+    (инвариант закреплён тестом).
+    """
+
+    phase: str
+    title: str
+    count: int = 0
+    median_age_hours: float | None = None
+    max_age_hours: float | None = None
+
+
+class FbsStageJournal(BaseModel):
+    """Покрытие журнала переходов — подпись под этапами точности `approx`.
+
+    Без неё пустой этап читается как «проходит мгновенно», хотя на деле
+    «истории ещё нет».
+    """
+
+    events: int = 0
+    #: Наивно-UTC метка из `WbFbsOrderEvent.changed_at`, сериализуется с явным
+    #: `Z`. Без суффикса JS-клиент прочитал бы её как ЛОКАЛЬНОЕ время, и один и
+    #: тот же момент на двух экранах раздела разошёлся бы на три часа.
+    since: datetime | None = None
+    orders: int = 0
+
+    @field_serializer("since")
+    def _serialize_since(self, value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        return (value.isoformat() + "Z") if value.tzinfo is None else value.isoformat()
+
+
+class FbsStageAnalyticsOut(BaseModel):
+    """Аналитика этапов FBS: длительности, разрез по складам, динамика, очередь.
+
+    `stages` и `queue` приходят ПОЛНОЙ длиной (со строками-нулями), поэтому
+    `stage` из длинных блоков (`by_warehouse`, `dynamics`) всегда резолвится в
+    заголовок и точность без второго запроса. В самих длинных строках
+    `precision`/`dropped` нет намеренно — их место в справочнике `stages`.
+    """
+
+    date_from: date
+    date_to: date
+    #: Шаг динамики: `day` / `week` / `month` (`ALLOWED_STAGE_BUCKETS`).
+    bucket: str
+    wb_warehouse_id: int | None = None
+    stages: list[FbsStageRow] = Field(default_factory=list)
+    by_warehouse: list[FbsStageWarehouseRow] = Field(default_factory=list)
+    dynamics: list[FbsStageDynamicsRow] = Field(default_factory=list)
+    queue: list[FbsStageQueueRow] = Field(default_factory=list)
+    journal: FbsStageJournal = Field(default_factory=FbsStageJournal)
+    history: "FbsStageHistory" = Field(default_factory=lambda: FbsStageHistory())
+
+
+class FbsStageHistory(BaseModel):
+    """Покрытие догона истории из КАБИНЕТА WB — на чём посчитаны поздние этапы.
+
+    Пока `orders_covered` заметно меньше `orders_total`, часть замеров опирается
+    на журнал переходов (± каденс синка) — это видно в `approx_count` строки
+    этапа. Без этой подписи «5.2 дн» не отличить от «5.2 дн по половине выборки».
+    """
+
+    orders_total: int = 0
+    orders_covered: int = 0
+    rows: int = 0
+    since: datetime | None = None
+
+    @field_serializer("since")
+    def _serialize_since(self, value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        return (value.isoformat() + "Z") if value.tzinfo is None else value.isoformat()
+
+
+# ─── География доставки ──────────────────────────────────────────────────────
+
+
+class FbsGeoDirectionRow(BaseModel):
+    """Направление (округ покупателя): скорость, маршрут, SLA и отказы.
+
+    🔴 В строке ДВЕ разные выборки, и путать их нельзя:
+      • `orders` — задания, чей путь завершился в периоде (по ним скорость,
+        `avg_hops` и SLA);
+      • `matured` — созревшая когорта (заказ старше `maturity_days`), только по
+        ней считается `refused`. На всей выборке доля отказов была бы ошибкой
+        выжившего: свежее ещё в пути.
+    """
+
+    label: str
+    orders: int = 0
+    median_days: float | None = None
+    p90_days: float | None = None
+    avg_hops: float | None = None
+    matured: int = 0
+    refused: int = 0
+    #: Сколько заданий имели обещанную WB дату и сколько уложились в неё.
+    sla_total: int = 0
+    sla_in_time: int = 0
+
+
+class FbsGeoMatrixRow(BaseModel):
+    """Клетка матрицы «склад отгрузки × округ назначения» — откуда куда возить."""
+
+    wb_warehouse_id: int | None = None
+    warehouse_name: str
+    label: str
+    orders: int = 0
+    median_days: float | None = None
+
+
+class FbsGeoNodeRow(BaseModel):
+    """Узел маршрута (СЦ): сколько заказов прошло и сколько узел держит груз.
+
+    🔴 `measured` меньше `passes` — у части проходов в истории одно событие,
+    и удержание там НЕИЗВЕСТНО. При `measured = 0` длительность приходит
+    `null`: ноль означал бы «прошёл мгновенно», а это другое утверждение.
+    """
+
+    label: str
+    passes: int = 0
+    measured: int = 0
+    median_hours: float | None = None
+    p90_hours: float | None = None
+
+
+class FbsGeoHopsRow(BaseModel):
+    """Перевалки против времени — управляемый рычаг маршрута."""
+
+    hops: int = 0
+    orders: int = 0
+    median_days: float | None = None
+
+
+class FbsGeoCoverage(BaseModel):
+    """Доля заданий, сшитых с зеркалом статистики (иначе округ неизвестен).
+
+    Без неё «мало заказов в Сибири» не отличить от «Сибирь не сшилась».
+    """
+
+    orders_total: int = 0
+    orders_matched: int = 0
+
+
+class FbsGeoAnalyticsOut(BaseModel):
+    """География доставки FBS: направления, маршруты, узлы и перевалки."""
+
+    date_from: date
+    date_to: date
+    wb_warehouse_id: int | None = None
+    #: Возраст заказа, начиная с которого его судьба считается определившейся.
+    maturity_days: int = 14
+    directions: list[FbsGeoDirectionRow] = Field(default_factory=list)
+    #: Города назначения по маршруту — покрытие 100%, в отличие от округов.
+    destinations: list["FbsGeoDestinationRow"] = Field(default_factory=list)
+    matrix: list[FbsGeoMatrixRow] = Field(default_factory=list)
+    nodes: list[FbsGeoNodeRow] = Field(default_factory=list)
+    hops: list[FbsGeoHopsRow] = Field(default_factory=list)
+    coverage: FbsGeoCoverage = Field(default_factory=FbsGeoCoverage)
+
+
+class FbsGeoDestinationRow(BaseModel):
+    """Город назначения — ПОСЛЕДНИЙ узел маршрута перед готовностью к вручению.
+
+    🔴 Это точка сети WB (СЦ/ПВЗ), а не адрес покупателя. Зато известна для
+    всех заданий с завершённым путём, тогда как округ берётся сшивкой с
+    зеркалом статистики и покрывает не всё.
+    """
+
+    label: str
+    orders: int = 0
+    median_days: float | None = None
+    p90_days: float | None = None

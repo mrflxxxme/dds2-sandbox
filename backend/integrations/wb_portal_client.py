@@ -49,6 +49,24 @@ logger = structlog.get_logger("dds.wb_portal")
 SUPPLY_BASE = "https://seller-supply.wildberries.ru"
 AUTH_BASE = "https://seller.wildberries.ru"
 CMP_BASE = "https://cmp.wildberries.ru"  # кабинет рекламы (стата кампаний) — GET, authorizev3
+#: Кабинет маркетплейса (FBS). История статусов задания живёт ЗДЕСЬ, а не в
+#: публичном Marketplace API — тот истории не отдаёт вовсе.
+#: 🔴 Антибот-куки НУЖНЫ, как и supply-manager'у. В HAR-экспорте Chrome их не
+#: видно (санитайзер вырезает заголовок `Cookie` целиком), и на этом легко
+#: сделать ложный вывод «хватает токенов» — проверено 30.07: с двумя валидными
+#: токенами и БЕЗ кук хост отвечает 401. Косвенное подтверждение внутри самого
+#: токена: `authorizev3` несёт claim `validation_key`, который WB сверяет с
+#: кукой `wbx-validation-key`.
+#: 🔴 `origin`/`referer` обязаны остаться КАБИНЕТНЫМИ (`seller.wildberries.ru`):
+#: это XHR страницы кабинета на соседний хост, и на «свой» origin он даёт 401.
+MARKETPLACE_BASE = "https://marketplace.wildberries.ru"
+
+#: Путь истории статусов задания FBS в кабинете.
+_ORDER_HISTORY_PATH = "/ns/marketplace-app/marketplace-remote-wh/api/v3/portal/orders/{id}/history"
+
+#: Лимит хоста — 150 запросов в минуту (заголовки `x-ratelimit-*` живого ответа).
+#: Держим потолок ниже, чтобы догон истории делил окно с остальным кабинетом.
+ORDER_HISTORY_RATE_LIMIT_PER_MIN = 150
 ROOT_VERSION = "v1.100.0"
 TIMEOUT = 30
 
@@ -72,6 +90,16 @@ class WbPortalError(Exception):
 
 class WbSessionExpired(WbPortalError):
     """authorizev3/cookie недействительны — нужно обновить доступ в настройках."""
+
+
+class WbPortalRateLimited(WbPortalError):
+    """Кабинет попросил притормозить (429). Отличается от прочих ошибок тем,
+    что задание НЕ испорчено: тот же запрос через паузу пройдёт. Несёт
+    `retry_after` — секунды из заголовка, если WB его прислал."""
+
+    def __init__(self, message: str, retry_after: int = 0):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 def _parse_session(session: "str | dict") -> tuple[str, str | None, list[dict], str]:
@@ -230,7 +258,15 @@ class WbPortalClient:
             raise WbPortalError(f"WB недоступен ({url}): {type(e).__name__}") from e
         raise WbPortalError(f"Не удалось выполнить {url}")
 
-    async def _raw_get(self, base: str, path: str, params: dict) -> dict | list:
+    async def _raw_get(
+        self,
+        base: str,
+        path: str,
+        params: dict,
+        *,
+        keep_lk: bool = False,
+        origin: str | None = None,
+    ) -> dict | list:
         """GET на кабинетный хост (cmp) через shared-клиент с authorizev3+cookie.
 
         В отличие от supply-POST, cmp-стата НЕ использует wb-seller-lk, поэтому 401 здесь =
@@ -239,8 +275,14 @@ class WbPortalClient:
         origin/referer подменяем на cmp — зеркало реального вызова браузера.
         """
         client = self._ensure_client()
-        headers = {**self._headers(), "origin": base, "referer": base + "/"}
-        headers.pop("wb-seller-lk", None)  # supply-токен на cmp не нужен
+        # origin/referer по умолчанию = хост запроса (так ходит cmp-стата). Но
+        # кабинет маркетплейса — это XHR СТРАНИЦЫ seller.wildberries.ru на
+        # соседний хост: он проверяет пару origin/referer и на «свой же» домен
+        # отвечает 401. Поэтому вызывающий может оставить origin кабинета.
+        site = origin or base
+        headers = {**self._headers(), "origin": site, "referer": site + "/"}
+        if not keep_lk:
+            headers.pop("wb-seller-lk", None)  # supply-токен на cmp не нужен
         try:
             resp = await client.get(base + path, headers=headers, params=params)
         except httpx.HTTPError as e:
@@ -249,6 +291,15 @@ class WbPortalClient:
             raise WbSessionExpired(
                 f"401 на {path}: сессия рекламного кабинета недействительна (нужен свежий доступ WB)"
             )
+        if resp.status_code == 429:
+            # Лимит хоста (150/мин на кабинет маркетплейса). Не ошибка данных:
+            # вызывающий обязан подождать и повторить, а не пропускать задание.
+            raw_retry = resp.headers.get("retry-after") or resp.headers.get("x-ratelimit-reset")
+            try:
+                retry_after = int(float(raw_retry)) if raw_retry else 0
+            except (TypeError, ValueError):
+                retry_after = 0
+            raise WbPortalRateLimited(self._http_error(path, resp), retry_after=retry_after)
         if resp.status_code >= 400:
             raise WbPortalError(self._http_error(path, resp))
         return resp.json()
@@ -328,6 +379,51 @@ class WbPortalClient:
         return True
 
     # ─── реклама: кабинетная стата кампаний (cmp) ─────────────────────────
+
+    async def fetch_order_history(self, wb_order_id: int) -> dict:
+        """История статусов ОДНОГО задания FBS из кабинета маркетплейса.
+
+        Публичный Marketplace API (`POST /api/v3/orders/status`) отдаёт только
+        ТЕКУЩИЕ значения осей без единой отметки времени — из-за этого поздние
+        этапы аналитики восстановить задним числом нечем. Кабинет отдаёт полную
+        цепочку с точным временем и городом плеча, вплоть до «Оформлен».
+
+        В отличие от cmp-статистики, здесь `wb-seller-lk` НУЖЕН (живой захват
+        шлёт оба токена), а вот антибот-куки — нет.
+
+        Возвращает `{"deliveryDate": str|None, "statuses": [{date, name, place,
+        isFinal}]}` в порядке WB (сначала свежие). Ошибку уровня приложения
+        (`error: true`) поднимаем как `WbPortalError` — молча отдать пустую
+        историю значило бы записать заданию «путь неизвестен» как факт.
+        """
+        path = _ORDER_HISTORY_PATH.format(id=int(wb_order_id))
+        try:
+            data = await self._raw_get(
+                MARKETPLACE_BASE, path, {}, keep_lk=True, origin=AUTH_BASE
+            )
+        except WbSessionExpired:
+            # 🔴 `wb-seller-lk` живёт ПЯТЬ МИНУТ (наблюдалось iat→exp = 300 с), а
+            # догон истории идёт десятками минут. Поэтому 401 здесь — почти
+            # всегда «короткий токен протух», а не «сессия умерла»: минтим
+            # новый через долгоживущий authorizev3 + куки и повторяем ОДИН раз.
+            # Если и refresh не прошёл — это уже настоящая смерть сессии, и
+            # `_refresh_lk` сам поднимет `WbSessionExpired` наружу.
+            await self._refresh_lk()
+            data = await self._raw_get(
+                MARKETPLACE_BASE, path, {}, keep_lk=True, origin=AUTH_BASE
+            )
+        if not isinstance(data, dict):
+            raise WbPortalError(f"История задания {wb_order_id}: неожиданный формат ответа")
+        if data.get("error"):
+            raise WbPortalError(
+                f"История задания {wb_order_id}: {data.get('errorText') or 'ошибка кабинета'}"
+            )
+        payload = data.get("data") or {}
+        statuses = payload.get("statuses")
+        return {
+            "deliveryDate": payload.get("deliveryDate"),
+            "statuses": statuses if isinstance(statuses, list) else [],
+        }
 
     async def fetch_campaigns_stats(
         self, campaign_ids: list[int], date_from: str, date_to: str

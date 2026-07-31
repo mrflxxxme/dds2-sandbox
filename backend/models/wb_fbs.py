@@ -462,6 +462,14 @@ class WbFbsOrder(Base, TimestampMixin):
     written_off_at: Mapped[datetime | None] = mapped_column(DateTime)
     synced_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
+    #: Когда последний раз забрали историю статусов из КАБИНЕТА (`WbFbsOrderHistory`).
+    #: NULL — ни разу; очередь догона идёт по этому полю. У живых заданий метка
+    #: протухает и историю перезабирают, у терминальных — больше нет смысла.
+    history_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+    #: Плановая дата доставки покупателю (`deliveryDate` кабинета). В публичном
+    #: Marketplace API её нет вовсе — приезжает вместе с историей.
+    delivery_date_plan: Mapped[datetime | None] = mapped_column(DateTime)
+
     __table_args__ = (
         UniqueConstraint("project_id", "wb_order_id", name="uq_wb_fbs_order"),
         Index("ix_wb_fbs_orders_project_status", "project_id", "supplier_status"),
@@ -512,6 +520,55 @@ class WbFbsOrderEvent(Base):
     __table_args__ = (
         # Таймлайн одного задания — единственный читатель журнала.
         Index("ix_wb_fbs_order_events_order", "project_id", "order_id", "changed_at"),
+    )
+
+
+class WbFbsOrderHistory(Base):
+    """Строка ИСТОРИИ статусов задания из КАБИНЕТА WB — точное время от WB.
+
+    🔴 Это ДРУГОЙ источник, не `WbFbsOrderEvent`. Публичный Marketplace API
+    истории не отдаёт вовсе, поэтому журнал событий пишет наш синк в момент
+    ОБНАРУЖЕНИЯ перехода (± каденс 5 мин) и прошлое не знает. А портал
+    (`GET /ns/marketplace-app/marketplace-remote-wh/api/v3/portal/orders/{id}/history`)
+    отдаёт полную цепочку с миллисекундной точностью и городом плеча — вплоть
+    до «Оформлен». Отсюда: аналитика этапов предпочитает эту таблицу журналу,
+    а журнал остаётся фолбэком для заданий, которые ещё не догнаны.
+
+    **Имя статуса хранится СЫРЫМ.** Словарь WB открытый (наблюдались «Оформлен»,
+    «Продавец собирает заказ», «Продавец собрал заказ: скоро передаст в
+    доставку», «Отсортирован», «Отгружено сортировочным центром», «Отгружен
+    распределительным центром - транзит», «В пути в сортировочный центр»,
+    «В пути», «Доставлен СЦ/РЦ»; поздние — «готов к выдаче», «получен» — в
+    выборке не встретились). Маппинг в вехи делается НА ЧТЕНИИ: новый статус WB
+    не должен требовать миграции и не должен теряться.
+
+    Цепочка повторяется на каждом плече (несколько «Отсортирован» в разных
+    городах), поэтому веха берётся по ПЕРВОМУ вхождению имени.
+
+    Append-only, каскадно умирает с заданием. Уникальность по
+    `(order_id, at, name)` делает повторный догон идемпотентным.
+    """
+
+    __tablename__ = "wb_fbs_order_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    order_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("wb_fbs_orders.id", ondelete="CASCADE"), nullable=False
+    )
+    #: Момент статуса по данным WB (наивный UTC, как все даты домена).
+    at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    #: Сырое имя статуса из кабинета — НЕ нормализуем при записи.
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    #: Город/узел плеча («Сынково», «СЦ Иваново Окружная»); у ранних этапов пусто.
+    place: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    #: Признак WB «статус финальный» — путь закончен.
+    is_final: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "order_id", "at", "name", name="uq_wb_fbs_order_history"),
+        Index("ix_wb_fbs_order_history_order", "project_id", "order_id", "at"),
     )
 
 
