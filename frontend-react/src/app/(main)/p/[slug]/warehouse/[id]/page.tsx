@@ -3071,6 +3071,18 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                             </span>
                         );
                     })()}
+                    {/* Приёмка внутреннего ПЕРЕМЕЩЕНИЯ (наш TR приехал на ФФ) —
+                        третий тип операции наравне со вскрытием: без метки
+                        читалась как закупка. */}
+                    {kind === 'inbound' && row.stock_transfer_id != null && (
+                        <span
+                            className="badge badge-secondary"
+                            style={{ fontSize: 11, padding: '2px 8px' }}
+                            title={`Приёмка внутреннего перемещения с нашего склада${row.linked_number ? ` (${row.linked_number})` : ''} — товар едет между нашими складами, это не закупка`}
+                        >
+                            Перемещение{row.linked_number ? ` ${row.linked_number}` : ''}
+                        </span>
+                    )}
                     {ffRepackBadge(row, kind)}
                     {ffRepackPaired(row) && (
                         <button
@@ -3215,7 +3227,9 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             && (!statusFilter || ffStatusLabel(r) === statusFilter)
             && (!opFilter
                 || (opFilter === 'repack' && ffRepackPaired(r))
-                || (opFilter === 'plain' && !ffRepackPaired(r) && !r.repack_unpaired)
+                || (opFilter === 'transfer' && r.stock_transfer_id != null)
+                || (opFilter === 'plain'
+                    && !ffRepackPaired(r) && !r.repack_unpaired && r.stock_transfer_id == null)
                 || (opFilter === 'unpaired' && !!r.repack_unpaired))
             && (!progressFilter || ffProgressCode(r) === progressFilter),
         ),
@@ -3227,10 +3241,12 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
         if (kind === 'assembly') return [] as Array<[string, string, number]>;
         const paired = rows.filter(r => ffRepackPaired(r)).length;
         const unpaired = rows.filter(r => !!r.repack_unpaired).length;
-        const plain = rows.length - paired - unpaired;
+        const transfers = rows.filter(r => r.stock_transfer_id != null && !ffRepackPaired(r)).length;
+        const plain = rows.length - paired - unpaired - transfers;
         const chips: Array<[string, string, number]> = [['', 'Все', rows.length]];
         if (paired) chips.push(['repack', 'Вскрытие коробов', paired]);
-        if (plain && (paired || unpaired)) chips.push(['plain', 'Обычные', plain]);
+        if (transfers) chips.push(['transfer', 'Перемещения', transfers]);
+        if (plain && (paired || unpaired || transfers)) chips.push(['plain', 'Обычные', plain]);
         if (kind === 'return' && unpaired) chips.push(['unpaired', 'Без пары', unpaired]);
         return chips.length > 1 ? chips : [];
     }, [rows, kind]);
