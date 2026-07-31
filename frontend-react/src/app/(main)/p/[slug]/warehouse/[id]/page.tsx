@@ -876,6 +876,10 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
                         loadVehicles();
                         onFfLinked?.();  // вкладки ФФ перезагружают списки
                     }}
+                    onUnlinked={() => {
+                        loadVehicles();
+                        onFfLinked?.();
+                    }}
                 />
             )}
             {natPushFor && natPushFor.receipt_id != null && (
@@ -897,13 +901,15 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
 
 /* ─── Модалка «Связать заявки ФФ» с приёмкой машины (мульти-выбор) ────────── */
 
-function FfVehicleLinkModal({ warehouseId, vehicle, onClose, onLinked }: {
+function FfVehicleLinkModal({ warehouseId, vehicle, onClose, onLinked, onUnlinked }: {
     warehouseId: number;
     /** машина (receipt_id — наша приёмка, цель связки) */
     vehicle: ExpectedVehicleRow;
     onClose: () => void;
     /** успешно связали все выбранные: номера заявок (для тоста родителя) */
     onLinked: (linkedNumbers: string[]) => void;
+    /** отвязали заявку из списка модалки — родитель обновляет карточки/вкладки */
+    onUnlinked?: () => void;
 }) {
     const [rows, setRows] = useState<FfRequestRow[]>([]);
     const [loading, setLoading] = useState(true);
@@ -921,12 +927,14 @@ function FfVehicleLinkModal({ warehouseId, vehicle, onClose, onLinked }: {
         api.getFulfillmentRequests(warehouseId, 'inbound')
             .then(r => {
                 if (controller.signal.aborted) return;
-                // Только свободные приёмки ФФ: без нашей приёмки/перемещения и не пара «вскрытия коробов»
+                // Свободные приёмки ФФ + УЖЕ связанные с приёмкой ЭТОЙ машины
+                // (управление связкой в одном месте: видно что привязано, есть
+                // «Отвязать»); чужие связки/перемещения/пары вскрытия — мимо.
                 setRows(r.filter(x =>
                     !x.archived
-                    && x.inbound_receipt_id == null
                     && x.stock_transfer_id == null
                     && x.repack_return_id == null
+                    && (x.inbound_receipt_id == null || x.inbound_receipt_id === vehicle.receipt_id)
                 ));
             })
             .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка загрузки заявок ФФ'); })
@@ -1017,18 +1025,31 @@ function FfVehicleLinkModal({ warehouseId, vehicle, onClose, onLinked }: {
                         {rows.filter(r => !search
                             || (r.number || '').toLowerCase().includes(search.toLowerCase())
                             || (r.stage_title || r.status || '').toLowerCase().includes(search.toLowerCase())
-                        ).map(row => (
-                            <label key={row.id} className="ff-link-row" style={{ cursor: 'pointer' }}>
-                                <input
-                                    type="checkbox"
-                                    checked={selected.has(row.id)}
-                                    onChange={() => toggle(row.id)}
-                                    disabled={acting}
-                                />
+                        ).map(row => {
+                            // Уже связана с приёмкой ЭТОЙ машины: вместо чекбокса —
+                            // метка и «Отвязать» (управление связкой в одном месте).
+                            const isLinked = row.inbound_receipt_id === vehicle.receipt_id;
+                            return (
+                            <label key={row.id} className="ff-link-row" style={{ cursor: isLinked ? 'default' : 'pointer' }}>
+                                {isLinked ? (
+                                    <span className="badge badge-success" style={{ fontSize: 11, padding: '2px 8px' }}>✓</span>
+                                ) : (
+                                    <input
+                                        type="checkbox"
+                                        checked={selected.has(row.id)}
+                                        onChange={() => toggle(row.id)}
+                                        disabled={acting}
+                                    />
+                                )}
                                 {/* flex:1 — .ff-link-row даёт space-between, прижимаем контент влево */}
                                 <div className="ff-link-row-main" style={{ flex: 1 }}>
                                     <div className="ff-link-row-head">
                                         <span className="ff-link-row-number">{row.number || row.external_id}</span>
+                                        {isLinked && (
+                                            <span className="badge badge-success" style={{ fontSize: 11, padding: '2px 8px' }}>
+                                                связана
+                                            </span>
+                                        )}
                                         {(row.stage_title || row.status) && (
                                             <span className="badge badge-secondary" style={{ fontSize: 11, padding: '2px 8px' }}>
                                                 {row.stage_title || row.status}
@@ -1052,8 +1073,36 @@ function FfVehicleLinkModal({ warehouseId, vehicle, onClose, onLinked }: {
                                         <div style={{ color: 'var(--color-danger)', fontSize: 12, marginTop: 4 }}>{rowErrors[row.id]}</div>
                                     )}
                                 </div>
+                                {isLinked && (
+                                    <button
+                                        className="btn btn-sm btn-secondary"
+                                        disabled={acting}
+                                        onClick={async e => {
+                                            e.preventDefault();
+                                            setActing(true);
+                                            setRowErrors(prev => ({ ...prev, [row.id]: '' }));
+                                            try {
+                                                await api.unlinkFulfillmentRequest(warehouseId, row.id);
+                                                setRows(prev => prev.map(x => x.id === row.id
+                                                    ? { ...x, inbound_receipt_id: null }
+                                                    : x));
+                                                onUnlinked?.();
+                                            } catch (err: unknown) {
+                                                setRowErrors(prev => ({
+                                                    ...prev,
+                                                    [row.id]: err instanceof Error ? err.message : 'Ошибка отвязки',
+                                                }));
+                                            } finally {
+                                                setActing(false);
+                                            }
+                                        }}
+                                    >
+                                        Отвязать
+                                    </button>
+                                )}
                             </label>
-                        ))}
+                            );
+                        })}
                     </div>
                 )}
 
