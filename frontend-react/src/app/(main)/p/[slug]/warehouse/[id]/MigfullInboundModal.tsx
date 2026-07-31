@@ -26,6 +26,9 @@ interface PackRowState {
 
 const EMPTY_ROW: PackRowState = { boxMode: false, units: '', boxes: '' };
 
+/** Сегмент-фильтр состава (быстрый срез по текущему состоянию упаковки). */
+type SegmentFilter = 'all' | 'box' | 'loose' | 'no_mult' | 'mismatch';
+
 /** Максимум коробов при данной кратности (пустая/невалидная кратность → ''). */
 const maxBoxesStr = (qty: number, unitsStr: string): string => {
     const u = parseInt(unitsStr, 10);
@@ -61,6 +64,13 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
     // Свёртываемый блок «Нестыковки кратности» (наша ≠ у Натали).
     const [mismatchOpen, setMismatchOpen] = useState(false);
 
+    // Поиск/срез/выбор по составу. Всё ключуется ШК (не индексом видимого
+    // списка) — правки и выбор переживают фильтрацию.
+    const [search, setSearch] = useState('');
+    const [segment, setSegment] = useState<SegmentFilter>('all');
+    const [selected, setSelected] = useState<Set<string>>(new Set());
+    const [bulkUnits, setBulkUnits] = useState('');
+
     const [submitting, setSubmitting] = useState(false);
     const [submitError, setSubmitError] = useState('');
     const [result, setResult] = useState<MigfullSendResult | null>(null);
@@ -88,6 +98,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                 };
             }
             setPackRows(rows);
+            setSelected(new Set());
             setConfirmResend(false);
         }).catch((e: unknown) => {
             if (controller.signal.aborted) return;
@@ -162,6 +173,83 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
         setRow(barcode, { boxMode: true, units: u, boxes: maxBoxesStr(qty, u) });
     };
 
+    // ─── Поиск + сегмент-фильтр (видимый срез; итоги и массовые кнопки — по ВСЕМ) ─
+    const mismatchSet = new Set(mismatches.map(it => it.barcode));
+    const boxModeCount = items.reduce((s, it) => s + (packOf(it.barcode).boxMode ? 1 : 0), 0);
+    const noMultCount = items.filter(it => it.units_per_box == null).length;
+    const query = search.trim().toLowerCase();
+    const visibleItems = items.filter(it => {
+        if (query
+            && !it.barcode.toLowerCase().includes(query)
+            && !(it.article_seller ?? '').toLowerCase().includes(query)
+            && !(it.name ?? '').toLowerCase().includes(query)) return false;
+        switch (segment) {
+            case 'box': return packOf(it.barcode).boxMode;
+            case 'loose': return !packOf(it.barcode).boxMode;
+            case 'no_mult': return it.units_per_box == null;
+            case 'mismatch': return mismatchSet.has(it.barcode);
+            default: return true;
+        }
+    });
+    const segments: { key: SegmentFilter; label: string; count: number }[] = [
+        { key: 'all', label: 'Все', count: items.length },
+        { key: 'box', label: 'Коробом', count: boxModeCount },
+        { key: 'loose', label: 'Россыпью', count: items.length - boxModeCount },
+        { key: 'no_mult', label: 'Без кратности', count: noMultCount },
+        { key: 'mismatch', label: 'Нестыковки', count: mismatches.length },
+    ];
+
+    // ─── Выбор строк (чекбоксы) + массовые операции по выбранным ────────────────
+    const toggleSelect = (barcode: string) =>
+        setSelected(prev => {
+            const next = new Set(prev);
+            if (next.has(barcode)) next.delete(barcode); else next.add(barcode);
+            return next;
+        });
+    const allVisibleSelected = visibleItems.length > 0 && visibleItems.every(it => selected.has(it.barcode));
+    const toggleSelectAllVisible = () =>
+        setSelected(prev => {
+            const next = new Set(prev);
+            if (allVisibleSelected) visibleItems.forEach(it => next.delete(it.barcode));
+            else visibleItems.forEach(it => next.add(it.barcode));
+            return next;
+        });
+    const selectedItems = items.filter(it => selected.has(it.barcode));
+
+    /** Выбранные → коробом (units: текущее значение строки → prefill-кратность). */
+    const applySelectedBox = () =>
+        setPackRows(prev => {
+            const next = { ...prev };
+            for (const it of selectedItems) {
+                const r = next[it.barcode] ?? EMPTY_ROW;
+                const units = r.units || (it.units_per_box != null ? String(it.units_per_box) : '');
+                next[it.barcode] = { boxMode: true, units, boxes: r.boxes || maxBoxesStr(it.qty, units) };
+            }
+            return next;
+        });
+    const applySelectedLoose = () =>
+        setPackRows(prev => {
+            const next = { ...prev };
+            for (const it of selectedItems) {
+                next[it.barcode] = { ...(next[it.barcode] ?? EMPTY_ROW), boxMode: false };
+            }
+            return next;
+        });
+    const bulkUnitsNum = parseInt(bulkUnits, 10);
+    const bulkUnitsOk = Number.isFinite(bulkUnitsNum) && bulkUnitsNum >= 2;
+    /** Задать «шт в коробе» выбранным: коробом, коробов = максимум при этой кратности. */
+    const applySelectedUnits = () => {
+        if (!bulkUnitsOk) return;
+        const u = String(bulkUnitsNum);
+        setPackRows(prev => {
+            const next = { ...prev };
+            for (const it of selectedItems) {
+                next[it.barcode] = { boxMode: true, units: u, boxes: maxBoxesStr(it.qty, u) };
+            }
+            return next;
+        });
+    };
+
     const hasItems = items.length > 0;
     // Кнопка требует подтверждения, если поставка уже создавалась/связана.
     const needsConfirm = !!draft?.already_sent;
@@ -218,9 +306,8 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
             onClick={e => { if (e.target === e.currentTarget) onClose(); }}
         >
             <div
-                className="modal-card modal-card-wide modal-card-solid"
+                className="modal-card modal-card-xl modal-card-solid"
                 style={{
-                    width: 720, maxWidth: '94vw',
                     maxHeight: 'calc(100vh - 48px)',
                     padding: 0,
                     display: 'flex', flexDirection: 'column',
@@ -447,6 +534,34 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                 )}
                             </div>
 
+                            {/* Поиск + сегмент-фильтр (правки при фильтрации не теряются — state по ШК) */}
+                            {hasItems && (
+                                <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
+                                    <input
+                                        value={search}
+                                        onChange={e => setSearch(e.target.value)}
+                                        placeholder="Поиск по ШК или артикулу…"
+                                        style={{
+                                            flex: '1 1 240px', minWidth: 200, padding: '7px 10px', borderRadius: 8,
+                                            border: '1px solid var(--color-border)',
+                                            background: 'var(--color-bg-card)', color: 'var(--color-text)', fontSize: 14,
+                                        }}
+                                    />
+                                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                        {segments.map(s => (
+                                            <button
+                                                key={s.key}
+                                                className={`btn btn-sm ${segment === s.key ? 'btn-primary' : 'btn-secondary'}`}
+                                                style={{ padding: '3px 10px', fontSize: 12 }}
+                                                onClick={() => setSegment(s.key)}
+                                            >
+                                                {s.label}{s.key === 'all' ? '' : ` (${formatNumber(s.count, 0)})`}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
                             {/* Итоги сверху: Σ коробов / Σ штук россыпью */}
                             {hasItems && (
                                 <div style={{ display: 'flex', gap: 24, marginBottom: 10, fontSize: 14, flexWrap: 'wrap' }}>
@@ -461,28 +576,113 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                 </div>
                             )}
 
+                            {/* Панель массовых операций по выбранным */}
+                            {selected.size > 0 && (
+                                <div style={{
+                                    display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+                                    padding: '8px 12px', marginBottom: 10, borderRadius: 8,
+                                    border: '1px solid var(--color-border)', background: 'var(--color-bg-card)', fontSize: 13,
+                                }}>
+                                    <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
+                                        Выбрано: {formatNumber(selected.size, 0)}
+                                    </span>
+                                    <button className="btn btn-secondary btn-sm" onClick={applySelectedBox}>
+                                        Выбранные → коробом
+                                    </button>
+                                    <button className="btn btn-secondary btn-sm" onClick={applySelectedLoose}>
+                                        → россыпью
+                                    </button>
+                                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+                                        <span style={{ color: 'var(--color-text-muted)' }}>шт в коробе:</span>
+                                        <input
+                                            type="number"
+                                            min={2}
+                                            value={bulkUnits}
+                                            onChange={e => setBulkUnits(e.target.value)}
+                                            placeholder="шт"
+                                            style={{
+                                                width: 64, padding: '3px 6px', borderRadius: 8, fontSize: 13,
+                                                border: '1px solid var(--color-border)',
+                                                background: 'var(--color-bg)', color: 'var(--color-text)',
+                                            }}
+                                        />
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            onClick={applySelectedUnits}
+                                            disabled={!bulkUnitsOk}
+                                            title="Коробом с этой кратностью, коробов = максимум"
+                                        >
+                                            применить к выбранным
+                                        </button>
+                                    </span>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        style={{ marginLeft: 'auto' }}
+                                        onClick={() => setSelected(new Set())}
+                                    >
+                                        снять выбор
+                                    </button>
+                                </div>
+                            )}
+
                             {!hasItems ? (
                                 <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 14 }}>
                                     В приёмке нет позиций — поставку создать нельзя
                                 </div>
                             ) : (
                                 <div style={{ overflowX: 'auto', border: '1px solid var(--color-border)', borderRadius: 8 }}>
-                                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                                    <table style={{ width: '100%', minWidth: 960, borderCollapse: 'collapse', fontSize: 13, tableLayout: 'fixed' }}>
+                                        <colgroup>
+                                            <col style={{ width: 36 }} />
+                                            <col style={{ width: 150 }} />
+                                            <col />
+                                            <col style={{ width: 90 }} />
+                                            <col style={{ width: 160 }} />
+                                            <col style={{ width: 90 }} />
+                                            <col style={{ width: 90 }} />
+                                            <col style={{ width: 190 }} />
+                                        </colgroup>
                                         <thead>
                                             <tr style={{ background: 'var(--color-bg-card)', textAlign: 'left' }}>
+                                                <th style={{ padding: '8px 10px' }}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={allVisibleSelected}
+                                                        onChange={toggleSelectAllVisible}
+                                                        title="Выбрать все видимые строки"
+                                                        style={{ width: 15, height: 15, accentColor: 'var(--color-accent)', cursor: 'pointer' }}
+                                                    />
+                                                </th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }}>ШК</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }}>Наименование</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Кол-во</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }}>Упаковка</th>
+                                                <th style={{ padding: '8px 10px', fontWeight: 600 }} title="Штук в коробе">Шт в коробе</th>
+                                                <th style={{ padding: '8px 10px', fontWeight: 600 }} title="Коробов (остаток едет россыпью)">Коробов</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }}>Разбивка</th>
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {items.map(it => {
+                                            {visibleItems.length === 0 && (
+                                                <tr style={{ borderTop: '1px solid var(--color-border)' }}>
+                                                    <td colSpan={8} style={{ padding: '20px 10px', textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                                                        Ничего не найдено по текущему фильтру
+                                                    </td>
+                                                </tr>
+                                            )}
+                                            {visibleItems.map(it => {
                                                 const c = rowCalc(it.barcode, it.qty);
                                                 const r = packOf(it.barcode);
                                                 return (
                                                     <tr key={it.barcode} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                                        <td style={{ padding: '8px 10px' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={selected.has(it.barcode)}
+                                                                onChange={() => toggleSelect(it.barcode)}
+                                                                style={{ width: 15, height: 15, accentColor: 'var(--color-accent)', cursor: 'pointer' }}
+                                                            />
+                                                        </td>
                                                         <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: 12 }}>
                                                             {it.barcode}
                                                             {/* ШК короба — при короб-режиме: карта Натали либо выведенный GTIN-14 */}
@@ -495,7 +695,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                                 </div>
                                                             )}
                                                         </td>
-                                                        <td style={{ padding: '8px 10px' }}>
+                                                        <td style={{ padding: '8px 10px', overflowWrap: 'break-word' }}>
                                                             {it.name || '—'}
                                                             {it.pack_source !== 'none' && (
                                                                 <span
@@ -542,43 +742,50 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                                 >
                                                                     россыпь
                                                                 </button>
-                                                                {r.boxMode && (
-                                                                    <>
-                                                                        <input
-                                                                            type="number"
-                                                                            min={2}
-                                                                            value={r.units}
-                                                                            // Смена кратности → «коробов» пересчитывается на максимум.
-                                                                            onChange={e => setRow(it.barcode, {
-                                                                                units: e.target.value,
-                                                                                boxes: maxBoxesStr(it.qty, e.target.value),
-                                                                            })}
-                                                                            placeholder="шт"
-                                                                            title="Штук в коробе"
-                                                                            style={{
-                                                                                width: 58, padding: '3px 6px', borderRadius: 8, fontSize: 13,
-                                                                                border: `1px solid ${c.invalidUnits ? 'var(--color-danger)' : 'var(--color-border)'}`,
-                                                                                background: 'var(--color-bg-card)', color: 'var(--color-text)',
-                                                                            }}
-                                                                        />
-                                                                        <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>×</span>
-                                                                        <input
-                                                                            type="number"
-                                                                            min={0}
-                                                                            max={Number.isFinite(c.unitsNum) && c.unitsNum >= 2 ? Math.floor(it.qty / c.unitsNum) : undefined}
-                                                                            value={r.boxes}
-                                                                            onChange={e => setRow(it.barcode, { boxes: e.target.value })}
-                                                                            placeholder="кор."
-                                                                            title="Коробов (остаток qty − коробов × шт едет россыпью)"
-                                                                            style={{
-                                                                                width: 58, padding: '3px 6px', borderRadius: 8, fontSize: 13,
-                                                                                border: `1px solid ${c.invalidBoxes ? 'var(--color-danger)' : 'var(--color-border)'}`,
-                                                                                background: 'var(--color-bg-card)', color: 'var(--color-text)',
-                                                                            }}
-                                                                        />
-                                                                    </>
-                                                                )}
                                                             </div>
+                                                        </td>
+                                                        <td style={{ padding: '8px 10px' }}>
+                                                            {r.boxMode ? (
+                                                                <input
+                                                                    type="number"
+                                                                    min={2}
+                                                                    value={r.units}
+                                                                    // Смена кратности → «коробов» пересчитывается на максимум.
+                                                                    onChange={e => setRow(it.barcode, {
+                                                                        units: e.target.value,
+                                                                        boxes: maxBoxesStr(it.qty, e.target.value),
+                                                                    })}
+                                                                    placeholder="шт"
+                                                                    title="Штук в коробе"
+                                                                    style={{
+                                                                        width: 62, padding: '3px 6px', borderRadius: 8, fontSize: 13,
+                                                                        border: `1px solid ${c.invalidUnits ? 'var(--color-danger)' : 'var(--color-border)'}`,
+                                                                        background: 'var(--color-bg-card)', color: 'var(--color-text)',
+                                                                    }}
+                                                                />
+                                                            ) : (
+                                                                <span style={{ color: 'var(--color-text-muted)' }}>—</span>
+                                                            )}
+                                                        </td>
+                                                        <td style={{ padding: '8px 10px' }}>
+                                                            {r.boxMode ? (
+                                                                <input
+                                                                    type="number"
+                                                                    min={0}
+                                                                    max={Number.isFinite(c.unitsNum) && c.unitsNum >= 2 ? Math.floor(it.qty / c.unitsNum) : undefined}
+                                                                    value={r.boxes}
+                                                                    onChange={e => setRow(it.barcode, { boxes: e.target.value })}
+                                                                    placeholder="кор."
+                                                                    title="Коробов (остаток qty − коробов × шт едет россыпью)"
+                                                                    style={{
+                                                                        width: 62, padding: '3px 6px', borderRadius: 8, fontSize: 13,
+                                                                        border: `1px solid ${c.invalidBoxes ? 'var(--color-danger)' : 'var(--color-border)'}`,
+                                                                        background: 'var(--color-bg-card)', color: 'var(--color-text)',
+                                                                    }}
+                                                                />
+                                                            ) : (
+                                                                <span style={{ color: 'var(--color-text-muted)' }}>—</span>
+                                                            )}
                                                         </td>
                                                         <td style={{ padding: '8px 10px', whiteSpace: 'nowrap', fontSize: 12 }}>
                                                             {c.invalid ? (
