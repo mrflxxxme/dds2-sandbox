@@ -3299,11 +3299,25 @@ function FfRequestsTab({ warehouseId, slug, kind, externalTick = 0 }: { warehous
                         </span>
                     );
                 }
+                // Приход машины: наша приёмка рождена отгрузкой V-… — это
+                // импорт из Китая, а не разовая приёмка от ФФ.
+                if (row.vehicle_order_no) {
+                    return (
+                        <span
+                            style={{ fontWeight: 600 }}
+                            title={`Приход машины ${row.vehicle_order_no} — приёмка ${row.linked_number || ''} создана отгрузкой машины`}
+                        >
+                            🚛 {row.vehicle_order_no}
+                        </span>
+                    );
+                }
                 return v || '—';
             },
             exportValue: (row: FfRequestRow) => ffRepackPaired(row)
                 ? 'Вскрытие коробов'
-                : (kind === 'inbound' && row.stock_transfer_id != null ? 'Перемещение' : row.type_name || ''),
+                : (kind === 'inbound' && row.stock_transfer_id != null
+                    ? 'Перемещение'
+                    : (row.vehicle_order_no ? `Приход машины ${row.vehicle_order_no}` : row.type_name || '')),
         },
         // Только для сборки: склад отгрузки МП (из деталки skladbot)
         ...(kind === 'assembly' ? [
@@ -3572,8 +3586,11 @@ function FfRequestsTab({ warehouseId, slug, kind, externalTick = 0 }: { warehous
             && (!opFilter
                 || (opFilter === 'repack' && ffRepackPaired(r))
                 || (opFilter === 'transfer' && r.stock_transfer_id != null)
+                || (opFilter === 'vehicle' && !!r.vehicle_order_no && !ffRepackPaired(r))
+                || (opFilter.startsWith('veh:') && r.vehicle_order_no === opFilter.slice(4))
                 || (opFilter === 'plain'
-                    && !ffRepackPaired(r) && !r.repack_unpaired && r.stock_transfer_id == null)
+                    && !ffRepackPaired(r) && !r.repack_unpaired
+                    && r.stock_transfer_id == null && !r.vehicle_order_no)
                 || (opFilter === 'unpaired' && !!r.repack_unpaired))
             && (!progressFilter || ffProgressCode(r) === progressFilter),
         ),
@@ -3586,12 +3603,23 @@ function FfRequestsTab({ warehouseId, slug, kind, externalTick = 0 }: { warehous
         const paired = rows.filter(r => ffRepackPaired(r)).length;
         const unpaired = rows.filter(r => !!r.repack_unpaired).length;
         const transfers = rows.filter(r => r.stock_transfer_id != null && !ffRepackPaired(r)).length;
-        const plain = rows.length - paired - unpaired - transfers;
+        const vehicleRows = rows.filter(r => !!r.vehicle_order_no && !ffRepackPaired(r));
+        const plain = rows.length - paired - unpaired - transfers - vehicleRows.length;
         const chips: Array<[string, string, number]> = [['', 'Все', rows.length]];
         if (paired) chips.push(['repack', 'Вскрытие коробов', paired]);
+        if (vehicleRows.length) chips.push(['vehicle', 'Приход машин', vehicleRows.length]);
         if (transfers) chips.push(['transfer', 'Перемещения', transfers]);
-        if (plain && (paired || unpaired || transfers)) chips.push(['plain', 'Обычные', plain]);
+        if (plain && (paired || unpaired || transfers || vehicleRows.length)) {
+            chips.push(['plain', 'Обычные', plain]);
+        }
         if (kind === 'return' && unpaired) chips.push(['unpaired', 'Без пары', unpaired]);
+        // Отбор по КОНКРЕТНОЙ машине: у склада их немного, а искать «всё по
+        // V-0035» — самый частый вопрос при разборе прихода.
+        const byVehicle = new Map<string, number>();
+        for (const r of vehicleRows) byVehicle.set(r.vehicle_order_no!, (byVehicle.get(r.vehicle_order_no!) ?? 0) + 1);
+        for (const [no, n] of Array.from(byVehicle.entries()).sort((a, b) => a[0] < b[0] ? 1 : -1)) {
+            chips.push([`veh:${no}`, `🚛 ${no}`, n]);
+        }
         return chips.length > 1 ? chips : [];
     }, [rows, kind]);
     const progressChips = useMemo(() => {

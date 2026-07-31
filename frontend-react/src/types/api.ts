@@ -1216,6 +1216,7 @@ export interface ExpectedVehicleRow {
   linked_ff_numbers?: string[];
 }
 
+
 export interface OutboundShipmentItem {
   id: number;
   shipment_id: number;
@@ -6561,6 +6562,8 @@ export interface FfRequestRow {
   linked_status: string | null;
   /** состав нашего документа расходится с заявкой(ами) ФФ (true — расхождение, null — неизвестно) */
   linked_mismatch?: boolean | null;
+  /** Номер машины (V-…), породившей нашу приёмку — тип строки «Приход машины» */
+  vehicle_order_no?: string | null;
   /** Вскрытие коробов (migfull): id заявки-пары — у поступления это пара-возврат, у возврата пара-поступление */
   repack_return_id?: number | null;
   /** Номер заявки-пары по вскрытию коробов (для подписи бейджа) */

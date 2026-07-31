@@ -3679,6 +3679,7 @@ def _request_to_dict(
     repack_pair_map: dict | None = None,
     boxes_map: dict | None = None,
     accepted_map: dict | None = None,
+    vehicle_map: dict | None = None,
 ) -> dict:
     """FulfillmentRequest → FfRequestRow-shaped dict с обогащением связи.
 
@@ -3745,6 +3746,8 @@ def _request_to_dict(
         "linked_number": linked_number,
         "linked_status": linked_status,
         "linked_mismatch": linked_mismatch,
+        # Номер машины, породившей нашу приёмку (V-…) — тип строки «Приход машины».
+        "vehicle_order_no": (vehicle_map or {}).get(req.inbound_receipt_id or 0),
         "repack_return_id": req.repack_return_id,
         "repack_pair_number": (repack_pair_map or {}).get(req.id),
         "repack_unpaired": _repack_unpaired(req),
@@ -3816,15 +3819,31 @@ async def list_requests(
         assembly_map = {row[0]: (row[1], row[2]) for row in result.all()}
 
     inbound_map: dict[int, tuple] = {}
+    # {inbound_receipt_id: номер машины V-…} — приёмка, рождённая отгрузкой
+    # машины (`InboundReceipt.cost_order_id`): такие заявки ФФ показываются
+    # как «Приход машины», а не безликая «Приёмка».
+    vehicle_map: dict[int, str] = {}
     if inbound_ids:
+        from backend.models.cost import CostOrder
+
         result = await db.execute(
-            select(InboundReceipt.id, InboundReceipt.number, InboundReceipt.status).where(
+            select(
+                InboundReceipt.id,
+                InboundReceipt.number,
+                InboundReceipt.status,
+                CostOrder.order_no,
+            )
+            .join(CostOrder, CostOrder.id == InboundReceipt.cost_order_id, isouter=True)
+            .where(
                 InboundReceipt.project_id == project_id,
                 InboundReceipt.id.in_(inbound_ids),
                 InboundReceipt.is_deleted == False,
             )
         )
-        inbound_map = {row[0]: (row[1], row[2]) for row in result.all()}
+        for rid, number, status, order_no in result.all():
+            inbound_map[rid] = (number, status)
+            if order_no:
+                vehicle_map[rid] = order_no
 
     transfer_map = await _transfer_map(
         db, project_id, {r.stock_transfer_id for r in requests if r.stock_transfer_id}
@@ -3849,6 +3868,7 @@ async def list_requests(
             repack_pair_map,
             boxes_map=boxes_map,
             accepted_map=accepted_map,
+            vehicle_map=vehicle_map,
         )
         for r in requests
     ]
