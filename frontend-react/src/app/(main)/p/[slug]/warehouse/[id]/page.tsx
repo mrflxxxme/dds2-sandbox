@@ -858,6 +858,8 @@ function FfVehicleLinkModal({ warehouseId, vehicle, onClose, onLinked }: {
     const [selected, setSelected] = useState<Set<number>>(new Set());
     const [rowErrors, setRowErrors] = useState<Record<number, string>>({});
     const [acting, setActing] = useState(false);
+    // Поиск по номеру/стадии — заявок бывают десятки, глазами не найти.
+    const [search, setSearch] = useState('');
 
     useEffect(() => {
         const controller = new AbortController();
@@ -933,15 +935,36 @@ function FfVehicleLinkModal({ warehouseId, vehicle, onClose, onLinked }: {
 
                 {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
 
+                {!loading && rows.length > 0 && (
+                    <input
+                        className="form-input"
+                        style={{ marginBottom: 12, fontSize: 13 }}
+                        placeholder="Поиск по номеру или стадии…"
+                        value={search}
+                        onChange={e => setSearch(e.target.value)}
+                        autoFocus
+                    />
+                )}
+
                 {loading ? (
                     <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка...</div>
                 ) : rows.length === 0 ? (
                     <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
                         Несвязанных заявок ФФ (приёмок) нет
                     </div>
+                ) : rows.filter(r => !search
+                    || (r.number || '').toLowerCase().includes(search.toLowerCase())
+                    || (r.stage_title || r.status || '').toLowerCase().includes(search.toLowerCase())
+                ).length === 0 ? (
+                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                        Ничего не найдено по «{search}»
+                    </div>
                 ) : (
                     <div className="ff-link-list">
-                        {rows.map(row => (
+                        {rows.filter(r => !search
+                            || (r.number || '').toLowerCase().includes(search.toLowerCase())
+                            || (r.stage_title || r.status || '').toLowerCase().includes(search.toLowerCase())
+                        ).map(row => (
                             <label key={row.id} className="ff-link-row" style={{ cursor: 'pointer' }}>
                                 <input
                                     type="checkbox"
