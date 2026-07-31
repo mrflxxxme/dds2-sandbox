@@ -2,7 +2,7 @@
 import { ApiClient } from './client';
 import type {
     AdSubject, AdNmCard, CreateCampaignResult, FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdGlueRow, AdsManagerCampaign, AdsScheduleSetting, AdsScheduleLogEntry, AdsWbAutopayStatus, BudgetLedgerEntry, AdsCampaignStateResult, AdsScheduleSaveResult, AdsBudgetGap, AdsBudgetGapHistory, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionsResponse, PositionsProgress, CollectPositionsResult, CollectOneResult, CampaignZones,
-    CampaignZonesUpdate, ClusterMinusResult, ClusterBidResult, ClusterBidBulkResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse } from '@/types/api';
+    CampaignZonesUpdate, ClusterMinusResult, ClusterBidResult, ClusterBidBulkResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse, FunnelTreeResponse, FunnelDimensionsResponse } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -24,6 +24,26 @@ export function addFunnelMethods(api: ApiClient) {
             if (params?.color) q.set('color', params.color);
             if (params?.subcat) q.set('subcat', 'true');
             return api.request<{ data: (FunnelDayRow | FunnelSkuRow | FunnelGroupRow)[]; detailed: boolean; tax_rate: number; has_bdr?: boolean; group_by?: string }>('GET', `/api/v1/funnel/data?${q.toString()}`);
+        },
+        /** Воронка деревом по произвольной цепочке группировок: dims в порядке уровней. */
+        getFunnelTree(params: { dims: string[]; date_from?: string; date_to?: string; brand?: string; subject?: string; vendor_code?: string; extended?: boolean; min_orders?: number; tag?: string; imt?: string; color?: string }) {
+            const q = new URLSearchParams();
+            q.set('group_by', params.dims.join(','));
+            if (params.date_from) q.set('date_from', params.date_from);
+            if (params.date_to) q.set('date_to', params.date_to);
+            if (params.brand) q.set('brand', params.brand);
+            if (params.subject) q.set('subject', params.subject);
+            if (params.vendor_code) q.set('vendor_code', params.vendor_code);
+            if (params.extended) q.set('extended', 'true');
+            if (params.min_orders) q.set('min_orders', String(params.min_orders));
+            if (params.tag) q.set('tag', params.tag);
+            if (params.imt) q.set('imt', params.imt);
+            if (params.color) q.set('color', params.color);
+            return api.request<FunnelTreeResponse>('GET', `/api/v1/funnel/tree?${q.toString()}`);
+        },
+        /** Каталог измерений для конструктора группировок. */
+        getFunnelDimensions() {
+            return api.request<FunnelDimensionsResponse>('GET', '/api/v1/funnel/dimensions');
         },
         getFunnelColors(subject?: string, brand?: string) {
             const q = new URLSearchParams();

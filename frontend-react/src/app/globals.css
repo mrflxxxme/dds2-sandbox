@@ -136,6 +136,28 @@ input[type="number"] {
     background: #f3f4f6;
 }
 
+/* Кнопка-фильтр (SearchSelect, «Пресеты», числовые поля рядом с ними):
+   наведение подсвечивает рамку — ровно как у пикера периода (.apk-trigger).
+   Рамка живёт здесь, а не в inline-стиле: inline-border перебил бы :hover. */
+.filter-trigger {
+    border: 1px solid var(--color-border);
+    transition: border-color .15s, box-shadow .15s;
+}
+
+.filter-trigger:hover:not(:disabled) {
+    border-color: var(--color-accent);
+}
+
+/* Открытый список / активное значение — та же подсветка, что у пикера периода */
+.filter-trigger[aria-expanded="true"],
+.filter-trigger.is-active {
+    border-color: var(--color-accent);
+}
+
+.filter-trigger[aria-expanded="true"] {
+    box-shadow: 0 0 0 3px rgba(0, 113, 227, .1);
+}
+
 /* ─── Buttons ───────────────────────────────────────────────────────────────── */
 
 .btn {
