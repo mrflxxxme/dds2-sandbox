@@ -2765,32 +2765,6 @@ function ffProgressCode(row: FfRequestRow): 'accepting' | 'done' | 'over' | 'idl
     return acc === planned ? 'done' : 'accepting';
 }
 
-function ffRepackBadge(row: FfRequestRow, kind: FfRequestKind) {
-    if (ffRepackPaired(row)) {
-        const pair = row.repack_pair_number || '—';
-        const title = kind === 'return'
-            ? `Пара к поступлению ${pair}`
-            : `Пара к возврату ${pair}: ФФ вскрыл короба под FBS — сток не двигается, это переупаковка`;
-        return (
-            <span className="badge badge-info" style={{ fontSize: 11, padding: '2px 8px' }} title={title}>
-                Вскрытие коробов
-            </span>
-        );
-    }
-    if (kind === 'return' && row.repack_unpaired) {
-        return (
-            <span
-                className="badge badge-warning"
-                style={{ fontSize: 11, padding: '2px 8px' }}
-                title="Поступления-пары нет — возможно, реальный возврат товара со склада ФФ. Проверьте и оформите приход вручную, если товар едет к вам"
-            >
-                Без пары
-            </span>
-        );
-    }
-    return null;
-}
-
 function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug: string; kind: FfRequestKind }) {
     const [rows, setRows] = useState<FfRequestRow[]>([]);
     const [loading, setLoading] = useState(true);
@@ -2976,7 +2950,38 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             key: 'external_created_at', label: 'Создана',
             render: (v: string | null) => (v ? formatDate(v) : '—'),
         },
-        { key: 'type_name', label: 'Тип', render: (v: string | null) => v || '—' },
+        // Тип показывает ОПЕРАЦИЮ, а не константу провайдера: «Приёмка» у всех
+        // строк не говорила ничего, а бейджи типов в «Стадии» налезали друг на
+        // друга. Вскрытие/перемещение различимы прямо здесь.
+        {
+            key: 'type_name', label: 'Тип',
+            render: (v: string | null, row: FfRequestRow) => {
+                if (ffRepackPaired(row)) {
+                    return (
+                        <span
+                            style={{ fontWeight: 600, color: 'var(--color-accent)' }}
+                            title={`Вскрытие коробов — пара ${row.repack_pair_number || '…'}: внутренняя переупаковка ФФ, сток не двигается`}
+                        >
+                            Вскрытие коробов
+                        </span>
+                    );
+                }
+                if (kind === 'inbound' && row.stock_transfer_id != null) {
+                    return (
+                        <span
+                            style={{ fontWeight: 600 }}
+                            title={`Приёмка внутреннего перемещения с нашего склада${row.linked_number ? ` (${row.linked_number})` : ''} — это не закупка`}
+                        >
+                            Перемещение
+                        </span>
+                    );
+                }
+                return v || '—';
+            },
+            exportValue: (row: FfRequestRow) => ffRepackPaired(row)
+                ? 'Вскрытие коробов'
+                : (kind === 'inbound' && row.stock_transfer_id != null ? 'Перемещение' : row.type_name || ''),
+        },
         // Только для сборки: склад отгрузки МП (из деталки skladbot)
         ...(kind === 'assembly' ? [
             {
@@ -3015,17 +3020,16 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                     );
                 }
                 if (v == null) return '—';
+                // Без суффикса «шт» = единицы не подтверждены (сырое число строк) —
+                // тихий сигнал вместо оранжевого «?» на каждой свежей приёмке.
                 return (
-                    <span style={{ whiteSpace: 'nowrap' }}>
-                        <span>{formatNumber(v, 0)}</span>
-                        {kind !== 'assembly' && (
-                            <span
-                                style={{ fontSize: 11, color: 'var(--color-warning)', cursor: 'help' }}
-                                title="Единицы не определены: у части SKU нет карты кратности. Число — сумма по строкам документа и может смешивать короба со штуками."
-                            >
-                                {' '}?
-                            </span>
-                        )}
+                    <span
+                        style={{ whiteSpace: 'nowrap' }}
+                        title={kind !== 'assembly'
+                            ? 'Единицы не подтверждены: у части SKU нет карты кратности — число по строкам документа'
+                            : undefined}
+                    >
+                        {formatNumber(v, 0)}
                     </span>
                 );
             },
@@ -3071,28 +3075,16 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                             </span>
                         );
                     })()}
-                    {/* Приёмка внутреннего ПЕРЕМЕЩЕНИЯ (наш TR приехал на ФФ) —
-                        третий тип операции наравне со вскрытием: без метки
-                        читалась как закупка. */}
-                    {kind === 'inbound' && row.stock_transfer_id != null && (
+                    {/* Тип операции живёт в колонке «Тип», отвязка — в «Связи».
+                        Здесь только предупреждение возврата без пары. */}
+                    {kind === 'return' && !ffRepackPaired(row) && row.repack_unpaired && (
                         <span
-                            className="badge badge-secondary"
+                            className="badge badge-warning"
                             style={{ fontSize: 11, padding: '2px 8px' }}
-                            title={`Приёмка внутреннего перемещения с нашего склада${row.linked_number ? ` (${row.linked_number})` : ''} — товар едет между нашими складами, это не закупка`}
+                            title="Поступления-пары нет — возможно, реальный возврат товара со склада ФФ. Проверьте и оформите приход вручную, если товар едет к вам"
                         >
-                            Перемещение{row.linked_number ? ` ${row.linked_number}` : ''}
+                            Без пары
                         </span>
-                    )}
-                    {ffRepackBadge(row, kind)}
-                    {ffRepackPaired(row) && (
-                        <button
-                            className="btn btn-sm btn-secondary"
-                            title="Разорвать пару «вскрытие коробов»"
-                            onClick={() => handleRepackUnlink(row)}
-                            disabled={actingId === row.id}
-                        >
-                            {actingId === row.id ? '...' : 'Отвязать'}
-                        </button>
                     )}
                 </span>
             ),
@@ -3107,6 +3099,22 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             key: 'linked_number', label: 'Связь',
             render: (_: unknown, row: FfRequestRow) => {
                 const acting = actingId === row.id;
+                // Пара «вскрытия» — тоже связь: номер парного документа + отвязка.
+                if (ffRepackPaired(row)) {
+                    return (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <span
+                                style={{ fontWeight: 600 }}
+                                title={kind === 'return' ? 'Поступление-пара вскрытия' : 'Возврат-пара вскрытия'}
+                            >
+                                {row.repack_pair_number || '—'}
+                            </span>
+                            <button className="btn btn-sm btn-secondary" onClick={() => handleRepackUnlink(row)} disabled={acting}>
+                                {acting ? '...' : 'Отвязать'}
+                            </button>
+                        </span>
+                    );
+                }
                 if (row.linked_number) {
                     const siblings = row.assembly_request_id != null ? (linkedCount.get(row.assembly_request_id) ?? 0) : 0;
                     return (
@@ -3340,28 +3348,25 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 <option value="">Статус ФФ: все</option>
                 {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
-            {/* Срез по типу операции (вскрытие/обычные/без пары) — все документы
-                Натали теперь у нас, без среза внутренние переупаковки тонут
-                среди товарных приёмок. */}
-            {opChips.map(([code, label, n]) => (
-                <button
-                    key={`op-${code}`}
-                    className={`btn btn-sm ${opFilter === code ? 'btn-primary' : 'btn-secondary'}`}
-                    onClick={() => setOpFilter(code)}
-                >
-                    {label} · {formatNumber(n, 0)}
-                </button>
-            ))}
-            {/* Срез по живому прогрессу приёмки. Чип-тумблер: повторный клик снимает. */}
-            {progressChips.map(([code, label, n]) => (
-                <button
-                    key={`pr-${code}`}
-                    className={`btn btn-sm ${progressFilter === code ? 'btn-primary' : 'btn-secondary'}`}
-                    onClick={() => setProgressFilter(progressFilter === code ? '' : code)}
-                >
-                    {label} · {formatNumber(n, 0)}
-                </button>
-            ))}
+            {/* Срезы — селектами в один ряд со «Стадией»/«Статусом ФФ»: чипы
+                разрастались в два ряда кнопок и читались как шум. */}
+            {opChips.length > 0 && (
+                <select className="form-input" style={{ maxWidth: 220, fontSize: 13 }} value={opFilter} onChange={e => setOpFilter(e.target.value)}>
+                    {opChips.map(([code, label, n]) => (
+                        <option key={`op-${code}`} value={code}>
+                            {code === '' ? 'Тип: все' : `${label} · ${formatNumber(n, 0)}`}
+                        </option>
+                    ))}
+                </select>
+            )}
+            {progressChips.length > 0 && (
+                <select className="form-input" style={{ maxWidth: 220, fontSize: 13 }} value={progressFilter} onChange={e => setProgressFilter(e.target.value)}>
+                    <option value="">Приёмка: вся</option>
+                    {progressChips.map(([code, label, n]) => (
+                        <option key={`pr-${code}`} value={code}>{label} · {formatNumber(n, 0)}</option>
+                    ))}
+                </select>
+            )}
             {(stageFilter || statusFilter || opFilter || progressFilter) && (
                 <button className="btn btn-sm btn-secondary" onClick={() => { setStageFilter(''); setStatusFilter(''); setOpFilter(''); setProgressFilter(''); }}>Сбросить</button>
             )}
