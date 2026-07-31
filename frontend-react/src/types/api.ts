@@ -1312,13 +1312,72 @@ export interface StockTransfer {
 
   // Обогащение, которое сервис заполняет пачкой (не relationship).
   // Всё, чего в схеме НЕТ, объявлять тут нельзя: «поле есть, тип верный, в
-  // рантайме вечный null» не ловится ни типами, ни ревью. Поэтому связок ФФ и
-  // данных расхода по забору здесь не будет — связки карточка берёт со стороны
-  // ФФ (stock_transfer_id заявки), оплату показывает «Лист логиста».
+  // рантайме вечный null» не ловится ни типами, ни ревью. Данных расхода по
+  // забору здесь по-прежнему нет — оплату показывает «Лист логиста».
   from_warehouse_name?: string | null;
   to_warehouse_name?: string | null;
   /** Имя перевозчика. Пока не приехало — UI честно падает на «Контрагент #id». */
   counterparty_name?: string | null;
+  /**
+   * Связанные заявки ФФ обеих сторон маршрута. Заполняется ТОЛЬКО в деталке
+   * (`GET /warehouse/transfers/{id}` и ответе PUT) — в списке всегда пусто,
+   * опираться там на него нельзя. Раньше карточка ради этого списка тянула ВСЕ
+   * заявки обоих складов (два тяжёлых запроса на открытие).
+   */
+  ff_links?: TransferFfLink[];
+}
+
+/** Сторона маршрута переезда: отгрузка у источника / приёмка у получателя. */
+export type TransferFfSide = 'source' | 'dest';
+
+/**
+ * Заявка ФФ на стороне переезда — ОДИН тип на два места:
+ *  • `StockTransfer.ff_links` — уже связанные;
+ *  • `GET /warehouse/transfers/{id}/ff-candidates?side=…` — свободные кандидаты.
+ *
+ * Имя `FfLinkCandidate` занято кандидатом ОБРАТНОГО направления (наш документ
+ * как кандидат для заявки ФФ, `{doc_id, doc_kind, score…}`) — не путать.
+ *
+ * `warehouse_id` — склад самой заявки ФФ; он нужен ручкам link/unlink (в их
+ * путях есть warehouse_id) и ссылке на деталку заявки. `side` бэкенд считает
+ * сам (склад совпал с from → source, с to → dest; на легаси-маршруте — по
+ * kind), поле всегда непустое.
+ */
+export interface TransferFfLink {
+  /** fulfillment_requests.id */
+  id: number;
+  warehouse_id: number;
+  side: TransferFfSide;
+  number: string | null;
+  external_id: string;
+  /** 'assembly' | 'inbound' | 'return' | 'other' */
+  kind: string;
+  status: string | null;
+  stage_title: string | null;
+  total_qty: number | null;
+  /** Дата (YYYY-MM-DD), не datetime. */
+  external_created_at: string | null;
+}
+
+/**
+ * Тело PUT /warehouse/transfers/{id} — правка ЧЕРНОВИКА.
+ *
+ * 🔴 `shipped_as_boxes` здесь — обычный bool (как на создании), а НЕ
+ * трёхзначный «null = не трогать» из assign-vehicle: форма правки всегда
+ * показывает текущее значение переключателем, значит всегда знает, что слать.
+ * `items` — ПОЛНАЯ замена состава; передавать частичный список нельзя.
+ * Разрешено только в статусе DRAFT — в пути/принято бэкенд вернёт 400.
+ */
+export interface TransferUpdatePayload {
+  from_warehouse_id: number;
+  to_warehouse_id: number;
+  comment: string | null;
+  is_defect: boolean;
+  defect_reason: string | null;
+  pallets_count: number | null;
+  pallet_weight_kg: number | null;
+  shipped_as_boxes: boolean;
+  items: { barcode: string; quantity: number }[] | null;
 }
 
 /** Тело POST /warehouse/transfers/{id}/assign-vehicle. */

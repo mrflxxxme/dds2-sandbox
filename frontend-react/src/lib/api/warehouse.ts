@@ -90,7 +90,10 @@ import type {
     StockTransfer,
     StockTransferStatus,
     TransferAssignVehiclePayload,
+    TransferFfLink,
+    TransferFfSide,
     TransferLogisticsReport,
+    TransferUpdatePayload,
     AssemblyToTransferResponse,
     Warehouse,
     WarehouseStockRow,
@@ -249,6 +252,31 @@ export function addWarehouseMethods(api: ApiClient) {
         /** GET /warehouse/transfers/{id} — одно перемещение (деталка переезда). */
         getTransfer(transferId: number) {
             return api.request<StockTransfer>('GET', `/api/v1/warehouse/transfers/${transferId}`);
+        },
+        /**
+         * PUT /warehouse/transfers/{id} — правка ЧЕРНОВИКА (маршрут, комментарий,
+         * брак, транспортная единица, состав).
+         *
+         * 🔴 `items` — ПОЛНАЯ замена состава (null — не трогать), а
+         * `shipped_as_boxes` — обычный bool, как на создании, а НЕ трёхзначный
+         * «null = не трогать» из assign-vehicle: форма правки всегда видит
+         * текущее значение и всегда знает, что слать.
+         *
+         * Только в DRAFT: в пути/принято бэкенд отвечает 400 с русским текстом
+         * (показывать как есть). Ответ — полная схема с items и ff_links, так
+         * что перезапрашивать карточку после сохранения не нужно.
+         */
+        updateTransfer(transferId: number, data: TransferUpdatePayload) {
+            return api.request<StockTransfer>('PUT', `/api/v1/warehouse/transfers/${transferId}`, data);
+        },
+        /**
+         * GET /warehouse/transfers/{id}/ff-candidates?side=source|dest — свободные
+         * заявки ФФ для связки с переездом: `source` — сборки склада-ИСТОЧНИКА,
+         * `dest` — приёмки склада-ПОЛУЧАТЕЛЯ. Уже занятые чужими документами не
+         * приходят. Пустой ответ — норма: у транзитных складов ФФ-интеграции нет.
+         */
+        getTransferFfCandidates(transferId: number, side: TransferFfSide) {
+            return api.request<TransferFfLink[]>('GET', `/api/v1/warehouse/transfers/${transferId}/ff-candidates?side=${side}`);
         },
         sendTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/send`); },
         completeTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/complete`); },

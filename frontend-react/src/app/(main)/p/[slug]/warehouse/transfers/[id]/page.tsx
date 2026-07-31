@@ -6,11 +6,12 @@
  *  • Ступени статуса «машина назначена» НЕТ (DRAFT → IN_TRANSIT → COMPLETED):
  *    назначенная машина — это признак черновика (vehicle_assigned_at), поэтому
  *    бейдж «машина назначена» рисуется отдельно от статуса.
- *  • Назначать машину бэкенд разрешает ТОЛЬКО в DRAFT; в пути/принято — 400.
+ *  • Назначать машину и править переезд бэкенд разрешает ТОЛЬКО в DRAFT;
+ *    в пути/принято — 400, поэтому кнопок там нет вовсе.
  *  • Имена концов маршрута приходят в самой схеме; справочник складов грузим
- *    ради контрагента склада забора (и как фолбэк имени). ФФ-связки берём со
- *    стороны ФФ (в заявке ФФ есть stock_transfer_id) — в схеме перемещения их
- *    нет. Все эти блоки обязаны переживать отсутствие данных.
+ *    ради контрагента склада забора (и как фолбэк имени). ФФ-связки приходят
+ *    в самой схеме (`ff_links`) — раньше карточка ради них тянула ВСЕ заявки
+ *    обоих складов. Все эти блоки обязаны переживать отсутствие данных.
  *  • Оплата забора (OUT-xx) в схему перемещения ещё не приехала — блок
  *    показывает то, что есть (стоимость забора), и честно говорит про остальное.
  */
@@ -20,14 +21,25 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
-import { Toast, AssignVehicleModal } from '@/components';
+import { Toast, AssignVehicleModal, TransferEditModal, TransferFfLinkModal } from '@/components';
 import type { AssignVehicleValues } from '@/components';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
-import type { FfRequestRow, Nomenclature, StockTransfer, StockTransferItem, Warehouse } from '@/types/api';
+import type {
+    Nomenclature,
+    StockTransfer,
+    StockTransferItem,
+    TransferFfLink,
+    TransferFfSide,
+    TransferUpdatePayload,
+    Warehouse,
+} from '@/types/api';
 import {
     TRANSFER_STATUS_MAP,
+    ffLinkLabel,
+    ffLinkStage,
+    splitTransferFfLinks,
     toMoney,
     transferDriverName,
     transferSkuCount,
@@ -52,13 +64,19 @@ export default function TransferDetailPage() {
 
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [nomenclature, setNomenclature] = useState<Nomenclature[]>([]);
-    // Заявки ФФ, привязанные к этому переезду (slot stock_transfer_id).
-    const [ffLinks, setFfLinks] = useState<{ row: FfRequestRow; warehouseId: number }[]>([]);
-    const [ffLoading, setFfLoading] = useState(false);
 
     const [showVehicleModal, setShowVehicleModal] = useState(false);
     const [assigning, setAssigning] = useState(false);
     const [assignError, setAssignError] = useState('');
+
+    const [showEditModal, setShowEditModal] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [saveError, setSaveError] = useState('');
+
+    /** Сторона, для которой открыт пикер заявок ФФ (null — закрыт). */
+    const [ffLinkSide, setFfLinkSide] = useState<TransferFfSide | null>(null);
+    /** id заявки ФФ, которую сейчас отвязываем — блокирует только её кнопку. */
+    const [unlinkingId, setUnlinkingId] = useState<number | null>(null);
 
     // ─── Load ─────────────────────────────────────────────────────────────
 
@@ -83,36 +101,10 @@ export default function TransferDetailPage() {
         api.getNomenclature().then(setNomenclature).catch(() => {});
     }, []);
 
-    // ФФ-связки: в схеме перемещения их нет, поэтому спрашиваем оба склада
-    // маршрута и оставляем заявки с нашим stock_transfer_id. Склад без ФФ
-    // отдаёт пустой список — ошибки глушим, блок необязательный.
-    // Зависимости — только id переезда и его маршрут, а НЕ весь объект: любое
-    // действие («Отправить», «Назначить машину») кладёт новый объект в стейт, и
-    // с [transfer] связки перезапрашивались бы по обоим складам после каждого
-    // клика, хотя маршрут не менялся.
-    const transferId = transfer?.id;
-    const fromWhId = transfer?.from_warehouse_id;
-    const toWhId = transfer?.to_warehouse_id;
-    useEffect(() => {
-        if (transferId == null || fromWhId == null || toWhId == null) return;
-        let cancelled = false;
-        const whIds = Array.from(new Set([fromWhId, toWhId]));
-        setFfLoading(true);
-        Promise.all(whIds.map(whId =>
-            api.getFulfillmentRequests(whId)
-                .then(rows => rows.map(row => ({ row, warehouseId: whId })))
-                .catch(() => [] as { row: FfRequestRow; warehouseId: number }[]),
-        ))
-            .then(chunks => {
-                if (cancelled) return;
-                const flat = chunks.flat().filter(x => x.row.stock_transfer_id === transferId);
-                // Один и тот же ФФ-документ мог прийти из обоих складов маршрута.
-                const seen = new Set<number>();
-                setFfLinks(flat.filter(x => (seen.has(x.row.id) ? false : (seen.add(x.row.id), true))));
-            })
-            .finally(() => { if (!cancelled) setFfLoading(false); });
-        return () => { cancelled = true; };
-    }, [transferId, fromWhId, toWhId]);
+    // ФФ-связки приезжают в самой схеме переезда (`ff_links`) — отдельных
+    // запросов больше нет: карточка тянула ВСЕ заявки обоих складов маршрута
+    // ради нескольких строк.
+    const ffLinks = useMemo(() => splitTransferFfLinks(transfer?.ff_links), [transfer?.ff_links]);
 
     const warehouseById = useMemo(() => {
         const map = new Map<number, Warehouse>();
@@ -143,6 +135,45 @@ export default function TransferDetailPage() {
             setToast({ message: e instanceof Error ? e.message : 'Ошибка', type: 'error' });
         } finally {
             setActionLoading(false);
+        }
+    };
+
+    const handleSave = async (payload: TransferUpdatePayload) => {
+        setSaving(true);
+        setSaveError('');
+        try {
+            // Ответ PUT — полная схема с items и ff_links: перезапрашивать нечего.
+            const updated = await api.updateTransfer(id, payload);
+            setTransfer(updated);
+            setShowEditModal(false);
+            setToast({ message: 'Перемещение обновлено', type: 'success' });
+        } catch (e: unknown) {
+            setSaveError(e instanceof Error ? e.message : 'Ошибка сохранения');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    /** Перечитать карточку после связки/отвязки ФФ — ff_links живут в схеме. */
+    const reloadTransfer = useCallback(async () => {
+        try {
+            setTransfer(await api.getTransfer(id));
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Не удалось обновить связки', type: 'error' });
+        }
+    }, [id]);
+
+    const handleUnlinkFf = async (link: TransferFfLink) => {
+        if (!confirm(`Отвязать заявку ФФ ${ffLinkLabel(link)} от перемещения? Сама заявка у ФФ останется — исчезнет только связь.`)) return;
+        setUnlinkingId(link.id);
+        try {
+            await api.unlinkFulfillmentRequest(link.warehouse_id, link.id);
+            await reloadTransfer();
+            setToast({ message: 'Заявка ФФ отвязана', type: 'success' });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка отвязки', type: 'error' });
+        } finally {
+            setUnlinkingId(null);
         }
     };
 
@@ -217,7 +248,11 @@ export default function TransferDetailPage() {
     // Имя склада забора берём из выдачи, справочник — фолбэк (и источник
     // контрагента для тумблера «логистику оказывает склад»).
     const fromWhName = transfer.from_warehouse_name || fromWh?.name || null;
-    const canAssignVehicle = canEdit() && transfer.status === 'DRAFT';
+    const toWhName = transfer.to_warehouse_name || warehouseById.get(transfer.to_warehouse_id)?.name || null;
+    // Единый гард правок черновика: и машина, и PUT разрешены бэкендом только
+    // в DRAFT — в остальных статусах кнопок нет, а не «есть, но с 400».
+    const canDraftEdit = canEdit() && transfer.status === 'DRAFT';
+    const canAssignVehicle = canDraftEdit;
 
     const itemColumns: Column[] = [
         {
@@ -274,6 +309,16 @@ export default function TransferDetailPage() {
                     <Link href={`/p/${slug}/warehouse/assembly?tab=transfers`}>
                         <button className="btn btn-secondary">← К списку</button>
                     </Link>
+                    {canDraftEdit && (
+                        <button
+                            className="btn btn-secondary"
+                            onClick={() => { setSaveError(''); setShowEditModal(true); }}
+                            disabled={actionLoading}
+                            title="Маршрут, комментарий, брак, транспортная единица и состав — пока переезд в черновике"
+                        >
+                            Редактировать
+                        </button>
+                    )}
                     {canEdit() && transfer.status === 'DRAFT' && (
                         <button
                             className="btn btn-primary"
@@ -454,30 +499,35 @@ export default function TransferDetailPage() {
             </div>
 
             {/* ─── Фулфилмент ─────────────────────────────────────────── */}
+            {/* Две стороны маршрута — РАЗНЫЕ склады и разные документы ФФ:
+                у источника сборка (отгрузка), у получателя приёмка. На одну
+                сторону может приходиться несколько заявок (у Натали короба и
+                штучные — отдельные документы), поэтому всюду списки. */}
             <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
                 <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 16px' }}>Фулфилмент</h2>
-                {ffLoading ? (
-                    <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>Загрузка связок…</div>
-                ) : ffLinks.length === 0 ? (
-                    <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
-                        Связанных заявок ФФ нет. Зеркала ФФ переносятся на перемещение только если при
-                        переделке заявки включить «перенести связку ФФ» — по умолчанию они остаются историей заявки.
-                    </div>
-                ) : (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-                        {ffLinks.map(({ row, warehouseId }) => (
-                            <Link
-                                key={row.id}
-                                href={`/p/${slug}/warehouse/${warehouseId}/ff-request/${row.id}`}
-                                style={{ color: 'var(--color-accent)' }}
-                                title={`${whName(warehouseId)}${row.stage_title ? ` · ${row.stage_title}` : ''}`}
-                            >
-                                {row.number || `Заявка #${row.id}`}
-                                {row.stage_title ? ` (${row.stage_title})` : ''} →
-                            </Link>
-                        ))}
-                    </div>
-                )}
+                <FfSideSection
+                    title="Отгрузка у склада-источника"
+                    warehouseName={fromWhName}
+                    links={ffLinks.source}
+                    slug={slug}
+                    emptyText="Заявок ФФ на отгрузку не связано. Нажмите «Связать» — покажем свободные сборки этого склада."
+                    canEdit={canEdit()}
+                    unlinkingId={unlinkingId}
+                    onLink={() => setFfLinkSide('source')}
+                    onUnlink={handleUnlinkFf}
+                />
+                <div style={{ height: 1, background: 'var(--color-border)', margin: '16px 0' }} />
+                <FfSideSection
+                    title="Приёмка у склада-получателя"
+                    warehouseName={toWhName}
+                    links={ffLinks.dest}
+                    slug={slug}
+                    emptyText="Заявок ФФ на приёмку не связано. У транзитных складов-получателей ФФ-интеграции обычно нет — тогда и связывать нечего."
+                    canEdit={canEdit()}
+                    unlinkingId={unlinkingId}
+                    onLink={() => setFfLinkSide('dest')}
+                    onUnlink={handleUnlinkFf}
+                />
             </div>
 
             {/* ─── Состав ─────────────────────────────────────────────── */}
@@ -527,6 +577,30 @@ export default function TransferDetailPage() {
                     onClose={() => { setShowVehicleModal(false); setAssignError(''); }}
                 />
             )}
+
+            {showEditModal && (
+                <TransferEditModal
+                    transfer={transfer}
+                    warehouses={warehouses}
+                    nomenclature={nomenclature}
+                    submitting={saving}
+                    error={saveError}
+                    onSubmit={handleSave}
+                    onClose={() => { setShowEditModal(false); setSaveError(''); }}
+                />
+            )}
+
+            {ffLinkSide && (
+                <TransferFfLinkModal
+                    transferId={transfer.id}
+                    transferNumber={transfer.number}
+                    side={ffLinkSide}
+                    warehouseId={ffLinkSide === 'source' ? transfer.from_warehouse_id : transfer.to_warehouse_id}
+                    warehouseName={ffLinkSide === 'source' ? fromWhName : toWhName}
+                    onClose={() => setFfLinkSide(null)}
+                    onLinked={reloadTransfer}
+                />
+            )}
         </div>
     );
 }
@@ -536,6 +610,89 @@ function InfoField({ label, value }: { label: string; value: React.ReactNode }) 
         <div>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{label}</div>
             <div style={{ fontSize: 14, fontWeight: 500 }}>{value}</div>
+        </div>
+    );
+}
+
+/**
+ * Одна сторона блока «Фулфилмент»: заголовок со складом, список связанных
+ * заявок ФФ и кнопка «Связать». Пустое состояние у каждой стороны СВОЁ — на
+ * стороне получателя отсутствие заявок это норма (у транзитных складов
+ * ФФ-интеграции нет), и общий текст на весь блок читался бы как ошибка.
+ */
+function FfSideSection({
+    title,
+    warehouseName,
+    links,
+    slug,
+    emptyText,
+    canEdit,
+    unlinkingId,
+    onLink,
+    onUnlink,
+}: {
+    title: string;
+    warehouseName: string | null;
+    links: TransferFfLink[];
+    slug: string;
+    emptyText: string;
+    canEdit: boolean;
+    unlinkingId: number | null;
+    onLink: () => void;
+    onUnlink: (link: TransferFfLink) => void;
+}) {
+    return (
+        <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
+                <div style={{ fontSize: 14, fontWeight: 600 }}>{title}</div>
+                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                    {warehouseName || '—'}
+                </span>
+                <span style={{ flex: 1 }} />
+                {canEdit && (
+                    <button className="btn btn-secondary btn-sm" onClick={onLink}>Связать</button>
+                )}
+            </div>
+            {links.length === 0 ? (
+                <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>{emptyText}</div>
+            ) : (
+                <div className="ff-link-list" style={{ maxHeight: 'none' }}>
+                    {links.map(link => (
+                        <div key={link.id} className="ff-link-row">
+                            <div className="ff-link-row-main">
+                                <div className="ff-link-row-head">
+                                    <Link
+                                        href={`/p/${slug}/warehouse/${link.warehouse_id}/ff-request/${link.id}`}
+                                        className="ff-link-row-number"
+                                        style={{ color: 'var(--color-accent)' }}
+                                        title="Открыть заявку ФФ"
+                                    >
+                                        {ffLinkLabel(link)} →
+                                    </Link>
+                                    <span className="badge badge-info" style={{ fontSize: 11, padding: '2px 8px' }}>
+                                        {ffLinkStage(link)}
+                                    </span>
+                                </div>
+                                <span className="ff-link-row-meta">
+                                    {link.external_created_at ? `${formatDate(link.external_created_at)} · ` : ''}
+                                    {link.total_qty == null ? 'количество неизвестно' : `${formatNumber(link.total_qty, 0)} шт`}
+                                </span>
+                            </div>
+                            {canEdit && (
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    style={{ color: 'var(--color-danger)' }}
+                                    disabled={unlinkingId === link.id}
+                                    onClick={() => onUnlink(link)}
+                                    title="Убрать связь с перемещением; сама заявка у ФФ останется"
+                                >
+                                    {unlinkingId === link.id ? '...' : 'Отвязать'}
+                                </button>
+                            )}
+                        </div>
+                    ))}
+                </div>
+            )}
         </div>
     );
 }

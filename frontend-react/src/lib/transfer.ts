@@ -1,4 +1,4 @@
-import type { StockTransfer, StockTransferStatus } from '@/types/api';
+import type { StockTransfer, StockTransferStatus, TransferFfLink, TransferFfSide } from '@/types/api';
 import { formatNumber, pluralRu } from '@/lib/utils';
 
 /**
@@ -136,4 +136,64 @@ export function unitCountText(count: number | null | undefined, shippedAsBoxes?:
         ? ['короб', 'короба', 'коробов']
         : ['палета', 'палеты', 'палет'];
     return `${formatNumber(count, 0)} ${pluralRu(count, forms)}`;
+}
+
+// ─── Связки с заявками ФФ ───────────────────────────────────────────────────
+// Одна сторона маршрута может нести НЕСКОЛЬКО заявок ФФ: у Натали короба и
+// штучные приезжают отдельными документами. Поэтому всюду списки, а не «первая».
+
+/** Подпись заявки ФФ: номер, а без него — внешний id (не «Заявка #внутренний_id»). */
+export function ffLinkLabel(link: Pick<TransferFfLink, 'number' | 'external_id'>): string {
+    return link.number || link.external_id || '—';
+}
+
+/** Стадия заявки ФФ одной строкой: стадия → статус → прочерк. */
+export function ffLinkStage(link: Pick<TransferFfLink, 'stage_title' | 'status'>): string {
+    return link.stage_title || link.status || '—';
+}
+
+/**
+ * Разложить связки по сторонам маршрута. Порядок внутри стороны сохраняем как
+ * пришёл (бэкенд отдаёт свежие сверху).
+ */
+export function splitTransferFfLinks(links: TransferFfLink[] | null | undefined): Record<TransferFfSide, TransferFfLink[]> {
+    const out: Record<TransferFfSide, TransferFfLink[]> = { source: [], dest: [] };
+    for (const link of links ?? []) {
+        // Неизвестная сторона (чужой код в поле) — к отгрузке, чтобы связка не
+        // исчезла с экрана: «пропала» хуже, чем «не в той подсекции».
+        out[link.side === 'dest' ? 'dest' : 'source'].push(link);
+    }
+    return out;
+}
+
+/** Клиентский поиск по кандидатам: номер, внешний id, стадия, статус. */
+export function filterTransferFfLinks(links: TransferFfLink[], query: string): TransferFfLink[] {
+    const q = query.trim().toLowerCase();
+    if (!q) return links;
+    return links.filter(l =>
+        (l.number ?? '').toLowerCase().includes(q)
+        || l.external_id.toLowerCase().includes(q)
+        || (l.stage_title ?? '').toLowerCase().includes(q)
+        || (l.status ?? '').toLowerCase().includes(q));
+}
+
+// ─── Правка черновика ───────────────────────────────────────────────────────
+
+/**
+ * Клиентская валидация формы правки переезда. Проверяем ровно то, на что
+ * бэкенд отвечает 400 — чтобы пользователь узнал об ошибке до сетевого вызова,
+ * а не после. Возвращает текст ошибки либо null.
+ */
+export function transferEditError(values: {
+    fromWarehouseId: number | '';
+    toWarehouseId: number | '';
+    itemCount: number;
+}): string | null {
+    if (values.fromWarehouseId === '') return 'Выберите склад-источник';
+    if (values.toWarehouseId === '') return 'Выберите склад-получатель';
+    if (values.fromWarehouseId === values.toWarehouseId) {
+        return 'Склад-источник и склад-получатель должны различаться';
+    }
+    if (values.itemCount === 0) return 'Добавьте хотя бы одну позицию — пустой состав отправлять нечем';
+    return null;
 }

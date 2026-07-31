@@ -14,12 +14,17 @@
  *  4. состав считается по items: SKU — строки, штуки — сумма quantity.
  */
 import { describe, expect, it } from 'vitest';
-import type { StockTransfer } from '@/types/api';
+import type { StockTransfer, TransferFfLink } from '@/types/api';
 import {
     TRANSFER_REPORT_DEFAULT_DAYS,
     TRANSFER_STATUS_MAP,
+    ffLinkLabel,
+    ffLinkStage,
+    filterTransferFfLinks,
     initialUnitMode,
+    splitTransferFfLinks,
     toMoney,
+    transferEditError,
     transferReportDefaultRange,
     unitModeToFlag,
     transferDriverName,
@@ -232,5 +237,114 @@ describe('состав и водитель', () => {
         expect(transferDriverName(makeTransfer({ driver_first_name: 'Дмитрий' }))).toBe('Дмитрий');
         expect(transferDriverName(makeTransfer({ driver_first_name: 'Дмитрий', driver_last_name: 'Крапива' })))
             .toBe('Дмитрий Крапива');
+    });
+});
+
+// ─── Связки с заявками ФФ и валидация правки черновика ──────────────────────
+
+function makeFfLink(patch: Partial<TransferFfLink> = {}): TransferFfLink {
+    return {
+        id: 1,
+        warehouse_id: 2,
+        side: 'source',
+        number: 'PVB-124',
+        external_id: 'ext-1',
+        kind: 'assembly',
+        status: 'В работе',
+        stage_title: 'Сборка',
+        total_qty: 500,
+        external_created_at: '2026-07-30',
+        ...patch,
+    };
+}
+
+describe('splitTransferFfLinks', () => {
+    it('раскладывает по сторонам и держит порядок бэкенда', () => {
+        const links = [
+            makeFfLink({ id: 1, side: 'source', number: 'PVB-1' }),
+            makeFfLink({ id: 2, side: 'dest', number: 'IN-1', kind: 'inbound' }),
+            makeFfLink({ id: 3, side: 'source', number: 'PVB-2' }),
+        ];
+        const { source, dest } = splitTransferFfLinks(links);
+        expect(source.map(l => l.number)).toEqual(['PVB-1', 'PVB-2']);
+        expect(dest.map(l => l.number)).toEqual(['IN-1']);
+    });
+
+    it('на одну сторону может прийти НЕСКОЛЬКО заявок (Натали: короба и штучные — разные документы)', () => {
+        const { dest } = splitTransferFfLinks([
+            makeFfLink({ id: 10, side: 'dest', number: 'PVB-133 короба' }),
+            makeFfLink({ id: 11, side: 'dest', number: 'PVB-134 штучные' }),
+        ]);
+        expect(dest).toHaveLength(2);
+    });
+
+    it('нет поля / пустой список — обе стороны пусты, а не падение', () => {
+        expect(splitTransferFfLinks(undefined)).toEqual({ source: [], dest: [] });
+        expect(splitTransferFfLinks(null)).toEqual({ source: [], dest: [] });
+        expect(splitTransferFfLinks([])).toEqual({ source: [], dest: [] });
+    });
+
+    it('неизвестная сторона не теряется — уходит в отгрузку', () => {
+        const { source, dest } = splitTransferFfLinks([
+            makeFfLink({ id: 5, side: 'wat' as unknown as TransferFfLink['side'] }),
+        ]);
+        expect(source).toHaveLength(1);
+        expect(dest).toHaveLength(0);
+    });
+});
+
+describe('filterTransferFfLinks', () => {
+    const links = [
+        makeFfLink({ id: 1, number: 'PVB-124', stage_title: 'Сборка', external_id: 'aaa' }),
+        makeFfLink({ id: 2, number: null, stage_title: 'Приёмка', external_id: 'zzz-77', status: 'Закрыта' }),
+    ];
+
+    it('пустой запрос — весь список', () => {
+        expect(filterTransferFfLinks(links, '   ')).toHaveLength(2);
+    });
+
+    it('ищет по номеру, стадии, статусу и внешнему id, регистронезависимо', () => {
+        expect(filterTransferFfLinks(links, 'pvb-124').map(l => l.id)).toEqual([1]);
+        expect(filterTransferFfLinks(links, 'приёмка').map(l => l.id)).toEqual([2]);
+        expect(filterTransferFfLinks(links, 'закрыт').map(l => l.id)).toEqual([2]);
+        expect(filterTransferFfLinks(links, 'ZZZ').map(l => l.id)).toEqual([2]);
+    });
+
+    it('заявка без номера не роняет поиск', () => {
+        expect(filterTransferFfLinks(links, 'нет-такого')).toEqual([]);
+    });
+});
+
+describe('ffLinkLabel / ffLinkStage', () => {
+    it('без номера показываем внешний id, а не внутренний', () => {
+        expect(ffLinkLabel(makeFfLink())).toBe('PVB-124');
+        expect(ffLinkLabel(makeFfLink({ number: null, external_id: 'ext-9' }))).toBe('ext-9');
+        expect(ffLinkLabel({ number: null, external_id: '' })).toBe('—');
+    });
+
+    it('стадия: title → status → прочерк', () => {
+        expect(ffLinkStage(makeFfLink())).toBe('Сборка');
+        expect(ffLinkStage(makeFfLink({ stage_title: null }))).toBe('В работе');
+        expect(ffLinkStage(makeFfLink({ stage_title: null, status: null }))).toBe('—');
+    });
+});
+
+describe('transferEditError', () => {
+    it('одинаковые склады ловим на клиенте, не дожидаясь 400', () => {
+        expect(transferEditError({ fromWarehouseId: 2, toWarehouseId: 2, itemCount: 3 }))
+            .toBe('Склад-источник и склад-получатель должны различаться');
+    });
+
+    it('пустой состав отправлять нечем', () => {
+        expect(transferEditError({ fromWarehouseId: 2, toWarehouseId: 14, itemCount: 0 })).toMatch(/позици/i);
+    });
+
+    it('не выбранный склад — своя подсказка на каждый конец маршрута', () => {
+        expect(transferEditError({ fromWarehouseId: '', toWarehouseId: 14, itemCount: 1 })).toMatch(/источник/i);
+        expect(transferEditError({ fromWarehouseId: 2, toWarehouseId: '', itemCount: 1 })).toMatch(/получател/i);
+    });
+
+    it('корректная форма — ошибки нет', () => {
+        expect(transferEditError({ fromWarehouseId: 2, toWarehouseId: 14, itemCount: 1 })).toBeNull();
     });
 });

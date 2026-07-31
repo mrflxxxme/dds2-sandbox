@@ -46,11 +46,13 @@ from backend.services.warehouse_outbound import (  # noqa: F401
     deliver_shipment,
     get_shipment,
     get_transfer,
+    get_transfer_ff_candidates,
     list_shipments,
     list_transfers,
     send_transfer,
     ship_shipment,
     unassign_vehicle_transfer,
+    update_transfer,
 )
 
 # ─── Stock Engine ──────────────────────────────────────────────────────────

@@ -46,9 +46,11 @@ from backend.schemas.warehouse import (
     StockMovementSchema,
     StockTransferCreate,
     StockTransferSchema,
+    StockTransferUpdate,
     SupplyAcceptanceSlotsResponse,
     TransferAssignVehicle,
     TransferAssignVehicleBulk,
+    TransferFfLink,
     TransferLogisticsReport,
     WarehouseCounterpartyLink,
     WarehouseCreate,
@@ -763,11 +765,71 @@ async def get_transfer(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Одно перемещение с составом (карточка переезда: машина, логистика, связки)."""
+    """Одно перемещение с составом (карточка переезда: машина, логистика, связки).
+
+    В отличие от списка отдаёт `items` и `ff_links` (уже связанные заявки ФФ
+    обеих сторон).
+    """
     transfer = await warehouse_service.get_transfer(db, project.id, transfer_id)
     if not transfer:
         raise HTTPException(404, "Перемещение не найдено")
     return StockTransferSchema.model_validate(transfer)
+
+
+@router.put(
+    "/transfers/{transfer_id}",
+    response_model=StockTransferSchema,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def update_transfer(
+    transfer_id: int,
+    payload: StockTransferUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Править перемещение — ТОЛЬКО черновик (DRAFT).
+
+    Маршрут, комментарий, брак, транспортная единица и состав. `items` —
+    полная замена состава; не передан — состав не трогаем. Применяются только
+    явно переданные поля (`exclude_unset`), поэтому частичное тело не обнулит
+    остальное дефолтами схемы.
+
+    400 — переезд уже отправлен, склады совпали, состав передан пустым, ШК не
+    найден или маршрут разошёлся бы со связками ФФ. Ответ — карточка целиком
+    (состав, подписи, `ff_links`), перезапрашивать переезд не нужно.
+    """
+    try:
+        transfer = await warehouse_service.update_transfer(
+            db, project.id, transfer_id, payload.model_dump(exclude_unset=True)
+        )
+    except ValueError as e:
+        raise _transfer_error(e) from None
+    return StockTransferSchema.model_validate(transfer)
+
+
+@router.get("/transfers/{transfer_id}/ff-candidates", response_model=list[TransferFfLink])
+async def transfer_ff_candidates(
+    transfer_id: int,
+    side: str = Query(..., pattern="^(source|dest)$"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Заявки ФФ, которые можно привязать к этому переезду, — связка ОТ карточки переезда.
+
+    `side=source` — отгрузочная сторона: `kind=assembly` на складе ЗАБОРА (ФФ
+    собирает переезд у себя). `side=dest` — приёмочная: `kind=inbound` на складе
+    ПОЛУЧАТЕЛЯ. Только заявки без нашего документа, свежие сверху.
+
+    Сама привязка — существующей ручкой ФФ
+    `POST /warehouse/{warehouse_id}/fulfillment/requests/{ff_id}/link` с
+    `{"stock_transfer_id": ...}`; `warehouse_id` бери из строки кандидата.
+    """
+    try:
+        return await warehouse_service.get_transfer_ff_candidates(
+            db, project.id, transfer_id, side
+        )
+    except ValueError as e:
+        raise _transfer_error(e) from None
 
 
 @router.post(

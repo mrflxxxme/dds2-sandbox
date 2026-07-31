@@ -7262,6 +7262,122 @@ async def _transfer_candidates(
     return docs, items_by_doc
 
 
+# ─── Связка ФФ ОТ КАРТОЧКИ ПЕРЕЕЗДА (зеркало _transfer_candidates) ──────────
+#
+# `_transfer_candidates` выше отвечает на вопрос «какие НАШИ переезды можно
+# привязать к этой ФФ-заявке» (пользователь стоит на заявке). Ниже — обратное
+# направление: «какие ЗАЯВКИ ФФ можно привязать к этому переезду»
+# (пользователь стоит на карточке переезда). Расклад сторон общий и живёт в
+# _TRANSFER_SIDE_KIND — тот же, что проверяет `link_request`.
+
+#: Сторона переезда → kind ФФ-заявки, которая эту сторону зеркалит.
+_TRANSFER_SIDE_KIND = {
+    # Склад ЗАБОРА: ФФ собирает переезд у себя и отдаёт машине — для него это сборка.
+    "source": FfRequestKind.ASSEMBLY.value,
+    # Склад ПОЛУЧАТЕЛЯ: ФФ приходует приехавшее — для него это приёмка.
+    "dest": FfRequestKind.INBOUND.value,
+}
+
+
+def _transfer_ff_side(transfer: StockTransfer, req: FulfillmentRequest) -> str:
+    """Сторона переезда, к которой относится ФФ-заявка.
+
+    Основной признак — СКЛАД: ровно его сверяет `link_request`, и он не врёт
+    даже если провайдер поменял kind заявки задним числом. Фолбэк по kind нужен
+    для связок, переживших правку маршрута черновика (гард на реруте такие
+    случаи не пускает, но исторические строки могли доехать из синка): сторона
+    обязана быть непустой, иначе UI не разложит связку по подсекциям.
+    """
+    if req.warehouse_id == transfer.from_warehouse_id:
+        return "source"
+    if req.warehouse_id == transfer.to_warehouse_id:
+        return "dest"
+    return "source" if req.kind == FfRequestKind.ASSEMBLY.value else "dest"
+
+
+def _transfer_ff_link_row(req: FulfillmentRequest, side: str) -> dict:
+    """FulfillmentRequest → TransferFfLink-shaped dict (общий для связок и кандидатов)."""
+    return {
+        "id": req.id,
+        "warehouse_id": req.warehouse_id,
+        "side": side,
+        "number": req.number,
+        "external_id": req.external_id,
+        "kind": req.kind,
+        "status": req.status,
+        "stage_title": req.stage_title,
+        "total_qty": req.total_qty,
+        "external_created_at": req.external_created_at,
+    }
+
+
+async def list_transfer_ff_links(
+    db: AsyncSession, project_id: int, transfer: StockTransfer
+) -> list[dict]:
+    """Заявки ФФ, УЖЕ связанные с переездом (обе стороны) — ОДНОЙ выборкой.
+
+    Скоуп — сам переезд, а не склад: у переезда две стороны и два разных склада,
+    а `stock_transfer_id` уже уникально указывает на нужные строки.
+
+    `local_archived` НЕ фильтруем, в отличие от кандидатов ниже: локальный архив
+    — это «убрать из рабочего списка склада», а не «связи нет». Спрятав такую
+    строку из карточки, мы отняли бы у пользователя единственную кнопку
+    «Отвязать» и оставили переезд с невидимой связью.
+    """
+    result = await db.execute(
+        select(FulfillmentRequest)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.stock_transfer_id == transfer.id,
+        )
+        .order_by(
+            FulfillmentRequest.external_created_at.desc().nullslast(),
+            FulfillmentRequest.id.desc(),
+        )
+        .limit(_LINK_CANDIDATES_LIMIT)
+    )
+    return [_transfer_ff_link_row(r, _transfer_ff_side(transfer, r)) for r in result.scalars().all()]
+
+
+async def list_transfer_ff_candidates(
+    db: AsyncSession, project_id: int, transfer: StockTransfer, side: str
+) -> list[dict]:
+    """Заявки ФФ, которые МОЖНО привязать к переезду с запрошенной стороны.
+
+    Отдаём только заявки БЕЗ нашего документа (`assembly_request_id` /
+    `inbound_receipt_id` / `stock_transfer_id` пусты): занятая заявка уже
+    описывает другой документ, привязка второго её бы переписала. Пары
+    «вскрытия коробов» (`repack_return_id`) исключены — `link_request` их всё
+    равно отбивает, показывать их в списке значит звать на 400.
+
+    ValueError — неизвестная сторона (роутер валидирует раньше, гард на случай
+    вызова из другого места).
+    """
+    kind = _TRANSFER_SIDE_KIND.get(side)
+    if kind is None:
+        raise ValueError("Сторона переезда должна быть source или dest")
+    warehouse_id = transfer.from_warehouse_id if side == "source" else transfer.to_warehouse_id
+    result = await db.execute(
+        select(FulfillmentRequest)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.kind == kind,
+            FulfillmentRequest.local_archived == False,
+            FulfillmentRequest.assembly_request_id.is_(None),
+            FulfillmentRequest.inbound_receipt_id.is_(None),
+            FulfillmentRequest.stock_transfer_id.is_(None),
+            FulfillmentRequest.repack_return_id.is_(None),
+        )
+        .order_by(
+            FulfillmentRequest.external_created_at.desc().nullslast(),
+            FulfillmentRequest.id.desc(),
+        )
+        .limit(_LINK_CANDIDATES_LIMIT)
+    )
+    return [_transfer_ff_link_row(r, side) for r in result.scalars().all()]
+
+
 async def get_link_candidates(
     db: AsyncSession,
     project_id: int,

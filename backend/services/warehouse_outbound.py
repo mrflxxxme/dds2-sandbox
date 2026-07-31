@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from backend.cache import invalidate_cache
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
 from backend.models.counterparty import Counterparty
+from backend.models.fulfillment import FfRequestKind, FulfillmentRequest
 from backend.models.warehouse import (
     InboundReceipt,
     MovementType,
@@ -259,7 +260,12 @@ async def cancel_shipment(db: AsyncSession, project_id: int, shipment_id: int) -
 
 
 async def _attach_transfer_labels(
-    db: AsyncSession, project_id: int, transfers: list, *, with_totals: bool = False
+    db: AsyncSession,
+    project_id: int,
+    transfers: list,
+    *,
+    with_totals: bool = False,
+    with_ff_links: bool = False,
 ) -> None:
     """Проставить читаемые подписи на объекты перемещений: имена складов
     обоих концов маршрута, имя перевозчика и (опционально) итоги состава.
@@ -274,6 +280,8 @@ async def _attach_transfer_labels(
     GROUP BY вместо загрузки состава. Полный состав в списке никому не нужен, а
     весит он много: 500 переездов × ~53 позиции ≈ 3.4 МБ и 23 500
     pydantic-моделей на каждый заход.
+
+    `with_ff_links=True` — для КАРТОЧКИ: связанные заявки ФФ обеих сторон.
     """
     if not transfers:
         return
@@ -328,6 +336,12 @@ async def _attach_transfer_labels(
         t.from_warehouse_name = names.get(t.from_warehouse_id)
         t.to_warehouse_name = names.get(t.to_warehouse_id)
         t.counterparty_name = cp_names.get(t.counterparty_id) if t.counterparty_id else None
+        # Без `with_ff_links` атрибут НЕ ставим вовсе — даже пустым списком.
+        # `from_attributes` возьмёт дефолт схемы (`[]`), а безусловное `= []`
+        # было бы хуже отсутствия: в одной сессии (тесты, батч-задачи) список
+        # затирал бы связки, уже собранные карточкой того же переезда.
+        if with_ff_links:
+            t.ff_links = await _transfer_ff_links(db, project_id, t)
         if with_totals:
             units, skus = totals.get(t.id, (0, 0))
         else:
@@ -427,8 +441,52 @@ async def get_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> S
     )
     transfer = result.scalar_one_or_none()
     if transfer:
-        await _attach_transfer_labels(db, project_id, [transfer])
+        await _attach_transfer_labels(db, project_id, [transfer], with_ff_links=True)
     return transfer
+
+
+async def _transfer_ff_links(
+    db: AsyncSession, project_id: int, transfer: StockTransfer
+) -> list[dict]:
+    """Связки ФФ переезда (обе стороны) одной выборкой — см. fulfillment_service.
+
+    Импорт локальный: `fulfillment_service` тянет `assembly.crud` → фасад
+    `warehouse_service` → этот модуль, то есть на уровне модуля это цикл (та же
+    причина, что у локального импорта резолверов перевозчика ниже).
+    """
+    from backend.services.fulfillment_service import list_transfer_ff_links
+
+    return await list_transfer_ff_links(db, project_id, transfer)
+
+
+async def get_transfer_ff_candidates(
+    db: AsyncSession, project_id: int, transfer_id: int, side: str
+) -> list[dict]:
+    """Заявки ФФ, которые можно привязать к переезду с указанной стороны.
+
+    Связка ФФ ↔ переезд существует с обеих сторон (см. `link_request`), но до
+    сих пор заводилась только «от заявки ФФ»: пользователь открывал заявку и
+    искал наш документ. С карточки переезда обратного пути не было — фронт
+    вместо этого тянул ДВА полных списка заявок ФФ по обоим складам и искал
+    связку в них.
+
+    ValueError — переезда нет или сторона неизвестна.
+    """
+    from backend.services.fulfillment_service import list_transfer_ff_candidates
+
+    result = await db.execute(
+        select(StockTransfer)
+        .options(noload(StockTransfer.items))
+        .where(
+            StockTransfer.id == transfer_id,
+            StockTransfer.project_id == project_id,
+            StockTransfer.is_deleted == False,  # noqa: E712
+        )
+    )
+    transfer = result.scalar_one_or_none()
+    if not transfer:
+        raise ValueError("Перемещение не найдено")
+    return await list_transfer_ff_candidates(db, project_id, transfer, side)
 
 
 async def create_transfer(db: AsyncSession, project_id: int, payload: dict) -> StockTransfer:
@@ -494,6 +552,144 @@ async def _get_transfer_locked(db: AsyncSession, project_id: int, transfer_id: i
     if transfer:
         await db.refresh(transfer, ["items"])
     return transfer
+
+
+async def _guard_reroute_ff_links(
+    db: AsyncSession, project_id: int, transfer: StockTransfer, from_id: int, to_id: int
+) -> None:
+    """Смена маршрута черновика не должна осиротить уже заведённые связки ФФ.
+
+    `link_request` вяжет отгрузочное зеркало (kind=assembly) к складу ЗАБОРА, а
+    приёмочное (kind=inbound) — к складу ПОЛУЧАТЕЛЯ, и сверяет это явно. Если
+    после правки маршрута склад связки перестаёт быть концом маршрута, связь
+    становится такой, какую `link_request` создать бы не дал, — и это не
+    косметика: авто-приём факта (`_collect_transfer_fact_candidates`) отбирает
+    приёмки ПО СКЛАДУ ЗАЯВКИ, а джойн на перемещение конец маршрута не сверяет.
+    Факт чужого склада поехал бы на `to_warehouse_id` этого переезда, то есть
+    сток приходовался бы не туда. Дешевле потребовать отвязать вручную.
+    """
+    rows = (
+        await db.execute(
+            select(
+                FulfillmentRequest.number,
+                FulfillmentRequest.external_id,
+                FulfillmentRequest.kind,
+                FulfillmentRequest.warehouse_id,
+            )
+            .where(
+                FulfillmentRequest.project_id == project_id,
+                FulfillmentRequest.stock_transfer_id == transfer.id,
+            )
+            .limit(50)
+        )
+    ).all()
+    broken = [
+        r.number or r.external_id
+        for r in rows
+        if r.warehouse_id != (from_id if r.kind == FfRequestKind.ASSEMBLY.value else to_id)
+    ]
+    if broken:
+        raise ValueError(
+            "Маршрут не изменить: с переездом связаны заявки ФФ другого склада — "
+            f"{', '.join(broken)}. Сначала отвяжите их на карточке переезда."
+        )
+
+
+async def update_transfer(
+    db: AsyncSession, project_id: int, transfer_id: int, payload: dict
+) -> StockTransfer:
+    """Правка перемещения — ТОЛЬКО в статусе DRAFT.
+
+    В DRAFT сток ещё не двигался: маршрут, состав, транспортная единица и брак
+    — это пока просто намерение, и менять их безопасно. После `send_transfer`
+    списание уже проведено (`TRANSFER_OUT` со склада забора + транзит на
+    получателе) и снято снимком в забор (`OutboundShipment` с логистикой и
+    деньгами) — правка состава задним числом разъехалась бы с движениями, а
+    правка маршрута оставила бы транзит висеть на складе, куда груз уже не
+    едет. Поэтому в IN_TRANSIT/COMPLETED — отказ, а не «частичная» правка.
+
+    `payload` — только ЯВНО переданные поля (`exclude_unset` в роутере).
+    `items` — полная замена состава; отсутствует — состав не трогаем.
+
+    Валидация ВСЯ идёт до первой мутации: иначе отказ на резолве баркода
+    оставил бы в сессии половину применённых полей и удалённые позиции, а
+    роутер, поймав ValueError, ответил бы 400 «ничего не изменилось».
+    """
+    transfer = await _get_transfer_locked(db, project_id, transfer_id)
+    if not transfer:
+        raise ValueError("Перемещение не найдено")
+    if transfer.status != TransferStatus.DRAFT:
+        raise ValueError(
+            f"Переезд уже отправлен (статус {transfer.status}) — сток списан со склада "
+            "забора и висит транзитом на получателе, а логистика зафиксирована в заборе. "
+            "Править маршрут и состав можно только в черновике."
+        )
+
+    # ── Валидация (без мутаций) ───────────────────────────────────────────
+    from_id = payload.get("from_warehouse_id") or transfer.from_warehouse_id
+    to_id = payload.get("to_warehouse_id") or transfer.to_warehouse_id
+    if from_id != transfer.from_warehouse_id and not await get_warehouse(db, project_id, from_id):
+        raise ValueError("Склад забора не найден")
+    if to_id != transfer.to_warehouse_id and not await get_warehouse(db, project_id, to_id):
+        raise ValueError("Склад получателя не найден")
+    if from_id == to_id:
+        raise ValueError("Склад забора и склад получателя совпадают — переезда не получится")
+
+    rerouted = (from_id, to_id) != (transfer.from_warehouse_id, transfer.to_warehouse_id)
+    if rerouted:
+        await _guard_reroute_ff_links(db, project_id, transfer, from_id, to_id)
+
+    items_data = payload.get("items")
+    barcode_map: dict = {}
+    if items_data is not None:
+        if not items_data:
+            raise ValueError(
+                "Состав перемещения пуст — переезд без позиций всё равно не отправить. "
+                "Оставьте хотя бы одну строку или удалите черновик."
+            )
+        barcode_map = await _resolve_barcodes_batch(
+            db, project_id, [d["barcode"] for d in items_data]
+        )
+
+    # ── Мутации ───────────────────────────────────────────────────────────
+    transfer.from_warehouse_id = from_id
+    transfer.to_warehouse_id = to_id
+    for field in (
+        "comment",
+        "is_defect",
+        "defect_reason",
+        "pallets_count",
+        "pallet_weight_kg",
+        "shipped_as_boxes",
+    ):
+        if field in payload:
+            setattr(transfer, field, payload[field])
+
+    if items_data is not None:
+        for old_item in list(transfer.items):
+            await db.delete(old_item)  # no-soft-delete-check: у StockTransferItem нет SoftDeleteMixin
+        await db.flush()
+        for item_data in items_data:
+            nom = barcode_map[item_data["barcode"]]
+            db.add(
+                StockTransferItem(
+                    project_id=project_id,
+                    transfer_id=transfer.id,
+                    nomenclature_id=nom.id,
+                    barcode=item_data["barcode"],
+                    quantity=item_data["quantity"],
+                )
+            )
+
+    await db.commit()
+    # Симметрично `unassign_vehicle_transfer` — единственная мутация черновика,
+    # которая кэш сбрасывает. Сток черновик не двигает, поэтому reports:balance /
+    # warehouse_need здесь ни при чём; ручная правка редка, и один SCAN на неё
+    # не жалко (в отличие от bulk-назначения машины, где сброс вынесен).
+    await invalidate_cache("reports:assembly_link_anomalies")
+    # Отдаём карточку целиком (состав + подписи + ff_links) тем же путём, что GET:
+    # после сохранения фронт не должен перезапрашивать переезд отдельно.
+    return await get_transfer(db, project_id, transfer_id) or transfer
 
 
 async def cancel_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> None:
