@@ -634,7 +634,7 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                     <table style={{ width: '100%', minWidth: 960, borderCollapse: 'collapse', fontSize: 13, tableLayout: 'fixed' }}>
                                         <colgroup>
                                             <col style={{ width: 36 }} />
-                                            <col style={{ width: 150 }} />
+                                            <col style={{ width: 170 }} />
                                             <col />
                                             <col style={{ width: 90 }} />
                                             <col style={{ width: 160 }} />
@@ -683,15 +683,25 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                                 style={{ width: 15, height: 15, accentColor: 'var(--color-accent)', cursor: 'pointer' }}
                                                             />
                                                         </td>
-                                                        <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: 12 }}>
+                                                        <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: 12, overflow: 'hidden' }}>
                                                             {it.barcode}
-                                                            {/* ШК короба — при короб-режиме: карта Натали либо выведенный GTIN-14 */}
+                                                            {/* ШК короба — при короб-режиме: карта Натали либо выведенный
+                                                                GTIN-14. Подпись — тултипом: текстом она вылезала за колонку
+                                                                и наезжала на «Наименование». */}
                                                             {r.boxMode && it.box_barcode && (
-                                                                <div style={{ color: 'var(--color-text-muted)', fontSize: 11, marginTop: 2, whiteSpace: 'nowrap' }}>
-                                                                    {it.box_barcode}
-                                                                    <span style={{ fontFamily: 'Inter, sans-serif', marginLeft: 5 }}>
-                                                                        {it.box_barcode_source === 'natali' ? 'короб Натали' : 'короб (выведен)'}
-                                                                    </span>
+                                                                <div
+                                                                    style={{
+                                                                        color: 'var(--color-text-muted)', fontSize: 11, marginTop: 2,
+                                                                        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                                                                    }}
+                                                                    title={it.box_barcode_source === 'natali'
+                                                                        ? `${it.box_barcode} — ШК короба из карты Натали`
+                                                                        : `${it.box_barcode} — ШК короба выведен нами (GTIN-14), у Натали карточки короба ещё нет`}
+                                                                >
+                                                                    📦 {it.box_barcode}
+                                                                    {it.box_barcode_source !== 'natali' && (
+                                                                        <span style={{ fontFamily: 'Inter, sans-serif' }}> *</span>
+                                                                    )}
                                                                 </div>
                                                             )}
                                                         </td>
