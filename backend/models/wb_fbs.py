@@ -551,7 +551,9 @@ class WbFbsOrderHistory(Base):
 
     __tablename__ = "wb_fbs_order_history"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: BigInteger: самая быстрорастущая таблица домена — ~6 строк на задание,
+    #: порядка 8–10 тысяч строк в сутки на живом проекте.
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     order_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("wb_fbs_orders.id", ondelete="CASCADE"), nullable=False
@@ -568,7 +570,11 @@ class WbFbsOrderHistory(Base):
 
     __table_args__ = (
         UniqueConstraint("project_id", "order_id", "at", "name", name="uq_wb_fbs_order_history"),
-        Index("ix_wb_fbs_order_history_order", "project_id", "order_id", "at"),
+        # Разрез «история проекта за период» — узлы маршрута и покрытие догона.
+        # Индекса (project_id, order_id, at) нет намеренно: он строгий префикс
+        # уникального выше и ничего сверх него не умеет, а вставок тут тысячи
+        # в сутки — лишний индекс только замедлял бы запись.
+        Index("ix_wb_fbs_order_history_project_at", "project_id", "at"),
     )
 
 
