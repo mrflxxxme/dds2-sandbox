@@ -21,39 +21,19 @@ export type Unit = '#' | '₽' | 'CR';
 /** Куда «хорошо» для относительной окраски: больше среднего, меньше среднего, никак. */
 export type Dir = 'up' | 'down' | 'none';
 
-/* ─── Условное форматирование цифр ───────────────────────────────────────
- * Каждая колонка сравнивается сама с собой: цвет числа зависит от того, где
- * оно стоит среди соседей того же уровня. Низ колонки — тёмно-бордовый, верх —
- * тёмно-зелёный, середина нейтральная. Для колонок, где меньше значит лучше
- * (расход, ДРР, себестоимость), шкала переворачивается.
+/* ─── Подсветка значений ─────────────────────────────────────────────────
+ * Цвет цифры задаёт сама метрика (светофоры ниже) — как было в прежнем разделе.
+ * Ранговая раскраска ВСЕХ цифр отвергнута 31.07.2026: таблица рябила.
+ * Величину при желании показывает полоска под числом — она и считает ранг.
  * ─────────────────────────────────────────────────────────────────────── */
 
-/** Режим показа величины в ячейке: только цвет цифр или плюс полоска под числом. */
+/** Режим показа величины в ячейке: только цифры или плюс полоска под числом. */
 export type Shading = 'text' | 'bar';
 
 export const SHADING_OPTIONS: { key: Shading; label: string; hint: string }[] = [
-    { key: 'text', label: 'Цифры', hint: 'только цвет цифр' },
+    { key: 'text', label: 'Цифры', hint: 'только цифры со своим светофором' },
     { key: 'bar', label: 'Полоски', hint: 'полоска величины под числом' },
 ];
-
-const TEXT_SCALE: { t: number; c: [number, number, number] }[] = [
-    { t: 0.00, c: [220, 38, 38] },   // ярко-красный — низ колонки
-    { t: 0.25, c: [234, 88, 12] },
-    { t: 0.50, c: [239, 143, 0] },   // оранжевый — середина
-    { t: 0.75, c: [101, 163, 13] },
-    { t: 1.00, c: [21, 128, 61] },   // зелёный — верх колонки
-];
-
-/** Цвет цифр по позиции значения в своей колонке [0..1]. */
-export function textScaleColor(pos: number): string {
-    const p = Math.max(0, Math.min(1, pos));
-    let i = 0;
-    while (i < TEXT_SCALE.length - 2 && p > TEXT_SCALE[i + 1].t) i++;
-    const a = TEXT_SCALE[i], b = TEXT_SCALE[i + 1];
-    const k = b.t === a.t ? 0 : (p - a.t) / (b.t - a.t);
-    const mix = (x: number, y: number) => Math.round(x + (y - x) * k);
-    return `rgb(${mix(a.c[0], b.c[0])}, ${mix(a.c[1], b.c[1])}, ${mix(a.c[2], b.c[2])})`;
-}
 
 /** Позиция значения по РАНГУ среди соседей, а не по расстоянию между min и max.
  *  Один выброс (день с рекламной вспышкой) иначе прижимает всю колонку ко дну
@@ -84,6 +64,9 @@ export interface ColumnDef {
     format?: (v: number, r: Row) => string;
     /** Светофор: цвет текста по значению. */
     color?: (v: number, r: Row) => string | undefined;
+    /** Мягкая заливка ячейки по значению — как в прежнем разделе (прибыль/убыток,
+     *  крупный расход, всплеск ДРР, «большие» дни по переходам/корзинам/заказам). */
+    bg?: (v: number, r: Row) => string | undefined;
     bold?: boolean;
     /** Колонка есть только в расширенном режиме (остатки грузятся отдельным запросом). */
     extendedOnly?: boolean;
@@ -130,11 +113,18 @@ const pick = (r: Row, ...keys: (keyof Row)[]): number | null => {
 
 const C = { good: '#16a34a', ok: '#65a30d', warn: '#ea580c', bad: '#dc2626', dim: '#9ca3af', ink: '#111827', accent: '#6366f1' };
 
-const marginColor = (v: number) => (v > 20 ? C.good : v > 10 ? C.ok : v > 0 ? C.warn : C.bad);
+const marginColor = (v: number) => (v > 20 ? C.good : v > 0 ? C.ok : C.bad);
+
+/* Фоновые подсветки прежнего раздела. Пороги абсолютные и подобраны под масштаб
+ * дня: на строках артикулов такие значения не набираются, и заливки нет — ровно
+ * как было раньше. */
+const BG = { warm: '#fffbeb', blue: '#eff6ff', green: '#f0fdf4', violet: '#faf5ff', red: '#fef2f2' };
+const bgOver = (limit: number, color: string) => (v: number) => (v > limit ? color : undefined);
+const profitBg = (v: number) => (v > 0 ? BG.green : v < 0 ? BG.red : undefined);
 const drrColor = (v: number) => (v <= 0 ? C.dim : v > 30 ? C.bad : v > 15 ? C.warn : C.good);
+const advColor = (v: number) => (v > 400_000 ? C.bad : v > 100_000 ? '#f59e0b' : v > 0 ? '#f97316' : C.dim);
 const sppColor = (v: number) => (v > 40 ? C.bad : v > 20 ? C.warn : C.good);
 const ctrColor = (v: number) => (v > 5 ? C.good : v > 2 ? C.ink : C.warn);
-const crColor = (hi: number, mid: number) => (v: number) => (v > hi ? C.good : v > mid ? C.ink : C.warn);
 const profitColor = (v: number) => (v > 0 ? C.good : v < 0 ? C.bad : C.dim);
 /** Прогноз исчерпания стока: <7 дн — красный, до 14 — оранжевый, до 29 — жёлтый. */
 export const daysColor = (v: number) => (v >= 999 ? C.dim : v < 7 ? C.bad : v <= 14 ? C.warn : v <= 29 ? '#ca8a04' : C.good);
@@ -194,30 +184,30 @@ const div = (a: number, b: number, mult = 1): number | null => (b > 0 ? (a / b) 
 
 export const COLUMNS: ColumnDef[] = [
     // Ключевые метрики
-    { key: 'orders_count', label: 'Заказы', unit: '#', w: 76, dir: 'up', bold: true, value: r => pick(r, 'orders_count', 'orders'), total: 'sum', format: fmtInt },
+    { key: 'orders_count', label: 'Заказы', unit: '#', w: 76, dir: 'up', bold: true, value: r => pick(r, 'orders_count', 'orders'), total: 'sum', format: fmtInt, bg: bgOver(2_500, BG.green) },
     { key: 'wb_stock_qty', label: 'Остатки', unit: '#', w: 82, extendedOnly: true, snapshot: true, title: 'Остаток на складах WB, шт (включая товары в пути)', value: r => pick(r, 'wb_stock_qty'), total: 'sum', format: fmtInt },
     { key: 'revenue', label: 'Выручка', unit: '₽', w: 118, dir: 'up', bold: true, value: r => pick(r, 'revenue', 'buyout_sum'), total: 'sum', format: fmtRub, color: v => (v > 0 ? C.ink : C.bad) },
-    { key: 'adv_sum', label: 'Рекл. расход', unit: '₽', w: 104, dir: 'down', value: r => pick(r, 'adv_sum', 'ad_sum'), total: 'sum', format: fmtRub, color: v => (v > 0 ? '#ea580c' : C.dim) },
-    { key: 'profit', label: 'Прибыль', unit: '₽', w: 110, dir: 'up', bold: true, value: r => pick(r, 'profit'), total: 'sum', format: fmtRub, color: profitColor },
+    { key: 'adv_sum', label: 'Расходы', unit: '₽', w: 110, dir: 'down', title: 'Расход на внутреннюю рекламу', value: r => pick(r, 'adv_sum', 'ad_sum'), total: 'sum', format: fmtRub, color: advColor, bg: bgOver(400_000, BG.red) },
+    { key: 'profit', label: 'Прибыль', unit: '₽', w: 110, dir: 'up', bold: true, value: r => pick(r, 'profit'), total: 'sum', format: fmtRub, color: profitColor, bg: profitBg },
     { key: 'margin', label: 'Маржа', unit: 'CR', w: 62, dir: 'up', title: 'Прибыль / выручка', value: r => pick(r, 'margin'), total: t => div(t.profit, t.revenue, 100), format: fmtPct, color: marginColor },
-    { key: 'drr', label: 'ДРР', unit: 'CR', w: 58, dir: 'down', title: 'Рекламный расход / сумма заказов', value: r => pick(r, 'drr'), total: t => div(t.adv_sum, t.orders_sum, 100), format: fmtPct, color: drrColor },
+    { key: 'drr', label: 'ДРР', unit: 'CR', w: 58, dir: 'down', title: 'Рекламный расход / сумма заказов', value: r => pick(r, 'drr'), total: t => div(t.adv_sum, t.orders_sum, 100), format: fmtPct, color: drrColor, bg: bgOver(30, BG.red) },
     { key: 'spp_rate', label: 'СПП', unit: 'CR', w: 58, dir: 'down', title: 'Скидка постоянного покупателя — скидка за счёт WB', value: r => pick(r, 'spp_rate'), total: t => div(t.spp_w, t.spp_wt), format: fmtPct, color: sppColor },
     { key: 'price_after_spp', label: 'После СПП', unit: '₽', w: 82, title: 'Средняя цена за вычетом СПП: ср. цена × (1 − СПП). Столько платит покупатель', value: r => { const p = pick(r, 'avg_price'); const s = pick(r, 'spp_rate'); return p == null ? null : p * (1 - (s ?? 0) / 100); }, total: t => { const p = div(t.orders_sum, t.orders_count); const s = div(t.spp_w, t.spp_wt) ?? 0; return p == null ? null : p * (1 - s / 100); }, format: fmtRub },
     { key: 'cost_per_unit', label: 'С/С ед.', unit: '₽', w: 74, dir: 'down', title: 'Себестоимость одной единицы: себестоимость продаж / заказы', value: r => div(num(r.cost_total), pick(r, 'orders_count', 'orders') ?? 0), total: t => div(t.cost_total, t.orders_count), format: fmtRub },
 
     // Воронка
-    { key: 'adv_views', label: 'Показы', unit: '#', w: 98, dir: 'up', title: 'Рекламные показы (показов карточки в выдаче WB нам не отдаёт)', value: r => pick(r, 'adv_views', 'ad_views'), total: 'sum', format: fmtInt },
+    { key: 'adv_views', label: 'Просмотры', unit: '#', w: 104, dir: 'up', title: 'Рекламные показы (показов карточки в выдаче WB нам не отдаёт)', value: r => pick(r, 'adv_views', 'ad_views'), total: 'sum', format: fmtInt },
     { key: 'ctr', label: 'CTR', unit: 'CR', w: 58, dir: 'up', title: 'Клики / показы рекламы', value: r => pick(r, 'ctr'), total: t => div(t.adv_clicks, t.adv_views, 100), format: fmtPct, color: ctrColor },
-    { key: 'open_card', label: 'Переходы', unit: '#', w: 98, dir: 'up', value: r => pick(r, 'open_card', 'opens'), total: 'sum', format: fmtInt },
-    { key: 'add_to_cart_pct', label: 'CR1', unit: 'CR', w: 58, dir: 'up', title: 'CR1 — конверсия в корзину: корзины / переходы', value: r => pick(r, 'add_to_cart_pct'), total: t => div(t.add_to_cart, t.open_card, 100), format: fmtPct, color: crColor(8, 4) },
-    { key: 'add_to_cart', label: 'Корзина', unit: '#', w: 76, dir: 'up', value: r => pick(r, 'add_to_cart'), total: 'sum', format: fmtInt },
-    { key: 'cart_to_order_pct', label: 'CR2', unit: 'CR', w: 58, dir: 'up', title: 'CR2 — конверсия в заказ: заказы / корзины', value: r => pick(r, 'cart_to_order_pct'), total: t => div(t.orders_count, t.add_to_cart, 100), format: fmtPct, color: crColor(15, 8) },
-    { key: 'orders_sum_rub', label: 'Сумма заказов', unit: '₽', w: 118, dir: 'up', value: r => pick(r, 'orders_sum_rub', 'orders_sum'), total: 'sum', format: fmtRub },
+    { key: 'open_card', label: 'Переходы', unit: '#', w: 98, dir: 'up', value: r => pick(r, 'open_card', 'opens'), total: 'sum', format: fmtInt, bg: bgOver(300_000, BG.warm) },
+    { key: 'add_to_cart_pct', label: 'В корзину', unit: 'CR', w: 84, dir: 'up', title: 'CR1 — конверсия в корзину: корзины / переходы', value: r => pick(r, 'add_to_cart_pct'), total: t => div(t.add_to_cart, t.open_card, 100), format: fmtPct },
+    { key: 'add_to_cart', label: 'Корзины', unit: '#', w: 82, dir: 'up', value: r => pick(r, 'add_to_cart'), total: 'sum', format: fmtInt, bg: bgOver(15_000, BG.blue) },
+    { key: 'cart_to_order_pct', label: 'В заказ', unit: 'CR', w: 76, dir: 'up', title: 'CR2 — конверсия в заказ: заказы / корзины', value: r => pick(r, 'cart_to_order_pct'), total: t => div(t.orders_count, t.add_to_cart, 100), format: fmtPct },
+    { key: 'orders_sum_rub', label: 'Сумма', unit: '₽', w: 118, dir: 'up', value: r => pick(r, 'orders_sum_rub', 'orders_sum'), total: 'sum', format: fmtRub, bg: bgOver(5_000_000, BG.violet) },
     { key: 'avg_price', label: 'Ср. цена', unit: '₽', w: 82, value: r => pick(r, 'avg_price'), total: t => div(t.orders_sum, t.orders_count), format: fmtRub },
     { key: 'buyout_percent', label: 'Выкуп', unit: 'CR', w: 68, dir: 'up', title: 'Доля заказов, которые фактически выкупили', value: r => pick(r, 'buyout_percent', 'buyout_pct'), total: t => div(t.buyout_w, t.buyout_wt), format: fmtPct },
 
     // Себестоимость продаж
-    { key: 'cost_total', label: 'Себестоимость', unit: '₽', w: 118, dir: 'down', value: r => pick(r, 'cost_total'), total: 'sum', format: fmtRub },
+    { key: 'cost_total', label: 'Себест.', unit: '₽', w: 112, dir: 'down', value: r => pick(r, 'cost_total'), total: 'sum', format: fmtRub },
     { key: 'tax', label: 'Налог', unit: '₽', w: 110, dir: 'down', value: r => pick(r, 'tax'), total: 'sum', format: fmtRub, color: () => '#6b7280' },
 
     // Остатки на FBO
@@ -233,21 +223,22 @@ export const COLUMNS: ColumnDef[] = [
     { key: 'cpo', label: 'CPO', unit: '₽', w: 82, dir: 'down', title: 'Стоимость заказа: рекламный расход / заказы', value: r => div(pick(r, 'adv_sum', 'ad_sum') ?? 0, pick(r, 'orders_count', 'orders') ?? 0), total: t => div(t.adv_sum, t.orders_count), format: fmtRub2 },
     { key: 'adv_clicks', label: 'Клики', unit: '#', w: 90, dir: 'up', value: r => pick(r, 'adv_clicks', 'ad_clicks'), total: 'sum', format: fmtInt },
 
-    // Комиссия
-    { key: 'commission_rate', label: 'Комиссия, %', unit: 'CR', w: 88, dir: 'down', title: 'Расходы WB: комиссия + логистика + штрафы + хранение', value: r => pick(r, 'commission_rate'), total: t => div(t.commission, t.revenue, 100), format: fmtPct, color: v => (v > 0 ? C.accent : C.dim) },
-    { key: 'commission', label: 'Комиссия, руб', unit: '₽', w: 110, dir: 'down', value: r => pick(r, 'commission'), total: 'sum', format: fmtRub, color: v => (v > 0 ? C.accent : C.dim) },
+    // Расходы WB (в старом разделе — «Расх. WB %» и «Комиссия ₽»)
+    { key: 'commission_rate', label: 'Расход WB, %', unit: 'CR', w: 100, dir: 'down', title: 'Расходы WB: комиссия + логистика + штрафы + хранение, в % от выручки', value: r => pick(r, 'commission_rate'), total: t => div(t.commission, t.revenue, 100), format: fmtPct, color: v => (v > 0 ? C.accent : C.dim) },
+    { key: 'commission', label: 'Расход WB, ₽', unit: '₽', w: 112, dir: 'down', title: 'Расходы WB в рублях: комиссия + логистика + штрафы + хранение', value: r => pick(r, 'commission'), total: 'sum', format: fmtRub, color: v => (v > 0 ? C.accent : C.dim) },
 ];
 
 export const COLUMN_BY_KEY: Record<string, ColumnDef> = Object.fromEntries(COLUMNS.map(c => [c.key, c]));
 
-/** Раскладка по умолчанию — повторяет группы референса, где у нас есть данные. */
+/** Раскладка по умолчанию — порядок и группы прежнего раздела (решение Дениса 31.07.2026).
+ *  Метрики, которых в старом разделе не было (С/С ед., После СПП, CPL, CPO), стоят рядом
+ *  со своими родственниками, а не отдельной группой. */
 export const DEFAULT_GROUPS: ColumnGroup[] = [
-    { key: 'key', label: 'Ключевые метрики', color: '#7c3aed', cols: ['orders_count', 'wb_stock_qty', 'revenue', 'adv_sum', 'profit', 'margin', 'drr', 'spp_rate', 'price_after_spp', 'cost_per_unit'] },
-    { key: 'funnel', label: 'Воронка', color: '#f59e0b', cols: ['adv_views', 'ctr', 'open_card', 'add_to_cart_pct', 'add_to_cart', 'cart_to_order_pct', 'orders_sum_rub', 'avg_price', 'buyout_percent'] },
-    { key: 'cost', label: 'Себестоимость продаж', color: '#6366f1', cols: ['cost_total', 'tax'] },
-    { key: 'fbo', label: 'Остатки на FBO', color: '#8b5cf6', cols: ['wb_stock_cost', 'own_stock_cost', 'total_stock_cost', 'stock_days_left'] },
-    { key: 'ads', label: 'Реклама', color: '#f97316', cols: ['cpm', 'cpc', 'cpl', 'cpo', 'adv_clicks'] },
-    { key: 'commission', label: 'Комиссия', color: '#ec4899', cols: ['commission_rate', 'commission'] },
+    { key: 'funnel', label: 'Воронка', color: '#f59e0b', cols: ['open_card', 'add_to_cart', 'orders_count', 'orders_sum_rub', 'revenue'] },
+    { key: 'ads', label: 'Внутренняя реклама', color: '#f97316', cols: ['adv_sum', 'adv_views', 'adv_clicks', 'ctr', 'cpc', 'cpm', 'drr', 'cpl', 'cpo'] },
+    { key: 'fin', label: 'Финансы', color: '#6366f1', cols: ['cost_total', 'cost_per_unit', 'spp_rate', 'price_after_spp', 'buyout_percent', 'tax', 'commission_rate', 'commission', 'profit', 'margin', 'avg_price'] },
+    { key: 'conv', label: 'Конверсия', color: '#ec4899', cols: ['add_to_cart_pct', 'cart_to_order_pct'] },
+    { key: 'fbo', label: 'Остатки на FBO', color: '#8b5cf6', cols: ['wb_stock_qty', 'wb_stock_cost', 'own_stock_cost', 'total_stock_cost', 'stock_days_left'] },
 ];
 
 /** Палитра для новых групп, которые создаёт пользователь. */

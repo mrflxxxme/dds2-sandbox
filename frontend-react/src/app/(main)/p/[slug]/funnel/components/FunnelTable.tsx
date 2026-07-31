@@ -1,6 +1,6 @@
 'use client';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { COLUMN_BY_KEY, accumulate, textScaleColor, rankPos, type Shading, type ColumnDef, type ColumnGroup, type ColumnLayout, type Row } from './columns';
+import { COLUMN_BY_KEY, accumulate, rankPos, type Shading, type ColumnDef, type ColumnGroup, type ColumnLayout, type Row } from './columns';
 
 /* ─── Таблица воронки ──────────────────────────────────────────────────────
  * Один рендерер на все группировки. Колонки и их группы приходят раскладкой
@@ -170,21 +170,6 @@ export default function FunnelTable({
         return map;
     }, [flatCols, totals, rows, timeSeries, lastRow]);
 
-    /** Среднее по строкам одного уровня — точка отсчёта окраски.
-     *  Аддитивные колонки: сумма / число строк. Производные (проценты, CPC, С/С ед.):
-     *  их ИТОГО уже средневзвешенное, делить нельзя. */
-    const baselineFor = (list: Row[]): Map<string, number | null> => {
-        const map = new Map<string, number | null>();
-        if (list.length === 0) return map;
-        const t = accumulate(list);
-        const n = list.length;
-        for (const c of flatCols) {
-            if (!c.dir || c.dir === 'none') continue;
-            map.set(c.key, c.total === 'sum' ? sumOf(list, c) / n : c.total(t));
-        }
-        return map;
-    };
-
     /** Отсортированные значения колонки на уровне — основа серой шкалы величины (по рангу). */
     const rangeFor = (list: Row[]): Map<string, number[]> => {
         const map = new Map<string, number[]>();
@@ -203,7 +188,6 @@ export default function FunnelTable({
         return map;
     };
 
-    const topBase = useMemo(() => baselineFor(rows), [rows, flatCols, timeSeries]);   // eslint-disable-line react-hooks/exhaustive-deps
     const topRange = useMemo(() => rangeFor(rows), [rows, flatCols]);   // eslint-disable-line react-hooks/exhaustive-deps
 
     const arrow = (key: string) => (sort?.key === key ? (sort.dir === 'desc' ? ' ↓' : ' ↑') : '');
@@ -219,26 +203,16 @@ export default function FunnelTable({
         whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 12, lineHeight: 1, ...extra,
     });
 
-    /** Позиция значения в своей колонке: 1 — лучшее, 0 — худшее (для 'down' шкала перевёрнута). */
-    const posOf = (c: ColumnDef, v: number | null, range: Map<string, number[]>): number | null => {
-        if (v == null || !c.dir || c.dir === 'none') return null;
-        const vals = range.get(c.key);
-        if (!vals) return null;
-        const p = rankPos(vals, v);
-        return c.dir === 'up' ? p : 1 - p;
-    };
-
-    const cellStyle = (c: ColumnDef, s: Section, first: boolean, v: number | null, r: Row,
-                       range: Map<string, number[]>): React.CSSProperties => {
-        // Цвет цифр — условное форматирование внутри своей колонки;
-        // колонки без направления (цена, остатки) держат свой абсолютный светофор
-        const pos = posOf(c, v, range);
+    const cellStyle = (c: ColumnDef, s: Section, first: boolean, v: number | null, r: Row): React.CSSProperties => {
+        // Цвет цифры и мягкая заливка — свои у каждой колонки, как в прежнем разделе
+        // (решение Дениса 31.07.2026): ранговая раскраска всех цифр рябила в глазах.
         return {
             position: 'relative', textAlign: 'right', padding: '0 8px', fontSize: 12, lineHeight: 1, fontFamily: MONO, whiteSpace: 'nowrap',
             borderBottom: '1px solid rgba(15,23,42,.07)',
             borderRight: '1px solid rgba(15,23,42,.06)',
             borderLeft: first && s.group ? `2px solid ${s.group.color}` : undefined,
-            color: v == null ? '#c8ccd2' : pos != null ? textScaleColor(pos) : c.color?.(v, r) ?? '#111827',
+            background: v == null ? undefined : c.bg?.(v, r),
+            color: v == null ? '#c8ccd2' : c.color?.(v, r) ?? '#111827',
             fontWeight: c.bold ? 600 : 400,
         };
     };
@@ -259,7 +233,7 @@ export default function FunnelTable({
         );
     };
 
-    const renderRow = (r: Row, i: number, depth: number, base: Map<string, number | null>, range: Map<string, number[]>,
+    const renderRow = (r: Row, i: number, depth: number, range: Map<string, number[]>,
                        parentPath: string[] = []): React.ReactNode => {
         const key = rowKey(r, i, depth);
         const lazy = !!nodeKey;
@@ -284,7 +258,7 @@ export default function FunnelTable({
                     {sections.map(s => s.cols.map((c, ci) => {
                         const v = c.value(r);
                         return (
-                            <td key={c.key} style={cellStyle(c, s, ci === 0, v, r, range)}>
+                            <td key={c.key} style={cellStyle(c, s, ci === 0, v, r)}>
                                 {v == null ? '—' : (c.format ? c.format(v, r) : v.toLocaleString('ru-RU'))}
                                 {bar(c, s, v, range)}
                             </td>
@@ -298,9 +272,8 @@ export default function FunnelTable({
                 )}
                 {open && kids && (() => {
                     // дети сравниваются со своими соседями: и среднее, и диапазон — по их уровню
-                    const kidsBase = baselineFor(kids);
                     const kidsRange = rangeFor(kids);
-                    return sortRows(kids).map((k, ki) => renderRow(k, ki, depth + 1, kidsBase, kidsRange, path));
+                    return sortRows(kids).map((k, ki) => renderRow(k, ki, depth + 1, kidsRange, path));
                 })()}
             </React.Fragment>
         );
@@ -385,7 +358,7 @@ export default function FunnelTable({
                             {rows.length === 0 && (
                                 <tr><td colSpan={flatCols.length + 1} style={{ textAlign: 'center', padding: 48, color: 'var(--color-text-dim)' }}>{emptyText}</td></tr>
                             )}
-                            {sorted.map((r, i) => renderRow(r, i, 0, topBase, topRange))}
+                            {sorted.map((r, i) => renderRow(r, i, 0, topRange))}
                         </tbody>
                     </table>
                 )}

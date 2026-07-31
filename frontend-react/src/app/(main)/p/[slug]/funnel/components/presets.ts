@@ -20,7 +20,9 @@ export interface FunnelPreset {
 }
 
 const presetsKey = (slug: string) => `funnel_presets_v1:${slug}`;
-const layoutKey = (slug: string) => `funnel_columns_v1:${slug}`;
+// v2 — порядок колонок пересобран под старый раздел (31.07.2026); сохранённая
+// раскладка v1 иначе перекрыла бы новый порядок у всех, кто уже открывал воронку
+const layoutKey = (slug: string) => `funnel_columns_v2:${slug}`;
 const chainKey = (slug: string) => `funnel_chain_v1:${slug}`;
 const shadingKey = (slug: string) => `funnel_shading_v1:${slug}`;
 const viewKey = (slug: string) => `funnel_view_v1:${slug}`;
