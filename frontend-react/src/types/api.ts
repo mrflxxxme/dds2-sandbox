@@ -2792,14 +2792,21 @@ export interface MigfullInboundPrefill {
 /** Источник кратности строки: карта Натали → наша кратность отгрузки → нет. */
 export type MigfullPackSource = 'natali' | 'ours' | 'none';
 
+/** Откуда ШК короба: реальный короб Натали либо выведенный нами GTIN-14. */
+export type MigfullBoxBarcodeSource = 'natali' | 'derived';
+
 /** Строка состава приёмки для редактируемой модалки (по-SKU, до нарезки на короба). */
 export interface MigfullInboundItem {
   barcode: string;                  // ШК товара (EAN13)
   name: string | null;
+  article_seller: string | null;    // наш артикул (Nomenclature по barcode)
   qty: number;                      // всего штук в приёмке
   units_per_box: number | null;     // prefill: шт в коробе (null — кратность неизвестна)
   pack_source: MigfullPackSource;
   box_barcode: string | null;       // ШК короба ITF14 (карта Натали / выведенный GTIN-14)
+  box_barcode_source: MigfullBoxBarcodeSource | null;
+  units_natali: number | null;      // кратность из карты Натали (если известна)
+  units_ours: number | null;        // НАША кратность (строки машины / per-ФФ / SKU-дефолт)
 }
 
 /** Per-line packing из модалки: units_per_box null/1 — россыпь; >=2 — короба + остаток россыпью. */

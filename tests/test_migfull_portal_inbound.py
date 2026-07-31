@@ -205,16 +205,27 @@ async def test_draft_items_and_pack_sources(db_session, env):
     assert by_bc[EAN].pack_source == "natali"
     assert by_bc[EAN].units_per_box == 5
     assert by_bc[EAN].box_barcode == ITF
+    assert by_bc[EAN].box_barcode_source == "natali"
+    assert by_bc[EAN].units_natali == 5
+    assert by_bc[EAN].units_ours is None
+    assert by_bc[EAN].article_seller == "ELKA"
     # Наша кратность: строки машины-источника (едущей, не принятой)
     assert by_bc[ean2].pack_source == "ours"
     assert by_bc[ean2].units_per_box == 6
     assert by_bc[ean2].box_barcode == svc.ean13_to_itf14(ean2)
+    assert by_bc[ean2].box_barcode_source == "derived"
+    assert by_bc[ean2].units_natali is None
+    assert by_bc[ean2].units_ours == 6
+    assert by_bc[ean2].article_seller == "KOVER-NEW"
     # Наша кратность: SKU-дефолт box_qty_override
     assert by_bc[ean4].pack_source == "ours"
     assert by_bc[ean4].units_per_box == 4
+    assert by_bc[ean4].units_ours == 4
     # Ничего не известно → россыпь
     assert by_bc[ean3].pack_source == "none"
     assert by_bc[ean3].units_per_box is None
+    assert by_bc[ean3].units_natali is None
+    assert by_bc[ean3].units_ours is None
 
     # Превью описи по дефолтному packing: короба нашей кратности + некратный остаток россыпью
     itf2 = svc.ean13_to_itf14(ean2)
@@ -237,6 +248,71 @@ def test_ean13_to_itf14_matches_natali_box_barcode():
     """Выведенный GTIN-14 совпадает с реальным ШК короба Натали для того же EAN13."""
     assert svc.ean13_to_itf14(EAN) == ITF
     assert svc.ean13_to_itf14("не-шк") is None
+
+
+async def test_draft_units_both_sides_mismatch(db_session, env):
+    """Draft несёт ОБЕ кратности (наша 20 vs у Натали 18) — блок нестыковок в модалке.
+
+    Prefill при этом остаётся за Натали; наш артикул и источник ШК короба — в строке.
+    """
+    ean = "2052922000042"
+    natali_box = "98052922000045"  # реальный ШК короба Натали ≠ выведенный GTIN-14
+    nom = Nomenclature(project_id=env.project_id, barcode=ean, article_seller="KOVER-MIX")
+    db_session.add(nom)
+    db_session.add(
+        FulfillmentStock(
+            project_id=env.project_id,
+            warehouse_id=env.warehouse.id,
+            provider="migfull",
+            barcode=natali_box,
+            name="KOVER короб 18 шт.",
+            base_barcode=ean,
+            units_per_box=18,
+        )
+    )
+    # НАША кратность — 20 (строка машины-источника)
+    db_session.add(
+        CostOrderItem(
+            project_id=env.project_id, order_no=env.vehicle.order_no,
+            barcode=ean, qty=40, pcs_per_box_override=20,
+        )
+    )
+    await db_session.flush()
+    db_session.add(
+        InboundReceiptItem(
+            project_id=env.project_id, receipt_id=env.receipt.id,
+            nomenclature_id=nom.id, barcode=ean, expected_qty=40,
+        )
+    )
+    # Строка без EAN13 и без карты Натали: ШК короба не выводится → source None;
+    # артикула в номенклатуре нет → article_seller None
+    nom_other = Nomenclature(project_id=env.project_id, barcode="CODE128-XYZ", article_seller=None)
+    db_session.add(nom_other)
+    await db_session.flush()
+    db_session.add(
+        InboundReceiptItem(
+            project_id=env.project_id, receipt_id=env.receipt.id,
+            nomenclature_id=nom_other.id, barcode="CODE128-XYZ", expected_qty=3,
+        )
+    )
+    await db_session.commit()
+
+    draft = await svc.build_inbound_draft(db_session, env.project_id, env.receipt.id)
+    by_bc = {it.barcode: it for it in draft.items}
+
+    it = by_bc[ean]
+    assert it.article_seller == "KOVER-MIX"
+    assert it.units_natali == 18
+    assert it.units_ours == 20
+    assert it.units_per_box == 18  # prefill — за Натали
+    assert it.pack_source == "natali"
+    assert it.box_barcode == natali_box
+    assert it.box_barcode_source == "natali"
+
+    other = by_bc["CODE128-XYZ"]
+    assert other.box_barcode is None
+    assert other.box_barcode_source is None
+    assert other.article_seller is None
     assert svc.ean13_to_itf14("123") is None
 
 

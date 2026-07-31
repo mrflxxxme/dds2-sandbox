@@ -120,21 +120,31 @@ class MigfullSendResult(BaseModel):
 # наша кратность отгрузки (box multiplicity: строки машины / per-ФФ / SKU-дефолт) → нет.
 PackSource = Literal["natali", "ours", "none"]
 
+# Откуда ШК короба: карта Натали (реальный короб в зеркале ФФ) либо
+# выведенный нами GTIN-14 из EAN13 товара (ean13_to_itf14).
+BoxBarcodeSource = Literal["natali", "derived"]
+
 
 class MigfullInboundItem(BaseModel):
     """Строка СОСТАВА приёмки для редактируемой модалки (по-SKU, до нарезки на короба).
 
     ``units_per_box`` — prefill кратности по цепочке natali → ours → none
     (``pack_source``); пользователь правит в модалке и шлёт per-line packing.
-    ``box_barcode`` — ШК короба (ITF14): из карты Натали либо выведенный GTIN-14.
+    ``box_barcode`` — ШК короба (ITF14): из карты Натали либо выведенный GTIN-14
+    (``box_barcode_source``). ``units_natali``/``units_ours`` — ОБЕ стороны
+    кратности, когда известны (модалка показывает нестыковки: наша ≠ у Натали).
     """
 
     barcode: str  # ШК товара (EAN13)
     name: str | None = None
+    article_seller: str | None = None  # наш артикул (Nomenclature по barcode)
     qty: int  # всего штук в приёмке
     units_per_box: int | None = None  # prefill: шт в коробе (None — кратность неизвестна)
     pack_source: PackSource = "none"
     box_barcode: str | None = None
+    box_barcode_source: BoxBarcodeSource | None = None
+    units_natali: int | None = None  # кратность из карты Натали (если известна)
+    units_ours: int | None = None  # НАША кратность (строки машины / per-ФФ / SKU-дефолт)
 
 
 class MigfullPackingLine(BaseModel):

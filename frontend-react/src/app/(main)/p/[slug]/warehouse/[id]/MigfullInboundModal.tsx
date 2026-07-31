@@ -58,6 +58,9 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
     // Подтверждение повторной отправки (already_sent или ответ 409).
     const [confirmResend, setConfirmResend] = useState(false);
 
+    // Свёртываемый блок «Нестыковки кратности» (наша ≠ у Натали).
+    const [mismatchOpen, setMismatchOpen] = useState(false);
+
     const [submitting, setSubmitting] = useState(false);
     const [submitError, setSubmitError] = useState('');
     const [result, setResult] = useState<MigfullSendResult | null>(null);
@@ -147,6 +150,16 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
             for (const it of items) next[it.barcode] = { ...(next[it.barcode] ?? EMPTY_ROW), boxMode: false };
             return next;
         });
+    };
+
+    /** Нестыковки кратности: обе стороны известны И различаются. */
+    const mismatches = items.filter(
+        it => it.units_natali != null && it.units_ours != null && it.units_natali !== it.units_ours,
+    );
+    /** «Взять нашу»/«взять Натали»: подставить кратность в units строки (коробом, коробов = максимум). */
+    const applyUnits = (barcode: string, qty: number, units: number) => {
+        const u = String(units);
+        setRow(barcode, { boxMode: true, units: u, boxes: maxBoxesStr(qty, u) });
     };
 
     const hasItems = items.length > 0;
@@ -348,6 +361,70 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                 </div>
                             </div>
 
+                            {/* Нестыковки кратности: наша ≠ у Натали (обе стороны известны) */}
+                            {mismatches.length > 0 && (
+                                <div style={{ border: '1px solid var(--color-border)', borderRadius: 8, background: 'rgba(245,158,11,0.08)', marginBottom: 16 }}>
+                                    <button
+                                        onClick={() => setMismatchOpen(o => !o)}
+                                        style={{
+                                            width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+                                            padding: '10px 14px', background: 'none', border: 'none', cursor: 'pointer',
+                                            fontSize: 13, fontWeight: 600, color: 'var(--color-warning)', textAlign: 'left',
+                                        }}
+                                        aria-expanded={mismatchOpen}
+                                    >
+                                        <span>⚠ Нестыковки кратности: {formatNumber(mismatches.length, 0)} {mismatches.length === 1 ? 'позиция' : 'позиций'}</span>
+                                        <span style={{ marginLeft: 'auto', color: 'var(--color-text-muted)', fontWeight: 400, fontSize: 12 }}>
+                                            {mismatchOpen ? 'свернуть ▲' : 'показать ▼'}
+                                        </span>
+                                    </button>
+                                    {mismatchOpen && (
+                                        <div style={{ borderTop: '1px solid var(--color-border)', padding: '4px 14px 10px' }}>
+                                            {mismatches.map(it => {
+                                                const ours = it.units_ours;
+                                                const natali = it.units_natali;
+                                                if (ours == null || natali == null) return null;
+                                                const current = parseInt(packOf(it.barcode).units, 10);
+                                                return (
+                                                    <div
+                                                        key={it.barcode}
+                                                        style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0', fontSize: 13, flexWrap: 'wrap' }}
+                                                    >
+                                                        <span style={{ minWidth: 0 }}>
+                                                            <strong>{it.article_seller || it.name || it.barcode}</strong>
+                                                            <span style={{ color: 'var(--color-text-muted)', fontFamily: 'monospace', fontSize: 12, marginLeft: 6 }}>{it.barcode}</span>
+                                                        </span>
+                                                        <span style={{ whiteSpace: 'nowrap' }}>
+                                                            наша: <strong>{formatNumber(ours, 0)}</strong>
+                                                            <span style={{ color: 'var(--color-text-muted)' }}> · </span>
+                                                            у Натали: <strong>{formatNumber(natali, 0)}</strong>
+                                                        </span>
+                                                        <span style={{ display: 'flex', gap: 6, marginLeft: 'auto' }}>
+                                                            <button
+                                                                className={`btn btn-sm ${current === ours ? 'btn-primary' : 'btn-secondary'}`}
+                                                                style={{ padding: '2px 8px', fontSize: 12 }}
+                                                                onClick={() => applyUnits(it.barcode, it.qty, ours)}
+                                                                title={`Коробом по нашей кратности: ${formatNumber(ours, 0)} шт`}
+                                                            >
+                                                                взять нашу
+                                                            </button>
+                                                            <button
+                                                                className={`btn btn-sm ${current === natali ? 'btn-primary' : 'btn-secondary'}`}
+                                                                style={{ padding: '2px 8px', fontSize: 12 }}
+                                                                onClick={() => applyUnits(it.barcode, it.qty, natali)}
+                                                                title={`Коробом по кратности Натали: ${formatNumber(natali, 0)} шт`}
+                                                            >
+                                                                взять Натали
+                                                            </button>
+                                                        </span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
                             {/* Состав (редактируемая упаковка: коробом / россыпью) */}
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
                                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
@@ -406,7 +483,18 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                 const r = packOf(it.barcode);
                                                 return (
                                                     <tr key={it.barcode} style={{ borderTop: '1px solid var(--color-border)' }}>
-                                                        <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: 12 }}>{it.barcode}</td>
+                                                        <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: 12 }}>
+                                                            {it.barcode}
+                                                            {/* ШК короба — при короб-режиме: карта Натали либо выведенный GTIN-14 */}
+                                                            {r.boxMode && it.box_barcode && (
+                                                                <div style={{ color: 'var(--color-text-muted)', fontSize: 11, marginTop: 2, whiteSpace: 'nowrap' }}>
+                                                                    {it.box_barcode}
+                                                                    <span style={{ fontFamily: 'Inter, sans-serif', marginLeft: 5 }}>
+                                                                        {it.box_barcode_source === 'natali' ? 'короб Натали' : 'короб (выведен)'}
+                                                                    </span>
+                                                                </div>
+                                                            )}
+                                                        </td>
                                                         <td style={{ padding: '8px 10px' }}>
                                                             {it.name || '—'}
                                                             {it.pack_source !== 'none' && (
@@ -419,6 +507,11 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                                 >
                                                                     {it.pack_source === 'natali' ? 'Натали' : 'наша'}
                                                                 </span>
+                                                            )}
+                                                            {it.article_seller && (
+                                                                <div style={{ color: 'var(--color-text-muted)', fontSize: 12, marginTop: 1 }}>
+                                                                    {it.article_seller}
+                                                                </div>
                                                             )}
                                                         </td>
                                                         <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 500, whiteSpace: 'nowrap' }}>

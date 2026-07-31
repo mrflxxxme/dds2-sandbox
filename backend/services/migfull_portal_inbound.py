@@ -26,6 +26,7 @@ kind=inbound, inbound_receipt_id=…)`` — когда PVB прилетит read
 """
 
 import asyncio
+from typing import NamedTuple
 
 import httpx
 import structlog
@@ -42,6 +43,7 @@ from backend.models import (
     InboundReceipt,
     MigfullShipmentOrder,
     MigfullShipmentStatus,
+    Nomenclature,
 )
 from backend.models.fulfillment import FfRequestKind
 from backend.models.warehouse import InboundStatus
@@ -140,6 +142,15 @@ def ean13_to_itf14(barcode: str, indicator: str = "1") -> str | None:
     return body + _gtin14_check_digit(body)
 
 
+class PackPrefill(NamedTuple):
+    """Резолюция кратности одной строки состава: prefill + обе стороны для UI."""
+
+    units: int | None  # prefill: natali → ours → None (россыпь)
+    source: PackSource
+    units_natali: int | None  # кратность из карты Натали (если известна)
+    units_ours: int | None  # НАША кратность (строки машины / per-ФФ / SKU-дефолт)
+
+
 async def _resolve_pack_prefill(
     db: AsyncSession,
     project_id: int,
@@ -147,36 +158,36 @@ async def _resolve_pack_prefill(
     vehicle: CostOrder | None,
     barcodes: list[str],
     box_for_piece: dict[str, tuple[str, int, str | None]],
-) -> dict[str, tuple[int | None, PackSource]]:
+) -> dict[str, PackPrefill]:
     """Prefill кратности per ШК: карта Натали → НАША кратность → россыпь.
 
     Цепочка «ours»: кратность со строк самой машины-источника (работает и для
     едущей, ещё не принятой машины — кейс новинок V-…) → box-multiplicity
     (machine по ACCEPTED-приёмкам → ручная per-ФФ → SKU-дефолт). Кратность 1
-    трактуем как «нет» (короб из 1 шт = россыпь).
+    трактуем как «нет» (короб из 1 шт = россыпь). НАША кратность считается
+    для ВСЕХ ШК (не только без карты Натали) — модалка показывает нестыковки
+    «наша ≠ у Натали», prefill при этом остаётся за Натали.
     """
-    out: dict[str, tuple[int | None, PackSource]] = {}
-    remaining: list[str] = []
-    for bc in barcodes:
-        natali = box_for_piece.get(bc)
-        if natali is not None:
-            out[bc] = (natali[1], "natali")
-        else:
-            remaining.append(bc)
-    if not remaining:
-        return out
-
+    if not barcodes:
+        return {}
     vehicle_ppb: dict[str, int] = {}
     if vehicle is not None and vehicle.order_no:
         vm = await resolve_source_machine_box_qty(db, project_id, {vehicle.id: vehicle.order_no})
         vehicle_ppb = {bc: ppb for (_vid, bc), ppb in vm.items()}
-    ours_map = await resolve_box_qty_map(db, project_id, warehouse_id, remaining)
-    for bc in remaining:
-        upb = vehicle_ppb.get(bc) or ours_map.get(bc)
-        if upb is not None and upb >= 2:
-            out[bc] = (int(upb), "ours")
+    ours_map = await resolve_box_qty_map(db, project_id, warehouse_id, barcodes)
+
+    out: dict[str, PackPrefill] = {}
+    for bc in barcodes:
+        natali = box_for_piece.get(bc)
+        units_natali = int(natali[1]) if natali is not None else None
+        raw_ours = vehicle_ppb.get(bc) or ours_map.get(bc)
+        units_ours = int(raw_ours) if raw_ours is not None and raw_ours >= 2 else None
+        if units_natali is not None:
+            out[bc] = PackPrefill(units_natali, "natali", units_natali, units_ours)
+        elif units_ours is not None:
+            out[bc] = PackPrefill(units_ours, "ours", None, units_ours)
         else:
-            out[bc] = (None, "none")
+            out[bc] = PackPrefill(None, "none", None, None)
     return out
 
 
@@ -296,13 +307,30 @@ def _validated_packing(
 
 
 def _default_packing(
-    qty_by_bc: dict[str, int], prefill: dict[str, tuple[int | None, PackSource]]
+    qty_by_bc: dict[str, int], prefill: dict[str, PackPrefill]
 ) -> list[MigfullPackingLine]:
     """Packing по умолчанию (без ручных правок): prefill-кратность, иначе россыпь."""
     return [
-        MigfullPackingLine(barcode=bc, qty=q, units_per_box=(prefill.get(bc) or (None, "none"))[0])
+        MigfullPackingLine(barcode=bc, qty=q, units_per_box=(p.units if (p := prefill.get(bc)) else None))
         for bc, q in qty_by_bc.items()
     ]
+
+
+async def _load_article_sellers(
+    db: AsyncSession, project_id: int, barcodes: list[str]
+) -> dict[str, str | None]:
+    """Наш артикул per ШК: Nomenclature по barcode, одним batch-запросом (без N+1)."""
+    if not barcodes:
+        return {}
+    rows = (
+        await db.execute(
+            select(Nomenclature.barcode, Nomenclature.article_seller).where(
+                Nomenclature.project_id == project_id,
+                Nomenclature.barcode.in_(barcodes),
+            )
+        )
+    ).all()
+    return {bc: art for bc, art in rows}
 
 
 def _default_notes(receipt: InboundReceipt, vehicle: CostOrder | None) -> str:
@@ -377,14 +405,21 @@ async def build_inbound_draft(db: AsyncSession, project_id: int, receipt_id: int
     pack_prefill = await _resolve_pack_prefill(
         db, project_id, receipt.warehouse_id, vehicle, list(qty_by_bc), box_for_piece
     )
+    article_by_bc = await _load_article_sellers(db, project_id, list(qty_by_bc))
     items = [
         MigfullInboundItem(
             barcode=bc,
             name=name_for_barcode.get(bc),
+            article_seller=article_by_bc.get(bc),
             qty=qty,
-            units_per_box=pack_prefill[bc][0],
-            pack_source=pack_prefill[bc][1],
+            units_per_box=pack_prefill[bc].units,
+            pack_source=pack_prefill[bc].source,
             box_barcode=(box_for_piece[bc][0] if bc in box_for_piece else ean13_to_itf14(bc)),
+            box_barcode_source=(
+                "natali" if bc in box_for_piece else ("derived" if ean13_to_itf14(bc) else None)
+            ),
+            units_natali=pack_prefill[bc].units_natali,
+            units_ours=pack_prefill[bc].units_ours,
         )
         for bc, qty in sorted(qty_by_bc.items(), key=lambda kv: (name_for_barcode.get(kv[0]) or "", kv[0]))
         if qty > 0
