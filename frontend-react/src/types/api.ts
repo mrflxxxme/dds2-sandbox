@@ -8371,6 +8371,206 @@ export interface FbsOrderStats {
   funnel: FbsOrderStatsFunnel;
 }
 
+/** Точность вехи: точные даты WB/наших операций против журнала переходов. */
+export type FbsStagePrecision = 'exact' | 'approx';
+
+/** Зона ответственности этапа: до сортировки — наша, после — логистики WB. */
+export type FbsStageZone = 'us' | 'wb' | 'total';
+
+/** Шаг динамики. Подбирается бэкендом по длине периода, если не задан. */
+export type FbsStageBucket = 'day' | 'week' | 'month';
+
+/**
+ * Этап пути задания за период.
+ *
+ * `count` — сколько заданий реально ЗАМЕРЕНО. Ноль при `precision: 'approx'`
+ * значит «истории ещё нет» (журнал переходов начинается с момента наполнения),
+ * а НЕ «этап проходит мгновенно» — подпись обязана это различать.
+ */
+export interface FbsStageRow {
+  key: string;
+  title: string;
+  /** Короткое имя для узкой колонки таблицы; полное — в подсказке. */
+  short: string;
+  zone: FbsStageZone;
+  precision: FbsStagePrecision;
+  /** Сводный этап перекрывает соседние — складывать с обычными нельзя. */
+  summary: boolean;
+  hint: string;
+  count: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+  avg_hours: number | null;
+  min_hours: number | null;
+  max_hours: number | null;
+  /** Замеры, выброшенные как недостоверные (обратный порядок вех / потолок). */
+  dropped: number;
+  /**
+   * Сколько из `count` опёрлись на журнал переходов вместо истории кабинета
+   * (± каденс синка). Ноль — этап целиком посчитан по точным моментам WB.
+   */
+  approx_count: number;
+}
+
+/** Этап × склад продавца, с которого собирают. */
+export interface FbsStageWarehouseRow {
+  stage: string;
+  wb_warehouse_id?: number | null;
+  warehouse_name: string;
+  count: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+  avg_hours: number | null;
+}
+
+/**
+ * Точка динамики: этап × начало бакета по дате ЗАВЕРШЕНИЯ этапа (МСК).
+ *
+ * Ряд РАЗРЕЖЕН: отсутствующий бакет — «замеров не было», а не «ноль часов».
+ * Дорисовка пропусков нулями покажет провалы там, где просто нет данных.
+ */
+export interface FbsStageDynamicsRow {
+  stage: string;
+  period_start: string;
+  count: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+  avg_hours: number | null;
+}
+
+/**
+ * Что висит на этапе прямо сейчас. Период на этот блок не влияет.
+ *
+ * Фазы `to_ship` и `in_transit` — разбиение псевдо-статуса `in_delivery`
+ * вкладки «Заказы» по факту скана QR, поэтому «Едет к СЦ» здесь всегда меньше
+ * «В доставке» там, а совпадает СУММА двух карточек.
+ */
+export interface FbsStageQueueRow {
+  phase: string;
+  title: string;
+  count: number;
+  median_age_hours: number | null;
+  max_age_hours: number | null;
+}
+
+/** Покрытие журнала переходов — фолбэк для заданий без догнанной истории. */
+export interface FbsStageJournal {
+  events: number;
+  since?: string | null;
+  orders: number;
+}
+
+/**
+ * Покрытие догона истории из кабинета WB — на чём посчитаны поздние этапы.
+ *
+ * Пока `orders_covered` меньше `orders_total`, часть замеров опирается на
+ * журнал (это видно в `approx_count` строки этапа).
+ */
+export interface FbsStageHistory {
+  orders_total: number;
+  orders_covered: number;
+  rows: number;
+  since?: string | null;
+}
+
+/**
+ * Направление доставки (округ покупателя).
+ *
+ * 🔴 В строке ДВЕ разные выборки: `orders` — задания, чей путь завершился
+ * в периоде (по ним скорость и SLA); `matured` — созревшая когорта, и только
+ * по ней считается `refused`. На всей выборке доля отказов была бы ошибкой
+ * выжившего — свежее ещё в пути.
+ */
+export interface FbsGeoDirectionRow {
+  label: string;
+  orders: number;
+  median_days: number | null;
+  p90_days: number | null;
+  avg_hops: number | null;
+  matured: number;
+  refused: number;
+  sla_total: number;
+  sla_in_time: number;
+}
+
+/**
+ * Город назначения — последний узел маршрута перед готовностью к вручению.
+ *
+ * 🔴 Это точка сети WB (СЦ/ПВЗ), а не адрес покупателя. Зато известна для всех
+ * заданий с завершённым путём, тогда как округ берётся сшивкой с зеркалом
+ * статистики и покрывает не всё.
+ */
+export interface FbsGeoDestinationRow {
+  label: string;
+  orders: number;
+  median_days: number | null;
+  p90_days: number | null;
+}
+
+/** Клетка матрицы «склад отгрузки × округ назначения». */
+export interface FbsGeoMatrixRow {
+  wb_warehouse_id?: number | null;
+  warehouse_name: string;
+  label: string;
+  orders: number;
+  median_days: number | null;
+}
+
+/**
+ * Узел маршрута (СЦ). `measured` меньше `passes` — у части проходов в истории
+ * одно событие, и удержание неизвестно; при `measured = 0` длительность `null`,
+ * потому что ноль означал бы «прошёл мгновенно».
+ */
+export interface FbsGeoNodeRow {
+  label: string;
+  passes: number;
+  measured: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+}
+
+/** Перевалки против времени — управляемый рычаг маршрута. */
+export interface FbsGeoHopsRow {
+  hops: number;
+  orders: number;
+  median_days: number | null;
+}
+
+/** Доля заданий, сшитых с зеркалом статистики (иначе округ неизвестен). */
+export interface FbsGeoCoverage {
+  orders_total: number;
+  orders_matched: number;
+}
+
+/** География доставки FBS: направления, маршруты, узлы и перевалки. */
+export interface FbsGeoAnalytics {
+  date_from: string;
+  date_to: string;
+  wb_warehouse_id?: number | null;
+  maturity_days: number;
+  directions: FbsGeoDirectionRow[];
+  /** Города назначения по маршруту — покрытие 100%, в отличие от округов. */
+  destinations: FbsGeoDestinationRow[];
+  matrix: FbsGeoMatrixRow[];
+  nodes: FbsGeoNodeRow[];
+  hops: FbsGeoHopsRow[];
+  coverage: FbsGeoCoverage;
+}
+
+/** Аналитика этапов FBS: длительности, разрез по складам, динамика, очередь. */
+export interface FbsStageAnalytics {
+  date_from: string;
+  date_to: string;
+  bucket: FbsStageBucket;
+  wb_warehouse_id?: number | null;
+  stages: FbsStageRow[];
+  by_warehouse: FbsStageWarehouseRow[];
+  dynamics: FbsStageDynamicsRow[];
+  queue: FbsStageQueueRow[];
+  journal: FbsStageJournal;
+  history: FbsStageHistory;
+}
+
 /**
  * Из чего сложилась разница «Доступно на складе» → «Штук к передаче».
  * Цепочка сходится по построению: ledger_free − все cut_* = total_units.

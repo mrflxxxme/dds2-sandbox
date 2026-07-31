@@ -11,6 +11,9 @@ import type {
     FbsOrderListResponse,
     FbsOrderStats,
     FbsOrderTimeline,
+    FbsGeoAnalytics,
+    FbsStageAnalytics,
+    FbsStageBucket,
     FbsWarehouseSummary,
     FbsOverrideSetPayload,
     FbsReconcileApplyPayload,
@@ -171,6 +174,40 @@ export function addFbsMethods(api: ApiClient) {
             if (f.wbWarehouseId) q.set('wb_warehouse_id', String(f.wbWarehouseId));
             const qs = q.toString();
             return api.request<FbsOrderStats>('GET', `/api/v1/fbs/orders/stats${qs ? `?${qs}` : ''}`);
+        },
+        /**
+         * Аналитика этапов: сколько времени задание проводит на каждом шаге
+         * пути, с разрезом по складам и динамикой. Этап засчитывается в сутки,
+         * когда он ЗАВЕРШИЛСЯ; блок `queue` период игнорирует.
+         */
+        getFbsStageAnalytics(
+            f: { dateFrom?: string; dateTo?: string; wbWarehouseId?: number; bucket?: FbsStageBucket } = {},
+        ) {
+            const q = new URLSearchParams();
+            if (f.dateFrom) q.set('date_from', f.dateFrom);
+            if (f.dateTo) q.set('date_to', f.dateTo);
+            if (f.wbWarehouseId) q.set('wb_warehouse_id', String(f.wbWarehouseId));
+            if (f.bucket) q.set('bucket', f.bucket);
+            const qs = q.toString();
+            return api.request<FbsStageAnalytics>('GET', `/api/v1/fbs/orders/stage-analytics${qs ? `?${qs}` : ''}`);
+        },
+        /** География доставки: направления, маршруты, узлы, перевалки. */
+        getFbsGeoAnalytics(f: { dateFrom?: string; dateTo?: string; wbWarehouseId?: number } = {}) {
+            const q = new URLSearchParams();
+            if (f.dateFrom) q.set('date_from', f.dateFrom);
+            if (f.dateTo) q.set('date_to', f.dateTo);
+            if (f.wbWarehouseId) q.set('wb_warehouse_id', String(f.wbWarehouseId));
+            const qs = q.toString();
+            return api.request<FbsGeoAnalytics>('GET', `/api/v1/fbs/orders/geo-analytics${qs ? `?${qs}` : ''}`);
+        },
+        /**
+         * Догнать историю статусов из кабинета WB (точные вехи для этапов).
+         * Публичный API истории не отдаёт — идём портальной сессией, поэтому
+         * прогон ограничен пачкой и лимитом хоста (150 запросов/мин).
+         */
+        syncFbsOrderHistory(limit = 200) {
+            const q = new URLSearchParams({ limit: String(limit) });
+            return api.request<FbsActionResult>('POST', `/api/v1/fbs/orders/history/sync?${q}`);
         },
         syncFbsOrders() {
             return api.request<FbsActionResult>('POST', '/api/v1/fbs/orders/sync');
