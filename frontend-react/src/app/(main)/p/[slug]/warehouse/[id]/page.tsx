@@ -2994,17 +2994,36 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             // Единый канон: главное число — ВСЕГДА штуки (пересчёт коробов, когда
             // есть карта кратности), «· N кор.» — подпись. Сырые кол-ва смешивали
             // короба со штуками («заявлен 1» = 1 короб) — сравнивать нельзя было.
+            // Три визуальных состояния — «коробами или штуками» видно сразу:
+            //   «X шт»            — состав подтверждённо штучный;
+            //   «X шт · 📦 N кор.» — в составе короба (пересчитаны в штуки);
+            //   «X ?»             — единицы не определены (нет карты кратности) —
+            //                       сырое число строк, может смешивать короба и штуки.
             render: (v: number | null, row: FfRequestRow) => {
                 const units = kind === 'assembly' ? null : row.total_qty_units;
-                const main = units != null
-                    ? formatNumber(units, 0)
-                    : v == null ? '—' : formatNumber(v, 0);
+                if (kind !== 'assembly' && units != null) {
+                    return (
+                        <span style={{ whiteSpace: 'nowrap' }}>
+                            <span>{formatNumber(units, 0)}</span>
+                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}> шт</span>
+                            {row.total_boxes != null && (
+                                <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                    {' '}· 📦 {formatNumber(row.total_boxes, 0)} кор.
+                                </span>
+                            )}
+                        </span>
+                    );
+                }
+                if (v == null) return '—';
                 return (
                     <span style={{ whiteSpace: 'nowrap' }}>
-                        <span>{main}</span>
-                        {kind !== 'assembly' && row.total_boxes != null && (
-                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                                {' '}· {formatNumber(row.total_boxes, 0)} кор.
+                        <span>{formatNumber(v, 0)}</span>
+                        {kind !== 'assembly' && (
+                            <span
+                                style={{ fontSize: 11, color: 'var(--color-warning)', cursor: 'help' }}
+                                title="Единицы не определены: у части SKU нет карты кратности. Число — сумма по строкам документа и может смешивать короба со штуками."
+                            >
+                                {' '}?
                             </span>
                         )}
                     </span>
