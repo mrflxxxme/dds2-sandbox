@@ -223,6 +223,66 @@ class StockTransferSchema(BaseModel):
     updated_at: datetime | None = None
     items: list[StockTransferItemSchema] = []
 
+    # Машина и логистика переезда (зеркало блока «Назначить машину» у заявки).
+    vehicle_info: str | None = None
+    vehicle_brand: str | None = None
+    driver_first_name: str | None = None
+    driver_last_name: str | None = None
+    driver_phone: str | None = None
+    counterparty_id: int | None = None
+    logistics_by_warehouse: bool = False
+    pickup_date: date | None = None
+    pickup_time_slot: str | None = None
+    pickup_cost: Decimal | None = None
+    delivery_date: date | None = None
+    vehicle_assigned_at: datetime | None = None
+    converted_from_assembly_id: int | None = None
+
+
+class TransferAssignVehicle(BaseModel):
+    """Назначение машины на перемещение — контракт зеркалит AssignVehicle заявки.
+
+    logistics_by_warehouse=True → перевозчик берётся из контрагента склада-
+    ИСТОЧНИКА, поля carrier_* игнорируются. Иначе перевозчик резолвится по
+    carrier_inn / carrier_name.
+    """
+
+    vehicle_info: str | None = None
+    vehicle_brand: str | None = None
+    driver_first_name: str | None = None
+    driver_last_name: str | None = None
+    driver_phone: str | None = None
+    logistics_by_warehouse: bool = False
+    carrier_inn: str | None = None
+    carrier_name: str | None = None
+    pickup_date: date | None = None
+    pickup_time_slot: str | None = None
+    pickup_cost: Decimal | None = None
+    delivery_date: date | None = None
+
+
+class AssemblyToTransfer(BaseModel):
+    """«Переделать заявку в перемещение».
+
+    Состав берётся из заявки (зеркалу ФФ по количествам не доверяем —
+    у migfull total_qty не сводится ни к штукам, ни к SKU). move_ff_links
+    по умолчанию False: старые зеркала ФФ остаются историей заявки, на
+    переезд вяжутся свежие заявки провайдера (обе стороны переезда).
+    """
+
+    to_warehouse_id: int
+    comment: str | None = None
+    move_ff_links: bool = False
+
+
+class AssemblyToTransferResult(BaseModel):
+    transfer_id: int
+    transfer_number: str
+    assembly_number: str
+    items_count: int
+    units_total: int
+    ff_links_moved: int = 0
+
 
 # ─── Stock Movement (Журнал) ──────────────────────────────────────────────
 
