@@ -72,6 +72,7 @@ from backend.scheduler.jobs.wb_fbs import (
     sync_all_projects_fbs_new_orders,
     sync_all_projects_fbs_order_statuses,
     sync_all_projects_fbs_recent_orders,
+    sync_all_projects_fbs_order_history,
     sync_all_projects_fbs_supplies,
     sync_all_projects_fbs_warehouses,
 )
@@ -518,6 +519,21 @@ def start_scheduler():
         max_instances=1,
         coalesce=True,
         misfire_grace_time=300,
+    )
+
+    # История статусов из КАБИНЕТА: точные вехи для аналитики этапов. Пачка 400
+    # каждые 15 мин = 38 к запросов в сутки при потребности ~18 к (живые задания
+    # по лестнице протухания) — двукратный запас. Лимит хоста 150/мин при этом
+    # выбирается лишь на ~80%: прогон держит паузу между запросами.
+    _scheduler.add_job(
+        sync_all_projects_fbs_order_history,
+        trigger=IntervalTrigger(minutes=settings.WB_FBS_ORDER_HISTORY_INTERVAL_MINUTES),
+        id="wb_fbs_order_history_sync",
+        name="WB FBS order history sync (every 15min)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
     )
 
     _scheduler.add_job(
