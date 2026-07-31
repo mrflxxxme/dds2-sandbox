@@ -428,24 +428,18 @@ async def _compute_opis_lines(
     return await compute_opis_lines_from_qty(db, project_id, warehouse_id, qty_by_bc, nom_by_bc)
 
 
-async def compute_opis_lines_from_qty(
+async def load_opis_context(
     db: AsyncSession,
     project_id: int,
     warehouse_id: int,
-    qty_by_bc: dict[str, int],
     nom_by_bc: dict[str, int],
-) -> tuple[list[MigfullOpisLine], list[str]]:
-    """Штуки по ШК → строки описи (короб/россыпь) через зеркало остатков ФФ.
+) -> tuple[dict[str, tuple[str, int, str | None]], dict[str, str | None]]:
+    """Контекст описи из зеркала остатков ФФ: (box_for_piece, name_for_barcode).
 
-    Общее ядро для обоих направлений: заявка на отгрузку (состав сборки) и
-    поставка/приёмка (состав нашей InboundReceipt) — источник qty разный,
-    сопоставление короб→россыпь и фолбэк имени из номенклатуры одинаковые.
+    box_for_piece: EAN13 россыпи → (ШК короба ITF14, шт/короб, имя короба) — карта
+    кратности Натали. name_for_barcode: ШК → имя товара, с фолбэком из номенклатуры
+    (артикул) для ШК без строки в зеркале ФФ.
     """
-    qty_by_bc = {bc: q for bc, q in qty_by_bc.items() if q > 0}
-    if not qty_by_bc:
-        return [], []
-
-    # Зеркало остатков ФФ склада: имя товара + сопоставление короб→россыпь
     stock_rows = (
         await db.execute(
             select(FulfillmentStock).where(
@@ -477,6 +471,26 @@ async def compute_opis_lines_from_qty(
             if not name_for_barcode.get(bc):
                 name_for_barcode[bc] = nom_name.get(nid)
 
+    return box_for_piece, name_for_barcode
+
+
+async def compute_opis_lines_from_qty(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    qty_by_bc: dict[str, int],
+    nom_by_bc: dict[str, int],
+) -> tuple[list[MigfullOpisLine], list[str]]:
+    """Штуки по ШК → строки описи (короб/россыпь) через зеркало остатков ФФ.
+
+    Общее ядро для обоих направлений: заявка на отгрузку (состав сборки) и
+    поставка/приёмка (состав нашей InboundReceipt) — источник qty разный,
+    сопоставление короб→россыпь и фолбэк имени из номенклатуры одинаковые.
+    """
+    qty_by_bc = {bc: q for bc, q in qty_by_bc.items() if q > 0}
+    if not qty_by_bc:
+        return [], []
+    box_for_piece, name_for_barcode = await load_opis_context(db, project_id, warehouse_id, nom_by_bc)
     return classify_opis_lines(qty_by_bc, box_for_piece=box_for_piece, name_for_barcode=name_for_barcode)
 
 

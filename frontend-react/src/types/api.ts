@@ -2619,13 +2619,34 @@ export interface MigfullInboundPrefill {
   receipt_number: string | null;    // инфо: наша приёмка (IN-…)
 }
 
+/** Источник кратности строки: карта Натали → наша кратность отгрузки → нет. */
+export type MigfullPackSource = 'natali' | 'ours' | 'none';
+
+/** Строка состава приёмки для редактируемой модалки (по-SKU, до нарезки на короба). */
+export interface MigfullInboundItem {
+  barcode: string;                  // ШК товара (EAN13)
+  name: string | null;
+  qty: number;                      // всего штук в приёмке
+  units_per_box: number | null;     // prefill: шт в коробе (null — кратность неизвестна)
+  pack_source: MigfullPackSource;
+  box_barcode: string | null;       // ШК короба ITF14 (карта Натали / выведенный GTIN-14)
+}
+
+/** Per-line packing из модалки: units_per_box null/1 — россыпь; >=2 — короба + остаток россыпью. */
+export interface MigfullPackingLine {
+  barcode: string;
+  qty: number;                      // > 0
+  units_per_box: number | null;     // >= 1
+}
+
 export interface MigfullInboundDraft {
   eligible: boolean;                // склад приёмки == склад интеграции
   already_sent: boolean;            // поставка для этой приёмки уже есть/создавалась
   sent_guid: string | null;
   sent_number: string | null;
   prefill: MigfullInboundPrefill;
-  opis_lines: MigfullOpisLine[];
+  items: MigfullInboundItem[];      // редактируемый состав (prefill кратности + источник)
+  opis_lines: MigfullOpisLine[];    // превью описи по дефолтному packing
   total_boxes: number;
   total_pieces: number;
   warnings: string[];
@@ -2636,6 +2657,8 @@ export interface MigfullInboundSendRequest {
   submission_date: string | null;
   notes: string | null;
   force_resend: boolean;
+  /** Per-line packing (коробом/россыпью). null — сервис строит опись по дефолтной цепочке. */
+  packing?: MigfullPackingLine[] | null;
 }
 
 export interface CreatedRequestBrief {

@@ -47,9 +47,17 @@ from backend.models.fulfillment import FfRequestKind
 from backend.models.warehouse import InboundStatus
 from backend.schemas.migfull_portal import (
     MigfullInboundDraftResponse,
+    MigfullInboundItem,
     MigfullInboundPrefill,
     MigfullInboundSendRequest,
+    MigfullOpisLine,
+    MigfullPackingLine,
     MigfullSendResult,
+    PackSource,
+)
+from backend.services.box_multiplicity_service import (
+    resolve_box_qty_map,
+    resolve_source_machine_box_qty,
 )
 from backend.services.migfull_opis import OPIS_CONTENT_TYPE, build_opis_xlsx
 from backend.services.migfull_portal_service import (
@@ -58,7 +66,7 @@ from backend.services.migfull_portal_service import (
     _client_from_key,
     _get_key,
     _with_portal_session,
-    compute_opis_lines_from_qty,
+    load_opis_context,
 )
 from backend.utils.time import utcnow
 
@@ -107,6 +115,170 @@ def _qty_maps(receipt: InboundReceipt) -> tuple[dict[str, int], dict[str, int]]:
         if it.nomenclature_id:
             nom_by_bc.setdefault(bc, it.nomenclature_id)
     return qty_by_bc, nom_by_bc
+
+
+# ─── Кратность (короб/россыпь) ───────────────────────────────────────────────
+
+
+def _gtin14_check_digit(body13: str) -> str:
+    """Контрольная цифра GTIN-14 по первым 13 цифрам (веса 3/1 слева направо)."""
+    total = sum((3 if i % 2 == 0 else 1) * int(c) for i, c in enumerate(body13))
+    return str((10 - total % 10) % 10)
+
+
+def ean13_to_itf14(barcode: str, indicator: str = "1") -> str | None:
+    """ШК россыпи (EAN13) → ШК короба (ITF14 / GTIN-14, индикатор упаковки «1»).
+
+    Обратная операция к ``_itf14_to_ean13`` (fulfillment_service): тело EAN13 без
+    контрольной цифры + индикатор + контрольная GTIN-14. Проверено на живых коробах
+    Натали — их ITF14 выводится из EAN13 товара именно так. Не EAN13 → None.
+    """
+    b = (barcode or "").strip()
+    if len(b) != 13 or not b.isdigit():
+        return None
+    body = indicator + b[:12]
+    return body + _gtin14_check_digit(body)
+
+
+async def _resolve_pack_prefill(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    vehicle: CostOrder | None,
+    barcodes: list[str],
+    box_for_piece: dict[str, tuple[str, int, str | None]],
+) -> dict[str, tuple[int | None, PackSource]]:
+    """Prefill кратности per ШК: карта Натали → НАША кратность → россыпь.
+
+    Цепочка «ours»: кратность со строк самой машины-источника (работает и для
+    едущей, ещё не принятой машины — кейс новинок V-…) → box-multiplicity
+    (machine по ACCEPTED-приёмкам → ручная per-ФФ → SKU-дефолт). Кратность 1
+    трактуем как «нет» (короб из 1 шт = россыпь).
+    """
+    out: dict[str, tuple[int | None, PackSource]] = {}
+    remaining: list[str] = []
+    for bc in barcodes:
+        natali = box_for_piece.get(bc)
+        if natali is not None:
+            out[bc] = (natali[1], "natali")
+        else:
+            remaining.append(bc)
+    if not remaining:
+        return out
+
+    vehicle_ppb: dict[str, int] = {}
+    if vehicle is not None and vehicle.order_no:
+        vm = await resolve_source_machine_box_qty(db, project_id, {vehicle.id: vehicle.order_no})
+        vehicle_ppb = {bc: ppb for (_vid, bc), ppb in vm.items()}
+    ours_map = await resolve_box_qty_map(db, project_id, warehouse_id, remaining)
+    for bc in remaining:
+        upb = vehicle_ppb.get(bc) or ours_map.get(bc)
+        if upb is not None and upb >= 2:
+            out[bc] = (int(upb), "ours")
+        else:
+            out[bc] = (None, "none")
+    return out
+
+
+def build_opis_lines_from_packing(
+    packing: list[MigfullPackingLine],
+    *,
+    box_for_piece: dict[str, tuple[str, int, str | None]],
+    name_for_barcode: dict[str, str | None],
+) -> tuple[list[MigfullOpisLine], list[str]]:
+    """Per-line packing → строки описи (чистая функция, без БД).
+
+    ``units_per_box`` >= 2 → целые короба (ШК короба: карта Натали, иначе
+    выведенный GTIN-14) + некратный остаток россыпью (с warning). None/1 —
+    вся строка россыпью. Опись строится ПО packing — сервис не пересчитывает.
+    """
+    lines: list[MigfullOpisLine] = []
+    warnings: list[str] = []
+    for p in sorted(packing, key=lambda x: (name_for_barcode.get(x.barcode) or "", x.barcode)):
+        pieces = int(p.qty)
+        if pieces <= 0:
+            continue
+        name = name_for_barcode.get(p.barcode)
+        upb = int(p.units_per_box or 1)
+        if upb > 1:
+            natali = box_for_piece.get(p.barcode)
+            box_barcode = natali[0] if natali is not None else ean13_to_itf14(p.barcode)
+            if box_barcode is None:
+                warnings.append(f"{name or p.barcode}: не удалось вывести ШК короба — вся строка россыпью")
+            else:
+                if natali is not None and natali[1] != upb:
+                    warnings.append(
+                        f"{name or p.barcode}: в карточке Натали короб {natali[1]} шт, отправляем по {upb} шт"
+                    )
+                box_name = (
+                    natali[2]
+                    if natali is not None and natali[1] == upb
+                    else (f"{name} — короб {upb} шт." if name else None)
+                )
+                boxes, rest = divmod(pieces, upb)
+                if boxes > 0:
+                    lines.append(
+                        MigfullOpisLine(
+                            barcode=box_barcode, name=box_name, quantity=boxes,
+                            is_box=True, units_per_box=upb, pieces=boxes * upb,
+                        )
+                    )
+                if rest > 0:
+                    warnings.append(f"{name or p.barcode}: {pieces} шт не кратно коробу ({upb}) — {rest} шт россыпью")
+                    lines.append(
+                        MigfullOpisLine(
+                            barcode=p.barcode, name=name, quantity=rest,
+                            is_box=False, units_per_box=1, pieces=rest,
+                        )
+                    )
+                continue
+        lines.append(
+            MigfullOpisLine(
+                barcode=p.barcode, name=name, quantity=pieces,
+                is_box=False, units_per_box=1, pieces=pieces,
+            )
+        )
+    return lines, warnings
+
+
+def _validated_packing(
+    packing: list[MigfullPackingLine], qty_by_bc: dict[str, int]
+) -> list[MigfullPackingLine]:
+    """Валидация packing из модалки (нарушение → 400, не 422).
+
+    qty > 0, units_per_box >= 1, ШК без дублей и строго совпадают с составом
+    приёмки (ни лишних, ни пропущенных — опись обязана покрыть весь состав).
+    """
+    seen: set[str] = set()
+    for p in packing:
+        bc = (p.barcode or "").strip()
+        if bc not in qty_by_bc:
+            raise MigfullPortalServiceError(f"Packing: ШК {bc or '—'} нет в составе приёмки", status_code=400)
+        if bc in seen:
+            raise MigfullPortalServiceError(f"Packing: ШК {bc} передан дважды", status_code=400)
+        seen.add(bc)
+        if p.qty <= 0:
+            raise MigfullPortalServiceError(f"Packing: количество по ШК {bc} должно быть > 0", status_code=400)
+        if p.units_per_box is not None and p.units_per_box < 1:
+            raise MigfullPortalServiceError(f"Packing: шт в коробе по ШК {bc} должно быть >= 1", status_code=400)
+    missing = sorted(set(qty_by_bc) - seen)
+    if missing:
+        raise MigfullPortalServiceError(
+            f"Packing не покрывает весь состав приёмки (нет ШК: {', '.join(missing[:5])}"
+            f"{'…' if len(missing) > 5 else ''})",
+            status_code=400,
+        )
+    return list(packing)
+
+
+def _default_packing(
+    qty_by_bc: dict[str, int], prefill: dict[str, tuple[int | None, PackSource]]
+) -> list[MigfullPackingLine]:
+    """Packing по умолчанию (без ручных правок): prefill-кратность, иначе россыпь."""
+    return [
+        MigfullPackingLine(barcode=bc, qty=q, units_per_box=(prefill.get(bc) or (None, "none"))[0])
+        for bc, q in qty_by_bc.items()
+    ]
 
 
 def _default_notes(receipt: InboundReceipt, vehicle: CostOrder | None) -> str:
@@ -177,7 +349,25 @@ async def build_inbound_draft(db: AsyncSession, project_id: int, receipt_id: int
 
     eligible = key.warehouse_id is not None and receipt.warehouse_id == key.warehouse_id
     qty_by_bc, nom_by_bc = _qty_maps(receipt)
-    lines, warnings = await compute_opis_lines_from_qty(db, project_id, receipt.warehouse_id, qty_by_bc, nom_by_bc)
+    box_for_piece, name_for_barcode = await load_opis_context(db, project_id, receipt.warehouse_id, nom_by_bc)
+    pack_prefill = await _resolve_pack_prefill(
+        db, project_id, receipt.warehouse_id, vehicle, list(qty_by_bc), box_for_piece
+    )
+    items = [
+        MigfullInboundItem(
+            barcode=bc,
+            name=name_for_barcode.get(bc),
+            qty=qty,
+            units_per_box=pack_prefill[bc][0],
+            pack_source=pack_prefill[bc][1],
+            box_barcode=(box_for_piece[bc][0] if bc in box_for_piece else ean13_to_itf14(bc)),
+        )
+        for bc, qty in sorted(qty_by_bc.items(), key=lambda kv: (name_for_barcode.get(kv[0]) or "", kv[0]))
+        if qty > 0
+    ]
+    lines, warnings = build_opis_lines_from_packing(
+        _default_packing(qty_by_bc, pack_prefill), box_for_piece=box_for_piece, name_for_barcode=name_for_barcode
+    )
     already, guid, number = await _already_pushed(db, project_id, receipt_id)
 
     prefill = MigfullInboundPrefill(
@@ -193,6 +383,7 @@ async def build_inbound_draft(db: AsyncSession, project_id: int, receipt_id: int
         sent_guid=guid,
         sent_number=number,
         prefill=prefill,
+        items=items,
         opis_lines=lines,
         total_boxes=sum(line.quantity for line in lines if line.is_box),
         total_pieces=sum(line.pieces for line in lines),
@@ -316,11 +507,23 @@ async def send_submission(
             )
 
     qty_by_bc, nom_by_bc = _qty_maps(receipt)
-    lines, warnings = await compute_opis_lines_from_qty(db, project_id, receipt.warehouse_id, qty_by_bc, nom_by_bc)
+    vehicle = await _load_vehicle(db, project_id, receipt)
+    box_for_piece, name_for_barcode = await load_opis_context(db, project_id, receipt.warehouse_id, nom_by_bc)
+    if req.packing is not None:
+        # Опись строится ПО ручному packing из модалки — не пересчитываем сами.
+        packing = _validated_packing(req.packing, {bc: q for bc, q in qty_by_bc.items() if q > 0})
+    else:
+        # Legacy/дефолт: цепочка кратности natali → ours → россыпь.
+        pack_prefill = await _resolve_pack_prefill(
+            db, project_id, receipt.warehouse_id, vehicle, list(qty_by_bc), box_for_piece
+        )
+        packing = _default_packing(qty_by_bc, pack_prefill)
+    lines, warnings = build_opis_lines_from_packing(
+        packing, box_for_piece=box_for_piece, name_for_barcode=name_for_barcode
+    )
     if not lines:
         raise MigfullPortalServiceError("В приёмке нет позиций для описи", status_code=400)
 
-    vehicle = await _load_vehicle(db, project_id, receipt)
     submission_date = (
         req.submission_date or receipt.planned_date or (vehicle.estimated_arrival_date if vehicle else None)
     )
@@ -337,7 +540,8 @@ async def send_submission(
     )
     filename = _opis_filename(receipt, vehicle)
     payload = {"header": {k: v for k, v in header.items() if v is not None},
-               "opis_lines": [line.model_dump() for line in lines], "warnings": warnings}
+               "opis_lines": [line.model_dump() for line in lines], "warnings": warnings,
+               "packing": [p.model_dump() for p in packing] if req.packing is not None else None}
 
     total_pieces = sum(line.pieces for line in lines)
     status = MigfullShipmentStatus.FAILED

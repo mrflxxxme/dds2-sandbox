@@ -116,6 +116,39 @@ class MigfullSendResult(BaseModel):
 # kind=inbound в зеркале FulfillmentRequest).
 
 
+# Источник кратности строки состава: карта Натали (короб в зеркале ФФ) →
+# наша кратность отгрузки (box multiplicity: строки машины / per-ФФ / SKU-дефолт) → нет.
+PackSource = Literal["natali", "ours", "none"]
+
+
+class MigfullInboundItem(BaseModel):
+    """Строка СОСТАВА приёмки для редактируемой модалки (по-SKU, до нарезки на короба).
+
+    ``units_per_box`` — prefill кратности по цепочке natali → ours → none
+    (``pack_source``); пользователь правит в модалке и шлёт per-line packing.
+    ``box_barcode`` — ШК короба (ITF14): из карты Натали либо выведенный GTIN-14.
+    """
+
+    barcode: str  # ШК товара (EAN13)
+    name: str | None = None
+    qty: int  # всего штук в приёмке
+    units_per_box: int | None = None  # prefill: шт в коробе (None — кратность неизвестна)
+    pack_source: PackSource = "none"
+    box_barcode: str | None = None
+
+
+class MigfullPackingLine(BaseModel):
+    """Per-line packing из модалки: как везём строку — коробом или россыпью.
+
+    ``units_per_box``: None/1 — россыпь; >=2 — короба по N шт, некратный
+    остаток уходит россыпью. Сервис строит опись ПО ЭТИМ строкам, не пересчитывая.
+    """
+
+    barcode: str = Field(min_length=1, max_length=100)
+    qty: int  # >0 (валидация в сервисе → 400, не 422)
+    units_per_box: int | None = None  # >=1 (валидация в сервисе)
+
+
 class MigfullInboundPrefill(BaseModel):
     """Предзаполнение шапки поставки из приёмки/машины — пользователь правит в модалке."""
 
@@ -134,6 +167,9 @@ class MigfullInboundDraftResponse(BaseModel):
     sent_guid: str | None = None
     sent_number: str | None = None
     prefill: MigfullInboundPrefill
+    # Редактируемый состав по-SKU (prefill кратности + источник) — модалка строит
+    # из него per-line packing; opis_lines — превью описи по дефолтному packing.
+    items: list[MigfullInboundItem] = Field(default_factory=list)
     opis_lines: list[MigfullOpisLine] = Field(default_factory=list)
     total_boxes: int = 0
     total_pieces: int = 0
@@ -146,6 +182,9 @@ class MigfullInboundSendRequest(BaseModel):
     number: str | None = Field(default=None, max_length=100)
     submission_date: date | None = None
     notes: str | None = Field(default=None, max_length=1000)
+    # Per-line packing из модалки (коробом/россыпью + шт в коробе). None —
+    # legacy/дефолт: сервис строит опись по цепочке natali → ours → россыпь.
+    packing: list[MigfullPackingLine] | None = None
     # Подтверждение повторной отправки: если у приёмки уже есть SENT-поставка или
     # связанная FulfillmentRequest(migfull, kind=inbound), без флага send вернёт 409 —
     # создание на портале НЕОБРАТИМО (нет delete/cancel).

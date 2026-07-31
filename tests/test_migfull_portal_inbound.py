@@ -17,6 +17,7 @@ from sqlalchemy import select
 from backend.integrations.migfull_portal_client import MigfullCreateResult, MigfullPortalError, MigfullUploadResult
 from backend.models import (
     CostOrder,
+    CostOrderItem,
     FulfillmentRequest,
     FulfillmentStock,
     InboundReceipt,
@@ -27,7 +28,7 @@ from backend.models import (
     Warehouse,
 )
 from backend.models.warehouse import InboundReceiptItem, InboundStatus
-from backend.schemas.migfull_portal import MigfullInboundSendRequest
+from backend.schemas.migfull_portal import MigfullInboundSendRequest, MigfullPackingLine
 from backend.services import migfull_portal_inbound as svc
 from backend.services.migfull_portal_service import MigfullPortalServiceError
 from backend.utils.crypto import encrypt
@@ -168,6 +169,77 @@ async def test_draft_preview_boxes_and_prefill(db_session, env):
     assert "IN-777" in (draft.prefill.notes or "")
 
 
+async def test_draft_items_and_pack_sources(db_session, env):
+    """Фолбэк кратности: карта Натали → НАША кратность (строки машины / SKU-дефолт) → россыпь."""
+    # EAN2 — новинка без карты Натали, кратность 6 со строк самой машины V-…
+    ean2 = "2052922000011"
+    # EAN3 — ни карты Натали, ни нашей кратности → россыпь
+    ean3 = "2052922000028"
+    # EAN4 — SKU-дефолт кратности (Nomenclature.box_qty_override=4)
+    ean4 = "2052922000035"
+    nom2 = Nomenclature(project_id=env.project_id, barcode=ean2, article_seller="KOVER-NEW")
+    nom3 = Nomenclature(project_id=env.project_id, barcode=ean3, article_seller="KOVER-LOOSE")
+    nom4 = Nomenclature(project_id=env.project_id, barcode=ean4, article_seller="KOVER-DEF", box_qty_override=4)
+    db_session.add_all([nom2, nom3, nom4])
+    db_session.add(
+        CostOrderItem(
+            project_id=env.project_id, order_no=env.vehicle.order_no,
+            barcode=ean2, qty=25, pcs_per_box_override=6,
+        )
+    )
+    await db_session.flush()
+    for bc, q, nid in ((ean2, 25, nom2.id), (ean3, 7, nom3.id), (ean4, 8, nom4.id)):
+        db_session.add(
+            InboundReceiptItem(
+                project_id=env.project_id, receipt_id=env.receipt.id,
+                nomenclature_id=nid, barcode=bc, expected_qty=q,
+            )
+        )
+    await db_session.commit()
+
+    draft = await svc.build_inbound_draft(db_session, env.project_id, env.receipt.id)
+    by_bc = {it.barcode: it for it in draft.items}
+    assert len(draft.items) == 4
+
+    # Карта Натали побеждает
+    assert by_bc[EAN].pack_source == "natali"
+    assert by_bc[EAN].units_per_box == 5
+    assert by_bc[EAN].box_barcode == ITF
+    # Наша кратность: строки машины-источника (едущей, не принятой)
+    assert by_bc[ean2].pack_source == "ours"
+    assert by_bc[ean2].units_per_box == 6
+    assert by_bc[ean2].box_barcode == svc.ean13_to_itf14(ean2)
+    # Наша кратность: SKU-дефолт box_qty_override
+    assert by_bc[ean4].pack_source == "ours"
+    assert by_bc[ean4].units_per_box == 4
+    # Ничего не известно → россыпь
+    assert by_bc[ean3].pack_source == "none"
+    assert by_bc[ean3].units_per_box is None
+
+    # Превью описи по дефолтному packing: короба нашей кратности + некратный остаток россыпью
+    itf2 = svc.ean13_to_itf14(ean2)
+    box2 = next(line for line in draft.opis_lines if line.is_box and line.barcode == itf2)
+    assert box2.quantity == 4  # 25 // 6
+    assert box2.units_per_box == 6
+    assert box2.pieces == 24
+    loose2 = next(line for line in draft.opis_lines if not line.is_box and line.barcode == ean2)
+    assert loose2.quantity == 1  # 25 % 6
+    assert any("не кратно коробу (6)" in w for w in draft.warnings)
+    loose3 = next(line for line in draft.opis_lines if line.barcode == ean3)
+    assert loose3.is_box is False and loose3.quantity == 7
+    box4 = next(line for line in draft.opis_lines if line.is_box and line.barcode == svc.ean13_to_itf14(ean4))
+    assert box4.quantity == 2 and box4.units_per_box == 4
+    assert draft.total_boxes == 8 + 4 + 2
+    assert draft.total_pieces == 40 + 25 + 7 + 8
+
+
+def test_ean13_to_itf14_matches_natali_box_barcode():
+    """Выведенный GTIN-14 совпадает с реальным ШК короба Натали для того же EAN13."""
+    assert svc.ean13_to_itf14(EAN) == ITF
+    assert svc.ean13_to_itf14("не-шк") is None
+    assert svc.ean13_to_itf14("123") is None
+
+
 async def test_draft_receipt_not_found(db_session, env):
     with pytest.raises(MigfullPortalServiceError) as exc:
         await svc.build_inbound_draft(db_session, env.project_id, 99_999_999)
@@ -218,6 +290,96 @@ async def test_send_creates_submission_and_autolinks(db_session, env, monkeypatc
     assert req.inbound_receipt_id == env.receipt.id
     assert req.number == "PVB-0000401"
     assert req.total_qty == 40
+
+
+# ─── Send: per-line packing из модалки ───────────────────────────────────────
+
+
+async def test_send_with_packing_builds_opis(db_session, env, monkeypatch):
+    """Опись строится ПО ручному packing: N кор. × M шт + некратный остаток россыпью."""
+    fake = FakePortalClient()
+    _use_fake_client(monkeypatch, fake)
+
+    req = MigfullInboundSendRequest(packing=[MigfullPackingLine(barcode=EAN, qty=40, units_per_box=12)])
+    res = await svc.send_submission(db_session, env.project_id, env.receipt.id, req)
+    assert res.ok is True
+    assert fake.uploads and fake.uploads[0][0] == GUID
+
+    order = (
+        await db_session.execute(
+            select(MigfullShipmentOrder).where(MigfullShipmentOrder.inbound_receipt_id == env.receipt.id)
+        )
+    ).scalar_one()
+    ols = order.payload["opis_lines"]
+    box = next(line for line in ols if line["is_box"])
+    loose = next(line for line in ols if not line["is_box"])
+    # Короб — ШК короба Натали (ITF14), кол-во = 40 // 12
+    assert box["barcode"] == ITF
+    assert box["quantity"] == 3
+    assert box["units_per_box"] == 12
+    assert box["pieces"] == 36
+    # Остаток россыпью — ШК товара (EAN13)
+    assert loose["barcode"] == EAN
+    assert loose["quantity"] == 4
+    assert any("не кратно коробу (12)" in w for w in order.payload["warnings"])
+    # Ручная кратность != карточки Натали (5) → предупреждение
+    assert any("в карточке Натали короб 5" in w for w in order.payload["warnings"])
+    # Packing зафиксирован в audit-payload
+    assert order.payload["packing"] == [{"barcode": EAN, "qty": 40, "units_per_box": 12}]
+    # Автосвязь несёт суммарные штуки
+    req_row = (
+        await db_session.execute(
+            select(FulfillmentRequest).where(
+                FulfillmentRequest.project_id == env.project_id,
+                FulfillmentRequest.external_id == GUID,
+            )
+        )
+    ).scalar_one()
+    assert req_row.total_qty == 40
+
+
+async def test_send_with_packing_loose_overrides_natali(db_session, env, monkeypatch):
+    """Ручной выбор «россыпью» побеждает карту Натали — коробов в описи нет."""
+    fake = FakePortalClient()
+    _use_fake_client(monkeypatch, fake)
+
+    req = MigfullInboundSendRequest(packing=[MigfullPackingLine(barcode=EAN, qty=40, units_per_box=None)])
+    res = await svc.send_submission(db_session, env.project_id, env.receipt.id, req)
+    assert res.ok is True
+    order = (
+        await db_session.execute(
+            select(MigfullShipmentOrder).where(MigfullShipmentOrder.inbound_receipt_id == env.receipt.id)
+        )
+    ).scalar_one()
+    ols = order.payload["opis_lines"]
+    assert len(ols) == 1
+    assert ols[0]["is_box"] is False
+    assert ols[0]["barcode"] == EAN
+    assert ols[0]["quantity"] == 40
+
+
+@pytest.mark.parametrize(
+    "packing",
+    [
+        [{"barcode": EAN, "qty": 0, "units_per_box": 5}],  # qty <= 0
+        [{"barcode": EAN, "qty": 40, "units_per_box": 0}],  # units < 1
+        # лишний ШК, которого нет в приёмке
+        [{"barcode": "9999999999999", "qty": 1, "units_per_box": None},
+         {"barcode": EAN, "qty": 40, "units_per_box": None}],
+        [],  # не покрывает состав приёмки
+        # дубль ШК
+        [{"barcode": EAN, "qty": 20, "units_per_box": None},
+         {"barcode": EAN, "qty": 20, "units_per_box": None}],
+    ],
+)
+async def test_send_invalid_packing_is_400(db_session, env, monkeypatch, packing):
+    fake = FakePortalClient()
+    _use_fake_client(monkeypatch, fake)
+    req = MigfullInboundSendRequest(packing=[MigfullPackingLine(**p) for p in packing])
+    with pytest.raises(MigfullPortalServiceError) as exc:
+        await svc.send_submission(db_session, env.project_id, env.receipt.id, req)
+    assert exc.value.status_code == 400
+    assert fake.created_headers == []  # на портал ничего не ушло
 
 
 # ─── Идемпотентность ─────────────────────────────────────────────────────────

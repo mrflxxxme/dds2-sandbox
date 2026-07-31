@@ -5,15 +5,24 @@ import { formatNumber } from '@/lib/utils';
 import type {
     MigfullInboundDraft,
     MigfullInboundSendRequest,
+    MigfullPackingLine,
     MigfullSendResult,
 } from '@/types/api';
 
 /**
- * Confirm-модалка «Создать поставку у Натали»: превью состава нашей приёмки
- * машины (позиции / штуки / короба) → РЕАЛЬНОЕ создание поставки (приёмки)
- * в портале ФФ «Натали» (migfull). Создание НЕОБРАТИМО — портал не даёт
- * удалить/отменить документ, поэтому повтор требует явного подтверждения.
+ * Confirm-модалка «Создать поставку у Натали»: РЕДАКТИРУЕМЫЙ состав нашей
+ * приёмки машины (per-строка: коробом/россыпью + шт в коробе, prefill по
+ * цепочке кратность Натали → наша кратность → россыпь) → РЕАЛЬНОЕ создание
+ * поставки (приёмки) в портале ФФ «Натали» (migfull). Создание НЕОБРАТИМО —
+ * портал не даёт удалить/отменить документ, повтор требует подтверждения.
  */
+
+/** Состояние упаковки одной строки состава (ключ — ШК товара). */
+interface PackRowState {
+    boxMode: boolean;   // true — коробом, false — россыпью
+    units: string;      // «шт в коробе» (input; валидно при boxMode: целое >= 2)
+}
+
 interface Props {
     /** id нашей приёмки машины (InboundReceipt) — источник поставки */
     receiptId: number;
@@ -34,6 +43,9 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
     const [submissionDate, setSubmissionDate] = useState('');
     const [notes, setNotes] = useState('');
 
+    // Упаковка строк состава: ШК → {boxMode, units}. Prefill из draft.items.
+    const [packRows, setPackRows] = useState<Record<string, PackRowState>>({});
+
     // Подтверждение повторной отправки (already_sent или ответ 409).
     const [confirmResend, setConfirmResend] = useState(false);
 
@@ -52,6 +64,15 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
             setNumber(d.prefill.number ?? '');
             setSubmissionDate(d.prefill.submission_date ?? '');
             setNotes(d.prefill.notes ?? '');
+            // Prefill упаковки: строки с известной кратностью — коробом, прочие — россыпью.
+            const rows: Record<string, PackRowState> = {};
+            for (const it of d.items) {
+                rows[it.barcode] = {
+                    boxMode: it.units_per_box != null && it.units_per_box >= 2,
+                    units: it.units_per_box != null ? String(it.units_per_box) : '',
+                };
+            }
+            setPackRows(rows);
             setConfirmResend(false);
         }).catch((e: unknown) => {
             if (controller.signal.aborted) return;
@@ -64,18 +85,73 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
 
     useEffect(() => loadDraft(), [loadDraft]);
 
-    const hasOpis = !!draft && draft.opis_lines.length > 0;
+    // ─── Производные упаковки: per-строка (короба/остаток) + итоги ──────────────
+    const packOf = (barcode: string): PackRowState => packRows[barcode] ?? { boxMode: false, units: '' };
+    /** Разбор строки: unitsNum (NaN — пусто/мусор), короба/остаток при валидном коробе. */
+    const rowCalc = (barcode: string, qty: number) => {
+        const r = packOf(barcode);
+        const unitsNum = parseInt(r.units, 10);
+        const unitsOk = Number.isFinite(unitsNum) && unitsNum >= 2;
+        const asBox = r.boxMode && unitsOk;
+        return {
+            boxMode: r.boxMode,
+            unitsNum,
+            invalid: r.boxMode && !unitsOk,           // коробом, но «шт в коробе» не задано/некорректно
+            boxes: asBox ? Math.floor(qty / unitsNum) : 0,
+            rest: asBox ? qty % unitsNum : qty,       // при россыпи — вся строка
+        };
+    };
+    const items = draft?.items ?? [];
+    const totalBoxes = items.reduce((s, it) => s + rowCalc(it.barcode, it.qty).boxes, 0);
+    const totalLoose = items.reduce((s, it) => s + rowCalc(it.barcode, it.qty).rest, 0);
+    const invalidCount = items.reduce((s, it) => s + (rowCalc(it.barcode, it.qty).invalid ? 1 : 0), 0);
+    const knownCount = items.filter(it => it.units_per_box != null).length;
+
+    const setRow = (barcode: string, patch: Partial<PackRowState>) =>
+        setPackRows(prev => ({ ...prev, [barcode]: { ...(prev[barcode] ?? { boxMode: false, units: '' }), ...patch } }));
+
+    /** Массово: коробом по prefill-кратности все строки, где она известна. */
+    const applyKnownMultiplicity = () => {
+        setPackRows(prev => {
+            const next = { ...prev };
+            for (const it of items) {
+                if (it.units_per_box != null && it.units_per_box >= 2) {
+                    next[it.barcode] = { boxMode: true, units: String(it.units_per_box) };
+                }
+            }
+            return next;
+        });
+    };
+    const applyAllLoose = () => {
+        setPackRows(prev => {
+            const next = { ...prev };
+            for (const it of items) next[it.barcode] = { ...(next[it.barcode] ?? { units: '' }), boxMode: false };
+            return next;
+        });
+    };
+
+    const hasItems = items.length > 0;
     // Кнопка требует подтверждения, если поставка уже создавалась/связана.
     const needsConfirm = !!draft?.already_sent;
-    const canSubmit = !!draft && draft.eligible && hasOpis && (!needsConfirm || confirmResend);
+    const canSubmit = !!draft && draft.eligible && hasItems && invalidCount === 0 && (!needsConfirm || confirmResend);
 
     const doSend = async (forceResend: boolean) => {
         if (!draft) return;
+        // Per-line packing по текущему состоянию модалки — опись строится ПО НЕМУ.
+        const packing: MigfullPackingLine[] = items.map(it => {
+            const c = rowCalc(it.barcode, it.qty);
+            return {
+                barcode: it.barcode,
+                qty: it.qty,
+                units_per_box: c.boxMode && !c.invalid ? c.unitsNum : null,
+            };
+        });
         const body: MigfullInboundSendRequest = {
             number: number.trim() || null,
             submission_date: submissionDate || null,
             notes: notes.trim() || null,
             force_resend: forceResend,
+            packing,
         };
         setSubmitting(true);
         setSubmitError('');
@@ -250,11 +326,43 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                 </div>
                             </div>
 
-                            {/* Состав (превью описи) */}
-                            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-muted)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                                Состав поставки
+                            {/* Состав (редактируемая упаковка: коробом / россыпью) */}
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
+                                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                                    Состав поставки
+                                </div>
+                                {hasItems && (
+                                    <div style={{ display: 'flex', gap: 8 }}>
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            onClick={applyKnownMultiplicity}
+                                            disabled={knownCount === 0}
+                                            title="Коробом по известной кратности (Натали / наша) для всех строк, где она есть"
+                                        >
+                                            Коробом, где известна кратность{knownCount > 0 ? ` (${formatNumber(knownCount, 0)})` : ''}
+                                        </button>
+                                        <button className="btn btn-secondary btn-sm" onClick={applyAllLoose}>
+                                            Всё россыпью
+                                        </button>
+                                    </div>
+                                )}
                             </div>
-                            {!hasOpis ? (
+
+                            {/* Итоги сверху: Σ коробов / Σ штук россыпью */}
+                            {hasItems && (
+                                <div style={{ display: 'flex', gap: 24, marginBottom: 10, fontSize: 14, flexWrap: 'wrap' }}>
+                                    <span>Позиций: <strong>{formatNumber(items.length, 0)}</strong></span>
+                                    <span>Коробов: <strong>{formatNumber(totalBoxes, 0)}</strong></span>
+                                    <span>Россыпью: <strong>{formatNumber(totalLoose, 0)}</strong> шт</span>
+                                    {invalidCount > 0 && (
+                                        <span style={{ color: 'var(--color-danger)' }}>
+                                            ⚠ Заполните «шт в коробе» (мин. 2) в {formatNumber(invalidCount, 0)} стр.
+                                        </span>
+                                    )}
+                                </div>
+                            )}
+
+                            {!hasItems ? (
                                 <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 14 }}>
                                     В приёмке нет позиций — поставку создать нельзя
                                 </div>
@@ -266,42 +374,91 @@ export default function MigfullInboundModal({ receiptId, vehicleOrderNo, onClose
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }}>ШК</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600 }}>Наименование</th>
                                                 <th style={{ padding: '8px 10px', fontWeight: 600, textAlign: 'right' }}>Кол-во</th>
-                                                <th style={{ padding: '8px 10px', fontWeight: 600 }}>Тип</th>
+                                                <th style={{ padding: '8px 10px', fontWeight: 600 }}>Упаковка</th>
+                                                <th style={{ padding: '8px 10px', fontWeight: 600 }}>Разбивка</th>
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {draft.opis_lines.map((l, i) => (
-                                                <tr key={`${l.barcode}-${i}`} style={{ borderTop: '1px solid var(--color-border)' }}>
-                                                    <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: 12 }}>{l.barcode}</td>
-                                                    <td style={{ padding: '8px 10px' }}>{l.name || '—'}</td>
-                                                    <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 500 }}>
-                                                        {formatNumber(l.quantity, 0)}
-                                                        <span style={{ color: 'var(--color-text-muted)', fontWeight: 400 }}>
-                                                            {l.is_box ? ' кор' : ' шт'}
-                                                        </span>
-                                                    </td>
-                                                    <td style={{ padding: '8px 10px' }}>
-                                                        {l.is_box ? (
-                                                            <span className="badge badge-info" style={{ fontSize: 11 }} title={`${formatNumber(l.units_per_box, 0)} шт/короб · всего ${formatNumber(l.pieces, 0)} шт`}>
-                                                                короб
-                                                            </span>
-                                                        ) : (
-                                                            <span className="badge badge-secondary" style={{ fontSize: 11 }}>россыпь</span>
-                                                        )}
-                                                    </td>
-                                                </tr>
-                                            ))}
+                                            {items.map(it => {
+                                                const c = rowCalc(it.barcode, it.qty);
+                                                const r = packOf(it.barcode);
+                                                return (
+                                                    <tr key={it.barcode} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                                        <td style={{ padding: '8px 10px', fontFamily: 'monospace', fontSize: 12 }}>{it.barcode}</td>
+                                                        <td style={{ padding: '8px 10px' }}>
+                                                            {it.name || '—'}
+                                                            {it.pack_source !== 'none' && (
+                                                                <span
+                                                                    className={`badge ${it.pack_source === 'natali' ? 'badge-info' : 'badge-success'}`}
+                                                                    style={{ fontSize: 10, marginLeft: 6 }}
+                                                                    title={it.pack_source === 'natali'
+                                                                        ? `Кратность из карты Натали: короб ${formatNumber(it.units_per_box ?? 0, 0)} шт`
+                                                                        : `Наша кратность отгрузки: короб ${formatNumber(it.units_per_box ?? 0, 0)} шт`}
+                                                                >
+                                                                    {it.pack_source === 'natali' ? 'Натали' : 'наша'}
+                                                                </span>
+                                                            )}
+                                                        </td>
+                                                        <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 500, whiteSpace: 'nowrap' }}>
+                                                            {formatNumber(it.qty, 0)}
+                                                            <span style={{ color: 'var(--color-text-muted)', fontWeight: 400 }}> шт</span>
+                                                        </td>
+                                                        <td style={{ padding: '8px 10px', whiteSpace: 'nowrap' }}>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                                <button
+                                                                    className={`btn btn-sm ${r.boxMode ? 'btn-primary' : 'btn-secondary'}`}
+                                                                    style={{ padding: '2px 8px', fontSize: 12 }}
+                                                                    onClick={() => setRow(it.barcode, {
+                                                                        boxMode: true,
+                                                                        // При включении короба без units — подставить prefill.
+                                                                        units: r.units || (it.units_per_box != null ? String(it.units_per_box) : ''),
+                                                                    })}
+                                                                >
+                                                                    короб
+                                                                </button>
+                                                                <button
+                                                                    className={`btn btn-sm ${!r.boxMode ? 'btn-primary' : 'btn-secondary'}`}
+                                                                    style={{ padding: '2px 8px', fontSize: 12 }}
+                                                                    onClick={() => setRow(it.barcode, { boxMode: false })}
+                                                                >
+                                                                    россыпь
+                                                                </button>
+                                                                {r.boxMode && (
+                                                                    <input
+                                                                        type="number"
+                                                                        min={2}
+                                                                        value={r.units}
+                                                                        onChange={e => setRow(it.barcode, { units: e.target.value })}
+                                                                        placeholder="шт"
+                                                                        title="Штук в коробе"
+                                                                        style={{
+                                                                            width: 58, padding: '3px 6px', borderRadius: 8, fontSize: 13,
+                                                                            border: `1px solid ${c.invalid ? 'var(--color-danger)' : 'var(--color-border)'}`,
+                                                                            background: 'var(--color-bg-card)', color: 'var(--color-text)',
+                                                                        }}
+                                                                    />
+                                                                )}
+                                                            </div>
+                                                        </td>
+                                                        <td style={{ padding: '8px 10px', whiteSpace: 'nowrap', fontSize: 12 }}>
+                                                            {c.invalid ? (
+                                                                <span style={{ color: 'var(--color-danger)' }}>укажите шт в коробе</span>
+                                                            ) : c.boxMode ? (
+                                                                <>
+                                                                    <strong>{formatNumber(c.boxes, 0)}</strong> кор. × {formatNumber(c.unitsNum, 0)} шт
+                                                                    {c.rest > 0 && (
+                                                                        <span style={{ color: 'var(--color-warning)' }}> + {formatNumber(c.rest, 0)} россыпью</span>
+                                                                    )}
+                                                                </>
+                                                            ) : (
+                                                                <span style={{ color: 'var(--color-text-muted)' }}>{formatNumber(it.qty, 0)} шт россыпью</span>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
                                         </tbody>
                                     </table>
-                                </div>
-                            )}
-
-                            {/* Итоги: позиции / короба / штуки */}
-                            {hasOpis && (
-                                <div style={{ display: 'flex', gap: 24, marginTop: 12, fontSize: 14 }}>
-                                    <span>Позиций: <strong>{formatNumber(draft.opis_lines.length, 0)}</strong></span>
-                                    <span>Коробов: <strong>{formatNumber(draft.total_boxes, 0)}</strong></span>
-                                    <span>Штук: <strong>{formatNumber(draft.total_pieces, 0)}</strong></span>
                                 </div>
                             )}
                         </>
