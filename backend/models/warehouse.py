@@ -98,17 +98,14 @@ TRANSFER_TRANSITIONS: dict["TransferStatus", set["TransferStatus"]] = {
         TransferStatus.READY,
         TransferStatus.CANCELLED,
     },
-    TransferStatus.SHIPPED: {
-        TransferStatus.DELIVERED,
-        TransferStatus.RETURNED,
-        TransferStatus.CANCELLED,
-    },
+    # CANCELLED из SHIPPED/RETURNED НЕТ намеренно: сток уже списан, а отмена его
+    # не возвращает — это делает только RETURNED. `cancel_transfer` и так рубит
+    # всё после отгрузки, но таблица подана как единственный источник истины, и
+    # первый же новый вызывающий, доверившийся ей, отменил бы переезд поверх
+    # уехавшего товара.
+    TransferStatus.SHIPPED: {TransferStatus.DELIVERED, TransferStatus.RETURNED},
     TransferStatus.DELIVERED: {TransferStatus.RETURNED, TransferStatus.CLOSED},
-    TransferStatus.RETURNED: {
-        TransferStatus.READY,
-        TransferStatus.CLOSED,
-        TransferStatus.CANCELLED,
-    },
+    TransferStatus.RETURNED: {TransferStatus.READY, TransferStatus.CLOSED},
     TransferStatus.CLOSED: set(),
     TransferStatus.CANCELLED: set(),
 }

@@ -219,7 +219,10 @@ class StockTransferCreate(BaseModel):
 
 
 class StockTransferUpdate(BaseModel):
-    """Правка перемещения (`PUT /warehouse/transfers/{id}`) — ТОЛЬКО в статусе DRAFT.
+    """Правка перемещения (`PUT /warehouse/transfers/{id}`) — только до отгрузки.
+
+    Разрешена в `TRANSFER_EDITABLE_STATUSES` (PENDING / IN_PROGRESS / READY):
+    после `SHIPPED` сток уже списан, и правка состава разъехалась бы с движениями.
 
     Применяются ТОЛЬКО явно переданные поля: роутер отдаёт сервису
     `model_dump(exclude_unset=True)`. Форма карточки шлёт тело целиком, но

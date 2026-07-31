@@ -417,9 +417,8 @@ async def _attach_transfer_labels(
         }
 
     # Принято получателем — по журналу движений, одним GROUP BY на пачку.
-    # `reference_type='TRANSFER'` + приходные типы пишутся ТОЛЬКО на складе-
-    # получателе (`complete_transfer` / `receive_transfer_fact`), поэтому
-    # фильтровать по warehouse_id не нужно — reference_id уже однозначен.
+    # Фильтра по складу нет намеренно: пары (reference_type, movement_type) ниже
+    # однозначно принадлежат складу-получателю, а reference_id адресует переезд.
     received: dict[int, int] = (
         {
             int(ref_id): int(qty or 0)
@@ -433,13 +432,36 @@ async def _attach_transfer_labels(
                     )
                     .where(
                         StockMovement.project_id == project_id,
-                        StockMovement.reference_type == "TRANSFER",
                         StockMovement.reference_id.in_([t.id for t in transfers]),
-                        StockMovement.movement_type.in_(
-                            [
-                                MovementType.TRANSFER_IN.value,
-                                MovementType.DEFECT_TRANSFER_IN.value,
-                            ]
+                        # НЕТТО, как в `_transfer_received_map`: возврат откатывает
+                        # приход, и без его вычета бейдж «принято X из Y» после
+                        # переотправки показывал бы прошлый круг — «доехало всё» на
+                        # переезде, который едет заново.
+                        # Пара (reference_type, movement_type) здесь ОБЯЗАНА быть
+                        # явной: выборка идёт пачкой по многим переездам и фильтра
+                        # по складу не имеет, а `TRANSFER` + `TRANSFER_OUT` — это
+                        # списание на складе-ИСТОЧНИКЕ (`send_transfer`). Возьми
+                        # типы плоским списком — и оно вычлось бы из принятого,
+                        # уведя прогресс в минус на всю отгрузку.
+                        or_(
+                            and_(
+                                StockMovement.reference_type == "TRANSFER",
+                                StockMovement.movement_type.in_(
+                                    [
+                                        MovementType.TRANSFER_IN.value,
+                                        MovementType.DEFECT_TRANSFER_IN.value,
+                                    ]
+                                ),
+                            ),
+                            and_(
+                                StockMovement.reference_type == "TRANSFER_RETURN",
+                                StockMovement.movement_type.in_(
+                                    [
+                                        MovementType.TRANSFER_OUT.value,
+                                        MovementType.DEFECT_TRANSFER_OUT.value,
+                                    ]
+                                ),
+                            ),
                         ),
                     )
                     .group_by(StockMovement.reference_id)
@@ -869,16 +891,36 @@ async def cancel_transfer(db: AsyncSession, project_id: int, transfer_id: int) -
 _TRANSFER_SEND_FROM = frozenset({TransferStatus.READY, TransferStatus.VEHICLE_ASSIGNED})
 
 
-async def send_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> StockTransfer:
+async def send_transfer(
+    db: AsyncSession,
+    project_id: int,
+    transfer_id: int,
+    *,
+    allowed_from: frozenset[TransferStatus] | None = None,
+) -> StockTransfer:
     """
     Отправить переезд: READY | VEHICLE_ASSIGNED → SHIPPED.
     source.stock -= qty, target.in_transit += qty. Единственное списание переезда.
+
+    `allowed_from` сужает вход — зеркало `allow_gazelka_ready` у `ship_request`.
+    Нужен АВТО-отгрузке по сигналу ФФ: она отбирает кандидатов под транзакцией
+    синка (`status == VEHICLE_ASSIGNED`), а зовёт нас уже ПОСЛЕ её commit, между
+    чем лежат десятки секунд HTTP к провайдеру. В этом окне логист успевает снять
+    машину (переезд уходит в READY, логистика вычищена) или отредактировать
+    состав — и без сужения мы бы отгрузили по общему карв-ауту: сток списан,
+    забор создаётся без перевозчика и без суммы, откат только возвратом.
+    Проверка идёт ПОД row-lock, то есть по свежему статусу, а не по снимку.
     """
     transfer = await _get_transfer_locked(db, project_id, transfer_id)
     if not transfer:
         raise ValueError("Перемещение не найдено")
 
     current = TransferStatus(transfer.status)
+    if allowed_from is not None and current not in allowed_from:
+        raise ValueError(
+            f"Переезд больше не в статусе «{'», «'.join(s.value for s in allowed_from)}» "
+            f"(сейчас {current.value}) — авто-отправка отменена"
+        )
     if current not in _TRANSFER_SEND_FROM:
         # Всегда бросает: READY/VEHICLE_ASSIGNED отсеяны выше, а из прочих
         # статусов SHIPPED в таблице переходов нет.
@@ -1079,12 +1121,26 @@ async def _create_transfer_pickup(
 async def _transfer_received_map(
     db: AsyncSession, project_id: int, transfer: StockTransfer
 ) -> dict[int, int]:
-    """{nomenclature_id: уже принято по этому переезду на складе-ПОЛУЧАТЕЛЕ}.
+    """{nomenclature_id: сколько СЕЙЧАС лежит у получателя по этому переезду}.
 
-    Источник истины — журнал движений (TRANSFER_IN + DEFECT_TRANSFER_IN с
-    `reference_type='TRANSFER'` и `reference_id` переезда), а не поля документа:
-    порционный авто-приём ФФ (`receive_transfer_fact`) добирает факт несколькими
-    синками, и «сколько уже лежит у получателя» выводится только из движений.
+    Источник истины — журнал движений, а не поля документа: порционный авто-приём
+    ФФ (`receive_transfer_fact`) добирает факт несколькими синками, и «сколько уже
+    принято» выводится только из движений.
+
+    Сумма НЕТТО, и это принципиально. Возврат (`return_transfer`) откатывает
+    зачисленное движением `TRANSFER_OUT` с `reference_type='TRANSFER_RETURN'` —
+    отдельным типом, чтобы производная осталась честной. Считай мы только
+    приходные движения, карта после возврата НАВСЕГДА помнила бы принятое в
+    прошлом круге, а бюджет прихода считается как «план − принято». Переотправка
+    (RETURNED → READY → SHIPPED, таблица её разрешает и докстринга `return_transfer`
+    обещает) тогда списывала бы сток с источника и не зачисляла никому: единицы
+    повисали бы вечным фантомным транзитом, переезд рапортовал бы DELIVERED, а
+    бейдж «принято 10 из 10» это подтверждал. Второй возврат по такому переезду
+    пытался бы снять с получателя устаревшее количество — то есть списать чужие
+    единицы, если они на складе есть.
+
+    `TRANSFER_OUT` с `reference_type='TRANSFER'` на складе-ПОЛУЧАТЕЛЕ не бывает
+    (списание живёт на источнике), поэтому фильтр по складу не даёт вычесть лишнего.
     """
     res = await db.execute(
         select(
@@ -1094,15 +1150,22 @@ async def _transfer_received_map(
         .where(
             StockMovement.project_id == project_id,
             StockMovement.warehouse_id == transfer.to_warehouse_id,
-            StockMovement.reference_type == "TRANSFER",
+            StockMovement.reference_type.in_(("TRANSFER", "TRANSFER_RETURN")),
             StockMovement.reference_id == transfer.id,
             StockMovement.movement_type.in_(
-                [MovementType.TRANSFER_IN.value, MovementType.DEFECT_TRANSFER_IN.value]
+                [
+                    MovementType.TRANSFER_IN.value,
+                    MovementType.DEFECT_TRANSFER_IN.value,
+                    MovementType.TRANSFER_OUT.value,
+                    MovementType.DEFECT_TRANSFER_OUT.value,
+                ]
             ),
         )
         .group_by(StockMovement.nomenclature_id)
     )
-    return {row[0]: int(row[1] or 0) for row in res.all()}
+    # Отрицательный нетто невозможен, но кламп страхует от порчи данных руками:
+    # «принято минус пять» уронило бы бюджет прихода в сторону переприёма.
+    return {row[0]: max(0, int(row[1] or 0)) for row in res.all()}
 
 
 async def complete_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> StockTransfer:

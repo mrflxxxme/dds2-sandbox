@@ -1099,7 +1099,17 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         for tr_id in transfer_ship_ids:
             try:
                 async with AsyncSessionLocal() as tr_db:
-                    await send_transfer(tr_db, project_id, tr_id)
+                    # Кандидаты отобраны ПОД транзакцией синка, а зовём мы уже
+                    # после её commit — между этим десятки секунд HTTP к
+                    # провайдеру. Сужаем вход: если логист успел снять машину
+                    # (→ READY) или переезд ушёл дальше, авто-отправка отменяется,
+                    # а не списывает сток по общему карв-ауту READY.
+                    await send_transfer(
+                        tr_db,
+                        project_id,
+                        tr_id,
+                        allowed_from=frozenset({TransferStatus.VEHICLE_ASSIGNED}),
+                    )
                 transfers_shipped += 1
             except Exception as e:  # — best-effort, синк уже зафиксирован
                 logger.warning("FF auto-ship: переезд %s пропущен (%s)", tr_id, e)

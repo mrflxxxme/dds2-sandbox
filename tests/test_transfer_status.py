@@ -400,8 +400,15 @@ class TestManualLadder:
         assert transfer.is_deleted is True
 
     async def test_cancel_rejected_after_ship(self, db_session, project, src_wh, dst_wh, barcode):
-        """Таблица SHIPPED → CANCELLED допускает, сервис — НЕТ: сток уже уехал."""
-        assert TransferStatus.CANCELLED in TRANSFER_TRANSITIONS[TransferStatus.SHIPPED]
+        """После отгрузки отмены нет НИ в таблице, НИ в сервисе: сток уже уехал.
+
+        Отмена его не возвращает — это делает только RETURNED. Раньше таблица
+        переход разрешала, а рубил его лишь сервис; таблица подана как
+        единственный источник истины, и первый же новый вызывающий, который ей
+        доверится, отменил бы переезд поверх уехавшего товара.
+        """
+        assert TransferStatus.CANCELLED not in TRANSFER_TRANSITIONS[TransferStatus.SHIPPED]
+        assert TransferStatus.CANCELLED not in TRANSFER_TRANSITIONS[TransferStatus.RETURNED]
         await _stock(db_session, project, src_wh, barcode, 100)
         transfer = await _mk(db_session, project, src_wh, dst_wh, barcode, 10)
         await mark_transfer_ready(db_session, project.id, transfer.id)
@@ -647,6 +654,37 @@ class TestReturnTransfer:
         # И вторая отгрузка снова списала ровно 10 — не 20.
         src = await _stock_row(db_session, project, src_wh.id, nom_id)
         assert src.quantity == 90
+
+    async def test_reship_after_return_credits_destination(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """Переотправка после возврата ДОВОЗИТ товар получателю.
+
+        Регрессия на баг «карта принятого не нетто»: она суммировала только
+        приходные движения, поэтому после возврата навсегда помнила принятое в
+        прошлом круге. Бюджет прихода считается как «план − принято», значит на
+        втором круге он оказывался нулевым: сток списывался с источника и не
+        зачислялся НИКОМУ — 10 единиц висели вечным фантомным транзитом, а
+        переезд рапортовал DELIVERED и бейдж «принято 10 из 10» это подтверждал.
+        """
+        await _stock(db_session, project, src_wh, barcode, 100)
+        nom_id = await _nom_id(db_session, project, barcode)
+        transfer = await _mk(db_session, project, src_wh, dst_wh, barcode, 10)
+        await mark_transfer_ready(db_session, project.id, transfer.id)
+        await send_transfer(db_session, project.id, transfer.id)
+        await complete_transfer(db_session, project.id, transfer.id)
+        await return_transfer(db_session, project.id, transfer.id)
+
+        await mark_transfer_ready(db_session, project.id, transfer.id)
+        await send_transfer(db_session, project.id, transfer.id)
+        done = await complete_transfer(db_session, project.id, transfer.id)
+
+        assert done.status == TransferStatus.DELIVERED
+        src = await _stock_row(db_session, project, src_wh.id, nom_id)
+        dst = await _stock_row(db_session, project, dst_wh.id, nom_id)
+        assert src.quantity == 90, "источник списан ровно на один круг"
+        assert dst.quantity == 10, "получателю довезли — товар не растворился"
+        assert dst.in_transit == 0, "фантомного транзита не осталось"
 
     async def test_return_rejected_before_ship(self, db_session, project, src_wh, dst_wh, barcode):
         transfer = await _mk(db_session, project, src_wh, dst_wh, barcode, 10)
