@@ -61,10 +61,17 @@ export default function FfRequestDetailPage() {
         return () => controller.abort();
     }, [warehouseId, ffRequestId]);
 
-    // Назад — на вкладку склада по kind заявки; пока kind неизвестен — просто на склад
-    const backUrl = detail && (detail.kind === 'assembly' || detail.kind === 'inbound')
-        ? `/p/${slug}/warehouse/${warehouseId}?tab=${detail.kind === 'assembly' ? 'ff-assembly' : 'ff-inbound'}`
-        : `/p/${slug}/warehouse/${warehouseId}`;
+    // Назад — на вкладку «Фулфилмент» склада, в под-вкладку по kind заявки.
+    // kind=return и недозагруженная деталка раньше падали в голый URL склада —
+    // юзер улетал в «Приёмки» раздела Склад вместо ФФ, откуда пришёл.
+    const backTab = detail?.kind === 'assembly'
+        ? 'ff-assembly'
+        : detail?.kind === 'inbound'
+            ? 'ff-inbound'
+            : detail?.kind === 'return'
+                ? 'ff-return'
+                : 'fulfillment';
+    const backUrl = `/p/${slug}/warehouse/${warehouseId}?tab=${backTab}`;
     const goBack = () => router.push(backUrl);
 
     // Значение динамического поля: похожее на ISO-дату — через formatDate, иначе как есть
