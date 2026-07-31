@@ -17,6 +17,7 @@ import type { Column } from '@/components/DataTable';
 import Toast from '@/components/Toast';
 import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffSkippedNotice, ffStageBadge, ffStatusBadge, ffStatusLabel, ffEventBadge, ffEventSummary } from './ff-shared';
 import FfBillingTab from './FfBillingTab';
+import MigfullInboundModal from './MigfullInboundModal';
 import { FfMismatchModal } from '@/components/FfMismatchModal';
 import { whNamesMatch } from '@/lib/utils/ffLinkCandidates';
 
@@ -740,6 +741,10 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
     const [vehicles, setVehicles] = useState<ExpectedVehicleRow[]>([]);
     // Модалка «Связать заявки ФФ» — машина, к чьей приёмке привязываем
     const [linkFor, setLinkFor] = useState<ExpectedVehicleRow | null>(null);
+    // Модалка «Создать поставку у Натали» — машина, из чьей приёмки создаём
+    const [natPushFor, setNatPushFor] = useState<ExpectedVehicleRow | null>(null);
+    // Склад migfull-портала (кнопка «Создать поставку у Натали» — только на нём)
+    const [migfullWhId, setMigfullWhId] = useState<number | null>(null);
     const [toast, setToast] = useState('');
 
     const loadVehicles = useCallback(() => {
@@ -747,6 +752,14 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
     }, [warehouseId]);
 
     useEffect(() => { loadVehicles(); }, [loadVehicles]);
+
+    useEffect(() => {
+        let cancelled = false;
+        api.migfullPortalConfig()
+            .then(c => { if (!cancelled) setMigfullWhId(c.configured ? c.warehouse_id : null); })
+            .catch(() => { /* портал не подключён — кнопки просто нет */ });
+        return () => { cancelled = true; };
+    }, []);
 
     const handleAction = async (e: React.MouseEvent, orderNo: string, nextStatus: string) => {
         e.stopPropagation();
@@ -811,16 +824,28 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
                                     <span style={{ fontSize: 11, color: 'var(--color-success)', fontWeight: 600 }}>→ Приёмки</span>
                                 ) : null}
                             </div>
-                            {ffConnected && v.receipt_id != null && (
-                                <div style={{ marginTop: 8 }}>
-                                    <button
-                                        className="btn btn-secondary btn-sm"
-                                        style={{ fontSize: 11, padding: '3px 10px' }}
-                                        onClick={e => { e.stopPropagation(); setLinkFor(v); }}
-                                        title="Связать несвязанные заявки ФФ (kind=приёмка) с нашей приёмкой этой машины"
-                                    >
-                                        Связать заявки ФФ
-                                    </button>
+                            {v.receipt_id != null && (ffConnected || migfullWhId === warehouseId) && (
+                                <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                    {ffConnected && (
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            style={{ fontSize: 11, padding: '3px 10px' }}
+                                            onClick={e => { e.stopPropagation(); setLinkFor(v); }}
+                                            title="Связать несвязанные заявки ФФ (kind=приёмка) с нашей приёмкой этой машины"
+                                        >
+                                            Связать заявки ФФ
+                                        </button>
+                                    )}
+                                    {migfullWhId === warehouseId && (
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            style={{ fontSize: 11, padding: '3px 10px' }}
+                                            onClick={e => { e.stopPropagation(); setNatPushFor(v); }}
+                                            title="Создать поставку (приёмку) в WMS Натали из состава приёмки этой машины"
+                                        >
+                                            Создать поставку у Натали
+                                        </button>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -838,6 +863,18 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
                         setToast(`Связано с приёмкой машины ${linkFor.order_no}: ${linkedNumbers.join(', ')}`);
                         loadVehicles();
                         onFfLinked?.();  // вкладки ФФ перезагружают списки
+                    }}
+                />
+            )}
+            {natPushFor && natPushFor.receipt_id != null && (
+                <MigfullInboundModal
+                    receiptId={natPushFor.receipt_id}
+                    vehicleOrderNo={natPushFor.order_no}
+                    onClose={() => setNatPushFor(null)}
+                    onSuccess={res => {
+                        setToast(`Поставка у Натали создана: ${res.shipment_number || res.shipment_guid || '—'}`);
+                        loadVehicles();
+                        onFfLinked?.();  // вкладки ФФ перезагружают списки (PVB прилетит синком уже связанной)
                     }}
                 />
             )}

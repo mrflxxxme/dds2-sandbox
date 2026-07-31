@@ -27,6 +27,9 @@ import type {
     FfUnlinkedAssembly,
     FulfillmentConnectPayload,
     FulfillmentStatus,
+    MigfullInboundDraft,
+    MigfullInboundSendRequest,
+    MigfullSendResult,
 } from '@/types/api';
 
 export function addFulfillmentMethods(api: ApiClient) {
@@ -157,6 +160,29 @@ export function addFulfillmentMethods(api: ApiClient) {
         /** Массово убрать/вернуть заявки ФФ в локальный архив. */
         bulkArchiveFulfillmentRequests(warehouseId: number, payload: FfBulkArchivePayload) {
             return api.request<FfBulkArchiveResult>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/bulk-archive`, payload);
+        },
+
+        // ─── Поставка (приёмка) у Натали из нашей приёмки машины (migfull-портал) ──
+        migfullInboundDraft(receiptId: number) {
+            return api.request<MigfullInboundDraft>('GET', `/api/v1/migfull-portal/inbound/${receiptId}/draft`);
+        },
+        /**
+         * РЕАЛЬНОЕ создание поставки (приёмки) в портале ФФ «Натали» — НЕОБРАТИМО.
+         * Повторная отправка без force_resend → HTTP 409; тегируем `.code='conflict'`
+         * (как migfullPortalSend), чтобы модалка показала подтверждение.
+         */
+        async migfullInboundSend(receiptId: number, body: MigfullInboundSendRequest) {
+            try {
+                return await api.request<MigfullSendResult>('POST', `/api/v1/migfull-portal/inbound/${receiptId}/send`, body);
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : '';
+                if (!body.force_resend && /уже\s+(отправ|созда|есть)|already|409|конфликт/i.test(msg)) {
+                    const err = new Error(msg || 'Поставка уже создавалась') as Error & { code?: string };
+                    err.code = 'conflict';
+                    throw err;
+                }
+                throw e;
+            }
         },
     };
 }

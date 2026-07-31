@@ -2607,6 +2607,35 @@ export interface MigfullSendResult {
   order_id: number | null;
 }
 
+// Поставка (приёмка) на склад Натали из нашей приёмки машины (InboundReceipt)
+
+export interface MigfullInboundPrefill {
+  number: string | null;            // наш номер для оператора (V-… машины / № приёмки)
+  submission_date: string | null;   // YYYY-MM-DD (плановая дата поставки)
+  notes: string | null;
+  vehicle_order_no: string | null;  // инфо: машина-источник (V-…)
+  receipt_number: string | null;    // инфо: наша приёмка (IN-…)
+}
+
+export interface MigfullInboundDraft {
+  eligible: boolean;                // склад приёмки == склад интеграции
+  already_sent: boolean;            // поставка для этой приёмки уже есть/создавалась
+  sent_guid: string | null;
+  sent_number: string | null;
+  prefill: MigfullInboundPrefill;
+  opis_lines: MigfullOpisLine[];
+  total_boxes: number;
+  total_pieces: number;
+  warnings: string[];
+}
+
+export interface MigfullInboundSendRequest {
+  number: string | null;
+  submission_date: string | null;
+  notes: string | null;
+  force_resend: boolean;
+}
+
 export interface CreatedRequestBrief {
   id: number;
   number: string;
