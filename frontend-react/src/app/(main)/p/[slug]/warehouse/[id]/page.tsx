@@ -2750,6 +2750,21 @@ function ffRepackPaired(row: FfRequestRow): boolean {
     return row.repack_return_id != null || !!row.repack_pair_number;
 }
 
+/**
+ * Код прогресса приёмки для фильтра: accepting — принимается, done — принято
+ * всё, over — сверх заявки, idle — не начато. null — прогресс неприменим
+ * (закрыта / нет данных факта).
+ */
+function ffProgressCode(row: FfRequestRow): 'accepting' | 'done' | 'over' | 'idle' | null {
+    if (row.is_completed || row.accepted_qty == null) return null;
+    const acc = row.accepted_qty;
+    if (acc === 0) return 'idle';
+    const planned = row.total_qty_units ?? row.total_qty;
+    if (planned == null) return 'accepting';
+    if (acc > planned) return 'over';
+    return acc === planned ? 'done' : 'accepting';
+}
+
 function ffRepackBadge(row: FfRequestRow, kind: FfRequestKind) {
     if (ffRepackPaired(row)) {
         const pair = row.repack_pair_number || '—';
@@ -2787,6 +2802,10 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
     // Фильтры по статусам (клиентские, из загруженных строк)
     const [stageFilter, setStageFilter] = useState('');
     const [statusFilter, setStatusFilter] = useState('');
+    // Срез по типу операции: вскрытие коробов / обычные / возврат без пары.
+    const [opFilter, setOpFilter] = useState('');
+    // Срез по живому прогрессу приёмки (см. ffProgressCode).
+    const [progressFilter, setProgressFilter] = useState('');
     // Toast успеха + несмахиваемое предупреждение (пропущенные ШК при создании заявки)
     const [toast, setToast] = useState('');
     const [notice, setNotice] = useState('');
@@ -2807,7 +2826,7 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
     const [mismatchForAssembly, setMismatchForAssembly] = useState<number | null>(null);
 
     // Смена вида/фильтра/перезагрузка — сбросить выбор (id устаревают)
-    useEffect(() => { setSelected(new Set()); }, [warehouseId, kind, showArchived, stageFilter, statusFilter, reloadTick]);
+    useEffect(() => { setSelected(new Set()); }, [warehouseId, kind, showArchived, stageFilter, statusFilter, opFilter, progressFilter, reloadTick]);
 
     // Реверс-линк связал ФФ-заявку с нашей сборкой → обновляем обе таблицы
     const handleReverseLinked = useCallback((ffNumber: string, assemblyNumber: string) => {
@@ -3174,10 +3193,42 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
     const filteredRows = useMemo(
         () => rows.filter(r =>
             (!stageFilter || (r.stage_title || r.status || '') === stageFilter)
-            && (!statusFilter || ffStatusLabel(r) === statusFilter),
+            && (!statusFilter || ffStatusLabel(r) === statusFilter)
+            && (!opFilter
+                || (opFilter === 'repack' && ffRepackPaired(r))
+                || (opFilter === 'plain' && !ffRepackPaired(r) && !r.repack_unpaired)
+                || (opFilter === 'unpaired' && !!r.repack_unpaired))
+            && (!progressFilter || ffProgressCode(r) === progressFilter),
         ),
-        [rows, stageFilter, statusFilter],
+        [rows, stageFilter, statusFilter, opFilter, progressFilter],
     );
+
+    // Чипы срезов со счётчиками — только осмысленные для вкладки и с данными.
+    const opChips = useMemo(() => {
+        if (kind === 'assembly') return [] as Array<[string, string, number]>;
+        const paired = rows.filter(r => ffRepackPaired(r)).length;
+        const unpaired = rows.filter(r => !!r.repack_unpaired).length;
+        const plain = rows.length - paired - unpaired;
+        const chips: Array<[string, string, number]> = [['', 'Все', rows.length]];
+        if (paired) chips.push(['repack', 'Вскрытие коробов', paired]);
+        if (plain && (paired || unpaired)) chips.push(['plain', 'Обычные', plain]);
+        if (kind === 'return' && unpaired) chips.push(['unpaired', 'Без пары', unpaired]);
+        return chips.length > 1 ? chips : [];
+    }, [rows, kind]);
+    const progressChips = useMemo(() => {
+        if (kind !== 'inbound') return [] as Array<[string, string, number]>;
+        const by = { accepting: 0, done: 0, over: 0, idle: 0 } as Record<string, number>;
+        for (const r of rows) {
+            const c = ffProgressCode(r);
+            if (c) by[c] += 1;
+        }
+        const chips: Array<[string, string, number]> = [];
+        if (by.accepting) chips.push(['accepting', 'Принимается', by.accepting]);
+        if (by.done) chips.push(['done', 'Принято всё', by.done]);
+        if (by.over) chips.push(['over', 'Сверх заявки', by.over]);
+        if (by.idle) chips.push(['idle', 'Не начато', by.idle]);
+        return chips;
+    }, [rows, kind]);
 
     // Массовый выбор/архив видимых заявок
     const selectedCount = useMemo(() => filteredRows.filter(r => selected.has(r.id)).length, [filteredRows, selected]);
@@ -3244,7 +3295,7 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
         </div>
     );
 
-    const statusFilters = (stageOptions.length > 1 || statusOptions.length > 1) ? (
+    const statusFilters = (stageOptions.length > 1 || statusOptions.length > 1 || opChips.length > 0 || progressChips.length > 0) ? (
         <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
             <select className="form-input" style={{ maxWidth: 240, fontSize: 13 }} value={stageFilter} onChange={e => setStageFilter(e.target.value)}>
                 <option value="">Стадия: все</option>
@@ -3254,8 +3305,30 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 <option value="">Статус ФФ: все</option>
                 {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
-            {(stageFilter || statusFilter) && (
-                <button className="btn btn-sm btn-secondary" onClick={() => { setStageFilter(''); setStatusFilter(''); }}>Сбросить</button>
+            {/* Срез по типу операции (вскрытие/обычные/без пары) — все документы
+                Натали теперь у нас, без среза внутренние переупаковки тонут
+                среди товарных приёмок. */}
+            {opChips.map(([code, label, n]) => (
+                <button
+                    key={`op-${code}`}
+                    className={`btn btn-sm ${opFilter === code ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setOpFilter(code)}
+                >
+                    {label} · {formatNumber(n, 0)}
+                </button>
+            ))}
+            {/* Срез по живому прогрессу приёмки. Чип-тумблер: повторный клик снимает. */}
+            {progressChips.map(([code, label, n]) => (
+                <button
+                    key={`pr-${code}`}
+                    className={`btn btn-sm ${progressFilter === code ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setProgressFilter(progressFilter === code ? '' : code)}
+                >
+                    {label} · {formatNumber(n, 0)}
+                </button>
+            ))}
+            {(stageFilter || statusFilter || opFilter || progressFilter) && (
+                <button className="btn btn-sm btn-secondary" onClick={() => { setStageFilter(''); setStatusFilter(''); setOpFilter(''); setProgressFilter(''); }}>Сбросить</button>
             )}
             <span style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--color-text-muted)' }}>
                 Показано: {formatNumber(filteredRows.length, 0)} из {formatNumber(rows.length, 0)}
@@ -3285,8 +3358,8 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             <TanStackDataTable
                 columns={cols}
                 data={filteredRows}
-                emptyText={(stageFilter || statusFilter)
-                    ? 'Нет заявок с выбранным статусом'
+                emptyText={(stageFilter || statusFilter || opFilter || progressFilter)
+                    ? 'Нет заявок под выбранные фильтры'
                     : (showArchived
                         ? 'Архив пуст'
                         : (kind === 'assembly'
