@@ -961,6 +961,15 @@ function FfVehicleLinkModal({ warehouseId, vehicle, onClose, onLinked }: {
                                         <span className="ff-link-row-meta">
                                             {row.external_created_at ? `${formatDate(row.external_created_at)} · ` : ''}
                                             {formatNumber(row.total_qty_units ?? row.total_qty ?? 0, 0)} шт
+                                            {row.total_boxes != null && ` · 📦 ${formatNumber(row.total_boxes, 0)} кор.`}
+                                        </span>
+                                        {/* Мгновенный маркер вида заявки — пара «штучная + коробовая»
+                                            одной машины различима без чтения цифр. */}
+                                        <span
+                                            className={`badge ${row.total_boxes != null ? 'badge-info' : 'badge-secondary'}`}
+                                            style={{ fontSize: 11, padding: '2px 8px' }}
+                                        >
+                                            {row.total_boxes != null ? 'коробами' : 'штучная'}
                                         </span>
                                     </div>
                                     {rowErrors[row.id] && (
