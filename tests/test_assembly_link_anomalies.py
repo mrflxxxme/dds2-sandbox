@@ -892,6 +892,154 @@ async def test_stock_mismatch_logistics_not_counted_wrong_stage(db_session, proj
     assert row["surplus_our_qty"] == 40  # стадия не logistics_works → без досчёта
 
 
+# ─── (g3) stock_mismatch — FBS-вычет из ff_good (паритет с list_stocks) ──────
+
+
+async def _fbs_movement(db_session, project_id, warehouse_id, nomenclature_id, barcode, qty):
+    """Движение FBS-списания: qty=-1 — OUTBOUND продажи, qty=+1 — INBOUND-сторно отмены."""
+    from backend.models.warehouse import MovementType, StockMovement
+
+    db_session.add(
+        StockMovement(
+            project_id=project_id,
+            warehouse_id=warehouse_id,
+            nomenclature_id=nomenclature_id,
+            barcode=barcode,
+            movement_type=(MovementType.OUTBOUND if qty < 0 else MovementType.INBOUND).value,
+            quantity=qty,
+            reference_type="FBS_ORDER",
+        )
+    )
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_fbs_deduction_resolves_false_surplus(db_session, project, warehouse):
+    """FBS-продажа списала наш сток, провайдер зеркало не тронул → ложное «у ФФ
+    больше» гасится вычетом; полностью сошедшийся SKU уходит из расхождения."""
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 10, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 7)
+    for _ in range(3):
+        await _fbs_movement(db_session, project.id, warehouse.id, nom.id, bc, -1)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    # 10 − 3 (FBS) == 7 == наш остаток → расхождения нет вовсе.
+    assert row is None
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_fbs_partial_keeps_residual_and_reports_ff_fbs(
+    db_session, project, warehouse
+):
+    """Вычет уменьшает диф, остаток честный; ff_fbs в SKU-строке, Σ — в ff_fbs_qty."""
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 10, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 6)
+    for _ in range(3):
+        await _fbs_movement(db_session, project.id, warehouse.id, nom.id, bc, -1)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    assert row is not None
+    assert row["ff_fbs_qty"] == 3
+    sku = row["rows"][0]
+    assert sku["ff_good"] == 7  # 10 − 3
+    assert sku["ff_fbs"] == 3
+    assert sku["diff"] == 1  # честный остаток «у ФФ больше»
+    assert row["surplus_ff_qty"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_fbs_inbound_storno_reduces_deduction(db_session, project, warehouse):
+    """INBOUND-сторно отменённого задания схлопывает нетто вычета."""
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 10, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 8)
+    # 3 продажи, одна отменилась и вернулась: нетто 2.
+    for _ in range(3):
+        await _fbs_movement(db_session, project.id, warehouse.id, nom.id, bc, -1)
+    await _fbs_movement(db_session, project.id, warehouse.id, nom.id, bc, 1)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    # 10 − 2 == 8 == наш → сошлось.
+    assert row is None
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_fbs_capped_by_observed_surplus(db_session, project, warehouse):
+    """Кап по наблюдаемому профициту: лишнее нетто не рождает «у нас больше».
+
+    Профицит 1 (2 − 1), нетто движений 5 → применяется только 1, ячейка
+    сходится и уходит из расхождения. Прежний кап по одному ff_good вычитал 2
+    и оставлял ВЕЧНЫЙ ложный diff = −1 (провайдер спишет сам / прошла сверка
+    ADJUSTMENT'ом — вычет истории продаж не гас). Заодно инвариант «не в
+    минус»: applied ≤ профицит ≤ ff_good.
+    """
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 2, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 1)
+    for _ in range(5):
+        await _fbs_movement(db_session, project.id, warehouse.id, nom.id, bc, -1)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    assert row is None  # 2 − min(5, профицит 1) == 1 == наш → расхождения нет
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_fbs_no_deduction_after_adjustment(db_session, project, warehouse):
+    """После выравнивания (mirror == our) история FBS-движений вычет не даёт.
+
+    Профицита нет → applied = 0 → diff остаётся 0, ячейка не появляется. Со
+    старым капом по ff_good вычиталось бы 3 и рождался ложный diff = −3.
+    """
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 7, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 7)
+    for _ in range(3):
+        await _fbs_movement(db_session, project.id, warehouse.id, nom.id, bc, -1)
+
+    res = await _raw(db_session, project.id)
+    assert _wh_row(res, warehouse.id) is None
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_fbs_other_warehouse_untouched(db_session, project, warehouse):
+    """FBS-движения чужого склада не трогают ячейки этого — вычет скоуплен."""
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 10, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 7)
+    other_wh = await _add(
+        db_session,
+        Warehouse(project_id=project.id, name=f"FF-{_uid()}", warehouse_type="FULFILLMENT"),
+    )
+    await _fbs_movement(db_session, project.id, other_wh.id, nom.id, bc, -1)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    assert row is not None
+    sku = row["rows"][0]
+    assert sku["ff_good"] == 10
+    assert sku["ff_fbs"] == 0
+    assert sku["diff"] == 3
+    assert row["ff_fbs_qty"] == 0
+
+
 # ─── (h) fbo списки поставок (разворот) ──────────────────────────────────────
 
 

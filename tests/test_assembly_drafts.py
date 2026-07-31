@@ -1784,12 +1784,14 @@ async def test_commit_unit_links_draft_and_list_filter(db_session):
     assert res.scalar_one().source_draft_id == draft.id
 
     # list по своему draft_id — только эта заявка
-    items, total = await assembly_service.list_assembly_requests(db_session, PROJECT_ID, draft_id=draft.id)
+    items, total, _counts = await assembly_service.list_assembly_requests(db_session, PROJECT_ID, draft_id=draft.id)
     assert [r.id for r in items] == [req_id]
     assert total == 1
 
     # list по чужому draft_id — пусто
-    items2, total2 = await assembly_service.list_assembly_requests(db_session, PROJECT_ID, draft_id=draft.id + 999_999)
+    items2, total2, _counts2 = await assembly_service.list_assembly_requests(
+        db_session, PROJECT_ID, draft_id=draft.id + 999_999
+    )
     assert items2 == [] and total2 == 0
 
 

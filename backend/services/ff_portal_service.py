@@ -17,6 +17,7 @@ from sqlalchemy.orm import selectinload
 
 from backend.ff_context import FfContext
 from backend.models.assembly import (
+    AssemblyKind,
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,
@@ -126,6 +127,10 @@ async def get_scoped_assembly(db: AsyncSession, ctx: FfContext, assembly_id: int
         )
     ).scalar_one_or_none()
     if not req or not ctx.allows(req.project_id, req.warehouse_id):
+        raise HTTPException(404, "Заявка не найдена")
+    if req.kind == AssemblyKind.FBS.value:
+        # Учётное зеркало FBS оператору ФФ не отдаём: его нельзя ни править,
+        # ни двигать (list_assemblies уже фильтрует — деталка обязана совпадать).
         raise HTTPException(404, "Заявка не найдена")
     return req
 
@@ -525,6 +530,9 @@ async def list_assemblies(
         AssemblyRequest.project_id.in_(pids),
         AssemblyRequest.warehouse_id.in_(wh_ids),
         AssemblyRequest.is_deleted == False,  # noqa: E712
+        # kind=fbs — учётное зеркало сборки, которую ФФ ведёт САМ у себя в WMS:
+        # показывать её оператору как нашу заявку = дублировать его же работу.
+        AssemblyRequest.kind != AssemblyKind.FBS.value,
         _assembly_archive_cond(archived),
     ]
     statuses = _parse_status_filter(status)
@@ -614,6 +622,9 @@ async def _reserved_map(db: AsyncSession, pids: list[int], wh_ids: list[int]) ->
             AssemblyRequest.warehouse_id.in_(wh_ids),
             AssemblyRequest.is_deleted == False,  # noqa: E712
             AssemblyRequest.status.in_([s.value for s in _ACTIVE_RESERVE_STATUSES]),
+            # kind=fbs — учётное зеркало FBS: резерв не держит (инвариант
+            # _get_reserved_map_batch).
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
         )
         .group_by(AssemblyRequest.warehouse_id, AssemblyRequestItem.nomenclature_id)
     )

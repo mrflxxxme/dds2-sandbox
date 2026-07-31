@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatDateTime, formatNumber } from '@/lib/utils';
 import type {
+    FbsMirrorGateDetail,
     FbsOffice,
     FbsStockSource,
     FbsWarehouse,
@@ -27,6 +28,26 @@ import {
     warehouseModeLabel,
 } from './fbsShared';
 import { EnableTranslationModal } from './fbsReconcile';
+
+/**
+ * Опознание 409-гейта настроек по КОДУ структурированного detail, а не по
+ * пересказу серверного условия на фронте: любой будущий 409 этой ручки с
+ * другим кодом упадёт в обычную ошибку, а не в ложный «применить всё равно?».
+ */
+function mirrorGateOf(detail: unknown): FbsMirrorGateDetail | null {
+    if (!detail || typeof detail !== 'object') return null;
+    const d = detail as Partial<FbsMirrorGateDetail>;
+    return d.code === 'fbs_mirror_above_ledger' ? (d as FbsMirrorGateDetail) : null;
+}
+
+/**
+ * Содержимое диалога 409-гейта: `gate` — структурированный detail с цифрами;
+ * null — старый бэк (окно деплоя) прислал detail строкой, показываем текст.
+ */
+interface MirrorGateInfo {
+    message: string;
+    gate: FbsMirrorGateDetail | null;
+}
 
 interface Props {
     warehouses: FbsWarehouse[];
@@ -167,6 +188,13 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
     const [pct, setPct] = useState(String(num(wh.safety_stock_pct)));
     const [abs, setAbs] = useState(String(wh.safety_stock_abs ?? 0));
     const [maxQty, setMaxQty] = useState(String(wh.max_qty_per_sku ?? 0));
+    /**
+     * Авто-учёт сборки FBS: зеркалим сборку, которую ведёт WMS склада, учётными
+     * заявками kind=fbs. Наша настройка (WB не трогает) → шлётся ОТДЕЛЬНЫМ
+     * PATCH сразу по клику, мимо «Сохранить настройки» и 409-гейта зеркала.
+     */
+    const [autoAssembly, setAutoAssembly] = useState(wh.auto_assembly ?? false);
+    const [autoAsmSaving, setAutoAsmSaving] = useState(false);
     const [saving, setSaving] = useState(false);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
@@ -177,6 +205,12 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
      * проставленные в кабинете руками, дельта-пуш не обнулит никогда.
      */
     const [askEnable, setAskEnable] = useState(false);
+    /**
+     * 409-гейт «translate + Система ФФ при зеркале выше учёта»: бэк отказал
+     * сохранению и прислал цифры разрыва — они лежат здесь, пока открыт
+     * диалог «применить всё равно?». null — диалога нет.
+     */
+    const [forceAsk, setForceAsk] = useState<MirrorGateInfo | null>(null);
 
     /** Есть ли у склада хоть одно зеркало ФФ — без него выбирать источник не из чего. */
     const hasMirror = wh.links.some(l => l.has_mirror);
@@ -195,10 +229,32 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
         setPct(String(num(wh.safety_stock_pct)));
         setAbs(String(wh.safety_stock_abs ?? 0));
         setMaxQty(String(wh.max_qty_per_sku ?? 0));
+        setAutoAssembly(wh.auto_assembly ?? false);
     }, [wh.is_active, wh.mode, wh.stock_source, wh.safety_stock_pct, wh.safety_stock_abs,
-        wh.max_qty_per_sku]);
+        wh.max_qty_per_sku, wh.auto_assembly]);
 
-    const doSave = async () => {
+    /**
+     * Тумблер «Авто-учёт сборки FBS» — не рискованная настройка (в WB ничего
+     * не пишет), без confirm: оптимистично переключаем, при ошибке откатываем.
+     */
+    const handleAutoAssemblyToggle = async (next: boolean) => {
+        const prev = autoAssembly;
+        setAutoAssembly(next);
+        setAutoAsmSaving(true);
+        setError('');
+        try {
+            await api.updateFbsWarehouseSettings(wh.wb_warehouse_id, { auto_assembly: next });
+            onToast(next ? 'Авто-учёт сборки FBS включён' : 'Авто-учёт сборки FBS выключен');
+            onReload();
+        } catch (e: unknown) {
+            setAutoAssembly(prev);
+            setError(e instanceof Error ? e.message : 'Ошибка сохранения авто-учёта сборки');
+        } finally {
+            setAutoAsmSaving(false);
+        }
+    };
+
+    const doSave = async (force = false) => {
         setSaving(true);
         setError('');
         const payload: FbsWarehouseSettingsPayload = {
@@ -210,14 +266,37 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
             safety_stock_pct: Number(pct.replace(',', '.')) || 0,
             safety_stock_abs: Number(abs) || 0,
             max_qty_per_sku: Number(maxQty) || 0,
+            // force шлём только подтверждённым: дефолт (false) бэк подставит сам,
+            // а явный флаг в каждом PATCH размывал бы смысл «решение человека».
+            ...(force ? { force: true } : {}),
         };
         try {
             await api.updateFbsWarehouseSettings(wh.wb_warehouse_id, payload);
             setAskEnable(false);
+            setForceAsk(null);
             onToast('Настройки склада сохранены');
             onReload();
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка сохранения настроек');
+            const message = e instanceof Error ? e.message : 'Ошибка сохранения настроек';
+            // 409 на рискованной комбинации «translate + Система ФФ» — не ошибка,
+            // а вопрос: зеркало выше учёта, бэк прислал цифры разрыва. Опознаём
+            // по code структурированного detail; прочие 409 этого экрана (нет
+            // ключа, идёт трансляция…) невозможно подтвердить force'ом — они
+            // падают в обычную ошибку веткой ниже.
+            const httpErr = e as Error & { status?: number; detail?: unknown };
+            const gate = mirrorGateOf(httpErr?.detail);
+            if (httpErr?.status === 409 && !force && (
+                gate
+                // Старый бэк (окно деплоя) шлёт detail строкой без кода —
+                // фолбэк на прежнюю эвристику по отправленной комбинации.
+                || (httpErr?.detail === undefined
+                    && payload.mode === 'translate' && payload.stock_source === 'ff_mirror')
+            )) {
+                setAskEnable(false); // не громоздить модалку на модалку
+                setForceAsk({ message: gate?.message || message, gate });
+                return;
+            }
+            setError(message);
         } finally {
             setSaving(false);
         }
@@ -452,6 +531,27 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
                 </div>
             </div>
 
+            {/* Авто-учёт сборки FBS — зеркалим сборку WMS учётными заявками */}
+            <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Авто-учёт сборки FBS</div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                    <input
+                        type="checkbox"
+                        checked={autoAssembly}
+                        disabled={autoAsmSaving}
+                        onChange={e => handleAutoAssemblyToggle(e.target.checked)}
+                    />
+                    Зеркалить сборку ФФ учётными заявками
+                    {autoAsmSaving && (
+                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>сохранение…</span>
+                    )}
+                </label>
+                <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
+                    WMS фулфилмента сам ведёт сборку по FBS-заказам — система зеркалит её
+                    учётными заявками (одна на поставку WB). Применяется сразу, в WB ничего не пишет.
+                </div>
+            </div>
+
             {/* Настройки трансляции */}
             <div style={{
                 display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
@@ -506,8 +606,21 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
                     // сохранение читается как «кнопка не работает».
                     error={error}
                     onToast={onToast}
-                    onConfirm={doSave}
+                    // Стрелка обязательна: onClick отдаёт event первым аргументом,
+                    // и голый doSave прочитал бы его как force=true.
+                    onConfirm={() => doSave()}
                     onClose={() => setAskEnable(false)}
+                />
+            )}
+
+            {forceAsk !== null && (
+                <ForceMirrorConfirmModal
+                    warehouseName={wh.name || `Склад #${wh.wb_warehouse_id}`}
+                    info={forceAsk}
+                    busy={saving}
+                    error={error}
+                    onConfirm={() => doSave(true)}
+                    onClose={() => setForceAsk(null)}
                 />
             )}
 
@@ -518,6 +631,76 @@ function WarehouseCard({ wh, ourWarehouses, writeEnabled, writeHint, onReload, o
                     onRenamed={() => { setRenaming(false); onReload(); onToast('Склад переименован'); }}
                 />
             )}
+        </div>
+    );
+}
+
+// ─── Подтверждение «Система ФФ» при зеркале выше учёта ──────────────────────
+
+/**
+ * Диалог 409-гейта настроек склада: комбинация «Трансляция + Система ФФ» при
+ * зеркале выше нашего учёта отклонена бэком, `info` несёт цифры разрыва.
+ * Подтверждение повторяет тот же PATCH с `force: true` — рискует человек,
+ * а не дефолт.
+ */
+function ForceMirrorConfirmModal({ warehouseName, info, busy, error, onConfirm, onClose }: {
+    warehouseName: string;
+    /** 409 с бэка: человеческий текст + цифры разрыва (когда бэк их прислал). */
+    info: MirrorGateInfo;
+    busy: boolean;
+    /** Ошибка ПОВТОРНОГО сохранения (уже с force) — показываем в диалоге. */
+    error: string;
+    onConfirm: () => void;
+    onClose: () => void;
+}) {
+    const gate = info.gate;
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 540 }}>
+                <h2 className="modal-title">Зеркало ФФ выше нашего учёта</h2>
+                <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                    {warehouseName}: источник «Система ФФ» в режиме трансляции не применён — бэкенд
+                    остановил сохранение и прислал размер разрыва.
+                </p>
+                <div
+                    className="glass-card"
+                    style={{
+                        padding: 12, marginBottom: 12, fontSize: 13,
+                        borderLeft: '4px solid var(--color-warning)',
+                    }}
+                >
+                    <div>{info.message}</div>
+                    {gate && (
+                        <div style={{
+                            display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 8,
+                        }}>
+                            <span>
+                                Зеркало выше на{' '}
+                                <b style={{ color: 'var(--color-warning)' }}>
+                                    {formatNumber(num(gate.mirror_over_ledger), 0)} шт
+                                </b>
+                            </span>
+                            <span style={{ color: 'var(--color-text-muted)' }}>
+                                Наш учёт: <b>{formatNumber(num(gate.ledger_total), 0)}</b>
+                            </span>
+                            <span style={{ color: 'var(--color-text-muted)' }}>
+                                Зеркало ФФ: <b>{formatNumber(num(gate.mirror_total), 0)}</b>
+                            </span>
+                        </div>
+                    )}
+                </div>
+                <p style={{ fontSize: 13, marginBottom: 16 }}>
+                    Зеркало ФФ выше нашего учёта — WB получит остаток, которого нет в наших книгах.
+                    Применить всё равно?
+                </p>
+                {error && <div style={{ marginBottom: 12, fontSize: 13, color: 'var(--color-danger)' }}>{error}</div>}
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                    <button className="btn btn-secondary" onClick={onClose} disabled={busy}>Отмена</button>
+                    <button className="btn btn-danger" onClick={() => onConfirm()} disabled={busy}>
+                        {busy ? 'Сохранение...' : 'Применить всё равно'}
+                    </button>
+                </div>
+            </div>
         </div>
     );
 }

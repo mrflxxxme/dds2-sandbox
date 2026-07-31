@@ -608,6 +608,80 @@ async def test_wb_declined_order_is_not_counted_as_new(db_session, env, monkeypa
     assert rows[9501].supplier_status == FbsSupplierStatus.NEW.value
 
 
+# ─── Разрез отмен: cancel_client / cancel_seller (канон 30.07) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_cancel_split_buckets_and_sum_invariant(db_session, env):
+    """Отменённые делятся на две корзины: «клиент отменил» / «отменили мы».
+
+    Клиент — `wbStatus` из `FBS_WB_CLIENT_CANCEL_STATUSES` (canceled_by_client /
+    declined_by_client), чей бы `supplierStatus` ни стоял. Мы — всё прочее
+    отменённое: supplier cancel с пустым wb (SQL-NULL не должен выкидывать
+    строку из разбиения), cancel_carrier, wb canceled. Сумма корзин равна
+    счётчику отмен эффективного статуса — разбиение точное.
+    """
+    # Клиент: WB-отмена покупателем; supplier застыл в new (отказ до сборки).
+    await _seed_order(db_session, env.project_id, 9950, wb_status="canceled_by_client")
+    await _seed_order(db_session, env.project_id, 9951, wb_status="declined_by_client")
+    # Мы: отмена продавцом, ось WB пустая (NULL).
+    await _seed_order(
+        db_session, env.project_id, 9952,
+        supplier_status=FbsSupplierStatus.CANCEL.value, wb_status=None,
+    )
+    # Мы: отмена перевозчиком; wb canceled — не клиентский код.
+    await _seed_order(
+        db_session, env.project_id, 9953,
+        supplier_status=FbsSupplierStatus.CANCEL_CARRIER.value, wb_status="canceled",
+    )
+    # Живое — ни в одну корзину.
+    await _seed_order(db_session, env.project_id, 9954)
+
+    listed = await orders_service.list_orders(db_session, env.project_id)
+    assert listed["cancel_client_count"] == 2
+    assert listed["cancel_seller_count"] == 2
+    # Инвариант разбиения: client + seller == cancel + cancel_carrier.
+    cancels = (
+        listed["status_counts"].get(FbsSupplierStatus.CANCEL.value, 0)
+        + listed["status_counts"].get(FbsSupplierStatus.CANCEL_CARRIER.value, 0)
+    )
+    assert listed["cancel_client_count"] + listed["cancel_seller_count"] == cancels == 4
+
+
+@pytest.mark.asyncio
+async def test_cancel_split_status_filters(db_session, env):
+    """`status=cancel_client|cancel_seller` — фильтры выдачи, зеркальные счётчикам."""
+    from backend.models.wb_fbs import FBS_CANCEL_CLIENT_STATUS, FBS_CANCEL_SELLER_STATUS
+
+    await _seed_order(db_session, env.project_id, 9960, wb_status="canceled_by_client")
+    # Клиентский wb-код при supplier cancel — решение всё равно принял покупатель.
+    await _seed_order(
+        db_session, env.project_id, 9961,
+        supplier_status=FbsSupplierStatus.CANCEL.value, wb_status="declined_by_client",
+    )
+    await _seed_order(
+        db_session, env.project_id, 9962,
+        supplier_status=FbsSupplierStatus.CANCEL.value, wb_status=None,
+    )
+    await _seed_order(
+        db_session, env.project_id, 9963,
+        supplier_status=FbsSupplierStatus.CANCEL_CARRIER.value, wb_status="canceled",
+    )
+    await _seed_order(db_session, env.project_id, 9964)  # живое
+
+    client_page = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_CANCEL_CLIENT_STATUS
+    )
+    assert client_page["total"] == 2
+    assert {o["wb_order_id"] for o in client_page["items"]} == {9960, 9961}
+
+    seller_page = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_CANCEL_SELLER_STATUS
+    )
+    assert seller_page["total"] == 2
+    assert {o["wb_order_id"] for o in seller_page["items"]} == {9962, 9963}
+
+
 @pytest.mark.asyncio
 async def test_revenue_uses_converted_price_for_foreign_currency(db_session, env, monkeypatch):
     """Заказ в чужой валюте входит в выручку по `convertedPrice`, а не по `price`.
@@ -663,7 +737,10 @@ async def test_upsert_locks_rows_in_key_order(db_session, env, monkeypatch):
     original_chunks = orders_service._chunks
 
     def spy(items, size):
-        captured.append([r["wb_order_id"] for r in items])
+        # `_chunks` внутри `_upsert_orders` зовётся не только для строк UPSERT
+        # (снапшот журнала переходов чанкует голые id) — ловим только dict-строки.
+        if items and isinstance(items[0], dict) and "wb_order_id" in items[0]:
+            captured.append([r["wb_order_id"] for r in items])
         return original_chunks(items, size)
 
     monkeypatch.setattr(orders_service, "_chunks", spy)
@@ -951,6 +1028,37 @@ async def test_writeoff_skips_orders_without_link(db_session, env):
     written = await orders_service.writeoff_completed_orders(db_session, env.project_id)
     assert written == 0
     assert await _stock_qty(db_session, env.project_id, env.warehouse_id, env.nomenclature_id) == 5
+
+
+@pytest.mark.asyncio
+async def test_writeoff_does_not_write_to_soft_deleted_warehouse(db_session, env):
+    """Привязка к мягко удалённому складу — НЕ привязка: в мёртвый остаток не списываем.
+
+    Канон домена: удалённый склад выпадает из привязок (`get_linked_warehouse_ids`).
+    Раньше `_active_links_subquery` мёртвых не фильтровал, и списание уходило в
+    остаток склада, которого нет в интерфейсе; теперь задание честно blocked.
+    """
+    wh = (
+        await db_session.execute(select(Warehouse).where(Warehouse.id == env.warehouse_id))
+    ).scalar_one()
+    wh.is_deleted = True
+    await db_session.commit()
+
+    await _seed_order(
+        db_session,
+        env.project_id,
+        7046,
+        supplier_status=FbsSupplierStatus.COMPLETE.value,
+        nomenclature_id=env.nomenclature_id,
+    )
+
+    written = await orders_service.writeoff_completed_orders(db_session, env.project_id)
+    assert written == 0
+    # Остаток мёртвого склада не тронут, задание осталось неотмеченным.
+    assert await _stock_qty(db_session, env.project_id, env.warehouse_id, env.nomenclature_id) == 5
+    db_session.expire_all()
+    rows = await _orders(db_session, env.project_id)
+    assert all(r.written_off_at is None for r in rows)
 
 
 @pytest.mark.asyncio
@@ -1284,6 +1392,68 @@ async def test_delivery_phases_split_in_transit_from_sorted(db_session, env):
 
 
 @pytest.mark.asyncio
+async def test_in_delivery_is_whitelist_not_blacklist(db_session, env):
+    """Фаза «в пути» — БЕЛЫЙ список до-сортировочных `wbStatus`, не чёрный.
+
+    Чёрный список «complete минус sorted минус sold/defect» возвращал любой
+    неизвестный пост-сортировочный статус обратно в «едет к СЦ»: 168 заказов в
+    `ready_for_pickup` (лежат в ПВЗ) через 2 дня зажигали «зависло»
+    (прод 30.07.2026). Теперь: `waiting`/пустой/NULL — в пути; `ready_for_pickup`/
+    `postponed_delivery` — фаза «отсортировано»; НЕИЗВЕСТНЫЙ новый статус WB —
+    ни в одной фазе; WB-отмена при complete — тоже ни в одной.
+    """
+    done = FbsSupplierStatus.COMPLETE.value
+    await _seed_order(db_session, env.project_id, 9620, supplier_status=done, wb_status="ready_for_pickup")
+    await _seed_order(db_session, env.project_id, 9621, supplier_status=done, wb_status="postponed_delivery")
+    await _seed_order(db_session, env.project_id, 9622, supplier_status=done, wb_status="waiting")
+    await _seed_order(db_session, env.project_id, 9623, supplier_status=done, wb_status="")
+    await _seed_order(db_session, env.project_id, 9624, supplier_status=done, wb_status=None)
+    # Неизвестный статус WB: белый список не пускает его в «едет к СЦ».
+    await _seed_order(db_session, env.project_id, 9625, supplier_status=done, wb_status="new_wb_status_2027")
+    # WB-отмена при complete: effective — cancel, ни одна фаза не считает.
+    await _seed_order(db_session, env.project_id, 9626, supplier_status=done, wb_status="canceled_by_client")
+
+    listed = await orders_service.list_orders(db_session, env.project_id)
+    assert listed["in_delivery_count"] == 3  # waiting + "" + NULL
+    assert listed["sorted_count"] == 2  # ready_for_pickup + postponed_delivery
+
+    in_delivery = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_IN_DELIVERY_STATUS
+    )
+    assert {o["wb_order_id"] for o in in_delivery["items"]} == {9622, 9623, 9624}
+    sorted_phase = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_SORTED_STATUS
+    )
+    assert {o["wb_order_id"] for o in sorted_phase["items"]} == {9620, 9621}
+
+
+@pytest.mark.parametrize(
+    ("wb_status", "expected"),
+    [
+        (None, True),
+        ("", True),
+        ("waiting", True),
+        ("sent_to_carrier", True),
+        ("accepted_by_carrier", True),
+        ("sorted", False),
+        ("ready_for_pickup", False),
+        ("postponed_delivery", False),
+        ("sold", False),
+        ("defect", False),
+        ("canceled_by_client", False),
+        ("new_wb_status_2027", False),  # белый список: неизвестное — НЕ «в пути»
+    ],
+)
+def test_is_in_delivery_row_mirrors_whitelist(wb_status, expected):
+    """Питон-зеркало `_is_in_delivery_row` повторяет белый список SQL бит-в-бит."""
+    order = WbFbsOrder(supplier_status=FbsSupplierStatus.COMPLETE.value, wb_status=wb_status)
+    assert orders_service._is_in_delivery_row(order) is expected
+    # Не-complete — False при любом wb_status.
+    order_new = WbFbsOrder(supplier_status=FbsSupplierStatus.NEW.value, wb_status=wb_status)
+    assert orders_service._is_in_delivery_row(order_new) is False
+
+
+@pytest.mark.asyncio
 async def test_warehouse_summary_windows_delivery_but_not_the_queue(db_session, env):
     """Период режет ТОЛЬКО фазы доставки; очередь сборки отдаётся целиком.
 
@@ -1321,6 +1491,332 @@ async def test_warehouse_summary_windows_delivery_but_not_the_queue(db_session, 
     # Без окна — вся история фаз доставки.
     full = await orders_service.warehouse_summary(db_session, env.project_id)
     assert full["totals"]["in_delivery"] == 2
+
+
+# ─── Зависшие в пути на СЦ: transit_days и псевдо-статус in_delivery_stuck ───
+
+
+async def _seed_supply(db_session, project_id: int, wb_supply_id: str, **over) -> WbFbsSupply:
+    fields = {"project_id": project_id, "wb_supply_id": wb_supply_id, "done": True}
+    fields.update(over)
+    supply = WbFbsSupply(**fields)
+    db_session.add(supply)
+    await db_session.commit()
+    return supply
+
+
+@pytest.mark.asyncio
+async def test_transit_days_anchor_priority_and_fallback(db_session, env):
+    """Якорь передачи: scan_dt → closed_at → written_off_at; без якоря — None.
+
+    🔴 Дни считаются int-усечением от `total_seconds()/86400`, не `timedelta.days`
+    в сравнении (грабля проекта): 4.5 суток в пути — это «4 дня», 0.5 — «0».
+    """
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    # scan_dt перебивает closed_at.
+    await _seed_supply(
+        db_session,
+        env.project_id,
+        "WB-GI-T1",
+        scan_dt=now - timedelta(days=4, hours=12),
+        closed_at=now - timedelta(days=10),
+    )
+    # Нет scan_dt — берём closed_at.
+    await _seed_supply(db_session, env.project_id, "WB-GI-T2", closed_at=now - timedelta(days=3, hours=5))
+    await _seed_order(
+        db_session, env.project_id, 9800, supplier_status=done, wb_status=None, supply_id="WB-GI-T1"
+    )
+    await _seed_order(
+        db_session, env.project_id, 9801, supplier_status=done, wb_status=None, supply_id="WB-GI-T2"
+    )
+    # Поставки нет — фолбэк на written_off_at (списание = момент передачи).
+    await _seed_order(
+        db_session,
+        env.project_id,
+        9802,
+        supplier_status=done,
+        wb_status=None,
+        written_off_at=now - timedelta(hours=12),
+    )
+    # Ни поставки, ни списания — точку отсчёта взять неоткуда.
+    await _seed_order(db_session, env.project_id, 9803, supplier_status=done, wb_status=None)
+    # Отсортировано — фаза «едет» кончилась, transit_days не считается.
+    await _seed_order(
+        db_session, env.project_id, 9804, supplier_status=done, wb_status="sorted", supply_id="WB-GI-T1"
+    )
+    # Не complete — тем более None.
+    await _seed_order(db_session, env.project_id, 9805)
+
+    listed = await orders_service.list_orders(db_session, env.project_id)
+    by_id = {o["wb_order_id"]: o["transit_days"] for o in listed["items"]}
+    assert by_id[9800] == 4
+    assert by_id[9801] == 3
+    assert by_id[9802] == 0
+    assert by_id[9803] is None
+    assert by_id[9804] is None
+    assert by_id[9805] is None
+
+
+@pytest.mark.asyncio
+async def test_stuck_filter_window_and_counter(db_session, env):
+    """Зависло = передано 1–30 дней назад, СЦ не принял; вне окна — не зависло.
+
+    Порог — СУТКИ от скана QR (канон владельца 30.07): отвезли, а СЦ за день
+    так и не принял конкретный заказ — уже зависание.
+    """
+    from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    await _seed_supply(db_session, env.project_id, "WB-GI-S1", scan_dt=now - timedelta(hours=12))
+    await _seed_supply(db_session, env.project_id, "WB-GI-S2", scan_dt=now - timedelta(days=3))
+    await _seed_supply(db_session, env.project_id, "WB-GI-S3", scan_dt=now - timedelta(days=40))
+    # Моложе порога (полсуток < 1 дня) — штатно едет.
+    await _seed_order(
+        db_session, env.project_id, 9810, supplier_status=done, wb_status=None, supply_id="WB-GI-S1"
+    )
+    # В окне 1–30 дней — зависло.
+    await _seed_order(
+        db_session, env.project_id, 9811, supplier_status=done, wb_status=None, supply_id="WB-GI-S2"
+    )
+    # Старше потолка — застывший wb_status, не живой груз.
+    await _seed_order(
+        db_session, env.project_id, 9812, supplier_status=done, wb_status=None, supply_id="WB-GI-S3"
+    )
+    # СЦ принял — уже не «едет», каким бы старым ни был якорь.
+    await _seed_order(
+        db_session, env.project_id, 9813, supplier_status=done, wb_status="sorted", supply_id="WB-GI-S2"
+    )
+    # Без якоря — зависшим не считается (точки отсчёта нет).
+    await _seed_order(db_session, env.project_id, 9814, supplier_status=done, wb_status=None)
+
+    listed = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_IN_DELIVERY_STUCK_STATUS
+    )
+    assert listed["total"] == 1
+    assert listed["in_delivery_stuck_count"] == 1
+    assert {o["wb_order_id"] for o in listed["items"]} == {9811}
+    # transit_days у зависшего задания заполнен от того же якоря.
+    assert listed["items"][0]["transit_days"] == 3
+
+
+@pytest.mark.asyncio
+async def test_stuck_not_lit_by_post_sort_or_unknown_status(db_session, env):
+    """`ready_for_pickup` (лежит в ПВЗ) и неизвестный статус НЕ зажигают «зависло».
+
+    Прод 30.07.2026: чёрный список возвращал пост-сортировочные статусы в «едет
+    к СЦ», и 168 заказов из ПВЗ через 2 дня светились зависшими. Белый список:
+    при том же старом якоре зависшим остаётся только до-сортировочный `waiting`
+    (и пустой статус — канон «в пути»).
+    """
+    from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    await _seed_supply(db_session, env.project_id, "WB-GI-RFP", scan_dt=now - timedelta(days=5))
+    await _seed_order(
+        db_session,
+        env.project_id,
+        9830,
+        supplier_status=done,
+        wb_status="ready_for_pickup",
+        supply_id="WB-GI-RFP",
+    )
+    await _seed_order(
+        db_session,
+        env.project_id,
+        9831,
+        supplier_status=done,
+        wb_status="new_wb_status_2027",
+        supply_id="WB-GI-RFP",
+    )
+    await _seed_order(
+        db_session, env.project_id, 9832, supplier_status=done, wb_status="waiting", supply_id="WB-GI-RFP"
+    )
+
+    listed = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_IN_DELIVERY_STUCK_STATUS
+    )
+    assert listed["in_delivery_stuck_count"] == 1
+    assert {o["wb_order_id"] for o in listed["items"]} == {9832}
+    # ПВЗ-заказ — в фазе «отсортировано», не потерян.
+    assert listed["sorted_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stuck_filter_ignores_page_period(db_session, env):
+    """Окно периода страницы НЕ режет зависшие: это очередь проблем, не история."""
+    from backend.models.wb_fbs import FBS_IN_DELIVERY_STUCK_STATUS
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    await _seed_supply(db_session, env.project_id, "WB-GI-P1", scan_dt=now - timedelta(days=5))
+    # Задание создано 20 дней назад — заведомо ВНЕ узкого окна страницы.
+    await _seed_order(
+        db_session,
+        env.project_id,
+        9820,
+        supplier_status=done,
+        wb_status=None,
+        supply_id="WB-GI-P1",
+        created_at_wb=now - timedelta(days=20),
+    )
+
+    day = date.today()
+    listed = await orders_service.list_orders(
+        db_session,
+        env.project_id,
+        status=FBS_IN_DELIVERY_STUCK_STATUS,
+        date_from=day - timedelta(days=1),
+        date_to=day,
+    )
+    # Период выкинул бы задание (создано 20 дней назад) — фильтр зависших его держит.
+    assert listed["total"] == 1
+    assert {o["wb_order_id"] for o in listed["items"]} == {9820}
+    assert listed["in_delivery_stuck_count"] == 1
+    # Обычные счётчики при этом окно уважают: в узком периоде заданий нет.
+    assert listed["in_delivery_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_warehouse_summary_counts_stuck_without_period(db_session, env):
+    """`in_delivery_stuck` в сводке складов — БЕЗ периода (как очередь сборки)."""
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    await _seed_supply(db_session, env.project_id, "WB-GI-W1", scan_dt=now - timedelta(days=5))
+    await _seed_order(
+        db_session,
+        env.project_id,
+        9830,
+        supplier_status=done,
+        wb_status=None,
+        supply_id="WB-GI-W1",
+        created_at_wb=now - timedelta(days=20),
+    )
+    # Свежее «едет» (полсуток < порога-суток) — в периоде, но НЕ зависло.
+    await _seed_supply(db_session, env.project_id, "WB-GI-W2", scan_dt=now - timedelta(hours=12))
+    await _seed_order(
+        db_session,
+        env.project_id,
+        9831,
+        supplier_status=done,
+        wb_status=None,
+        supply_id="WB-GI-W2",
+        created_at_wb=now - timedelta(days=1),
+    )
+
+    day = date.today()
+    summary = await orders_service.warehouse_summary(
+        db_session, env.project_id, date_from=day - timedelta(days=2), date_to=day
+    )
+    totals = summary["totals"]
+    # Период отрезал 9830 от «в доставке», но не от «зависло».
+    assert totals["in_delivery"] == 1
+    assert totals["in_delivery_stuck"] == 1
+    row = next(r for r in summary["warehouses"] if r["wb_warehouse_id"] == WB_WAREHOUSE_ID)
+    assert row["in_delivery_stuck"] == 1
+
+
+# ─── Завершённые (delivered) и фаза поставки в строках ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_delivered_count_and_filter(db_session, env):
+    """«Завершённые» = complete + sold/defect; waiting не считается; окно уважается.
+
+    Это ИСТОРИЯ, а не очередь — в отличие от `in_delivery_stuck` период страницы
+    режет и счётчик, и выдачу (симметрично `sorted`).
+    """
+    from backend.models.wb_fbs import FBS_DELIVERED_STATUS
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    await _seed_order(
+        db_session, env.project_id, 9900, supplier_status=done, wb_status="sold",
+        created_at_wb=now - timedelta(days=1),
+    )
+    await _seed_order(
+        db_session, env.project_id, 9901, supplier_status=done, wb_status="defect",
+        created_at_wb=now - timedelta(days=2),
+    )
+    # Ещё едет — НЕ завершённое.
+    await _seed_order(
+        db_session, env.project_id, 9902, supplier_status=done, wb_status="waiting",
+        created_at_wb=now - timedelta(days=1),
+    )
+    await _seed_order(db_session, env.project_id, 9903, created_at_wb=now - timedelta(days=1))
+    # Завершённое ВНЕ окна периода — история, окно его отрезает.
+    await _seed_order(
+        db_session, env.project_id, 9904, supplier_status=done, wb_status="sold",
+        created_at_wb=now - timedelta(days=120),
+    )
+
+    listed = await orders_service.list_orders(db_session, env.project_id)
+    assert listed["delivered_count"] == 3  # sold + defect + старое sold
+
+    delivered = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_DELIVERED_STATUS
+    )
+    assert delivered["total"] == 3
+    assert {o["wb_order_id"] for o in delivered["items"]} == {9900, 9901, 9904}
+
+    day = date.today()
+    windowed = await orders_service.list_orders(
+        db_session, env.project_id, status=FBS_DELIVERED_STATUS,
+        date_from=day - timedelta(days=30), date_to=day,
+    )
+    assert windowed["delivered_count"] == 2
+    assert windowed["total"] == 2
+    assert {o["wb_order_id"] for o in windowed["items"]} == {9900, 9901}
+
+
+@pytest.mark.asyncio
+async def test_rows_carry_supply_phase(db_session, env):
+    """Каждая строка несёт фазу СВОЕЙ поставки: done/scan_dt; без поставки — None/None.
+
+    `supplier_status='complete'` значит лишь «поставка закрыта у нас» — сдано ли
+    WB, знает только скан QR, и без этой пары фронт рисовал зелёное «В доставке»
+    на неотсканированной поставке.
+    """
+    from backend.utils.time import utcnow
+
+    now = utcnow()
+    done = FbsSupplierStatus.COMPLETE.value
+    scan = now - timedelta(days=1)
+    await _seed_supply(db_session, env.project_id, "WB-GI-PH1", done=True, scan_dt=scan)
+    # Закрыта, но QR НЕ отсканирован — «Отгрузите товар», не «в доставке».
+    await _seed_supply(db_session, env.project_id, "WB-GI-PH2", done=True, scan_dt=None)
+    await _seed_order(
+        db_session, env.project_id, 9910, supplier_status=done, wb_status=None, supply_id="WB-GI-PH1"
+    )
+    await _seed_order(
+        db_session, env.project_id, 9911, supplier_status=done, wb_status=None, supply_id="WB-GI-PH2"
+    )
+    await _seed_order(db_session, env.project_id, 9912)  # без поставки
+    # supply_id есть, но зеркало поставку не знает — честные None/None.
+    await _seed_order(
+        db_session, env.project_id, 9913, supplier_status=done, wb_status=None, supply_id="WB-GI-GHOST"
+    )
+
+    listed = await orders_service.list_orders(db_session, env.project_id)
+    by_id = {o["wb_order_id"]: o for o in listed["items"]}
+    assert by_id[9910]["supply_done"] is True
+    assert by_id[9910]["supply_scan_dt"] == scan
+    assert by_id[9911]["supply_done"] is True
+    assert by_id[9911]["supply_scan_dt"] is None
+    assert by_id[9912]["supply_done"] is None
+    assert by_id[9912]["supply_scan_dt"] is None
+    assert by_id[9913]["supply_done"] is None
+    assert by_id[9913]["supply_scan_dt"] is None
 
 
 # ─── Контур: песочница не трогает боевые данные ──────────────────────────────

@@ -65,12 +65,13 @@ from backend.models import (
     WarehouseStock,
 )
 from backend.models.assembly import (
+    AssemblyKind,
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,
     AssemblyStatusHistory,
 )
-from backend.models.warehouse import StockTransfer, StockTransferItem, TransferStatus
+from backend.models.warehouse import StockMovement, StockTransfer, StockTransferItem, TransferStatus
 from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.assembly import AssemblyItemCreate, AssemblyRequestCreate
 from backend.schemas.fulfillment import FfBulkCreateRequestPayload, FfCreateFormResponse, FfCreateRequestPayload
@@ -1996,6 +1997,9 @@ async def _mark_linked_assemblies_ready(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.id.in_(list(ready_by_assembly)),
             AssemblyRequest.is_deleted == False,
+            # kind=fbs — учётное зеркало: статусы двигает ТОЛЬКО джоб fbs_mirror
+            # (страховка: ФФ-привязки у зеркала нет по построению).
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.status == AssemblyStatus.IN_PROGRESS.value,
         )
         # row-lock: ручной переход/линк в параллельной транзакции не должен
@@ -2178,6 +2182,8 @@ async def build_ff_board_text(db: AsyncSession, project_id: int, warehouse_id: i
         AssemblyRequest.is_deleted == False,
         Warehouse.is_deleted == False,
         AssemblyRequest.status.in_(_BOARD_STATUSES),
+        # kind=fbs — зеркало сборки, которую ФФ ведёт сам: на доску оператору не выводим.
+        AssemblyRequest.kind != AssemblyKind.FBS.value,
     ]
     if warehouse_id is not None:
         conditions.append(AssemblyRequest.warehouse_id == warehouse_id)
@@ -2428,6 +2434,8 @@ async def _collect_assembly_ship_candidates(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.id.in_(shipped_ids),
             AssemblyRequest.is_deleted == False,
+            # kind=fbs исключён — авто-шип списал бы сток, который спишет writeoff.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.status.in_(
                 [AssemblyStatus.VEHICLE_ASSIGNED.value, AssemblyStatus.READY.value]
             ),
@@ -2687,6 +2695,58 @@ async def ff_boxed_by_nomenclature(
     return out
 
 
+#: `reference_type` движений склада по FBS-продажам. Значение обязано совпадать
+#: с `services/wb_fbs/orders_service._WRITEOFF_REF_TYPE` — прямой импорт оттуда
+#: дал бы цикл (wb_fbs.stock_service уже импортирует fulfillment_service),
+#: поэтому константа продублирована, а равенство держит тест-связка
+#: tests/test_fulfillment_service.py::test_fbs_ref_type_matches_orders_service.
+_FBS_WRITEOFF_REF_TYPE = "FBS_ORDER"
+
+
+async def _fbs_shipped_multi(
+    db: AsyncSession, project_id: int, warehouse_ids: list[int]
+) -> dict[int, dict[str, int]]:
+    """{warehouse_id: {barcode: units}} — нетто отгружено по FBS с наших складов.
+
+    Ни один из трёх WMS-провайдеров не снимает свой остаток под FBS-продажи
+    (сверка на проде 29.07.2026): мы списали единицу из ledger'а, а ff_good
+    зеркала не шелохнулся — и каждая FBS-продажа читается как ложное «у ФФ
+    больше». Этот агрегат — сколько ВЫЧЕСТЬ из ff_good (знак обратный
+    `_logistics_in_transit_*`: там досчитываем К ff_good).
+
+    Нетто по движениям `reference_type = 'FBS_ORDER'`: OUTBOUND списания
+    отрицательные, INBOUND-сторно отмен положительные — `-SUM(quantity)`
+    схлопывает их сам. Значения ≤ 0 (всё сторнировано) отбрасываются.
+    """
+    if not warehouse_ids:
+        return {}
+    result = await db.execute(
+        select(
+            StockMovement.warehouse_id,
+            StockMovement.barcode,
+            (-func.sum(StockMovement.quantity)).label("units"),
+        )
+        .where(
+            StockMovement.project_id == project_id,
+            StockMovement.reference_type == _FBS_WRITEOFF_REF_TYPE,
+            StockMovement.warehouse_id.in_(warehouse_ids),
+        )
+        .group_by(StockMovement.warehouse_id, StockMovement.barcode)
+    )
+    out: dict[int, dict[str, int]] = {}
+    for wid, barcode, units in result.all():
+        units = int(units or 0)
+        if units > 0 and barcode:
+            out.setdefault(wid, {})[barcode] = units
+    return out
+
+
+async def _fbs_shipped_by_barcode(db: AsyncSession, project_id: int, warehouse_id: int) -> dict[str, int]:
+    """{barcode: units} FBS-вычета одного склада (см. `_fbs_shipped_multi`)."""
+    multi = await _fbs_shipped_multi(db, project_id, [warehouse_id])
+    return multi.get(warehouse_id, {})
+
+
 # Сборка ещё «наша» (сток у нас на складе, ship_request не списал) — пред-отгрузочные
 # статусы. SHIPPED и далее (наш сток уже списан) сюда не входят.
 _PRESHIP_ASSEMBLY_STATUSES = (
@@ -2768,6 +2828,12 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     резерв (stock_locked) делится на «Собрано» (ready, capped под резерв) + «Брак ФФ»
     (остаток). diff сверяет ИТОГИ: ff_good − (our_quantity + our_defect). Сортировка
     diff desc, затем barcode.
+
+    ff_good отдаётся с двумя поправками: досчёт логистики (`ff_logistics`, К
+    ff_good, кламп по наблюдаемой недостаче) и FBS-вычет (`ff_fbs`, ИЗ ff_good,
+    кап по наблюдаемому ПРОФИЦИТУ ff_good − наш итог) — diff считается от уже
+    поправленного ff_good и остаётся честным сам, а после выравнивания остатков
+    (ADJUSTMENT / провайдер начал списывать сам) вычет самоизлечивается в 0.
     """
     result = await db.execute(
         select(FulfillmentStock)
@@ -2844,6 +2910,7 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
             "ff_box_units": 0,  # из них пришло коробами (в штуках россыпи)
             "ff_box_count": 0,  # сколько коробов годного
             "ff_logistics": 0,  # досчитано к ff_good: товар в стадии списания логистики, ещё на складе ФФ
+            "ff_fbs": 0,  # вычтено из ff_good: отгружено по FBS у нас, провайдер не списал
             "our_quantity": 0,
             "our_defect": 0,
             "diff": 0,
@@ -2934,6 +3001,49 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
                 irow["ff_inbound_locked"] += take
                 irow["ff_defect"] -= take
 
+    # FBS-вычет из ff_good: провайдер выбытие под FBS-продажи не отражает
+    # (ни один из трёх WMS, сверка 29.07.2026) — без вычета каждая FBS-продажа
+    # читается как ложное «у ФФ больше». База вычета — ff_good УЖЕ с досчётом
+    # логистики. КАП по НАБЛЮДАЕМОМУ ПРОФИЦИТУ (как у соседа ff_logistics, где
+    # досчёт клампится наблюдаемой недостачей): surplus = ff_good − наш итог —
+    # ровно та развилка, по которой ниже считается diff. Прежний кап по одному
+    # ff_good (lifetime-нетто) после первой же сверки ADJUSTMENT'ом — или если
+    # провайдер однажды спишет сам — давал ВЕЧНОЕ ложное «у нас больше». В
+    # штатном случае профицит и есть объём FBS (полезный эффект не теряется),
+    # а самоизлечение появляется: выровняли остатки — вычет гаснет сам.
+    fbs_shipped = await _fbs_shipped_by_barcode(db, project_id, warehouse_id)
+    fbs_shipped_total = 0
+    fbs_applied_total = 0
+    fbs_key_misses = 0
+    for barcode, shipped in fbs_shipped.items():
+        fbs_shipped_total += shipped
+        frow = rows.get(barcode)
+        if frow is None:
+            # Движение есть, а строки (ни зеркала, ни учёта) нет — вычитать не
+            # из чего; счётчик промахов делает сломанную предпосылку видимой.
+            fbs_key_misses += 1
+            continue
+        our_total = frow["our_quantity"] + (frow["our_defect"] if is_migfull else 0)
+        surplus = frow["ff_good"] - our_total
+        applied = min(shipped, max(surplus, 0))
+        if applied <= 0:
+            continue
+        fbs_applied_total += applied
+        frow["ff_fbs"] += applied
+        frow["ff_good"] -= applied
+    if fbs_shipped:
+        # Раз на вызов, не на строку: clip > 0 или промахи ключа — сигнал, что
+        # предпосылка «провайдер не списывает под FBS» могла сломаться.
+        logger.info(
+            "FF FBS-вычет: project=%s warehouse=%s shipped=%s applied=%s clip=%s key_misses=%s",
+            project_id,
+            warehouse_id,
+            fbs_shipped_total,
+            fbs_applied_total,
+            fbs_shipped_total - fbs_applied_total,
+            fbs_key_misses,
+        )
+
     for row in rows.values():
         if is_migfull:
             # ff_good (stock_actual) включает брак → сравниваем с нашим ИТОГОМ,
@@ -2951,6 +3061,7 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         "ff_defect": sum(r["ff_defect"] for r in out_rows),
         "ff_box_units": sum(r["ff_box_units"] for r in out_rows),
         "ff_logistics": sum(r["ff_logistics"] for r in out_rows),
+        "ff_fbs": sum(r["ff_fbs"] for r in out_rows),
         "our_quantity": sum(r["our_quantity"] for r in out_rows),
         "diff": sum(r["diff"] for r in out_rows),
         "unmatched": sum(1 for k in ff_keys if rows[k]["nomenclature_id"] is None),
@@ -3792,6 +3903,8 @@ async def _load_match_suggestions(
             AssemblyRequest.warehouse_id.in_({r.warehouse_id for r in targets}),
             AssemblyRequest.is_deleted == False,
             AssemblyRequest.status.in_(_SUGGEST_CANDIDATE_STATUSES),
+            # kind=fbs не связывается с заявками ФФ (учётное зеркало без ФФ-цикла).
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.id.not_in(linked_subq),
         )
         .limit(_SUGGEST_CANDIDATES_LIMIT)
@@ -4047,6 +4160,8 @@ async def list_unlinked_assemblies(
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted == False,
             AssemblyRequest.status.in_(_UNLINKED_ASSEMBLY_STATUSES),
+            # kind=fbs не предлагаем к связыванию с заявками ФФ.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             ~linked,
         )
         .order_by(AssemblyRequest.created_at.desc(), AssemblyRequest.id.desc())
@@ -5786,6 +5901,9 @@ async def _assembly_candidates(
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted == False,
             AssemblyRequest.status != AssemblyStatus.CANCELLED.value,
+            # Зеркала FBS с заявками ФФ не связываются (канон kind=fbs) —
+            # братья _load_match_suggestions/list_unlinked_assemblies уже фильтруют.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
         )
         .order_by(AssemblyRequest.created_at.desc(), AssemblyRequest.id.desc())
         .limit(_LINK_CANDIDATES_LIMIT)

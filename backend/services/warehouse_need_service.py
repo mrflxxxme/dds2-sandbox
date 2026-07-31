@@ -252,6 +252,7 @@ async def get_warehouse_need(
             якорей greedy сохраняется — меняется только точка остановки.
     """
     from backend.models.assembly import (
+        AssemblyKind,
         AssemblyRequest,
         AssemblyRequestItem,
         AssemblyStatus,
@@ -758,6 +759,9 @@ async def get_warehouse_need(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
             AssemblyRequest.status.in_(active_statuses),
+            # kind=fbs — учётное зеркало: сток-обязательств не несёт (инвариант
+            # _get_reserved_map_batch), в «в сборке» не считается.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             Nomenclature.article_wb.isnot(None),
         )
         .group_by(Nomenclature.article_wb, AssemblyRequest.warehouse_id)
@@ -785,6 +789,10 @@ async def get_warehouse_need(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
             AssemblyRequest.status == AssemblyStatus.SHIPPED,
+            # Зеркала FBS не едут на склад WB — товар продан покупателю.
+            # Без фильтра фантомный «транзит» занижал потребность по SKU,
+            # которые продаются и по FBS.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             Nomenclature.article_wb.isnot(None),
         )
         .group_by(Nomenclature.article_wb)
@@ -825,6 +833,7 @@ async def get_warehouse_need(
             # active_statuses / in_assembly_per_wh — иначе зарезервируется не приехавший
             # ФФ-сток (фейк-резерв). См. критику C1 в .claude/PREDIST_DESIGN.md.
             AssemblyRequest.status.in_([*active_statuses, AssemblyStatus.SHIPPED, AssemblyStatus.PRE_DISTRIBUTED]),
+            AssemblyRequest.kind != AssemblyKind.FBS.value,  # зеркала FBS — не обязательства стока
             Nomenclature.article_wb.isnot(None),
         )
         .group_by(Nomenclature.article_wb, AssemblyRequest.status, target_label)

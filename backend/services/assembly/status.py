@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.cache import invalidate_cache
 from backend.models.assembly import (
     ASSEMBLY_TRANSITIONS,
+    AssemblyKind,
     AssemblyPickupCostHistory,
     AssemblyRequest,
     AssemblyStatus,
@@ -161,6 +162,31 @@ async def _warehouse_counterparty_id(db: AsyncSession, project_id: int, warehous
 # --- Helpers (used by crud.py via from .status import _log_status_change) ---
 
 
+class FbsMirrorManualError(ValueError):
+    """Ручное действие над учётной заявкой kind=fbs.
+
+    Зеркало ведёт джоб (`wb_fbs.assembly_mirror`): статусы двигаются по фазе
+    поставки FBS, ручные переходы запрещены полностью — они разъехались бы с
+    источником истины на следующем же тике, а ship-путь ещё и тронул бы сток
+    (двойное списание: его уже делает `writeoff_completed_orders`).
+    Наследует ValueError: bulk-пути (`set_status_bulk`, `delete_bulk`)
+    перехватывают её как обычный отказ и пропускают заявку с причиной;
+    роутер отличает по типу и отвечает 422 (а не 400).
+    """
+
+
+_FBS_MANUAL_DENIED = (
+    "Заявка FBS ведётся автоматически (учётное зеркало поставки FBS) — "
+    "ручная смена статуса недоступна"
+)
+
+
+def _deny_fbs_manual(req: AssemblyRequest) -> None:
+    """Гейт ручных переходов: kind=fbs → FbsMirrorManualError (роутер → 422)."""
+    if req.kind == AssemblyKind.FBS.value:
+        raise FbsMirrorManualError(_FBS_MANUAL_DENIED)
+
+
 def _check_transition(current: AssemblyStatus, target: AssemblyStatus) -> None:
     """Validate status transition. Raises ValueError if not allowed."""
     allowed = ASSEMBLY_TRANSITIONS.get(current, set())
@@ -224,6 +250,7 @@ async def start_assembly(db: AsyncSession, project_id: int, request_id: int) -> 
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
+    _deny_fbs_manual(req)
 
     # Idempotent: новые заявки создаются сразу в IN_PROGRESS, повторный клик «Начать сборку» — no-op.
     if AssemblyStatus(req.status) == AssemblyStatus.IN_PROGRESS:
@@ -264,6 +291,7 @@ async def mark_ready(db: AsyncSession, project_id: int, request_id: int) -> Asse
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
+    _deny_fbs_manual(req)
 
     if not req.wb_fbo_supply_id:
         raise ValueError("Нельзя перевести заявку в статус ГОТОВО без привязанной поставки WB")
@@ -401,6 +429,7 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
+    _deny_fbs_manual(req)
 
     targets = await _joint_active_siblings(db, project_id, req)
     if len(targets) >= 2:
@@ -638,6 +667,7 @@ async def unassign_vehicle(db: AsyncSession, project_id: int, request_id: int) -
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
+    _deny_fbs_manual(req)
 
     _check_transition(AssemblyStatus(req.status), AssemblyStatus.READY)
     old = req.status
@@ -681,6 +711,9 @@ async def ship_request(
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
+    # kind=fbs НИКОГДА не отгружается этим путём (ship списывает сток; списание
+    # FBS делает только writeoff_completed_orders) — гейт до любых мутаций.
+    _deny_fbs_manual(req)
 
     # Row-lock + ре-чтение статуса под локом: сериализует параллельные попытки
     # отгрузить ОДНУ заявку (WB-ACCEPTED авто-шип ‖ FF авто-шип ‖ ручной/bulk —
@@ -827,6 +860,7 @@ async def ship_joint_supply(db: AsyncSession, project_id: int, request_id: int) 
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
+    _deny_fbs_manual(req)
 
     siblings = await _joint_active_siblings(db, project_id, req)
     to_ship = [s.id for s in siblings if AssemblyStatus(s.status) == AssemblyStatus.VEHICLE_ASSIGNED]
@@ -855,6 +889,9 @@ async def cancel_request(db: AsyncSession, project_id: int, request_id: int) -> 
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
+    # Отмена kind=fbs — только джобом (по reject_dt/отмене заданий): ручной
+    # cancel разъехался бы с фазой поставки на следующем тике.
+    _deny_fbs_manual(req)
 
     # Row-lock + ре-чтение под локом (симметрично ship_request / return_to_warehouse):
     # cancel — единственный переход, ОТКАТЫВАЮЩИЙ сток. Без лока переход валидировался
@@ -965,6 +1002,7 @@ async def return_to_warehouse(
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
+    _deny_fbs_manual(req)
 
     # Row-lock + ре-чтение статуса (симметрично ship_request): сериализует
     # «Вернуть» ‖ параллельные переходы по этой заявке.
@@ -1138,6 +1176,7 @@ async def reopen_for_reship(
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
+    _deny_fbs_manual(req)
 
     pending_return = (
         await db.execute(
@@ -1183,6 +1222,7 @@ async def close_request(
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
+    _deny_fbs_manual(req)
 
     _check_transition(AssemblyStatus(req.status), AssemblyStatus.CLOSED)
     old = req.status
@@ -1221,7 +1261,16 @@ async def delete_request(db: AsyncSession, project_id: int, request_id: int) -> 
         raise ValueError("Assembly request not found")
 
     current = AssemblyStatus(req.status)
-    if current not in {AssemblyStatus.PENDING, AssemblyStatus.CANCELLED}:
+    if req.kind == AssemblyKind.FBS.value:
+        # Учётное зеркало: cancel руками запрещён (его двигает джоб), поэтому
+        # безопасный минимум удаления — терминальные CANCELLED/DELIVERED.
+        # Удалённое зеркало НЕ пересоздаётся (partial unique без is_deleted).
+        if current not in {AssemblyStatus.CANCELLED, AssemblyStatus.DELIVERED}:
+            raise ValueError(
+                "Заявку FBS можно удалить только в статусе «Отменена» или «Принято ВБ» — "
+                "статусы ведёт джоб зеркала"
+            )
+    elif current not in {AssemblyStatus.PENDING, AssemblyStatus.CANCELLED}:
         raise ValueError(f"Заявку в статусе «{current.value}» нельзя удалить. Сначала отмените её.")
 
     req.soft_delete()
@@ -1305,6 +1354,23 @@ async def delete_bulk(db: AsyncSession, project_id: int, ids: list[int]) -> dict
             continue
         status = AssemblyStatus(req.status)
         number = req.number
+        if req.kind == AssemblyKind.FBS.value:
+            # Зеркало FBS: cancel→delete путь недоступен (ручной cancel запрещён),
+            # удаляем только терминальные CANCELLED/DELIVERED — как в delete_request.
+            if status in {AssemblyStatus.CANCELLED, AssemblyStatus.DELIVERED}:
+                try:
+                    await delete_request(db, project_id, rid)
+                    deleted += 1
+                except ValueError as e:
+                    skipped.append({"id": rid, "number": number, "status": status.value, "reason": str(e)})
+            else:
+                skipped.append({
+                    "id": rid,
+                    "number": number,
+                    "status": status.value,
+                    "reason": "заявка FBS ведётся автоматически — удалить можно только «Отменена»/«Принято ВБ»",
+                })
+            continue
         if status in _NON_DELETABLE_STATUSES:
             skipped.append({
                 "id": rid,
@@ -1339,6 +1405,9 @@ async def deliver_request(
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
+    # Авто-DELIVERED синка FBO сюда с kind=fbs не приходит (нет wb_fbo-связи);
+    # зеркало FBS переводит в DELIVERED его собственный джоб напрямую.
+    _deny_fbs_manual(req)
     _check_transition(AssemblyStatus(req.status), AssemblyStatus.DELIVERED)
     old = req.status
     req.status = AssemblyStatus.DELIVERED

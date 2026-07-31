@@ -124,6 +124,7 @@ async def _free_ff_stock(
     только склады с available > 0. Зеркалит lean-логику warehouse_need_service.
     """
     from backend.models.assembly import (
+        AssemblyKind,
         AssemblyRequest,
         AssemblyRequestItem,
         AssemblyStatus,
@@ -187,6 +188,8 @@ async def _free_ff_stock(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
             AssemblyRequest.status.in_(active_statuses),
+            # kind=fbs — учётное зеркало FBS: резерв не держит.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.warehouse_id.in_(ff_ids),
             AssemblyRequestItem.nomenclature_id.in_(nomenclature_ids),
         )

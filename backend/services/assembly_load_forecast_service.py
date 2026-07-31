@@ -34,6 +34,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.assembly import (
+    AssemblyKind,
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,
@@ -274,6 +275,8 @@ async def _pipeline_incoming(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
             AssemblyRequest.status.in_([*_PIPELINE_ACTIVE_STATUSES, AssemblyStatus.SHIPPED]),
+            # kind=fbs — учётное зеркало FBS: не пайплайн на склады WB.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             Nomenclature.article_wb.in_(nm_ids),
         )
         .group_by(Nomenclature.article_wb, target_label)

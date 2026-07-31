@@ -9,9 +9,23 @@ WB FBS schemas: склады продавца и привязки, превью/
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
-from backend.models.wb_fbs import FBS_IN_DELIVERY_STATUS, FBS_SORTED_STATUS
+from backend.models.wb_fbs import (
+    FBS_CANCEL_CLIENT_STATUS,
+    FBS_CANCEL_SELLER_STATUS,
+    FBS_DELIVERED_STATUS,
+    FBS_IN_DELIVERY_STATUS,
+    FBS_IN_DELIVERY_STUCK_STATUS,
+    FBS_SORTED_STATUS,
+)
 
 # ─── Allowed enum values ─────────────────────────────────────────────────────
 
@@ -19,14 +33,25 @@ ALLOWED_STOCK_SOURCES = ["ledger", "ff_mirror", "min_of_both"]
 ALLOWED_WAREHOUSE_MODES = ["observe", "translate"]
 ALLOWED_FBS_MODES = ["safe", "sandbox", "prod"]
 ALLOWED_SUPPLIER_STATUSES = ["new", "confirm", "complete", "cancel", "cancel_carrier"]
-#: То же + псевдо-статус «ещё в доставке» (`complete` минус доставленное) —
-#: он валиден в фильтре списка заданий, но значением `supplierStatus` не является.
+#: То же + псевдо-статусы фаз доставки — валидны в фильтре списка заданий,
+#: но значениями `supplierStatus` не являются (`in_delivery` — ещё едет,
+#: `sorted` — принято СЦ, `in_delivery_stuck` — передано давно, СЦ не принял).
 ALLOWED_ORDER_STATUS_FILTERS = [
     *ALLOWED_SUPPLIER_STATUSES,
     FBS_IN_DELIVERY_STATUS,
     FBS_SORTED_STATUS,
+    FBS_IN_DELIVERY_STUCK_STATUS,
+    FBS_DELIVERED_STATUS,
+    FBS_CANCEL_CLIENT_STATUS,
+    FBS_CANCEL_SELLER_STATUS,
 ]
 ALLOWED_STICKER_TYPES = ["svg", "zplv", "zplh", "png"]
+#: Коды причин «не списано» — контракт с фронтом (словарь WRITEOFF_REASON_LABEL
+#: в fbsShared.tsx, закреплено тестами с обеих сторон): `no_stock` — остатка
+#: нет; `no_card` — нет карточки товара; `no_link` — склад продавца не привязан;
+#: `queued` — остаток ЕСТЬ, задание просто ещё не подхвачено прогоном списания
+#: (окно 5-минутного джоба / backlog) — это не проблема, а очередь.
+ALLOWED_WRITEOFF_REASONS = ["no_stock", "no_card", "no_link", "queued"]
 #: Производные состояния поставки (см. `models.wb_fbs.supply_status`) — своего
 #: поля статуса Marketplace API не отдаёт.
 ALLOWED_SUPPLY_STATUSES = ["active", "to_ship", "in_delivery", "rejected"]
@@ -112,6 +137,9 @@ class FbsWarehouseOut(BaseModel):
     #: Порог FBO-остатка: отдаём в FBS, только если на складах WB осталось ≤ этого.
     #: None — на FBO не смотрим.
     fbo_max_qty: int | None = None
+    #: Авто-учёт сборки FBS: заявки kind=fbs заводит и ведёт джоб (одна на
+    #: поставку WB-GI), сток/резерв они не трогают.
+    auto_assembly: bool = False
     synced_at: datetime | None = None
     links: list[FbsWarehouseLinkOut] = Field(default_factory=list)
 
@@ -141,6 +169,13 @@ class FbsWarehouseSettingsUpdate(BaseModel):
     mode: str | None = None
     #: -1 в запросе = «снять гейт» (None не отличить от «не передано»).
     fbo_max_qty: int | None = Field(None, ge=-1)
+    #: Авто-учёт сборки FBS: WMS склада сам заводит заявки по FBS-заказам —
+    #: мы зеркалим их учётными заявками kind=fbs (одна на поставку WB-GI).
+    auto_assembly: bool | None = None
+    #: Подтверждение рискованной комбинации «translate + ff_mirror», когда
+    #: зеркало ФФ выше нашего учёта: без force сервис отвечает 409 с цифрами
+    #: разрыва, с force — применяет как есть (решение человека).
+    force: bool = False
 
     @field_validator("mode")
     @classmethod
@@ -464,6 +499,63 @@ class FbsOrderOut(BaseModel):
     comment: str | None = None
     written_off_at: datetime | None = None
     synced_at: datetime
+    #: Сколько дней задание едет: от передачи поставки (scan_dt → closed_at →
+    #: written_off_at, что есть) до сейчас. Только у `complete`, ещё не принятых
+    #: СЦ; у прочих фаз и без якоря — None.
+    transit_days: int | None = None
+    #: Фаза ПОСТАВКИ задания — для кабинетного статуса строки: закрыта ли
+    #: (`done`) и отсканирован ли QR (`scan_dt`). Без них строка «complete +
+    #: waiting» читалась как противоречие: закрыто у нас ≠ сдано WB.
+    supply_done: bool | None = None
+    supply_scan_dt: datetime | None = None
+    #: Оценка штрафа WB за отмену (≈, см. `FbsCancelStats`) — заполняется ТОЛЬКО
+    #: в корзине «Наша отмена», чтобы итог плашки был разложим по строкам.
+    #: `None` = не корзина отмен либо нет ставки комиссии категории.
+    penalty_est: Decimal | None = None
+    #: Цена задания В РУБЛЯХ (канон `revenue_rub_expr`): рубль → sale_price →
+    #: price; валюта СНГ → пересчёт WB (`converted_price`). None — заказ в
+    #: чужой валюте, а пересчёт WB не прислал: показать номинал нельзя.
+    price_rub: Decimal | None = None
+
+
+class FbsCancelStats(BaseModel):
+    """Сводка корзины отмен (`status=cancel_client|cancel_seller`) по ВСЕЙ
+    выборке фильтра: потерянная выручка + штраф WB оценкой И фактом.
+
+    Два числа по штрафу намеренно: оценка есть сразу, но она приблизительная
+    (верхняя граница), факт точен до копейки, но садится в финотчёт WB примерно
+    на пятый день после даты заказа. Подробности расчёта и почему оценка выше
+    факта — в докстринге `services/wb_fbs/cancel_penalty.py`.
+    """
+
+    #: Потерянная выручка корзины: Σ coalesce(sale_price, price) по ВСЕЙ
+    #: выборке фильтра, а не по видимой странице.
+    revenue: Decimal = Decimal(0)
+    #: Заданий в выборке (дубль `total` — чтобы плашка не зависела от пагинации).
+    orders: int = 0
+
+    #: Оценка штрафа по правилам WB. У клиентских отмен всегда 0: такой штраф
+    #: («отмена покупателем из-за задержки продавца») отличить от обычного
+    #: отказа нечем, и в финотчёте проекта он не встречался ни разу.
+    penalty_est: Decimal = Decimal(0)
+    #: По скольким заданиям оценка реально посчиталась.
+    penalty_est_count: int = 0
+    #: Заданий без ставки комиссии в `wb_tariffs` — по ним штраф НЕ выдуман, а
+    #: пропущен; цифра объясняет расхождение `penalty_est_count` и `orders`.
+    no_commission_count: int = 0
+    #: Оценка усечена лимитом строк (очень широкое окно) — итог неполный.
+    estimate_truncated: bool = False
+
+    #: Факт: удержания «Штраф МП. Невыполненный заказ (отмена продавцом)» из
+    #: финотчёта WB за то же окно дат заказа.
+    penalty_fact: Decimal = Decimal(0)
+    penalty_fact_count: int = 0
+    #: До какой даты доехал финотчёт. Ноль факта по отменам свежее этой даты —
+    #: не «штрафа нет», а «WB ещё не выставил».
+    fact_covered_to: date | None = None
+    #: Факт скрыт: включён фильтр склада WB, а у строк финотчёта склада нет —
+    #: сумма по всем складам под заголовком одного вводила бы в заблуждение.
+    fact_scoped_out: bool = False
 
 
 class FbsOrderListOut(BaseModel):
@@ -476,6 +568,20 @@ class FbsOrderListOut(BaseModel):
     #: сумма счётчиков и так равна вкладке «Все».
     in_delivery_count: int = 0
     sorted_count: int = 0
+    #: Зависшие в пути: переданы ≥ N дней назад, СЦ так и не принял. Окно
+    #: ограничено сверху (см. сервис): у старых `complete` wb_status застывает
+    #: (синк опрашивает не всё), и без потолка счётчик копил бы мёртвые строки.
+    in_delivery_stuck_count: int = 0
+    #: «Завершённые» кабинета WB: complete, дошедшее до покупателя (sold/defect).
+    #: Окно периода применяется как к прочим фазам доставки.
+    delivered_count: int = 0
+    #: Разрез отмен (канон 30.07): клиент отменил / отменили мы (продавец или
+    #: перевозчик). Сумма равна счётчику отмен эффективного статуса.
+    cancel_client_count: int = 0
+    cancel_seller_count: int = 0
+    #: Сводка выручки/штрафа корзины отмен — ТОЛЬКО при фильтре
+    #: status=cancel_client|cancel_seller (лишний агрегат прочим фазам не нужен).
+    cancel_stats: FbsCancelStats | None = None
 
 
 class FbsWarehouseQueueRow(BaseModel):
@@ -489,6 +595,10 @@ class FbsWarehouseQueueRow(BaseModel):
     #: Фазы доставки — за выбранный период (`complete` копится вечно).
     in_delivery: int = 0
     sorted: int = 0
+    #: Зависшие в пути (передано ≥ N дней, СЦ не принял) — БЕЗ периода, как
+    #: очередь сборки: пока не отсортировано — вопросы к нам, и зависшее
+    #: обязано быть видно независимо от выбранного окна.
+    in_delivery_stuck: int = 0
 
 
 class FbsWarehouseSummaryOut(BaseModel):
@@ -501,6 +611,79 @@ class FbsWarehouseSummaryOut(BaseModel):
     #: Итог по всем складам — считает бэкенд, чтобы «Все склады» не расходились
     #: с суммой карточек при обрезке выдачи.
     totals: dict[str, int] = Field(default_factory=dict)
+
+
+class FbsWriteoffIssueRow(BaseModel):
+    """Переданные задания, которые НЕЧЕМ списать со склада (агрегат по товару).
+
+    Списание идемпотентно ретраится каждые 5 минут, но пока причина жива,
+    задание молча висит `written_off_at IS NULL` — единственным следом был
+    warning в логе воркера. Эта строка делает отказ видимым.
+    """
+
+    wb_warehouse_id: int | None = None
+    wb_warehouse_name: str | None = None
+    #: Привязанный наш склад (первый активный) — куда списание пыталось попасть.
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    nomenclature_id: int | None = None
+    article: str | None = None
+    barcode: str | None = None
+    #: Сколько заданий не списано по этому товару на этом складе продавца.
+    stuck: int = 0
+    #: Самое старое непроведённое (created_at_wb) — возраст проблемы.
+    oldest_at: datetime | None = None
+    #: Остаток на привязанных складах: почему «нечем» (обычно 0).
+    our_qty: int = 0
+    our_defect: int = 0
+    #: Россыпь в зеркале ФФ (None — зеркала нет): физически товар у провайдера
+    #: может лежать — сигнал, что наш ledger отстал, а не что товара нет.
+    ff_loose: int | None = None
+    #: Код из `ALLOWED_WRITEOFF_REASONS`: no_stock — остатка нет | no_card —
+    #: нет карточки товара | no_link — склад продавца не привязан | queued —
+    #: остаток есть, ждёт ближайшего прогона списания (не проблема).
+    reason: str = "no_stock"
+
+
+class FbsWriteoffIssuesOut(BaseModel):
+    """Сводка незакрытых списаний: `GET /fbs/orders/writeoff-issues`."""
+
+    total_orders: int = 0
+    rows: list[FbsWriteoffIssueRow] = Field(default_factory=list)
+    #: Выдача срезана капом строк (total_orders считается ДО среза) — фронт
+    #: обязан сказать «показаны первые N», а не молча спрятать хвост.
+    truncated: bool = False
+
+
+class FbsOrderTimelineEvent(BaseModel):
+    """Строка таймлайна «Статус заказа» (модалка по заданию, как в кабинете WB).
+
+    Смесь двух источников, оба уже отсортированы сервисом по времени:
+    - `kind="anchor"` — синтетический якорь из ТОЧНОЙ даты (задание оформлено,
+      поставка закрыта, QR отсканирован, списано в DDS);
+    - `kind="event"` — переход из журнала `wb_fbs_order_events`; его время —
+      момент ФИКСАЦИИ синком (точность = каденс, 5 мин), об этом говорит
+      `approx=True`.
+    """
+
+    kind: str = "event"
+    #: Человеческий ярлык рисует фронт по коду (словарь TIMELINE_LABEL) — здесь
+    #: машинный код: created | assembling | assembled | scanned | written_off |
+    #: wb:<status> | supplier:<status>.
+    code: str
+    at: datetime | None = None
+    #: Время приблизительное (зафиксировано синком, не WB).
+    approx: bool = False
+
+
+class FbsOrderTimelineOut(BaseModel):
+    """`GET /fbs/orders/{wb_order_id}/timeline`."""
+
+    wb_order_id: int
+    article: str | None = None
+    subject: str | None = None
+    nm_id: int | None = None
+    events: list[FbsOrderTimelineEvent] = Field(default_factory=list)
 
 
 class FbsOrderBackfillRequest(BaseModel):
@@ -768,3 +951,263 @@ class FbsActionOut(BaseModel):
     ok: bool = True
     message: str | None = None
     affected: int = 0
+
+
+# ─── Аналитика этапов ────────────────────────────────────────────────────────
+
+#: Точность вехи. `exact` — реальные даты WB и наших операций (считаются по всей
+#: истории зеркала), `approx` — журнал переходов (± каденс синка, только с момента
+#: его наполнения). Контракт с сервисом держит тест-связка.
+ALLOWED_STAGE_PRECISION: tuple[str, ...] = ("exact", "approx")
+
+#: Зона ответственности этапа: до приёмки на СЦ вопросы к нам, после — к WB.
+ALLOWED_STAGE_ZONES: tuple[str, ...] = ("us", "wb", "total")
+
+#: Шаг динамики. Дефолт подбирается по длине периода.
+ALLOWED_STAGE_BUCKETS: tuple[str, ...] = ("day", "week", "month")
+
+
+class FbsStageRow(BaseModel):
+    """Этап пути задания: длительность за период.
+
+    `count` — сколько заданий реально ЗАМЕРЕНО (обе вехи известны, длительность
+    правдоподобна). Ноль при `precision="approx"` означает «истории ещё нет»,
+    а не «мгновенно»: журнал переходов начинается с момента своего наполнения
+    и прошлое не восстанавливает.
+    """
+
+    key: str
+    title: str
+    #: Короткое имя для узкой колонки таблицы (полное — в шапке блока и подсказке).
+    short: str = ""
+    zone: str
+    precision: str
+    #: Сводный этап перекрывает соседние (`to_handover` = `to_confirm` + `assembly`).
+    #: Складывать его с обычными в одну сумму нельзя — фронт выносит отдельно.
+    summary: bool = False
+    hint: str = ""
+    count: int = 0
+    median_hours: float | None = None
+    p90_hours: float | None = None
+    avg_hours: float | None = None
+    min_hours: float | None = None
+    max_hours: float | None = None
+    #: Замеры, выброшенные как недостоверные (отрицательная длительность из-за
+    #: рассинхрона источников разной точности либо застывший `wb_status` сверх
+    #: потолка). Видны намеренно: молчаливое усечение читалось бы как «всё чисто».
+    dropped: int = 0
+    #: Сколько из `count` опёрлись на журнал переходов вместо истории кабинета
+    #: (± каденс синка). Ноль — этап целиком посчитан по точным моментам WB.
+    approx_count: int = 0
+
+
+class FbsStageWarehouseRow(BaseModel):
+    """Этап × склад продавца, С КОТОРОГО собирают."""
+
+    stage: str
+    wb_warehouse_id: int | None = None
+    warehouse_name: str
+    count: int = 0
+    median_hours: float | None = None
+    p90_hours: float | None = None
+    avg_hours: float | None = None
+
+
+class FbsStageDynamicsRow(BaseModel):
+    """Точка динамики: этап × начало бакета по дате ЗАВЕРШЕНИЯ этапа (МСК).
+
+    🔴 Ряд РАЗРЕЖЕН: отсутствующий бакет означает «замеров не было», а не «ноль
+    часов». Клиент, дорисовывающий пропуски нулями, покажет провалы там, где
+    просто нет данных.
+
+    Поле называется `period_start`, а не `bucket`: `bucket` верхнего уровня —
+    это ШАГ (`day`/`week`/`month`), и один ключ в двух смыслах внутри одного
+    ответа читался бы как ошибка контракта.
+    """
+
+    stage: str
+    period_start: date
+    count: int = 0
+    median_hours: float | None = None
+    p90_hours: float | None = None
+    avg_hours: float | None = None
+
+
+class FbsStageQueueRow(BaseModel):
+    """Что висит на этапе ПРЯМО СЕЙЧАС и как давно. Период не применяется.
+
+    🔴 Фазы `to_ship` и `in_transit` — это РАЗБИЕНИЕ псевдо-статуса
+    `in_delivery` вкладки «Заказы» по факту скана QR: до скана груз физически
+    у нас, после — уже у перевозчика. Поэтому карточка «Едет к СЦ» здесь всегда
+    меньше «В доставке» на соседней вкладке, а совпадает СУММА двух карточек
+    (инвариант закреплён тестом).
+    """
+
+    phase: str
+    title: str
+    count: int = 0
+    median_age_hours: float | None = None
+    max_age_hours: float | None = None
+
+
+class FbsStageJournal(BaseModel):
+    """Покрытие журнала переходов — подпись под этапами точности `approx`.
+
+    Без неё пустой этап читается как «проходит мгновенно», хотя на деле
+    «истории ещё нет».
+    """
+
+    events: int = 0
+    #: Наивно-UTC метка из `WbFbsOrderEvent.changed_at`, сериализуется с явным
+    #: `Z`. Без суффикса JS-клиент прочитал бы её как ЛОКАЛЬНОЕ время, и один и
+    #: тот же момент на двух экранах раздела разошёлся бы на три часа.
+    since: datetime | None = None
+    orders: int = 0
+
+    @field_serializer("since")
+    def _serialize_since(self, value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        return (value.isoformat() + "Z") if value.tzinfo is None else value.isoformat()
+
+
+class FbsStageAnalyticsOut(BaseModel):
+    """Аналитика этапов FBS: длительности, разрез по складам, динамика, очередь.
+
+    `stages` и `queue` приходят ПОЛНОЙ длиной (со строками-нулями), поэтому
+    `stage` из длинных блоков (`by_warehouse`, `dynamics`) всегда резолвится в
+    заголовок и точность без второго запроса. В самих длинных строках
+    `precision`/`dropped` нет намеренно — их место в справочнике `stages`.
+    """
+
+    date_from: date
+    date_to: date
+    #: Шаг динамики: `day` / `week` / `month` (`ALLOWED_STAGE_BUCKETS`).
+    bucket: str
+    wb_warehouse_id: int | None = None
+    stages: list[FbsStageRow] = Field(default_factory=list)
+    by_warehouse: list[FbsStageWarehouseRow] = Field(default_factory=list)
+    dynamics: list[FbsStageDynamicsRow] = Field(default_factory=list)
+    queue: list[FbsStageQueueRow] = Field(default_factory=list)
+    journal: FbsStageJournal = Field(default_factory=FbsStageJournal)
+    history: "FbsStageHistory" = Field(default_factory=lambda: FbsStageHistory())
+
+
+class FbsStageHistory(BaseModel):
+    """Покрытие догона истории из КАБИНЕТА WB — на чём посчитаны поздние этапы.
+
+    Пока `orders_covered` заметно меньше `orders_total`, часть замеров опирается
+    на журнал переходов (± каденс синка) — это видно в `approx_count` строки
+    этапа. Без этой подписи «5.2 дн» не отличить от «5.2 дн по половине выборки».
+    """
+
+    orders_total: int = 0
+    orders_covered: int = 0
+    rows: int = 0
+    since: datetime | None = None
+
+    @field_serializer("since")
+    def _serialize_since(self, value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        return (value.isoformat() + "Z") if value.tzinfo is None else value.isoformat()
+
+
+# ─── География доставки ──────────────────────────────────────────────────────
+
+
+class FbsGeoDirectionRow(BaseModel):
+    """Направление (округ покупателя): скорость, маршрут, SLA и отказы.
+
+    🔴 В строке ДВЕ разные выборки, и путать их нельзя:
+      • `orders` — задания, чей путь завершился в периоде (по ним скорость,
+        `avg_hops` и SLA);
+      • `matured` — созревшая когорта (заказ старше `maturity_days`), только по
+        ней считается `refused`. На всей выборке доля отказов была бы ошибкой
+        выжившего: свежее ещё в пути.
+    """
+
+    label: str
+    orders: int = 0
+    median_days: float | None = None
+    p90_days: float | None = None
+    avg_hops: float | None = None
+    matured: int = 0
+    refused: int = 0
+    #: Сколько заданий имели обещанную WB дату и сколько уложились в неё.
+    sla_total: int = 0
+    sla_in_time: int = 0
+
+
+class FbsGeoMatrixRow(BaseModel):
+    """Клетка матрицы «склад отгрузки × округ назначения» — откуда куда возить."""
+
+    wb_warehouse_id: int | None = None
+    warehouse_name: str
+    label: str
+    orders: int = 0
+    median_days: float | None = None
+
+
+class FbsGeoNodeRow(BaseModel):
+    """Узел маршрута (СЦ): сколько заказов прошло и сколько узел держит груз.
+
+    🔴 `measured` меньше `passes` — у части проходов в истории одно событие,
+    и удержание там НЕИЗВЕСТНО. При `measured = 0` длительность приходит
+    `null`: ноль означал бы «прошёл мгновенно», а это другое утверждение.
+    """
+
+    label: str
+    passes: int = 0
+    measured: int = 0
+    median_hours: float | None = None
+    p90_hours: float | None = None
+
+
+class FbsGeoHopsRow(BaseModel):
+    """Перевалки против времени — управляемый рычаг маршрута."""
+
+    hops: int = 0
+    orders: int = 0
+    median_days: float | None = None
+
+
+class FbsGeoCoverage(BaseModel):
+    """Доля заданий, сшитых с зеркалом статистики (иначе округ неизвестен).
+
+    Без неё «мало заказов в Сибири» не отличить от «Сибирь не сшилась».
+    """
+
+    orders_total: int = 0
+    orders_matched: int = 0
+
+
+class FbsGeoAnalyticsOut(BaseModel):
+    """География доставки FBS: направления, маршруты, узлы и перевалки."""
+
+    date_from: date
+    date_to: date
+    wb_warehouse_id: int | None = None
+    #: Возраст заказа, начиная с которого его судьба считается определившейся.
+    maturity_days: int = 14
+    directions: list[FbsGeoDirectionRow] = Field(default_factory=list)
+    #: Города назначения по маршруту — покрытие 100%, в отличие от округов.
+    destinations: list["FbsGeoDestinationRow"] = Field(default_factory=list)
+    matrix: list[FbsGeoMatrixRow] = Field(default_factory=list)
+    nodes: list[FbsGeoNodeRow] = Field(default_factory=list)
+    hops: list[FbsGeoHopsRow] = Field(default_factory=list)
+    coverage: FbsGeoCoverage = Field(default_factory=FbsGeoCoverage)
+
+
+class FbsGeoDestinationRow(BaseModel):
+    """Город назначения — ПОСЛЕДНИЙ узел маршрута перед готовностью к вручению.
+
+    🔴 Это точка сети WB (СЦ/ПВЗ), а не адрес покупателя. Зато известна для
+    всех заданий с завершённым путём, тогда как округ берётся сшивкой с
+    зеркалом статистики и покрывает не всё.
+    """
+
+    label: str
+    orders: int = 0
+    median_days: float | None = None
+    p90_days: float | None = None

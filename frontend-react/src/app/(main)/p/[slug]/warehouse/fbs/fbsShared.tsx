@@ -16,6 +16,7 @@ import type {
     FbsSupplierStatus,
     FbsSupply,
     FbsSupplyStatus,
+    FbsWriteoffReason,
 } from '@/types/api';
 import { formatAge } from './useAutoRefresh';
 
@@ -86,6 +87,263 @@ export function isActiveOrder(status: string | null | undefined): boolean {
     return !!status && !TERMINAL_STATUSES.includes(status);
 }
 
+/**
+ * Псевдо-статусы списка заданий — подмножества `complete`, которые считает
+ * бэкенд (`in_delivery_count` / `sorted_count` / `in_delivery_stuck_count`).
+ * Это НЕ значения `supplierStatus`: в `SUPPLIER_STATUS_LABEL` их нет, а в
+ * `GET /fbs/orders?status=…` они уходят как есть — фильтр понимает оба вида.
+ */
+export const PSEUDO_STATUS_LABEL: Record<string, string> = {
+    in_delivery: 'Ещё в доставке',
+    sorted: 'Отсортировано',
+    in_delivery_stuck: 'Зависли в пути',
+};
+
+/**
+ * Фазовые вкладки списка заданий — в терминах КАБИНЕТА WB. Ключи — валидные
+ * значения фильтра `GET /fbs/orders?status=…` (зеркало
+ * `ALLOWED_ORDER_STATUS_FILTERS` бэка): supplier-статусы + псевдо-статус
+ * `delivered` («Завершённые»: complete, дошедшее до покупателя — sold/defect).
+ * `complete` здесь — «В доставке», как в кабинете; прежний ярлык «Переданы
+ * в WB» врал зелёным цветом про неотсканированные поставки.
+ */
+export const ORDER_PHASE_LABEL: Record<string, string> = {
+    new: 'Новые',
+    confirm: 'На сборке',
+    complete: 'В доставке',
+    delivered: 'Завершённые',
+    cancel: 'Отменено',
+    cancel_carrier: 'Отменено перевозчиком',
+    // Разрез отмен (канон 30.07): чипы вкладки — два, по стороне решения.
+    cancel_client: 'Отмена клиента',
+    cancel_seller: 'Наша отмена',
+};
+
+// ─── Зависшие в пути на СЦ ──────────────────────────────────────────────────
+
+/**
+ * С какого дня «в пути» считаем задержкой (совпадает с порогом бэка —
+ * `_TRANSIT_STUCK_DAYS`). Канон владельца 30.07: СУТКИ от скана QR поставки
+ * без приёмки СЦ — уже зависание.
+ */
+export const TRANSIT_WARN_DAYS = 1;
+/** С какого дня задержка — уже ЧП: товар передали, а СЦ так и не принял. */
+export const TRANSIT_DANGER_DAYS = 3;
+/**
+ * Потолок окна «зависло» (совпадает с бэком): у старых `complete` wb_status
+ * застывает (синк опрашивает не всё), и дальше этого срока «N дн в пути» —
+ * артефакт застывшего статуса, а не живой груз на дороге.
+ */
+export const TRANSIT_STALE_DAYS = 30;
+
+/**
+ * Цвет значения «В пути, дн»: null — обычный текст (не подсвечиваем).
+ * Пороги едины с чипом «Зависли в пути», чтобы подсветка и счётчик не спорили:
+ * за потолком окна (> TRANSIT_STALE_DAYS) строка в чипе НЕ считается, поэтому
+ * и красить её тревожным нельзя — приглушаем как «застывший статус».
+ */
+export function transitDaysColor(days: number | null | undefined): string | null {
+    if (days == null) return null;
+    if (days > TRANSIT_STALE_DAYS) return 'var(--color-text-dim)';
+    if (days >= TRANSIT_DANGER_DAYS) return 'var(--color-danger)';
+    if (days >= TRANSIT_WARN_DAYS) return 'var(--color-warning)';
+    return null;
+}
+
+/**
+ * Полных дней с момента `iso` до сейчас (0 — сегодня, отрицательное время не
+ * бывает — будущие даты читаем как «сегодня»). Для подписи «N дн назад».
+ */
+export function parseUtcMs(iso: string | null | undefined): number | null {
+    if (!iso) return null;
+    // Бэк шлёт naive-UTC без 'Z' — Date.parse прочитал бы такое как ЛОКАЛЬНОЕ
+    // время и завысил возраст на часовой пояс (паттерн warehouse/[id]/page.tsx).
+    const raw = iso.endsWith('Z') || /[+-]\d\d:\d\d$/.test(iso) ? iso : iso + 'Z';
+    const ts = Date.parse(raw);
+    return Number.isFinite(ts) ? ts : null;
+}
+
+export function daysSince(iso: string | null | undefined, now: number = Date.now()): number | null {
+    const ts = parseUtcMs(iso);
+    if (ts == null) return null;
+    return Math.max(0, Math.floor((now - ts) / 86_400_000));
+}
+
+/**
+ * «Заказ завис ПОСЛЕ скана» — общий предикат подсветки строк в фазе
+ * «Ждёт сортировки» (три списка заданий, канон 30.07): с момента скана QR
+ * поставки прошло ≥ TRANSIT_WARN_DAYS (сутки), а СЦ заказ так и не принял.
+ *
+ * Считаем от scan-якоря миллисекундами, а НЕ от `transit_days` бэка: тот
+ * отдаёт ЦЕЛЫЕ сутки и зажёгся бы почти на день позже. За потолком
+ * TRANSIT_STALE_DAYS не подсвечиваем — там застывший статус старого задания,
+ * не живой груз (симметрично чипу «Зависли в пути» и `transitDaysColor`).
+ */
+export function isStuckAfterScan(scanIso: string | null | undefined, now: number = Date.now()): boolean {
+    const ts = parseUtcMs(scanIso);
+    if (ts == null) return false;
+    const elapsed = now - ts;
+    return elapsed >= TRANSIT_WARN_DAYS * 86_400_000 && elapsed <= TRANSIT_STALE_DAYS * 86_400_000;
+}
+
+/** Порог «заказ ждёт подозрительно долго» (WB ещё не отсканировал), часов. */
+export const ORDER_AGE_WARN_HOURS = 12;
+/** Порог «заказ ЗАВИС» — сутки без скана WB (сборка + передача + приёмка СЦ). */
+export const ORDER_AGE_DANGER_HOURS = 24;
+
+/** `wbStatus`, означающие отмену заказа (обе оси схлопнуты фронтом одинаково с бэком). */
+const WB_CANCEL_STATUSES: readonly string[] = ['canceled', 'canceled_by_client', 'declined_by_client'];
+
+/**
+ * Подмножество отмен, где решение принял ПОКУПАТЕЛЬ (зеркало
+ * `FBS_WB_CLIENT_CANCEL_STATUSES` бэка, канон 30.07): всё остальное
+ * отменённое — наша сторона (продавец / перевозчик / wb canceled).
+ */
+export const WB_CLIENT_CANCEL_STATUSES: readonly string[] = ['canceled_by_client', 'declined_by_client'];
+
+/**
+ * Статус задания В ТЕРМИНАХ КАБИНЕТА WB (решение владельца 30.07: «надо то же
+ * самое всё это сделать»). Кабинет выводит его из ФАЗЫ ПОСТАВКИ + оси WB:
+ *   поставка не закрыта → «На сборке»; закрыта, QR не отсканирован →
+ *   «Отгрузите товар» (ещё НАША зона — тут живёт подсветка зависших);
+ *   отсканирован → «Ждёт сортировки»; дальше говорит ось WB
+ *   («Отсортировано» / «Готово к выдаче» / «Получено покупателем»).
+ */
+export type FbsCabinetStatusKey =
+    | 'new' | 'assembling' | 'ship_goods' | 'awaiting_sort'
+    | 'sorted' | 'ready_for_pickup' | 'postponed' | 'sold' | 'defect'
+    | 'cancelled' | 'cancelled_client' | 'cancelled_seller' | 'cancelled_carrier';
+
+export const CABINET_STATUS_LABEL: Record<FbsCabinetStatusKey, { label: string; badge: string }> = {
+    new: { label: 'Новое', badge: 'badge-info' },
+    assembling: { label: 'На сборке', badge: 'badge-info' },
+    ship_goods: { label: 'Отгрузите товар', badge: 'badge-warning' },
+    awaiting_sort: { label: 'Ждёт сортировки', badge: 'badge-info' },
+    sorted: { label: 'Отсортировано', badge: 'badge-success' },
+    ready_for_pickup: { label: 'Готово к выдаче', badge: 'badge-success' },
+    postponed: { label: 'Отложенная доставка', badge: 'badge-secondary' },
+    sold: { label: 'Получено покупателем', badge: 'badge-success' },
+    defect: { label: 'Брак', badge: 'badge-danger' },
+    // Разрез отмен (канон 30.07): бейдж строки называет сторону решения.
+    cancelled_client: { label: 'Отменён клиентом', badge: 'badge-secondary' },
+    cancelled_seller: { label: 'Отменён нами', badge: 'badge-secondary' },
+    cancelled_carrier: { label: 'Отменён перевозчиком', badge: 'badge-secondary' },
+    // Легаси-ключ: `cabinetOrderStatus` его больше не возвращает, но старые
+    // консьюмеры словаря не должны падать на промахе.
+    cancelled: { label: 'Отменено', badge: 'badge-secondary' },
+};
+
+/** Фазы, где заказ ещё НЕ отсканирован WB — наша зона: подсветка зависших живёт тут. */
+export const NOT_SCANNED_CABINET_KEYS: readonly FbsCabinetStatusKey[] = ['new', 'assembling', 'ship_goods'];
+
+/**
+ * Терминальные фазы: заказ завершён (получен/брак) или отменён — «Срок»
+ * у них не тикает («3 дн 7 ч назад» у проданного — бессмыслица), показываем «—».
+ */
+export const TERMINAL_CABINET_KEYS: readonly FbsCabinetStatusKey[] = [
+    'sold', 'defect', 'cancelled_client', 'cancelled_seller', 'cancelled_carrier', 'cancelled',
+];
+
+/**
+ * Цена задания В РУБЛЯХ. Канон — `price_rub` бэка (у валют СНГ это пересчёт
+ * WB: заказ 5384434223 лежит как 60.10 BYN, номинал показывать нельзя).
+ * Фолбэк для старого бэка без поля — sale_price → price, но ТОЛЬКО у
+ * рублёвых заказов; у валютных без пересчёта честнее «—», чем тенге за рубли.
+ */
+export function orderPriceRub(o: {
+    price_rub?: number | string | null;
+    sale_price?: number | string | null;
+    price?: number | string | null;
+    currency_code?: string | null;
+}): number | null {
+    if (o.price_rub != null) return Number(o.price_rub);
+    if (o.currency_code == null || o.currency_code === '643') {
+        const nominal = o.sale_price ?? o.price;
+        return nominal == null ? null : Number(nominal);
+    }
+    return null;
+}
+
+export function cabinetOrderStatus(
+    supplierStatus: string | null | undefined,
+    wbStatus: string | null | undefined,
+    supplyDone: boolean,
+    supplyScanned: boolean,
+): FbsCabinetStatusKey {
+    if ((supplierStatus && TERMINAL_STATUSES.includes(supplierStatus))
+        || (wbStatus && WB_CANCEL_STATUSES.includes(wbStatus))) {
+        // Сторона решения (зеркало cancel_client/cancel_seller бэка): клиентский
+        // wbStatus главнее — отказ покупателя случается и при supplier cancel.
+        if (wbStatus && WB_CLIENT_CANCEL_STATUSES.includes(wbStatus)) return 'cancelled_client';
+        if (supplierStatus === 'cancel_carrier') return 'cancelled_carrier';
+        return 'cancelled_seller';
+    }
+    if (wbStatus === 'sold') return 'sold';
+    if (wbStatus === 'defect') return 'defect';
+    if (wbStatus === 'sorted') return 'sorted';
+    if (wbStatus === 'ready_for_pickup') return 'ready_for_pickup';
+    if (wbStatus === 'postponed_delivery') return 'postponed';
+    if (supplyScanned) return 'awaiting_sort';
+    if (supplyDone) return 'ship_goods';
+    return supplierStatus === 'new' ? 'new' : 'assembling';
+}
+
+/**
+ * Цвет возраста задания, пока WB его НЕ отсканировал (`NOT_SCANNED_CABINET_KEYS`):
+ * дольше суток — красный, дольше 12 ч — оранжевый. После скана — зона
+ * логистики WB, не красим.
+ */
+export function orderAgeColor(
+    iso: string | null | undefined,
+    cabinetKey: FbsCabinetStatusKey,
+    now: number = Date.now(),
+): string | null {
+    if (!NOT_SCANNED_CABINET_KEYS.includes(cabinetKey)) return null;
+    const ts = parseUtcMs(iso);
+    if (ts == null) return null;
+    const hours = (now - ts) / 3_600_000;
+    if (hours >= ORDER_AGE_DANGER_HOURS) return 'var(--color-danger)';
+    if (hours >= ORDER_AGE_WARN_HOURS) return 'var(--color-warning)';
+    return null;
+}
+
+/**
+ * Длительность «с момента X» без слова «назад»: «1 дн 17 ч» / «5 ч 53 мин» /
+ * «12 мин». Для колонки «В пути»: бэкендные transit_days — целые СУТКИ, и
+ * поставка, переданная вчера вечером, показывала бы «0» — как будто колонка
+ * сломана.
+ */
+export function durationSinceLabel(iso: string | null | undefined, now: number = Date.now()): string | null {
+    const ts = parseUtcMs(iso);
+    if (ts == null) return null;
+    const totalMin = Math.max(0, Math.floor((now - ts) / 60_000));
+    if (totalMin < 1) return '<1 мин';
+    if (totalMin < 60) return `${totalMin} мин`;
+    const days = Math.floor(totalMin / 1440);
+    const hours = Math.floor((totalMin % 1440) / 60);
+    if (days >= 1) return hours > 0 ? `${days} дн ${hours} ч` : `${days} дн`;
+    const mins = totalMin % 60;
+    return mins > 0 ? `${hours} ч ${mins} мин` : `${hours} ч`;
+}
+
+/**
+ * «Сколько прошло» в стиле кабинета WB: «5 ч 53 мин назад» / «12 мин назад» /
+ * «3 дн 4 ч назад». Для подписи под временем поступления задания — сборщику
+ * важнее возраст заказа, чем абсолютная дата.
+ */
+export function hoursAgoLabel(iso: string | null | undefined, now: number = Date.now()): string | null {
+    const ts = parseUtcMs(iso);
+    if (ts == null) return null;
+    const totalMin = Math.max(0, Math.floor((now - ts) / 60_000));
+    if (totalMin < 1) return 'только что';
+    if (totalMin < 60) return `${totalMin} мин назад`;
+    const days = Math.floor(totalMin / 1440);
+    const hours = Math.floor((totalMin % 1440) / 60);
+    const mins = totalMin % 60;
+    if (days >= 1) return hours > 0 ? `${days} дн ${hours} ч назад` : `${days} дн назад`;
+    return mins > 0 ? `${hours} ч ${mins} мин назад` : `${hours} ч назад`;
+}
+
 export const WB_STATUS_LABEL: Record<string, string> = {
     waiting: 'Ожидает сборки',
     sorted: 'Отсортировано',
@@ -99,6 +357,39 @@ export const WB_STATUS_LABEL: Record<string, string> = {
     accepted_by_carrier: 'Принято перевозчиком',
     sent_to_carrier: 'Передано перевозчику',
 };
+
+// ─── Таймлайн «Статус заказа» ───────────────────────────────────────────────
+
+/**
+ * Ярлыки БАЗОВЫХ кодов таймлайна (`GET /fbs/orders/{id}/timeline`).
+ *
+ * Тот же паттерн, что `WRITEOFF_REASON_LABEL`: ключи — машинные коды бэкенда,
+ * человеческий текст живёт только здесь. Коды с префиксом резолвятся словарями
+ * осей (`wb:<status>` → `WB_STATUS_LABEL`, `supplier:<status>` →
+ * `SUPPLIER_STATUS_LABEL`), промах любого словаря — фолбэк «показать код как
+ * есть» — контракт закреплён тестом `src/__tests__/lib/fbsOrderTimeline.test.ts`.
+ */
+export const TIMELINE_LABEL: Record<string, string> = {
+    created: 'Оформлен',
+    assembling: 'Взят в сборку',
+    assembled: 'Продавец собрал заказ',
+    scanned: 'Принят сортировочным центром (скан QR)',
+    written_off: 'Списано со склада (учёт DDS)',
+};
+
+/** Подсказка к «≈»: время события зафиксировано синком, а не WB. */
+export const TIMELINE_APPROX_HINT = 'время зафиксировано синхронизацией (точность ~5 мин)';
+
+/** Человеческий ярлык события таймлайна по машинному коду. */
+export function timelineLabel(code: string): string {
+    if (code.startsWith('wb:')) {
+        return WB_STATUS_LABEL[code.slice('wb:'.length)] ?? code;
+    }
+    if (code.startsWith('supplier:')) {
+        return SUPPLIER_STATUS_LABEL[code.slice('supplier:'.length)] ?? code;
+    }
+    return TIMELINE_LABEL[code] ?? code;
+}
 
 /** Порядок кнопок переключателя: от консервативного к «доверяем провайдеру». */
 export const STOCK_SOURCES: readonly FbsStockSource[] = ['min_of_both', 'ff_mirror', 'ledger'];
@@ -171,6 +462,28 @@ export const BLOCKED_REASON_LABEL: Record<string, string> = {
 
 export function blockedReasonLabel(reason: string): string {
     return BLOCKED_REASON_LABEL[reason] ?? reason;
+}
+
+/**
+ * Причины, по которым переданное задание НЕЧЕМ списать со склада
+ * (`orders_service`, ручка `GET /fbs/orders/writeoff-issues`).
+ *
+ * Тот же паттерн, что `BLOCKED_REASON_LABEL`: ключи — машинные коды бэкенда,
+ * человеческий текст живёт только здесь, промах словаря в рантайме невидим
+ * (фолбэк «показать код как есть») — контракт закреплён тестом
+ * `src/__tests__/lib/fbsWriteoffIssues.test.ts`.
+ */
+export const WRITEOFF_REASON_LABEL: Record<string, string> = {
+    no_stock: 'нет остатка на складе',
+    no_card: 'нет карточки товара',
+    no_link: 'склад не привязан',
+    // queued — НЕ проблема: остаток есть, задание ждёт ближайшего прогона
+    // 5-минутного джоба списания. Тон нейтральный, строка в панели приглушена.
+    queued: 'ждёт списания (остаток есть)',
+};
+
+export function writeoffReasonLabel(reason: FbsWriteoffReason): string {
+    return WRITEOFF_REASON_LABEL[reason] ?? reason;
 }
 
 // ─── Ручное количество и режим склада ───────────────────────────────────────
@@ -275,9 +588,9 @@ export const SUPPLY_STATUS_LABEL: Record<FbsSupplyStatus, {
     hint: string;
 }> = {
     active: {
-        label: 'Активная',
+        label: 'Сборка заказов',
         badge: 'badge-info',
-        hint: 'Черновик поставки: задания докладываются, передать её ещё не передали',
+        hint: 'Поставка не закрыта: задания докладываются — в кабинете WB это вкладка «На сборке»',
     },
     to_ship: {
         label: 'Отгрузите поставку',
@@ -285,9 +598,9 @@ export const SUPPLY_STATUS_LABEL: Record<FbsSupplyStatus, {
         hint: 'Поставка закрыта, но QR на пункте приёма WB ещё не отсканирован — товар не сдан',
     },
     in_delivery: {
-        label: 'В доставке',
+        label: 'Сортируем / в обработке',
         badge: 'badge-success',
-        hint: 'QR отсканирован на пункте приёма WB — в кабинете это «Поставка в обработке». '
+        hint: 'QR отсканирован на пункте приёма WB — в кабинете это «Сортируем» / «Поставка в обработке». '
             + 'Факта приёмки поставка в API не несёт: он виден только по её заданиям',
     },
     rejected: {
@@ -316,6 +629,11 @@ export function supplyStatusOf(s: Pick<FbsSupply, 'status' | 'done' | 'scan_dt' 
     if (s.reject_dt) return 'rejected';
     if (!s.done) return 'active';
     return s.scan_dt ? 'in_delivery' : 'to_ship';
+}
+
+/** Ярлык/бейдж по СТРОКОВОМУ статусу поставки (напр. `fbs_supply_status` заявки). */
+export function supplyStatusInfo(v: string | null | undefined) {
+    return v && v in SUPPLY_STATUS_LABEL ? SUPPLY_STATUS_LABEL[v as FbsSupplyStatus] : null;
 }
 
 export function supplyStatusMeta(s: Pick<FbsSupply, 'status' | 'done' | 'scan_dt' | 'reject_dt'>) {

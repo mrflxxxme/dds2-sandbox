@@ -11,13 +11,14 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
 from backend.cache import invalidate_cache
 from backend.models.assembly import (
     AssemblyDraft,
+    AssemblyKind,
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,
@@ -234,6 +235,9 @@ async def _validate_available_for_assembly(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted.is_(False),
+            # kind=fbs резерв не держит — его держат открытые FBS-задания
+            # (второе слагаемое ниже); включить = задвоить вычет.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.status.in_(_RESERVING_STATUSES),
             AssemblyRequestItem.nomenclature_id.in_(nom_ids),
         )
@@ -286,6 +290,8 @@ async def _validate_available_for_assembly(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted.is_(False),
+            # Зеркало reserved_q выше: kind=fbs резерв не держит.
+            AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.status.in_(_RESERVING_STATUSES),
             AssemblyRequestItem.nomenclature_id.in_(deficit_nom_ids),
         )
@@ -423,6 +429,25 @@ async def _build_items_with_stock(
     return items_out
 
 
+def _fbs_supply_status_value(supply: Any, mirror_status: str | None = None) -> str | None:
+    """Производный статус поставки FBS (`supply_status()`), строкой для схемы.
+
+    WB не всегда отдаёт `scanDt` (СЦ принимает и без скана QR продавца —
+    живой кейс WB-GI-258027541: задания давно sorted/sold, а scanDt пуст) —
+    тройка тогда врёт «Отгрузите поставку». Факт приёмки виден только по
+    заданиям (канон DOMAIN_WB_FBS), а зеркало kind=fbs его уже вывело:
+    DELIVERED = все живые задания прошли СЦ → фаза минимум «в обработке».
+    """
+    if supply is None:
+        return None
+    from backend.models.wb_fbs import FbsSupplyStatus, supply_status
+
+    base = supply_status(bool(supply.done), supply.scan_dt, supply.reject_dt)
+    if base == FbsSupplyStatus.TO_SHIP.value and mirror_status == AssemblyStatus.DELIVERED.value:
+        return FbsSupplyStatus.IN_DELIVERY.value
+    return base
+
+
 async def _build_response(
     db: AsyncSession,
     request: AssemblyRequest,
@@ -436,6 +461,8 @@ async def _build_response(
     box_qty_by_wh_bc: dict[tuple[int, str], int | None] | None = None,
     machine_box_qty: dict[tuple[int, str], int] | None = None,
     box_weight_kg: Decimal | None = None,
+    fbs_supply_map: dict[str, Any] | None = None,
+    fbs_orders_progress: dict[str, tuple[int, int]] | None = None,
 ) -> dict:
     """
     Build AssemblyRequestResponse dict from ORM model.
@@ -571,12 +598,46 @@ async def _build_response(
         total_weight = suggested_total_weight_kg
         weight_is_estimated = True
 
+    # Поставка FBS зеркала: производный статус (ярлыки кабинета WB) + момент
+    # скана QR — граница «наша зона / зона WB» для подсветки зависших заданий.
+    # В списке карта приходит батчем (без N+1); деталка добирает одну строку.
+    fbs_supply = None
+    if request.fbs_supply_id:
+        if fbs_supply_map is not None:
+            fbs_supply = fbs_supply_map.get(request.fbs_supply_id)
+        else:
+            from backend.models.wb_fbs import WbFbsSupply
+
+            fbs_supply = (
+                await db.execute(
+                    select(WbFbsSupply).where(
+                        WbFbsSupply.project_id == request.project_id,
+                        WbFbsSupply.wb_supply_id == request.fbs_supply_id,
+                    )
+                )
+            ).scalar_one_or_none()
+
     return {
         "id": request.id,
         "warehouse_id": request.warehouse_id,
         "warehouse_name": request.warehouse.name if request.warehouse else None,
         "number": request.number,
         "status": request.status,
+        "kind": request.kind,
+        "fbs_supply_id": request.fbs_supply_id,
+        "fbs_supply_status": _fbs_supply_status_value(fbs_supply, str(request.status)),
+        "fbs_scan_dt": fbs_supply.scan_dt if fbs_supply is not None else None,
+        "fbs_supply_created_at": fbs_supply.created_at_wb if fbs_supply is not None else None,
+        "fbs_orders_total": (
+            (fbs_orders_progress or {}).get(request.fbs_supply_id, (None, None))[0]
+            if request.fbs_supply_id
+            else None
+        ),
+        "fbs_orders_pending": (
+            (fbs_orders_progress or {}).get(request.fbs_supply_id, (None, None))[1]
+            if request.fbs_supply_id
+            else None
+        ),
         "wb_fbo_supply_id": request.wb_fbo_supply_id,
         "wb_supply_name": request.wb_fbo_supply.name if request.wb_fbo_supply else None,
         "wb_warehouse_name": request.wb_fbo_supply.warehouse_name if request.wb_fbo_supply else None,
@@ -769,6 +830,64 @@ async def prefetch_list_maps(
         if vid_to_order:
             machine_box_qty = await resolve_source_machine_box_qty(db, project_id, vid_to_order)
 
+    # Поставки FBS зеркал — одним IN-запросом: статус/скан кабинета в списке.
+    fbs_supply_map: dict[str, Any] = {}
+    fbs_orders_progress: dict[str, tuple[int, int]] = {}
+    fbs_ids = sorted({r.fbs_supply_id for r in requests if r.fbs_supply_id})
+    if fbs_ids:
+        from backend.models.wb_fbs import (
+            FBS_TERMINAL_STATUSES,
+            FBS_WB_CANCELLED_STATUSES,
+            FBS_WB_DELIVERED_STATUSES,
+            FBS_WB_SORTED_STATUSES,
+            WbFbsOrder,
+            WbFbsSupply,
+        )
+
+        sup_rows = await db.execute(
+            select(WbFbsSupply).where(
+                WbFbsSupply.project_id == project_id,
+                WbFbsSupply.wb_supply_id.in_(fbs_ids),
+            )
+        )
+        fbs_supply_map = {s.wb_supply_id: s for s in sup_rows.scalars().all()}
+
+        # Прогресс сортировки: живых заданий всего / ещё не прошедших СЦ —
+        # один GROUP BY на все поставки страницы («ждут сортировки: N из M»).
+        past_sc = tuple(FBS_WB_SORTED_STATUSES) + tuple(FBS_WB_DELIVERED_STATUSES)
+        alive = and_(
+            WbFbsOrder.supplier_status.notin_(FBS_TERMINAL_STATUSES),
+            or_(
+                WbFbsOrder.wb_status.is_(None),
+                WbFbsOrder.wb_status.notin_(FBS_WB_CANCELLED_STATUSES),
+            ),
+        )
+        prog_rows = await db.execute(
+            select(
+                WbFbsOrder.supply_id,
+                func.count().filter(alive).label("total"),
+                func.count()
+                .filter(
+                    and_(
+                        alive,
+                        or_(
+                            WbFbsOrder.wb_status.is_(None),
+                            WbFbsOrder.wb_status.notin_(past_sc),
+                        ),
+                    )
+                )
+                .label("pending"),
+            )
+            .where(
+                WbFbsOrder.project_id == project_id,
+                WbFbsOrder.supply_id.in_(fbs_ids),
+            )
+            .group_by(WbFbsOrder.supply_id)
+        )
+        fbs_orders_progress = {
+            row.supply_id: (int(row.total or 0), int(row.pending or 0)) for row in prog_rows.all()
+        }
+
     return {
         "nom_map": nom_map,
         "stock_by_wh_nom": stock_by_wh_nom,
@@ -779,6 +898,8 @@ async def prefetch_list_maps(
         "box_qty_by_wh_bc": box_qty_by_wh_bc,
         "machine_box_qty": machine_box_qty,
         "box_weight_kg": box_weight_kg,
+        "fbs_supply_map": fbs_supply_map,
+        "fbs_orders_progress": fbs_orders_progress,
     }
 
 
@@ -892,11 +1013,12 @@ async def list_assembly_requests(
     joint_only: bool = False,
     source: str | None = None,
     source_vehicle_id: int | None = None,
+    kind: str | None = None,
     limit: int = 50,
     offset: int = 0,
-) -> tuple[list[AssemblyRequest], int]:
+) -> tuple[list[AssemblyRequest], int, dict[str, int]]:
     """
-    List assembly requests with filters, pagination.
+    List assembly requests with filters, pagination + счётчики статусов.
 
     ff_link: "none" — только заявки БЕЗ привязанной ФФ-заявки; "linked" — только
     с привязанной; None — без фильтра. Привязка живёт в
@@ -918,28 +1040,24 @@ async def list_assembly_requests(
 
     source_vehicle_id: точечный фильтр «заявки ЭТОЙ машины» (уточняет
     source="pre_dist"; сам по себе тоже работает).
+
+    kind: "fbo" — операционные заявки логиста; "fbs" — учётные зеркала поставок
+    FBS (ведёт джоб); None — все. Валидация значения — на роутере
+    (ALLOWED_ASSEMBLY_KINDS → 422).
     """
     base = select(AssemblyRequest).where(
         AssemblyRequest.project_id == project_id,
         AssemblyRequest.is_deleted == False,  # noqa: E712
     )
 
+    if kind is not None:
+        base = base.where(AssemblyRequest.kind == kind)
     if warehouse_id is not None:
         base = base.where(AssemblyRequest.warehouse_id == warehouse_id)
     if counterparty_id is not None:
         base = base.where(AssemblyRequest.counterparty_id == counterparty_id)
     if draft_id is not None:
         base = base.where(AssemblyRequest.source_draft_id == draft_id)
-    if status is not None:
-        statuses = [s.strip() for s in status.split(",")]
-        if len(statuses) == 1:
-            base = base.where(AssemblyRequest.status == statuses[0])
-        else:
-            base = base.where(AssemblyRequest.status.in_(statuses))
-    elif view == "active":
-        base = base.where(AssemblyRequest.status.notin_(_LIST_ARCHIVED_STATUSES))
-    elif view == "archived":
-        base = base.where(AssemblyRequest.status.in_(_LIST_ARCHIVED_STATUSES))
     if date_from is not None:
         base = base.where(AssemblyRequest.created_at >= date_from)
     if date_to is not None:
@@ -1018,6 +1136,29 @@ async def list_assembly_requests(
             joint_cnt >= 2,
         )
 
+    # Счётчики фазовых вкладок kind=fbs — по тем же фильтрам, но ДО статус-среза
+    # (цифра вкладки не зависит от открытой вкладки, как в кабинете WB).
+    # Статус/вид применяются НИЖЕ этого снимка — порядок принципиален.
+    status_counts: dict[str, int] = {}
+    if kind == AssemblyKind.FBS.value:
+        counts_q = (
+            base.with_only_columns(AssemblyRequest.status, func.count())
+            .order_by(None)
+            .group_by(AssemblyRequest.status)
+        )
+        status_counts = {str(s): int(c or 0) for s, c in (await db.execute(counts_q)).all()}
+
+    if status is not None:
+        statuses = [s.strip() for s in status.split(",")]
+        if len(statuses) == 1:
+            base = base.where(AssemblyRequest.status == statuses[0])
+        else:
+            base = base.where(AssemblyRequest.status.in_(statuses))
+    elif view == "active":
+        base = base.where(AssemblyRequest.status.notin_(_LIST_ARCHIVED_STATUSES))
+    elif view == "archived":
+        base = base.where(AssemblyRequest.status.in_(_LIST_ARCHIVED_STATUSES))
+
     # Total count
     count_q = select(func.count()).select_from(base.subquery())
     total = (await db.execute(count_q)).scalar() or 0
@@ -1036,7 +1177,7 @@ async def list_assembly_requests(
     result = await db.execute(items_q)
     items = list(result.scalars().all())
 
-    return items, total
+    return items, total, status_counts
 
 
 async def get_created_groups(db: AsyncSession, project_id: int) -> list[dict]:
@@ -1200,6 +1341,17 @@ async def merge_assembly_requests(
         raise ValueError(f"Сборки не найдены: {missing}")
     if len(requests) < 2:
         raise ValueError("Нужно ≥2 сборки для объединения")
+
+    # Зеркала FBS сливать нельзя НИКОГДА: их wb_warehouse_name_manual (склад
+    # ПРОДАВЦА) совпадает с именами складов WB, и merge с обычной сборкой дал
+    # бы позициям зеркала резерв и ship-списание — второе к уже сделанному
+    # writeoff_completed_orders. Фронт fbs-строки не выделяет, но эндпоинт
+    # принимает произвольные id — гейт обязан жить здесь.
+    fbs_mirrors = [r.number for r in requests if r.kind == AssemblyKind.FBS.value]
+    if fbs_mirrors:
+        raise ValueError(
+            f"Заявки FBS ведутся автоматически и не объединяются: {', '.join(fbs_mirrors)}"
+        )
 
     # PRE_DISTRIBUTED («зарезервировано под машину в пути») тоже сливаем — это дубли
     # экрана «Распределить машину». Но НЕ смешиваем их с обычными «В сборке»: у

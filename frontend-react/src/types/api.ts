@@ -1859,6 +1859,13 @@ export interface FboAuditRevertResponse {
 
 export type AssemblyStatus = 'PENDING' | 'PRE_DISTRIBUTED' | 'IN_PROGRESS' | 'READY' | 'VEHICLE_ASSIGNED' | 'SHIPPED' | 'DELIVERED' | 'RETURNED' | 'CLOSED' | 'CANCELLED';
 
+/**
+ * Тип заявки на сборку (зеркало backend/schemas/assembly.py::ALLOWED_ASSEMBLY_KINDS):
+ * fbo — операционная заявка логиста; fbs — учётное зеркало сборки ФФ по поставке
+ * FBS WB (ведёт джоб: руками не редактируется, машины/паллет/веса нет).
+ */
+export type AssemblyKind = 'fbo' | 'fbs';
+
 export type PackageType = 'BOX' | 'MONOPALLET' | 'SUPERSAFE';
 
 export interface AssemblyRequestItem {
@@ -2077,6 +2084,37 @@ export interface AssemblyRequest {
   warehouse_name?: string;
   number: string;
   status: AssemblyStatus;
+  /**
+   * fbo — операционная заявка логиста; fbs — учётное зеркало сборки ФФ по
+   * поставке FBS (ведёт джоб). Бэк шлёт всегда (дефолт 'fbo'); optional —
+   * страховка окна деплоя старого бэка: отсутствие поля читать как 'fbo'.
+   */
+  kind?: AssemblyKind;
+  /** Поставка FBS (WB-GI-…) — источник зеркала kind=fbs; у fbo всегда null. */
+  fbs_supply_id?: string | null;
+  /**
+   * Производное состояние поставки FBS (FbsSupplyStatus: active/to_ship/
+   * in_delivery/rejected) — фронт рисует ярлыки кабинета WB («Сборка заказов» /
+   * «Отгрузите поставку» / «Сортируем»). Только у kind=fbs.
+   */
+  fbs_supply_status?: string | null;
+  /**
+   * Момент скана QR поставки на приёмке WB — граница «наша зона / зона WB»:
+   * до скана задания «Отгрузите товар» (подсвечиваем зависшие), после — WB.
+   */
+  fbs_scan_dt?: string | null;
+  /**
+   * Когда поставка СОЗДАНА в кабинете WB — колонка «Создана» у kind=fbs.
+   * Собственный created_at зеркала — внутренняя дата (джоб создаёт записи
+   * задним числом): по ней «передана раньше созданной» читалось парадоксом.
+   */
+  fbs_supply_created_at?: string | null;
+  /**
+   * Прогресс сортировки (kind=fbs): живых заданий всего / ещё НЕ прошедших СЦ —
+   * подпись «ждут сортировки: N из M» объясняет, почему заявка не идёт дальше.
+   */
+  fbs_orders_total?: number | null;
+  fbs_orders_pending?: number | null;
   wb_fbo_supply_id: number | null;
   wb_supply_name?: string;
   wb_warehouse_name?: string;
@@ -2314,6 +2352,12 @@ export interface PrebookingCreateResult {
 export interface AssemblyListResponse {
   items: AssemblyRequest[];
   total: number;
+  /**
+   * Счётчики по статусам для фазовых вкладок kind=fbs («На сборке» /
+   * «В доставке» / «Завершённые»): по тем же фильтрам, что список, но БЕЗ
+   * статус-фильтра. У kind=fbo пустой объект.
+   */
+  status_counts?: Record<string, number>;
 }
 
 export interface AssemblyBulkDeleteSkip {
@@ -2786,8 +2830,10 @@ export interface StockMismatchSkuRow {
   article_seller: string | null;
   brand: string | null;
   name: string | null;
-  /** у ФФ (зеркало провайдера), штук россыпи */
+  /** у ФФ (зеркало провайдера), штук россыпи; уже ЗА ВЫЧЕТОМ ff_fbs */
   ff_good: number;
+  /** вычтено из ff_good: отгружено по FBS у нас, провайдер не списал */
+  ff_fbs: number;
   /** у нас годный (WarehouseStock.quantity) */
   our_quantity: number;
   /** у нас брак (вычтен из diff только для migfull) */
@@ -2811,6 +2857,8 @@ export interface StockMismatchWarehouseRow {
   surplus_our_sku: number;
   /** surplus_ff_qty - surplus_our_qty (нетто ФФ − наш) */
   net_diff: number;
+  /** Σ ff_fbs по SKU склада: сколько шума сняла FBS-поправка */
+  ff_fbs_qty: number;
   /** всего SKU с расхождением */
   sku_total: number;
   /** rows обрезаны до лимита (на складе больше расхождений) */
@@ -6164,6 +6212,13 @@ export interface FfStockRow {
   ff_box_count: number;
   /** досчитано к ff_good: товар в стадии списания логистики ФФ, физически ещё на складе */
   ff_logistics: number;
+  /**
+   * Вычтено ИЗ ff_good: отгружено по FBS у нас (движения FBS_ORDER), а
+   * провайдер выбытие не отразил — ни один из трёх WMS остаток под FBS не
+   * снимает (сверка 29.07.2026). ff_good приходит уже ЗА ВЫЧЕТОМ, поле —
+   * расшифровка, симметрично ff_logistics. Кап: не больше сырого ff_good.
+   */
+  ff_fbs: number;
   our_quantity: number;
   our_defect: number;
   /** ff_good - our_quantity (ff_good уже включает ff_logistics) */
@@ -6182,6 +6237,8 @@ export interface FfStockTotals {
   ff_box_units: number;
   /** досчитано к ff_good: товар в стадии списания логистики ФФ */
   ff_logistics: number;
+  /** вычтено из ff_good: отгружено по FBS, провайдер ещё не списал */
+  ff_fbs: number;
   our_quantity: number;
   diff: number;
   /** строк ФФ без нашей номенклатуры */
@@ -8134,6 +8191,12 @@ export interface FbsWarehouse {
    * (позиция с живым остатком на складах WB не транслируется).
    */
   fbo_max_qty?: number | null;
+  /**
+   * Авто-учёт сборки FBS: заявки kind=fbs заводит и ведёт джоб (одна на
+   * поставку WB-GI), сток/резерв они не трогают. Бэк шлёт всегда (дефолт
+   * false); optional — страховка окна деплоя старого бэка.
+   */
+  auto_assembly?: boolean;
   synced_at?: string | null;
   links: FbsWarehouseLink[];
 }
@@ -8163,6 +8226,18 @@ export interface FbsWarehouseSettingsPayload {
    * null в теле означал бы «не передано», поэтому «снять» кодируется -1.
    */
   fbo_max_qty?: number | null;
+  /**
+   * Авто-учёт сборки FBS: WMS склада сам ведёт сборку по FBS-заказам — мы
+   * зеркалим её учётными заявками kind=fbs (одна на поставку WB-GI).
+   * НЕ под 409-гейтом «зеркало выше учёта» — шлётся отдельным PATCH.
+   */
+  auto_assembly?: boolean | null;
+  /**
+   * Подтверждение рискованной комбинации «translate + ff_mirror», когда
+   * зеркало ФФ выше нашего учёта: без force сервис отвечает 409 с цифрами
+   * разрыва, с force — применяет как есть (решение человека).
+   */
+  force?: boolean;
 }
 
 export interface FbsLinkCreatePayload {
@@ -8294,6 +8369,206 @@ export interface FbsOrderStats {
   by_subject: FbsOrderStatRow[];
   by_subcategory: FbsOrderStatRow[];
   funnel: FbsOrderStatsFunnel;
+}
+
+/** Точность вехи: точные даты WB/наших операций против журнала переходов. */
+export type FbsStagePrecision = 'exact' | 'approx';
+
+/** Зона ответственности этапа: до сортировки — наша, после — логистики WB. */
+export type FbsStageZone = 'us' | 'wb' | 'total';
+
+/** Шаг динамики. Подбирается бэкендом по длине периода, если не задан. */
+export type FbsStageBucket = 'day' | 'week' | 'month';
+
+/**
+ * Этап пути задания за период.
+ *
+ * `count` — сколько заданий реально ЗАМЕРЕНО. Ноль при `precision: 'approx'`
+ * значит «истории ещё нет» (журнал переходов начинается с момента наполнения),
+ * а НЕ «этап проходит мгновенно» — подпись обязана это различать.
+ */
+export interface FbsStageRow {
+  key: string;
+  title: string;
+  /** Короткое имя для узкой колонки таблицы; полное — в подсказке. */
+  short: string;
+  zone: FbsStageZone;
+  precision: FbsStagePrecision;
+  /** Сводный этап перекрывает соседние — складывать с обычными нельзя. */
+  summary: boolean;
+  hint: string;
+  count: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+  avg_hours: number | null;
+  min_hours: number | null;
+  max_hours: number | null;
+  /** Замеры, выброшенные как недостоверные (обратный порядок вех / потолок). */
+  dropped: number;
+  /**
+   * Сколько из `count` опёрлись на журнал переходов вместо истории кабинета
+   * (± каденс синка). Ноль — этап целиком посчитан по точным моментам WB.
+   */
+  approx_count: number;
+}
+
+/** Этап × склад продавца, с которого собирают. */
+export interface FbsStageWarehouseRow {
+  stage: string;
+  wb_warehouse_id?: number | null;
+  warehouse_name: string;
+  count: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+  avg_hours: number | null;
+}
+
+/**
+ * Точка динамики: этап × начало бакета по дате ЗАВЕРШЕНИЯ этапа (МСК).
+ *
+ * Ряд РАЗРЕЖЕН: отсутствующий бакет — «замеров не было», а не «ноль часов».
+ * Дорисовка пропусков нулями покажет провалы там, где просто нет данных.
+ */
+export interface FbsStageDynamicsRow {
+  stage: string;
+  period_start: string;
+  count: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+  avg_hours: number | null;
+}
+
+/**
+ * Что висит на этапе прямо сейчас. Период на этот блок не влияет.
+ *
+ * Фазы `to_ship` и `in_transit` — разбиение псевдо-статуса `in_delivery`
+ * вкладки «Заказы» по факту скана QR, поэтому «Едет к СЦ» здесь всегда меньше
+ * «В доставке» там, а совпадает СУММА двух карточек.
+ */
+export interface FbsStageQueueRow {
+  phase: string;
+  title: string;
+  count: number;
+  median_age_hours: number | null;
+  max_age_hours: number | null;
+}
+
+/** Покрытие журнала переходов — фолбэк для заданий без догнанной истории. */
+export interface FbsStageJournal {
+  events: number;
+  since?: string | null;
+  orders: number;
+}
+
+/**
+ * Покрытие догона истории из кабинета WB — на чём посчитаны поздние этапы.
+ *
+ * Пока `orders_covered` меньше `orders_total`, часть замеров опирается на
+ * журнал (это видно в `approx_count` строки этапа).
+ */
+export interface FbsStageHistory {
+  orders_total: number;
+  orders_covered: number;
+  rows: number;
+  since?: string | null;
+}
+
+/**
+ * Направление доставки (округ покупателя).
+ *
+ * 🔴 В строке ДВЕ разные выборки: `orders` — задания, чей путь завершился
+ * в периоде (по ним скорость и SLA); `matured` — созревшая когорта, и только
+ * по ней считается `refused`. На всей выборке доля отказов была бы ошибкой
+ * выжившего — свежее ещё в пути.
+ */
+export interface FbsGeoDirectionRow {
+  label: string;
+  orders: number;
+  median_days: number | null;
+  p90_days: number | null;
+  avg_hops: number | null;
+  matured: number;
+  refused: number;
+  sla_total: number;
+  sla_in_time: number;
+}
+
+/**
+ * Город назначения — последний узел маршрута перед готовностью к вручению.
+ *
+ * 🔴 Это точка сети WB (СЦ/ПВЗ), а не адрес покупателя. Зато известна для всех
+ * заданий с завершённым путём, тогда как округ берётся сшивкой с зеркалом
+ * статистики и покрывает не всё.
+ */
+export interface FbsGeoDestinationRow {
+  label: string;
+  orders: number;
+  median_days: number | null;
+  p90_days: number | null;
+}
+
+/** Клетка матрицы «склад отгрузки × округ назначения». */
+export interface FbsGeoMatrixRow {
+  wb_warehouse_id?: number | null;
+  warehouse_name: string;
+  label: string;
+  orders: number;
+  median_days: number | null;
+}
+
+/**
+ * Узел маршрута (СЦ). `measured` меньше `passes` — у части проходов в истории
+ * одно событие, и удержание неизвестно; при `measured = 0` длительность `null`,
+ * потому что ноль означал бы «прошёл мгновенно».
+ */
+export interface FbsGeoNodeRow {
+  label: string;
+  passes: number;
+  measured: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+}
+
+/** Перевалки против времени — управляемый рычаг маршрута. */
+export interface FbsGeoHopsRow {
+  hops: number;
+  orders: number;
+  median_days: number | null;
+}
+
+/** Доля заданий, сшитых с зеркалом статистики (иначе округ неизвестен). */
+export interface FbsGeoCoverage {
+  orders_total: number;
+  orders_matched: number;
+}
+
+/** География доставки FBS: направления, маршруты, узлы и перевалки. */
+export interface FbsGeoAnalytics {
+  date_from: string;
+  date_to: string;
+  wb_warehouse_id?: number | null;
+  maturity_days: number;
+  directions: FbsGeoDirectionRow[];
+  /** Города назначения по маршруту — покрытие 100%, в отличие от округов. */
+  destinations: FbsGeoDestinationRow[];
+  matrix: FbsGeoMatrixRow[];
+  nodes: FbsGeoNodeRow[];
+  hops: FbsGeoHopsRow[];
+  coverage: FbsGeoCoverage;
+}
+
+/** Аналитика этапов FBS: длительности, разрез по складам, динамика, очередь. */
+export interface FbsStageAnalytics {
+  date_from: string;
+  date_to: string;
+  bucket: FbsStageBucket;
+  wb_warehouse_id?: number | null;
+  stages: FbsStageRow[];
+  by_warehouse: FbsStageWarehouseRow[];
+  dynamics: FbsStageDynamicsRow[];
+  queue: FbsStageQueueRow[];
+  journal: FbsStageJournal;
+  history: FbsStageHistory;
 }
 
 /**
@@ -8437,6 +8712,58 @@ export interface FbsOrder {
   comment?: string | null;
   written_off_at?: string | null;
   synced_at: string;
+  /**
+   * Сколько дней задание едет: от передачи поставки (scan_dt → closed_at →
+   * written_off_at, что есть) до сейчас. Только у `complete`, ещё не принятых
+   * СЦ; у прочих фаз и без якоря — null.
+   */
+  transit_days?: number | null;
+  /**
+   * Фаза ПОСТАВКИ задания — для кабинетного статуса строки: закрыта ли
+   * (`done`) и отсканирован ли QR (`scan_dt`). Без них строка «complete +
+   * waiting» читалась как противоречие: закрыто у нас ≠ сдано WB. Нет
+   * поставки / зеркало её не знает → null/null.
+   */
+  supply_done?: boolean | null;
+  supply_scan_dt?: string | null;
+  /**
+   * Оценка штрафа WB за отмену, ₽ (только в фазах cancel_client /
+   * cancel_seller). Numeric — приходит СТРОКОЙ, перед показом Number().
+   * 0 — отмена без штрафа, null — фаза не отменная / оценки нет.
+   */
+  penalty_est?: number | string | null;
+  /**
+   * Цена задания В РУБЛЯХ (канон бэка): рубль → sale_price → price; валюта
+   * СНГ → пересчёт WB. null — пересчёта нет, показывать номинал нельзя.
+   * Numeric — приходит СТРОКОЙ, перед показом Number().
+   */
+  price_rub?: number | string | null;
+}
+
+/**
+ * Сводка по фильтру отмен (cancel_client / cancel_seller): потерянная выручка
+ * по ВСЕЙ выборке фильтра + штраф WB двумя числами — оценка по правилам
+ * (сразу, но приблизительно, верхняя граница) и факт из финотчёта (точно, но
+ * с лагом ~5 дней). Numeric-суммы приходят СТРОКОЙ — перед показом Number().
+ */
+export interface FbsCancelStats {
+  revenue: number | string;
+  /** Заданий в выборке (дубль total — плашка не зависит от пагинации). */
+  orders: number;
+  /** Оценка по правилам WB; у клиентских отмен всегда 0 (WB их не штрафует). */
+  penalty_est: number | string;
+  penalty_est_count: number;
+  /** Заданий без ставки комиссии в тарифах — по ним оценка пропущена, не выдумана. */
+  no_commission_count: number;
+  /** Оценка усечена лимитом строк (очень широкое окно) — итог неполный. */
+  estimate_truncated: boolean;
+  /** Факт: удержания «Невыполненный заказ (отмена продавцом)» из финотчёта WB. */
+  penalty_fact: number | string;
+  penalty_fact_count: number;
+  /** До какой даты доехал финотчёт: ноль факта свежее неё = «ещё не выставлен». */
+  fact_covered_to?: string | null;
+  /** Факт скрыт: включён фильтр склада WB, а у строк финотчёта склада нет. */
+  fact_scoped_out: boolean;
 }
 
 export interface FbsOrderListResponse {
@@ -8451,6 +8778,28 @@ export interface FbsOrderListResponse {
    */
   in_delivery_count: number;
   sorted_count: number;
+  /**
+   * Зависшие в пути: переданы ≥ N дней назад, СЦ так и не принял. Окно
+   * ограничено сверху (см. сервис): у старых `complete` wb_status застывает
+   * (синк опрашивает не всё), и без потолка счётчик копил бы мёртвые строки.
+   */
+  in_delivery_stuck_count: number;
+  /**
+   * «Завершённые» кабинета WB: complete, дошедшее до покупателя (sold/defect).
+   * История, не очередь — окно периода применяется как к прочим фазам доставки.
+   */
+  delivered_count: number;
+  /**
+   * Разрез отмен (канон 30.07): клиент отменил / отменили мы (продавец или
+   * перевозчик). Сумма равна cancel + cancel_carrier из status_counts.
+   */
+  cancel_client_count: number;
+  cancel_seller_count: number;
+  /**
+   * Сводка отмен — только при фильтре status=cancel_client|cancel_seller,
+   * иначе null/отсутствует (старый бэк её не шлёт — фронт обязан переживать).
+   */
+  cancel_stats?: FbsCancelStats | null;
 }
 
 /** Очередь одного склада продавца по фазам жизни задания. */
@@ -8462,6 +8811,12 @@ export interface FbsWarehouseQueueRow {
   /** Фазы доставки — за выбранный период (`complete` копится вечно). */
   in_delivery: number;
   sorted: number;
+  /**
+   * Зависшие в пути (передано ≥ N дней, СЦ не принял) — БЕЗ периода, как
+   * очередь сборки: пока не отсортировано — вопросы к нам, и зависшее
+   * обязано быть видно независимо от выбранного окна.
+   */
+  in_delivery_stuck: number;
 }
 
 /** GET /fbs/orders/warehouse-summary — очередь по складам одним запросом. */
@@ -8472,6 +8827,109 @@ export interface FbsWarehouseSummary {
   warehouses: FbsWarehouseQueueRow[];
   /** Итог по всем складам — считает бэкенд. */
   totals: Record<string, number>;
+}
+
+/**
+ * Код причины «не списано» (`ALLOWED_WRITEOFF_REASONS` бэка). `queued` —
+ * НЕ проблема: остаток есть, задание просто ждёт ближайшего прогона
+ * 5-минутного джоба списания. `(string & {})` — неизвестный код нового бэка
+ * не роняет тип, фронт покажет его как есть.
+ */
+export type FbsWriteoffReason = 'no_stock' | 'no_card' | 'no_link' | 'queued' | (string & {});
+
+/**
+ * Переданные задания, которые НЕЧЕМ списать со склада (агрегат по товару).
+ *
+ * Списание идемпотентно ретраится каждые 5 минут, но пока причина жива,
+ * задание молча висит `written_off_at IS NULL` — единственным следом был
+ * warning в логе воркера. Эта строка делает отказ видимым.
+ */
+export interface FbsWriteoffIssueRow {
+  wb_warehouse_id: number | null;
+  wb_warehouse_name: string | null;
+  /** Привязанный наш склад (первый активный) — куда списание пыталось попасть. */
+  warehouse_id: number | null;
+  warehouse_name: string | null;
+  nomenclature_id: number | null;
+  article: string | null;
+  barcode: string | null;
+  /** Сколько заданий не списано по этому товару на этом складе продавца. */
+  stuck: number;
+  /** Самое старое непроведённое (created_at_wb) — возраст проблемы. ISO. */
+  oldest_at: string | null;
+  /** Остаток на привязанных складах: почему «нечем» (обычно 0). */
+  our_qty: number;
+  our_defect: number;
+  /**
+   * Россыпь в зеркале ФФ (null — зеркала нет): физически товар у провайдера
+   * может лежать — сигнал, что наш ledger отстал, а не что товара нет.
+   */
+  ff_loose: number | null;
+  /**
+   * no_stock — остаток 0 | no_card — нет карточки товара | no_link — склад
+   * продавца не привязан к нашему | queued — остаток есть, ждёт ближайшего
+   * прогона списания (очередь, не проблема).
+   */
+  reason: FbsWriteoffReason;
+}
+
+/** Сводка незакрытых списаний: `GET /fbs/orders/writeoff-issues`. */
+export interface FbsWriteoffIssues {
+  total_orders: number;
+  rows: FbsWriteoffIssueRow[];
+  /**
+   * Выдача срезана капом строк сервера (`total_orders` считается ДО среза) —
+   * UI обязан сказать «показаны первые N групп», а не молча спрятать хвост.
+   */
+  truncated: boolean;
+}
+
+/**
+ * Строка таймлайна «Статус заказа» (модалка по заданию — как в кабинете WB).
+ *
+ * Смесь двух источников, отсортирована сервисом по времени DESC (свежее сверху):
+ * - `kind="anchor"` — синтетический якорь из ТОЧНОЙ даты (задание оформлено,
+ *   поставка закрыта, QR отсканирован, списано в DDS);
+ * - `kind="event"` — переход из журнала `wb_fbs_order_events`; его время —
+ *   момент ФИКСАЦИИ синком (точность ~5 мин), об этом говорит `approx=true`
+ *   (UI помечает «≈» перед временем).
+ */
+export interface FbsOrderTimelineEvent {
+  kind: 'anchor' | 'event' | (string & {});
+  /**
+   * Машинный код события: created | assembling | assembled | scanned |
+   * written_off | wb:<status> | supplier:<status>. Человеческий ярлык рисует
+   * фронт — `timelineLabel()` в fbsShared.
+   */
+  code: string;
+  at: string | null;
+  /** Время приблизительное — зафиксировано синком, не WB. */
+  approx: boolean;
+}
+
+/** `GET /fbs/orders/{wb_order_id}/timeline` — история статусов задания. */
+export interface FbsOrderTimeline {
+  wb_order_id: number;
+  article: string | null;
+  subject: string | null;
+  nm_id: number | null;
+  events: FbsOrderTimelineEvent[];
+}
+
+/**
+ * Структурированный detail 409-гейта настроек склада FBS
+ * (`PATCH /fbs/warehouses/{id}/settings`): комбинация «Трансляция + Система ФФ»
+ * при зеркале выше учёта. Фронт опознаёт гейт по `code`, а не по своей копии
+ * серверного условия. Числа — штуки (целые), но могут приехать строкой.
+ */
+export interface FbsMirrorGateDetail {
+  code: 'fbs_mirror_above_ledger';
+  /** Человеческий текст отказа — показывается в диалоге как есть. */
+  message: string;
+  /** На сколько штук зеркало ФФ выше нашего учёта. */
+  mirror_over_ledger: number;
+  ledger_total: number;
+  mirror_total: number;
 }
 
 /**

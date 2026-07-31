@@ -14,6 +14,11 @@ from backend.schemas.assembly_wb import WbSupplyStateBrief
 
 PackageTypeStr = Literal["BOX", "MONOPALLET", "SUPERSAFE"]
 
+#: Типы заявки на сборку — контракт фильтра списка и бейджа фронта
+#: (зеркалится в types/api.ts): fbo — операционная заявка логиста,
+#: fbs — учётное зеркало сборки ФФ по поставке FBS.
+ALLOWED_ASSEMBLY_KINDS = ["fbo", "fbs"]
+
 
 class FfLinkInfo(BaseModel):
     """Одна привязанная ФФ-заявка (зеркало фулфилмента) для деталки/списка сборки.
@@ -283,6 +288,28 @@ class AssemblyRequestResponse(BaseModel):
     warehouse_name: str | None = None
     number: str
     status: str
+    #: fbo — операционная заявка логиста; fbs — учётное зеркало сборки ФФ по
+    #: поставке FBS (ведёт джоб: сток и резерв не трогает, машины/веса нет).
+    kind: str = "fbo"
+    #: Поставка FBS (WB-GI-…) — источник зеркала kind=fbs; у fbo всегда None.
+    fbs_supply_id: str | None = None
+    #: Производное состояние поставки FBS (active/to_ship/in_delivery/rejected —
+    #: `FbsSupplyStatus`): фронт рисует по нему ярлыки кабинета WB («Сборка
+    #: заказов» / «Отгрузите поставку» / «Сортируем»). Только у kind=fbs.
+    fbs_supply_status: str | None = None
+    #: Момент скана QR поставки на приёмке WB — граница «наша зона / зона WB»:
+    #: до скана задания «Отгрузите товар» (подсвечиваем зависшие), после — WB.
+    fbs_scan_dt: datetime | None = None
+    #: Когда поставка СОЗДАНА в кабинете WB (created_at_wb) — колонка «Создана»
+    #: у kind=fbs. Собственный created_at зеркала — внутренняя учётная дата:
+    #: джоб/бэкфилл создаёт записи задним числом, и «передана раньше созданной»
+    #: читалось как парадокс (прод-вопрос 30.07).
+    fbs_supply_created_at: datetime | None = None
+    #: Прогресс сортировки (kind=fbs): живых заданий всего / ещё НЕ прошедших
+    #: СЦ. Ответ на «почему заявка не переходит дальше» прямо в строке списка:
+    #: «ждут сортировки: N из M». None — не считалось (fbo).
+    fbs_orders_total: int | None = None
+    fbs_orders_pending: int | None = None
     wb_fbo_supply_id: int | None = None
     wb_supply_name: str | None = None  # wb_fbo_supplies.name
     wb_warehouse_name: str | None = None  # wb_fbo_supplies.warehouse_name (WB destination)
@@ -392,6 +419,11 @@ class AssemblyRequestResponse(BaseModel):
 class AssemblyListResponse(BaseModel):
     items: list[AssemblyRequestResponse]
     total: int
+    #: Счётчики по СТАТУСАМ для фазовых вкладок (кабинет WB: «На сборке» /
+    #: «В доставке» / «Завершённые»): считаются при kind=fbs по ТЕМ ЖЕ фильтрам,
+    #: что и список, НО без статус-фильтра — цифра вкладки не зависит от того,
+    #: какая вкладка открыта. У kind=fbo пустой dict (вкладок фаз там нет).
+    status_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class BulkStatusResult(BaseModel):
@@ -1107,7 +1139,8 @@ class StockMismatchSkuRow(BaseModel):
     article_seller: str | None
     brand: str | None
     name: str | None
-    ff_good: int  # у ФФ (зеркало провайдера), штук россыпи
+    ff_good: int  # у ФФ (зеркало провайдера), штук россыпи; уже ЗА ВЫЧЕТОМ ff_fbs
+    ff_fbs: int = 0  # вычтено из ff_good: отгружено по FBS у нас, провайдер не списал
     our_quantity: int  # у нас годный (WarehouseStock.quantity)
     our_defect: int = 0  # у нас брак (учтён в diff только для migfull)
     diff: int  # ff_good − (our_quantity + our_defect для migfull); >0 — у ФФ больше
@@ -1124,6 +1157,7 @@ class StockMismatchWarehouseRow(BaseModel):
     surplus_our_qty: int  # суммарно у нас больше, штук
     surplus_our_sku: int  # на скольких SKU у нас больше
     net_diff: int  # surplus_ff_qty - surplus_our_qty (нетто ФФ − наш)
+    ff_fbs_qty: int = 0  # Σ ff_fbs по SKU склада: сколько шума сняла FBS-поправка
     sku_total: int  # всего SKU с расхождением
     truncated: bool  # rows обрезаны до лимита (на складе больше расхождений)
     synced_at: str | None  # ISO — последний синк остатков ФФ

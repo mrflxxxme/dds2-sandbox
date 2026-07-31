@@ -83,6 +83,13 @@ RECENT_ORDERS_CYCLE_BUDGET_SEC = 150
 ORDER_STATUSES_TIMEOUT_SEC = 300
 ORDER_STATUSES_CYCLE_BUDGET_SEC = 240
 
+#: Догон истории: пачка 400 заданий × (пауза 0.3 c + ~0.2 c ответ) ≈ 200 c.
+#: Внутренний бюджет сервиса (`DEFAULT_BUDGET_SEC = 200`) строго меньше этого
+#: таймаута — иначе прогон убивают раньше, чем он успевает вернуть частичный
+#: результат (грабля синков рекламы, см. learnings).
+ORDER_HISTORY_TIMEOUT_SEC = 300
+ORDER_HISTORY_CYCLE_BUDGET_SEC = 260
+
 SUPPLIES_TIMEOUT_SEC = 300
 SUPPLIES_CYCLE_BUDGET_SEC = 240
 
@@ -392,26 +399,85 @@ async def _handle_recent_orders(db: AsyncSession, project_id: int) -> tuple[int,
     return count, count
 
 
+async def _run_assembly_mirror(db: AsyncSession, project_id: int) -> int:
+    """Учётное зеркало сборки FBS (заявки kind=fbs) — best-effort.
+
+    Сбой зеркала не должен ронять родительский синк (поставки/статусы уже
+    записаны и закоммичены сервисами) — логируем и продолжаем; сессию
+    откатываем, чтобы не оставить её в failed-состоянии.
+    """
+    from backend.services.wb_fbs.assembly_mirror import sync_fbs_assembly_mirror
+
+    try:
+        return await sync_fbs_assembly_mirror(db, project_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("WB FBS assembly mirror: проект %d упал — %s", project_id, e, exc_info=True)
+        try:
+            await db.rollback()
+        except Exception:  # noqa: BLE001 — сессия могла быть уже закрыта
+            pass
+        return 0
+
+
 async def _handle_order_statuses(db: AsyncSession, project_id: int) -> tuple[int, int]:
     """Статусы не-терминальных заданий + списание ушедших в `complete`.
 
     Списание живёт здесь, а не отдельным джобом: `complete` появляется ровно в
     момент обновления статусов, и списывать логично тем же проходом
     (`writeoff_completed_orders` идемпотентен по `written_off_at`).
+
+    После списания — догон учётного зеркала сборки FBS (kind=fbs): статусы
+    заявок обязаны догонять статусы заданий без отдельного расписания.
     """
     from backend.services.wb_fbs.orders_service import sync_order_statuses, writeoff_completed_orders
 
     updated = await sync_order_statuses(db, project_id)
     written_off = await writeoff_completed_orders(db, project_id)
+    await _run_assembly_mirror(db, project_id)
     return updated, written_off
 
 
 async def _handle_supplies(db: AsyncSession, project_id: int) -> tuple[int, int]:
-    """Зеркало поставок FBS."""
+    """Зеркало поставок FBS + учётное зеркало сборки (заявки kind=fbs)."""
     from backend.services.wb_fbs.supplies_service import sync_supplies
 
     count = await sync_supplies(db, project_id)
+    await _run_assembly_mirror(db, project_id)
     return count, count
+
+
+async def _handle_order_history(db: AsyncSession, project_id: int) -> tuple[int, int]:
+    """История статусов заданий из КАБИНЕТА — точные вехи для аналитики этапов.
+
+    Ходит НЕ в публичный Marketplace API (истории там нет вовсе), а в кабинет
+    портальной сессией. Отсюда два отличия от соседних хендлеров:
+      • сессии может не быть вовсе — тогда прогон честно падает в ERROR с
+        текстом про кабинет, а не молчит: без неё домен просто не наполняется;
+      • `WbSessionExpired` НЕ гасим — протухшую сессию обновляют руками
+        (харвест кук), и она обязана быть видна в SyncLog, а не выглядеть
+        случайным таймаутом.
+    """
+    from backend.integrations.wb_portal_client import WbSessionExpired
+    from backend.services import integrations_service
+    from backend.services.wb_fbs.order_history import sync_order_history
+
+    client = await integrations_service.get_wb_portal_client(db, project_id)
+    try:
+        stats = await sync_order_history(db, project_id, client=client)
+    except WbSessionExpired:
+        # 🔴 Помечаем сессию EXPIRED, как это делает FBW-транспорт: иначе
+        # протухание видно только строкой в SyncLog, а UI продолжает считать
+        # доступ живым и не просит его обновить. Куки кабинета WB ротирует
+        # примерно раз в неделю, так что это штатное событие, а не авария.
+        # Сервис поднимает это исключение только после SESSION_DEAD_AFTER
+        # подряд неудач — одиночный 401 сессию не хоронит.
+        await integrations_service.mark_wb_portal_expired(db, project_id)
+        raise
+    finally:
+        await client.aclose()
+    return stats["asked"], stats["rows"]
 
 
 async def _handle_warehouses(db: AsyncSession, project_id: int) -> tuple[int, int]:
@@ -504,6 +570,19 @@ async def sync_all_projects_fbs_supplies() -> None:
         timeout=SUPPLIES_TIMEOUT_SEC,
         cycle_budget=SUPPLIES_CYCLE_BUDGET_SEC,
         # Поставки создаются в кабинете и без нашей трансляции.
+        require_active_warehouse=False,
+    )
+
+
+async def sync_all_projects_fbs_order_history() -> None:
+    """Догнать историю статусов заданий из кабинета WB (каденс — 15 мин)."""
+    await _run_fbs_job(
+        sync_type="order_history",
+        title="WB FBS order history",
+        handler=_handle_order_history,
+        timeout=ORDER_HISTORY_TIMEOUT_SEC,
+        cycle_budget=ORDER_HISTORY_CYCLE_BUDGET_SEC,
+        # История читается из кабинета и от трансляции остатков не зависит.
         require_active_warehouse=False,
     )
 

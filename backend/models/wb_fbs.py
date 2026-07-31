@@ -83,6 +83,15 @@ FBS_WB_CANCELLED_STATUSES: tuple[str, ...] = (
     "declined_by_client",  # отказ покупателя до получения
 )
 
+#: Подмножество отмен, где решение принял ПОКУПАТЕЛЬ (канон владельца
+#: 30.07: отмены делятся «клиент отменил / мы отменили»). Всё остальное из
+#: `FBS_WB_CANCELLED_STATUSES` + supplier cancel/cancel_carrier — наша сторона
+#: (продавец / перевозчик).
+FBS_WB_CLIENT_CANCEL_STATUSES: tuple[str, ...] = (
+    "canceled_by_client",
+    "declined_by_client",
+)
+
 #: `wbStatus`, на которых путь заказа ЗАКОНЧИЛСЯ доставкой: товар у покупателя
 #: (или списан в брак). Сам `supplierStatus` навсегда остаётся `complete` и на
 #: вопрос «что ещё в пути» не отвечает — эту ось знает только `wbStatus`.
@@ -91,18 +100,40 @@ FBS_WB_DELIVERED_STATUSES: tuple[str, ...] = (
     "defect",  # брак — до покупателя не доедет, но и в пути больше не числится
 )
 
-#: Отдельная ФАЗА между передачей и вручением: заказ принят сортировочным
-#: центром WB. Считать его вместе с «едет к покупателю» нельзя — это разные
-#: этапы и разная зона ответственности: пока задание не отсортировано, вопросы
-#: по нему ещё к нам, после — уже к логистике WB.
-FBS_WB_SORTED_STATUSES: tuple[str, ...] = ("sorted",)
+#: Отдельная ФАЗА между передачей и вручением: заказ ПРОШЁЛ сортировочный
+#: центр WB (СЦ и дальше по цепочке — ПВЗ, отложенная доставка). Считать её
+#: вместе с «едет к СЦ» нельзя — это разные этапы и разная зона
+#: ответственности: пока задание не отсортировано, вопросы по нему ещё к нам,
+#: после — уже к логистике WB. Пост-сортировочные статусы обязаны быть здесь:
+#: чёрный список «complete минус sorted минус sold» возвращал `ready_for_pickup`
+#: обратно в «едет к СЦ» — 168 заказов, лежащих в ПВЗ, светились «зависшими»
+#: (прод 30.07.2026).
+FBS_WB_SORTED_STATUSES: tuple[str, ...] = ("sorted", "ready_for_pickup", "postponed_delivery")
+
+#: ДО-сортировочные `wbStatus`: заказ передан и физически едет к СЦ. Белый
+#: список для фазы «в пути» и сигнала «зависло»: у алярма ложный пропуск
+#: дешевле ложной тревоги, поэтому неизвестный новый статус WB по умолчанию
+#: НЕ считается «едет к СЦ» (и не зажигает «зависло»). Пустой/NULL `wb_status`
+#: остаётся «в пути» — строки до появления колонки. Наблюдаемое на проде
+#: 30.07.2026: waiting 2386×complete; sent_to_carrier/accepted_by_carrier —
+#: известные статусы WB того же этапа, живьём пока не встречались.
+FBS_WB_PRE_SORT_STATUSES: tuple[str, ...] = ("waiting", "sent_to_carrier", "accepted_by_carrier")
 
 #: Псевдо-статусы фильтра выдачи. Значениями `supplierStatus` не являются и в
 #: зеркале не хранятся — только фильтр и счётчик (см. `orders_service`):
 #:   `in_delivery` — передано в WB, ещё НЕ отсортировано;
-#:   `sorted`      — принято сортировочным центром, ещё не у покупателя.
+#:   `sorted`      — принято сортировочным центром, ещё не у покупателя;
+#:   `in_delivery_stuck` — подмножество `in_delivery`: передано давно (порог в
+#:   `orders_service`), а СЦ так и не принял — зависло у перевозчика/на СЦ.
 FBS_IN_DELIVERY_STATUS = "in_delivery"
 FBS_SORTED_STATUS = "sorted"
+FBS_IN_DELIVERY_STUCK_STATUS = "in_delivery_stuck"
+#: «Завершённые» кабинета WB: `complete`, дошедшее до покупателя (sold/defect).
+FBS_DELIVERED_STATUS = "delivered"
+#: Разрез отмен: клиентские (FBS_WB_CLIENT_CANCEL_STATUSES) и наши
+#: (supplier cancel/cancel_carrier + wb canceled без клиентского признака).
+FBS_CANCEL_CLIENT_STATUS = "cancel_client"
+FBS_CANCEL_SELLER_STATUS = "cancel_seller"
 
 
 class FbsSupplyStatus(str, enum.Enum):
@@ -226,6 +257,13 @@ class WbFbsWarehouse(Base, TimestampMixin):
     #: доступный FBO-остаток ≤ этого числа. NULL — на FBO не смотрим вовсе,
     #: 0 — классический сценарий «продаём со своего склада то, что кончилось на WB».
     fbo_max_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Авто-учёт сборки FBS: у склада WMS провайдера сам заводит свои заявки по
+    #: FBS-заказам — наша система зеркалит их учётными заявками kind=fbs
+    #: (одна на поставку WB-GI-…, статусы ведёт джоб). Сток/резерв зеркало не
+    #: трогает: списание остаётся за `writeoff_completed_orders`.
+    auto_assembly: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     synced_at: Mapped[datetime | None] = mapped_column(DateTime)
 
@@ -424,6 +462,14 @@ class WbFbsOrder(Base, TimestampMixin):
     written_off_at: Mapped[datetime | None] = mapped_column(DateTime)
     synced_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
+    #: Когда последний раз забрали историю статусов из КАБИНЕТА (`WbFbsOrderHistory`).
+    #: NULL — ни разу; очередь догона идёт по этому полю. У живых заданий метка
+    #: протухает и историю перезабирают, у терминальных — больше нет смысла.
+    history_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+    #: Плановая дата доставки покупателю (`deliveryDate` кабинета). В публичном
+    #: Marketplace API её нет вовсе — приезжает вместе с историей.
+    delivery_date_plan: Mapped[datetime | None] = mapped_column(DateTime)
+
     __table_args__ = (
         UniqueConstraint("project_id", "wb_order_id", name="uq_wb_fbs_order"),
         Index("ix_wb_fbs_orders_project_status", "project_id", "supplier_status"),
@@ -438,6 +484,97 @@ class WbFbsOrder(Base, TimestampMixin):
             "nomenclature_id",
             postgresql_where=text("supplier_status IN ('new', 'confirm')"),
         ),
+    )
+
+
+# ─── Журнал переходов статусов заданий ──────────────────────────────────────
+
+
+class WbFbsOrderEvent(Base):
+    """Переход статуса задания FBS — строка таймлайна «Статус заказа».
+
+    WB Marketplace API истории НЕ отдаёт (только текущие статусы), поэтому
+    журнал пишет наш синк В МОМЕНТ ОБНАРУЖЕНИЯ перехода: `changed_at` — время
+    фиксации (точность = каденс синка, 5 мин), не время события у WB. Точные
+    даты прошлого дают синтетические якоря модалки (created_at_wb задания,
+    closed_at/scan_dt поставки, written_off_at) — их в журнал не пишем, чтобы
+    не дублировать источники истины.
+
+    Append-only, без SoftDelete (как `FulfillmentStatusEvent`): каскадно
+    умирает с заданием, повторный синк без изменений событий не плодит.
+    """
+
+    __tablename__ = "wb_fbs_order_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    order_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("wb_fbs_orders.id", ondelete="CASCADE"), nullable=False
+    )
+    #: Какая ось сменилась: supplier_status | wb_status.
+    axis: Mapped[str] = mapped_column(String(20), nullable=False)
+    old_value: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    new_value: Mapped[str] = mapped_column(String(30), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        # Таймлайн одного задания — единственный читатель журнала.
+        Index("ix_wb_fbs_order_events_order", "project_id", "order_id", "changed_at"),
+    )
+
+
+class WbFbsOrderHistory(Base):
+    """Строка ИСТОРИИ статусов задания из КАБИНЕТА WB — точное время от WB.
+
+    🔴 Это ДРУГОЙ источник, не `WbFbsOrderEvent`. Публичный Marketplace API
+    истории не отдаёт вовсе, поэтому журнал событий пишет наш синк в момент
+    ОБНАРУЖЕНИЯ перехода (± каденс 5 мин) и прошлое не знает. А портал
+    (`GET /ns/marketplace-app/marketplace-remote-wh/api/v3/portal/orders/{id}/history`)
+    отдаёт полную цепочку с миллисекундной точностью и городом плеча — вплоть
+    до «Оформлен». Отсюда: аналитика этапов предпочитает эту таблицу журналу,
+    а журнал остаётся фолбэком для заданий, которые ещё не догнаны.
+
+    **Имя статуса хранится СЫРЫМ.** Словарь WB открытый (наблюдались «Оформлен»,
+    «Продавец собирает заказ», «Продавец собрал заказ: скоро передаст в
+    доставку», «Отсортирован», «Отгружено сортировочным центром», «Отгружен
+    распределительным центром - транзит», «В пути в сортировочный центр»,
+    «В пути», «Доставлен СЦ/РЦ»; поздние — «готов к выдаче», «получен» — в
+    выборке не встретились). Маппинг в вехи делается НА ЧТЕНИИ: новый статус WB
+    не должен требовать миграции и не должен теряться.
+
+    Цепочка повторяется на каждом плече (несколько «Отсортирован» в разных
+    городах), поэтому веха берётся по ПЕРВОМУ вхождению имени.
+
+    Append-only, каскадно умирает с заданием. Уникальность по
+    `(order_id, at, name)` делает повторный догон идемпотентным.
+    """
+
+    __tablename__ = "wb_fbs_order_history"
+
+    #: BigInteger: самая быстрорастущая таблица домена — ~6 строк на задание,
+    #: порядка 8–10 тысяч строк в сутки на живом проекте.
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    order_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("wb_fbs_orders.id", ondelete="CASCADE"), nullable=False
+    )
+    #: Момент статуса по данным WB (наивный UTC, как все даты домена).
+    at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    #: Сырое имя статуса из кабинета — НЕ нормализуем при записи.
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    #: Город/узел плеча («Сынково», «СЦ Иваново Окружная»); у ранних этапов пусто.
+    place: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    #: Признак WB «статус финальный» — путь закончен.
+    is_final: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "order_id", "at", "name", name="uq_wb_fbs_order_history"),
+        # Разрез «история проекта за период» — узлы маршрута и покрытие догона.
+        # Индекса (project_id, order_id, at) нет намеренно: он строгий префикс
+        # уникального выше и ничего сверх него не умеет, а вставок тут тысячи
+        # в сутки — лишний индекс только замедлял бы запись.
+        Index("ix_wb_fbs_order_history_project_at", "project_id", "at"),
     )
 
 

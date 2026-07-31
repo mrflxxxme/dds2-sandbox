@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached, invalidate_cache
 from backend.config import settings
-from backend.models.assembly import AssemblyRequest, AssemblyStatus
+from backend.models.assembly import AssemblyKind, AssemblyRequest, AssemblyStatus
 from backend.models.counterparty import Counterparty
 from backend.models.ff_billing import (
     FfInvoice,
@@ -528,6 +528,9 @@ async def reconcile_invoice(db: AsyncSession, project_id: int, invoice_id: int) 
                             AssemblyStatus.CLOSED.value,
                         ]
                     ),
+                    # kind=fbs — учётное зеркало FBS: тарификация работ ФФ по FBS —
+                    # отдельная договорённость, в FBO-строки счёта не входит.
+                    AssemblyRequest.kind != AssemblyKind.FBS.value,
                     AssemblyRequest.shipped_at.isnot(None),
                     func.date(AssemblyRequest.shipped_at) >= inv.period_start,
                     func.date(AssemblyRequest.shipped_at) <= inv.period_end,

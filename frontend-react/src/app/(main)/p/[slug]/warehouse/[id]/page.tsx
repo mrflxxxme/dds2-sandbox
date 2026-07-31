@@ -2034,6 +2034,9 @@ function FfStocksTab({ warehouseId, provider }: { warehouseId: number; provider:
     const totals = data?.totals;
     const hasFilters = Boolean(subjectFilter || brandFilter || search.trim() || quickFilter);
     const isMigfull = provider === 'migfull';  // только у «Натали» резерв раскладывается на части
+    // FBS-вычет из ff_good: провайдеры остаток под FBS не снимают, снимаем мы.
+    // Колонка и KPI появляются, только когда вычет вообще есть.
+    const hasFbs = (totals?.ff_fbs ?? 0) > 0;
 
     const diffCell = (v: number) => {
         if (!v) return <span style={{ color: 'var(--color-text-muted)' }}>0</span>;
@@ -2077,6 +2080,18 @@ function FfStocksTab({ warehouseId, provider }: { warehouseId: number; provider:
             ),
             exportValue: (row: FfStockRow) => row.ff_good,
         },
+        // «ФФ годный» приходит уже ЗА ВЫЧЕТОМ этой колонки — она расшифровка,
+        // симметрично «в коробах», и живёт только пока у склада есть вычет.
+        ...(hasFbs ? ([{
+            key: 'ff_fbs', label: 'Отгружено FBS', align: 'right', headerWrap: true,
+            headerTitle: 'Списано у нас по FBS-продажам; провайдер выбытие ещё не отразил '
+                + '— вычтено из остатка ФФ',
+            render: (v: number) => (
+                <span style={{ color: v > 0 ? 'var(--color-accent)' : 'var(--color-text-muted)' }}>
+                    {formatNumber(v, 0)}
+                </span>
+            ),
+        }] as Column[]) : []),
         { key: 'ff_reserve', label: 'ФФ резерв', align: 'right', format: 'number' },
         // migfull: резерв (stock_locked) = «Собрано» (под активные отгрузки) + «В приёмке»
         // (свежий приход, залоченный при оприходовании) + «Брак» (остаток). Без этого
@@ -2131,6 +2146,7 @@ function FfStocksTab({ warehouseId, provider }: { warehouseId: number; provider:
             color: totals.ff_defect > 0 ? 'var(--color-warning)' : undefined,
         },
         ...(totals.ff_box_units > 0 ? [{ label: 'В коробах', value: totals.ff_box_units, color: 'var(--color-accent)' }] : []),
+        ...(totals.ff_fbs > 0 ? [{ label: 'Отгружено FBS', value: totals.ff_fbs, color: 'var(--color-accent)' }] : []),
         { label: 'У нас', value: totals.our_quantity },
         { label: 'Расхождение', value: totals.diff, color: totals.diff > 0 ? 'var(--color-success)' : totals.diff < 0 ? 'var(--color-danger)' : undefined, filter: 'diff' },
         { label: 'Несматчено', value: totals.unmatched, color: totals.unmatched > 0 ? 'var(--color-warning)' : undefined, filter: 'unmatched' },
@@ -2139,7 +2155,10 @@ function FfStocksTab({ warehouseId, provider }: { warehouseId: number; provider:
     return (
         <>
             {totals && (
-                <div style={{ display: 'grid', gridTemplateColumns: `repeat(${summary.length}, 1fr)`, gap: 12, marginBottom: 16 }}>
+                /* auto-fit, а не repeat(N, 1fr): карточек бывает до десятка
+                   (Собрано/В приёмке/В коробах/Отгружено FBS — условные), и
+                   жёсткая сетка ужимала бы их в нечитаемые столбики. */
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginBottom: 16 }}>
                     {summary.map(s => {
                         const filter = s.filter ?? null;
                         const active = filter !== null && quickFilter === filter;

@@ -10,6 +10,10 @@ import type {
     FbsOrderBackfillResult,
     FbsOrderListResponse,
     FbsOrderStats,
+    FbsOrderTimeline,
+    FbsGeoAnalytics,
+    FbsStageAnalytics,
+    FbsStageBucket,
     FbsWarehouseSummary,
     FbsOverrideSetPayload,
     FbsReconcileApplyPayload,
@@ -33,6 +37,7 @@ import type {
     FbsWarehouseCreatePayload,
     FbsWarehouseRenamePayload,
     FbsWarehouseSettingsPayload,
+    FbsWriteoffIssues,
 } from '@/types/api';
 
 /** Фильтры списка сборочных заданий (GET /fbs/orders). */
@@ -153,6 +158,14 @@ export function addFbsMethods(api: ApiClient) {
                 'GET', `/api/v1/fbs/orders/warehouse-summary${qs ? `?${qs}` : ''}`,
             );
         },
+        /**
+         * Переданные задания, которые НЕЧЕМ списать со склада (агрегат по
+         * товару): остаток 0 / нет карточки / склад не привязан. Пока сводка
+         * непуста, часть FBS-продаж не проведена по нашим книгам.
+         */
+        getFbsWriteoffIssues() {
+            return api.request<FbsWriteoffIssues>('GET', '/api/v1/fbs/orders/writeoff-issues');
+        },
         /** Сводка заказов за период: выручка, разрезы, доля в объёме воронки. */
         getFbsOrderStats(f: { dateFrom?: string; dateTo?: string; wbWarehouseId?: number } = {}) {
             const q = new URLSearchParams();
@@ -161,6 +174,40 @@ export function addFbsMethods(api: ApiClient) {
             if (f.wbWarehouseId) q.set('wb_warehouse_id', String(f.wbWarehouseId));
             const qs = q.toString();
             return api.request<FbsOrderStats>('GET', `/api/v1/fbs/orders/stats${qs ? `?${qs}` : ''}`);
+        },
+        /**
+         * Аналитика этапов: сколько времени задание проводит на каждом шаге
+         * пути, с разрезом по складам и динамикой. Этап засчитывается в сутки,
+         * когда он ЗАВЕРШИЛСЯ; блок `queue` период игнорирует.
+         */
+        getFbsStageAnalytics(
+            f: { dateFrom?: string; dateTo?: string; wbWarehouseId?: number; bucket?: FbsStageBucket } = {},
+        ) {
+            const q = new URLSearchParams();
+            if (f.dateFrom) q.set('date_from', f.dateFrom);
+            if (f.dateTo) q.set('date_to', f.dateTo);
+            if (f.wbWarehouseId) q.set('wb_warehouse_id', String(f.wbWarehouseId));
+            if (f.bucket) q.set('bucket', f.bucket);
+            const qs = q.toString();
+            return api.request<FbsStageAnalytics>('GET', `/api/v1/fbs/orders/stage-analytics${qs ? `?${qs}` : ''}`);
+        },
+        /** География доставки: направления, маршруты, узлы, перевалки. */
+        getFbsGeoAnalytics(f: { dateFrom?: string; dateTo?: string; wbWarehouseId?: number } = {}) {
+            const q = new URLSearchParams();
+            if (f.dateFrom) q.set('date_from', f.dateFrom);
+            if (f.dateTo) q.set('date_to', f.dateTo);
+            if (f.wbWarehouseId) q.set('wb_warehouse_id', String(f.wbWarehouseId));
+            const qs = q.toString();
+            return api.request<FbsGeoAnalytics>('GET', `/api/v1/fbs/orders/geo-analytics${qs ? `?${qs}` : ''}`);
+        },
+        /**
+         * Догнать историю статусов из кабинета WB (точные вехи для этапов).
+         * Публичный API истории не отдаёт — идём портальной сессией, поэтому
+         * прогон ограничен пачкой и лимитом хоста (150 запросов/мин).
+         */
+        syncFbsOrderHistory(limit = 200) {
+            const q = new URLSearchParams({ limit: String(limit) });
+            return api.request<FbsActionResult>('POST', `/api/v1/fbs/orders/history/sync?${q}`);
         },
         syncFbsOrders() {
             return api.request<FbsActionResult>('POST', '/api/v1/fbs/orders/sync');
@@ -181,6 +228,14 @@ export function addFbsMethods(api: ApiClient) {
         },
         cancelFbsOrder(wbOrderId: number) {
             return api.request<FbsActionResult>('PATCH', `/api/v1/fbs/orders/${wbOrderId}/cancel`);
+        },
+        /**
+         * История статусов задания — таймлайн «Статус заказа», как в кабинете
+         * WB. События уже отсортированы бэкендом DESC (свежее сверху); ярлыки
+         * по кодам рисует фронт (`timelineLabel` в fbsShared).
+         */
+        getFbsOrderTimeline(wbOrderId: number) {
+            return api.request<FbsOrderTimeline>('GET', `/api/v1/fbs/orders/${wbOrderId}/timeline`);
         },
 
         // ─── Поставки ────────────────────────────────────────────────────────

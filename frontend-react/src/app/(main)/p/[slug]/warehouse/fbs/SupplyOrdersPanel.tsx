@@ -12,13 +12,23 @@ import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import WbThumb from '@/components/WbThumb';
 import { wbProductUrl } from '@/lib/wbMedia';
 import type { FbsOrder, FbsStickerType, FbsSupply } from '@/types/api';
+import OrderTimelineModal from './OrderTimelineModal';
 import {
-    SupplierStatusBadge,
+    CABINET_STATUS_LABEL,
+    NOT_SCANNED_CABINET_KEYS,
+    cabinetOrderStatus,
     deliverStickers,
+    durationSinceLabel,
     fetchStickersChunked,
+    hoursAgoLabel,
     isActiveOrder,
     isStickerReady,
+    isStuckAfterScan,
     num,
+    orderAgeColor,
+    orderPriceRub,
+    TERMINAL_CABINET_KEYS,
+    transitDaysColor,
 } from './fbsShared';
 
 interface Props {
@@ -45,6 +55,8 @@ export default function SupplyOrdersPanel({
     const [stickerError, setStickerError] = useState('');
     const [type, setType] = useState<FbsStickerType>('png');
     const [size, setSize] = useState('58x40');
+    /** Задание, чью историю статусов смотрим (модалка «Статус заказа»). */
+    const [timelineOrder, setTimelineOrder] = useState<FbsOrder | null>(null);
 
     const load = useCallback(async (signal?: AbortSignal) => {
         setLoading(true);
@@ -184,17 +196,43 @@ export default function SupplyOrdersPanel({
                                 <th>Товар</th>
                                 <th style={{ textAlign: 'right' }}>Цена, ₽</th>
                                 <th>Статус</th>
-                                <th>Срок</th>
+                                <th title="Сколько заказ едет с передачи поставки, пока СЦ не принял">В пути</th>
+                                {/* «Срок» = обязательная дата доставки WB (ddate) — есть у
+                                    единиц заказов; пустую колонку не показываем. */}
+                                {items.some(o => o.ddate) && (
+                                    <th title="Обязательная дата доставки от WB — есть только у заказов с выбранной датой">Срок</th>
+                                )}
                             </tr>
                         </thead>
                         <tbody>
-                            {items.map(o => (
-                                <tr key={o.wb_order_id}>
+                            {items.map(o => {
+                                const now = Date.now();
+                                // Статус в терминах кабинета WB: фаза поставки + ось WB.
+                                const cab = cabinetOrderStatus(
+                                    o.supplier_status, o.wb_status, !!supply.done, !!supply.scan_dt,
+                                );
+                                const ageColor = orderAgeColor(o.created_at_wb, cab, now);
+                                // Подсветка: WB не отсканировал ≥ суток (наша зона)
+                                // ИЛИ отсканировал, а СЦ ≥ суток не принимает
+                                // («Ждёт сортировки» — канон 30.07, от scan-якоря).
+                                const stuck = ageColor === 'var(--color-danger)'
+                                    || (cab === 'awaiting_sort' && isStuckAfterScan(supply.scan_dt, now));
+                                return (
+                                <tr key={o.wb_order_id} className={stuck ? 'fbs-row-stuck' : undefined}>
                                     <td>
                                         <div style={{ fontFamily: 'monospace', fontSize: 12 }}>{o.wb_order_id}</div>
                                         <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                                             {o.created_at_wb ? formatDateTime(o.created_at_wb) : '—'}
                                         </div>
+                                        {/* Возраст заказа — как в кабинете WB («5 ч 53 мин назад»):
+                                            сборщику важнее, сколько заказ ЖДЁТ, чем календарная дата.
+                                            Красим по порогам ожидания сборки (12 ч / сутки).
+                                            У завершённых/отменённых таймер не тикает — статус финальный. */}
+                                        {o.created_at_wb && !TERMINAL_CABINET_KEYS.includes(cab) && (
+                                            <div style={{ fontSize: 13, fontWeight: 600, color: ageColor ?? 'var(--color-text-muted)' }}>
+                                                {hoursAgoLabel(o.created_at_wb, now)}
+                                            </div>
+                                        )}
                                     </td>
                                     <td>
                                         {/* Фото — самый быстрый способ понять, ТО ЛИ собирают:
@@ -222,15 +260,52 @@ export default function SupplyOrdersPanel({
                                         </div>
                                     </td>
                                     <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                        {o.sale_price == null ? '—' : formatNumber(num(o.sale_price))}
+                                        {/* Рублёвый канон orderPriceRub: у валют СНГ — пересчёт WB,
+                                            номинал (60.10 BYN) выдавал «60 ₽». */}
+                                        {orderPriceRub(o) == null
+                                            ? '—'
+                                            : formatNumber(orderPriceRub(o) as number)}
                                     </td>
-                                    <td><SupplierStatusBadge status={o.supplier_status} /></td>
-                                    <td>{o.ddate ? formatDate(o.ddate) : '—'}</td>
+                                    <td>
+                                        {/* Статусы кабинета WB: «Отгрузите товар» / «Ждёт сортировки» /
+                                            «Отсортировано»… — одна шкала с кабинетом (канон 30.07).
+                                            Клик — модалка «Статус заказа» с историей переходов. */}
+                                        <span
+                                            className={`badge ${CABINET_STATUS_LABEL[cab].badge}`}
+                                            style={{ cursor: 'pointer' }}
+                                            title="История статусов"
+                                            onClick={() => setTimelineOrder(o)}
+                                        >
+                                            {CABINET_STATUS_LABEL[cab].label}
+                                        </span>
+                                    </td>
+                                    <td style={{ color: transitDaysColor(o.transit_days) ?? undefined, whiteSpace: 'nowrap', fontWeight: 500 }}>
+                                        {/* «В пути» — от СКАНА QR (до скана товар ещё у нас, показывать
+                                            нечего). Часы/дни: целые сутки бэка давали «0» для вчерашнего. */}
+                                        {cab === 'awaiting_sort' && supply.scan_dt
+                                            ? durationSinceLabel(supply.scan_dt, now) ?? '—'
+                                            : NOT_SCANNED_CABINET_KEYS.includes(cab) || o.transit_days == null
+                                                ? '—'
+                                                : formatNumber(o.transit_days, 0)}
+                                    </td>
+                                    {items.some(x => x.ddate) && (
+                                        <td>{o.ddate ? formatDate(o.ddate) : '—'}</td>
+                                    )}
                                 </tr>
-                            ))}
+                                );
+                            })}
                         </tbody>
                     </table>
                 </div>
+            )}
+
+            {timelineOrder && (
+                <OrderTimelineModal
+                    wbOrderId={timelineOrder.wb_order_id}
+                    article={timelineOrder.article}
+                    nmId={timelineOrder.nm_id}
+                    onClose={() => setTimelineOrder(null)}
+                />
             )}
         </div>
     );

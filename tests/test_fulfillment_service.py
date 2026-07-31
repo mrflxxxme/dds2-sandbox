@@ -829,6 +829,190 @@ async def test_list_stocks_migfull_inbound_locked_out_of_defect(db_session, proj
     assert data["totals"]["ff_inbound_locked"] == 345 + 30
 
 
+# ─── FBS-вычет из ff_good (ff_fbs) ──────────────────────────────────────────
+#
+# Ни один из трёх WMS-провайдеров не снимает свой остаток под FBS-продажи
+# (сверка 29.07.2026): мы списали единицу из ledger'а (движение FBS_ORDER),
+# зеркало не шелохнулось — каждая продажа читалась как ложное «у ФФ больше».
+# list_stocks вычитает нетто FBS-отгрузок из ff_good, КАП по наблюдаемому
+# ПРОФИЦИТУ (ff_good − наш итог): после выравнивания остатков (ADJUSTMENT /
+# провайдер списал сам) вычет самоизлечивается в 0, а lifetime-нетто движений
+# не рождает вечное ложное «у нас больше».
+
+
+def test_fbs_ref_type_matches_orders_service():
+    """Связка констант между модулями: прямой импорт дал бы цикл
+    (wb_fbs.stock_service уже импортирует fulfillment_service) — паттерн
+    tests/test_wb_fbs_locks.py::TestLockTtlVsJobBudget."""
+    from backend.services.wb_fbs import orders_service  # late import — см. docstring
+
+    assert fulfillment_service._FBS_WRITEOFF_REF_TYPE == orders_service._WRITEOFF_REF_TYPE
+    assert fulfillment_service._FBS_WRITEOFF_REF_TYPE == "FBS_ORDER"
+
+
+async def _fbs_move(db_session, project_id, warehouse_id, nomenclature_id, barcode, qty):
+    """qty=-1 — OUTBOUND-списание продажи, qty=+1 — INBOUND-сторно отмены."""
+    from backend.models.warehouse import MovementType, StockMovement
+
+    db_session.add(
+        StockMovement(
+            project_id=project_id,
+            warehouse_id=warehouse_id,
+            nomenclature_id=nomenclature_id,
+            barcode=barcode,
+            movement_type=(MovementType.OUTBOUND if qty < 0 else MovementType.INBOUND).value,
+            quantity=qty,
+            reference_type="FBS_ORDER",
+        )
+    )
+    await db_session.commit()
+
+
+async def _seed_ff_and_our(db_session, project, warehouse, barcode, ff_good, our_qty):
+    nom = await _make_nomenclature(db_session, project.id, barcode)
+    db_session.add(
+        FulfillmentStock(
+            project_id=project.id,
+            warehouse_id=warehouse.id,
+            provider="skladbot",
+            barcode=barcode,
+            nomenclature_id=nom.id,
+            qty_good=ff_good,
+        )
+    )
+    if our_qty:
+        db_session.add(
+            WarehouseStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                nomenclature_id=nom.id,
+                barcode=barcode,
+                quantity=our_qty,
+            )
+        )
+    await db_session.commit()
+    return nom
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_fbs_deducted_from_ff_good(db_session, project, warehouse):
+    """Нетто FBS-отгрузок вычитается из ff_good; diff становится честным."""
+    bc = f"BC-{_uid()}"
+    nom = await _seed_ff_and_our(db_session, project, warehouse, bc, ff_good=10, our_qty=7)
+    for _ in range(3):
+        await _fbs_move(db_session, project.id, warehouse.id, nom.id, bc, -1)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = next(r for r in data["rows"] if r["barcode"] == bc)
+    assert row["ff_fbs"] == 3
+    assert row["ff_good"] == 7  # 10 − 3
+    assert row["diff"] == 0  # 7 − 7: ложное «у ФФ больше» ушло
+    assert data["totals"]["ff_fbs"] == 3
+    assert data["totals"]["diff"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_fbs_inbound_storno_reduces_net(db_session, project, warehouse):
+    """INBOUND-сторно отменённого задания уменьшает нетто вычета."""
+    bc = f"BC-{_uid()}"
+    nom = await _seed_ff_and_our(db_session, project, warehouse, bc, ff_good=10, our_qty=8)
+    for _ in range(3):
+        await _fbs_move(db_session, project.id, warehouse.id, nom.id, bc, -1)
+    await _fbs_move(db_session, project.id, warehouse.id, nom.id, bc, 1)  # отмена вернула единицу
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = next(r for r in data["rows"] if r["barcode"] == bc)
+    assert row["ff_fbs"] == 2  # нетто: 3 − 1
+    assert row["ff_good"] == 8
+    assert row["diff"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_fbs_capped_by_ff_good(db_session, project, warehouse):
+    """Кап по ff_good: если провайдер начнёт списывать сам, зеркало не уйдёт в минус."""
+    bc = f"BC-{_uid()}"
+    nom = await _seed_ff_and_our(db_session, project, warehouse, bc, ff_good=2, our_qty=0)
+    for _ in range(5):
+        await _fbs_move(db_session, project.id, warehouse.id, nom.id, bc, -1)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = next(r for r in data["rows"] if r["barcode"] == bc)
+    assert row["ff_fbs"] == 2  # применили не больше, чем было в зеркале
+    assert row["ff_good"] == 0  # не −3
+    assert row["diff"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_fbs_all_reverted_no_deduction(db_session, project, warehouse):
+    """Нетто ≤ 0 (всё сторнировано) — вычета нет вовсе."""
+    bc = f"BC-{_uid()}"
+    nom = await _seed_ff_and_our(db_session, project, warehouse, bc, ff_good=5, our_qty=5)
+    await _fbs_move(db_session, project.id, warehouse.id, nom.id, bc, -1)
+    await _fbs_move(db_session, project.id, warehouse.id, nom.id, bc, 1)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = next(r for r in data["rows"] if r["barcode"] == bc)
+    assert row["ff_fbs"] == 0
+    assert row["ff_good"] == 5
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_without_fbs_movements_unchanged(db_session, project, warehouse):
+    """Склад без FBS-движений не меняется: чужой склад проекта не подмешивается."""
+    bc = f"BC-{_uid()}"
+    nom = await _seed_ff_and_our(db_session, project, warehouse, bc, ff_good=10, our_qty=7)
+    # Движение на ДРУГОМ складе того же проекта — не должно затронуть этот.
+    other = Warehouse(project_id=project.id, name=f"FF-{_uid()}", warehouse_type="FULFILLMENT")
+    db_session.add(other)
+    await db_session.commit()
+    await db_session.refresh(other)
+    await _fbs_move(db_session, project.id, other.id, nom.id, bc, -1)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = next(r for r in data["rows"] if r["barcode"] == bc)
+    assert row["ff_fbs"] == 0
+    assert row["ff_good"] == 10
+    assert row["diff"] == 3
+    assert data["totals"]["ff_fbs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_fbs_no_deduction_after_adjustment_alignment(db_session, project, warehouse):
+    """После сверки ADJUSTMENT'ом (mirror == our) вычет НЕ применяется: diff = 0.
+
+    Вычет — lifetime-нетто движений и сам по себе не гаснет. Прежний кап по
+    одному ff_good после выравнивания остатков продолжал вычитать историю
+    FBS-продаж и давал ВЕЧНОЕ ложное «у нас больше». Кап по наблюдаемому
+    профициту (ff_good − our) самоизлечивается: профицита нет — вычета нет.
+    """
+    bc = f"BC-{_uid()}"
+    nom = await _seed_ff_and_our(db_session, project, warehouse, bc, ff_good=7, our_qty=7)
+    for _ in range(3):
+        await _fbs_move(db_session, project.id, warehouse.id, nom.id, bc, -1)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = next(r for r in data["rows"] if r["barcode"] == bc)
+    assert row["ff_fbs"] == 0  # applied = 0: профицита нет
+    assert row["ff_good"] == 7
+    assert row["diff"] == 0  # не −3
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_fbs_capped_by_observed_surplus(db_session, project, warehouse):
+    """Частичный профицит капит вычет: applied = min(нетто, профицит)."""
+    bc = f"BC-{_uid()}"
+    # Профицит 3 (10 − 7), нетто движений 5 → применяем только 3.
+    nom = await _seed_ff_and_our(db_session, project, warehouse, bc, ff_good=10, our_qty=7)
+    for _ in range(5):
+        await _fbs_move(db_session, project.id, warehouse.id, nom.id, bc, -1)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = next(r for r in data["rows"] if r["barcode"] == bc)
+    assert row["ff_fbs"] == 3
+    assert row["ff_good"] == 7
+    assert row["diff"] == 0  # не −2: лишнее нетто не продавливает «у нас больше»
+
+
 # ─── migfull короб → россыпь (box → loose) ──────────────────────────────────
 
 

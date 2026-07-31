@@ -390,6 +390,8 @@ export function addWarehouseMethods(api: ApiClient) {
             joint_only?: boolean;
             /** Происхождение: pre_dist — из машины (🚚), prebooking — предзаявки (🅿️), plain — обычные */
             source?: 'pre_dist' | 'prebooking' | 'plain';
+            /** Тип заявки: fbo — операционные, fbs — учётные зеркала сборки ФФ; не передан — все */
+            kind?: import('@/types/api').AssemblyKind;
             /** Только заявки конкретной машины (CostOrder.id) */
             source_vehicle_id?: number;
             limit?: number; offset?: number;

@@ -26,6 +26,13 @@ PUSH_LOCK_NAME = "push_lock"
 WRITEOFF_LOCK_NAME = "writeoff_lock"
 #: TTL строго больше бюджета джоба статусов (`ORDER_STATUSES_TIMEOUT_SEC` = 300).
 WRITEOFF_LOCK_TTL_SEC = 420
+#: Лок синка учётного зеркала сборки FBS → `wb_fbs:assembly_mirror:{project_id}`.
+#: Точек входа две в одном worker'е: джоб статусов (5 мин) и джоб поставок
+#: (15 мин) — раз в 15 минут пересекаются, и проигравший ловил бы StaleDataError
+#: на пересборке состава (`mirror.items = […]`), роняя весь свой тик в rollback.
+MIRROR_LOCK_NAME = "assembly_mirror"
+#: Синк — чистая работа с БД (без HTTP), 120 с хватает с запасом даже бэкфиллу.
+MIRROR_LOCK_TTL_SEC = 120
 #: TTL лока обязан быть строго БОЛЬШЕ бюджета джоба пуша
 #: (`scheduler/jobs/wb_fbs.py:STOCK_PUSH_TIMEOUT_SEC` = 300 c на проект).
 #: Прежние 180 c протухали ПОСРЕДИ прогона: лок снимался сам, следующий тик
@@ -44,6 +51,16 @@ PUSH_LOCK_TTL_SEC = 420
 #: дают гонку «кто последний», а `qty_sent` фиксирует чужой прогон.
 #: Инвариант PUSH_RUN_BUDGET_SEC < PUSH_LOCK_TTL_SEC — tests/test_wb_fbs_locks.py.
 PUSH_RUN_BUDGET_SEC = 300
+#: Имя лока догона истории из кабинета → `wb_fbs:order_history:{project_id}`.
+#: 🔴 Точек входа две: ручка `/orders/history/sync` (api-контейнер) и джоб
+#: `wb_fbs_order_history` (worker, каждые 15 мин). Без лока они удваивают темп
+#: и выбивают лимит хоста 150/мин — ловилось живьём 30.07, когда два прогона
+#: пошли параллельно и посыпались 429. Цена ошибки здесь выше, чем у ключа API:
+#: портальная сессия восстанавливается ручным харвестом кук.
+ORDER_HISTORY_LOCK_NAME = "order_history"
+#: TTL строго больше внешнего таймаута джоба (`ORDER_HISTORY_TIMEOUT_SEC` = 300).
+ORDER_HISTORY_LOCK_TTL_SEC = 420
+
 #: Значение-заглушка, когда Redis недоступен: работаем без лока, но помним,
 #: что снимать нечего (иначе `release_lock` полезет в мёртвый Redis).
 NO_REDIS_TOKEN = "__no_redis__"

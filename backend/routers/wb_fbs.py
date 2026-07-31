@@ -35,10 +35,12 @@ from backend.integrations.wb_fbs_api import (
     is_write_enabled,
     resolve_base_url,
 )
+from backend.integrations.wb_portal_client import WbPortalError, WbSessionExpired
 from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.wb_fbs import (
     ALLOWED_ORDER_STATUS_FILTERS,
+    ALLOWED_STAGE_BUCKETS,
     ALLOWED_STICKER_TYPES,
     ALLOWED_SUPPLY_STATUSES,
     FbsActionOut,
@@ -48,13 +50,16 @@ from backend.schemas.wb_fbs import (
     FbsOrderBackfillOut,
     FbsOrderBackfillRequest,
     FbsOrderListOut,
-    FbsOrderStatsOut,
     FbsOrderOut,
+    FbsOrderStatsOut,
+    FbsOrderTimelineOut,
     FbsOverrideSet,
     FbsPickListOut,
     FbsReconcileApply,
     FbsMatrixOut,
+    FbsGeoAnalyticsOut,
     FbsReconcileOut,
+    FbsStageAnalyticsOut,
     FbsStickerOut,
     FbsStickerRequest,
     FbsStockPreviewOut,
@@ -72,6 +77,7 @@ from backend.schemas.wb_fbs import (
     FbsWarehouseSummaryOut,
     FbsWarehouseRename,
     FbsWarehouseSettingsUpdate,
+    FbsWriteoffIssuesOut,
 )
 from backend.services.wb_fbs import (
     orders_service,
@@ -80,6 +86,8 @@ from backend.services.wb_fbs import (
     warehouse_service,
 )
 from backend.services.wb_fbs import orders_stats as orders_stats_service
+from backend.services.wb_fbs import geo_analytics as geo_analytics_service
+from backend.services.wb_fbs import stage_analytics as stage_analytics_service
 from backend.services.wb_fbs.client_factory import (
     FBS_SANDBOX_SERVICE,
     FBS_SERVICE,
@@ -88,6 +96,7 @@ from backend.services.wb_fbs.client_factory import (
     service_for_mode,
 )
 from backend.services.wb_fbs.locks import PUSH_LOCK_NAME, PUSH_RUN_BUDGET_SEC, is_locked
+from backend.services.wb_fbs.order_history import HistorySyncBusy
 from backend.utils.rate_limit import rate_limit_write
 from backend.utils.time import utcnow
 
@@ -160,6 +169,17 @@ def _fbs_errors() -> Iterator[None]:
         raise HTTPException(409, e.message) from e
     except WbFbsApiError as e:
         _raise_wb_error(e)
+    except WbSessionExpired as e:
+        # Протухание кук кабинета — штатное еженедельное событие, а не сбой.
+        # Без этой ветки пользователь получал голый 500 со стектрейсом, а UI
+        # продолжал считать доступ живым (джоб при этом помечает EXPIRED сам).
+        raise HTTPException(
+            409, "Сессия кабинета WB недействительна — обновите доступ WB в настройках."
+        ) from e
+    except HistorySyncBusy as e:
+        raise HTTPException(409, str(e)) from e
+    except WbPortalError as e:
+        raise HTTPException(502, f"Кабинет WB недоступен: {e}") from e
     except (ValueError, LookupError) as e:
         _raise_domain_error(e)
     except Exception as e:
@@ -282,9 +302,33 @@ async def update_warehouse_settings(
     Тумблер, источник остатка, буфер, потолок на SKU, режим склада
     (`observe` / `translate`) и гейт по FBO (`fbo_max_qty`: отдаём в FBS,
     только пока на складах WB осталось не больше этого; `-1` — снять гейт).
+
+    Включение рискованной тройки «is_active + translate + ff_mirror» при
+    зеркале ФФ выше учёта гейтится сервисом: 409 со структурированным detail
+    (`code=fbs_mirror_above_ledger` + цифры разрыва — фронт опознаёт «свой»
+    конфликт по коду, а не по тексту); `force=true` применяет как есть.
+
+    🔴 `except FbsMirrorAboveLedger` обязан стоять ВНУТРИ `_fbs_errors()`:
+    имя класса начинается с `Fbs`, и общий обработчик перевёл бы его в 422
+    (`_raise_domain_error`) — 409 деградировал бы молча (закреплено тестом).
     """
     with _fbs_errors():
-        return await warehouse_service.update_settings(db, project.id, wb_warehouse_id, payload)
+        try:
+            return await warehouse_service.update_settings(db, project.id, wb_warehouse_id, payload)
+        except warehouse_service.FbsMirrorAboveLedger as e:
+            # Конфликт состояния склада (зеркало обещает больше учёта), а не
+            # ошибка ввода: 409, как у гардов сверки выше. Структурированный
+            # detail — прецедент backend/routers/counterparty.py (inn_conflict).
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "fbs_mirror_above_ledger",
+                    "message": str(e),
+                    "mirror_over_ledger": e.mirror_over_ledger,
+                    "ledger_total": e.ledger_total,
+                    "mirror_total": e.mirror_total,
+                },
+            ) from e
 
 
 # ─── Привязки наших складов ──────────────────────────────────────────────────
@@ -586,7 +630,9 @@ async def list_orders(
     status: str | None = Query(
         None,
         description="supplier_status: new/confirm/complete/cancel/cancel_carrier "
-        "либо псевдо-статус in_delivery (переданные и ещё не доставленные)",
+        "либо псевдо-статусы in_delivery (переданные и ещё не доставленные) / "
+        "sorted / in_delivery_stuck (зависшие в пути — период игнорируется) / "
+        "delivered (завершённые: получено покупателем или брак)",
     ),
     supply_id: str | None = Query(None, max_length=50),
     wb_warehouse_id: int | None = Query(None, ge=1),
@@ -635,6 +681,129 @@ async def orders_stats(
             date_to=date_to,
             wb_warehouse_id=wb_warehouse_id,
         )
+
+
+@router.get("/orders/stage-analytics", response_model=FbsStageAnalyticsOut)
+async def orders_stage_analytics(
+    date_from: date | None = Query(None, description="МСК-дата начала; по умолчанию — 30 дней назад"),
+    date_to: date | None = Query(None, description="МСК-дата конца включительно; по умолчанию — сегодня"),
+    wb_warehouse_id: int | None = Query(None, ge=1),
+    bucket: str | None = Query(None, description="Шаг динамики: day / week / month; по умолчанию — по длине периода"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Сколько времени задание проводит на каждом этапе пути — с разрезом по складам.
+
+    Этап засчитывается в сутки, когда он ЗАВЕРШИЛСЯ. Блок `queue` — про
+    настоящее (что висит сейчас и как давно) и период намеренно игнорирует.
+    Путь статический — объявлен до path-параметров.
+    """
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(422, "date_from позже date_to")
+    if bucket is not None and bucket not in ALLOWED_STAGE_BUCKETS:
+        raise HTTPException(422, f"bucket: допустимо {', '.join(ALLOWED_STAGE_BUCKETS)}")
+    with _fbs_errors():
+        return await stage_analytics_service.stage_analytics(
+            db,
+            project.id,
+            date_from=date_from,
+            date_to=date_to,
+            wb_warehouse_id=wb_warehouse_id,
+            bucket=bucket,
+        )
+
+
+@router.get("/orders/geo-analytics", response_model=FbsGeoAnalyticsOut)
+async def orders_geo_analytics(
+    date_from: date | None = Query(None, description="МСК-дата начала; по умолчанию — 30 дней назад"),
+    date_to: date | None = Query(None, description="МСК-дата конца включительно; по умолчанию — сегодня"),
+    wb_warehouse_id: int | None = Query(None, ge=1),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Куда едут заказы и как быстро: направления, маршруты, узлы, перевалки.
+
+    Округ покупателя берётся сшивкой с зеркалом статистики по `rid = srid`;
+    покрытие неполное и отдаётся в `coverage`. Путь считается по истории
+    кабинета, поэтому глубина ограничена догоном (`/orders/history/sync`).
+    """
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(422, "date_from позже date_to")
+    with _fbs_errors():
+        return await geo_analytics_service.geo_analytics(
+            db,
+            project.id,
+            date_from=date_from,
+            date_to=date_to,
+            wb_warehouse_id=wb_warehouse_id,
+        )
+
+
+@router.post(
+    "/orders/history/sync",
+    response_model=FbsActionOut,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def sync_order_history(
+    limit: int = Query(120, ge=1, le=150, description="Сколько заданий догнать за прогон"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Догнать историю статусов заданий из КАБИНЕТА WB (точные вехи для этапов).
+
+    Публичный Marketplace API истории не отдаёт — ходим портальной сессией.
+    Ручка нужна для ТОЧЕЧНОГО догона: фоновый джоб берёт по 400 заданий каждые
+    15 минут и три месяца истории разгребает сам. ⚠️ Потолок 150 и бюджет 90 c
+    выбраны под прод-шлюз (`proxy_read_timeout 120s`) и под то, что ручка
+    исполняется в API-контейнере рядом с uvicorn: длинный прогон здесь выедает
+    память (локально 5600 заданий одним заходом словили OOM-kill).
+    Параллельный запуск невозможен — догон под распределённым локом, второй
+    вызов получит 409. `affected` — сколько
+    заданий обработано за этот прогон.
+
+    Запись в WB не делается (это GET к кабинету), но ручка write-типа: она
+    тратит лимит хоста (150 запросов/мин), и дёргать её конкурентно нельзя.
+    """
+    from backend.services import integrations_service
+    from backend.services.wb_fbs.order_history import sync_order_history as run_history
+
+    with _fbs_errors():
+        client = await integrations_service.get_wb_portal_client(db, project.id)
+        try:
+            # 🔴 Бюджет строго меньше `proxy_read_timeout 120s` у nginx: иначе
+            # клиент получает 504 с не-JSON телом (в тосте «Error 504»), а
+            # прогон продолжает молотить лимит кабинета в фоне. Массовый догон —
+            # дело джоба в worker'е, у него свой бюджет 200 c.
+            stats = await run_history(
+                db, project.id, client=client, limit=limit, budget_sec=90.0
+            )
+        finally:
+            await client.aclose()
+    return FbsActionOut(
+        ok=True,
+        affected=stats["orders"],
+        message=(
+            f"История: обработано {stats['orders']} заданий, "
+            f"новых строк {stats['rows']}, ошибок {stats['failed']}"
+        ),
+    )
+
+
+@router.get("/orders/writeoff-issues", response_model=FbsWriteoffIssuesOut)
+async def orders_writeoff_issues(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Незакрытые списания: задания `complete`, которые НЕЧЕМ списать со склада.
+
+    Агрегат по товару с причиной (`no_card` / `no_link` / `no_stock` /
+    `queued` — остатка хватает, ждёт ближайшего прогона) и остатками
+    привязанных складов — раньше отказ был виден только warning'ом
+    в логе воркера. Читает наше зеркало, в WB не ходит; путь статический —
+    объявлен до path-параметров.
+    """
+    with _fbs_errors():
+        return await orders_service.writeoff_issues(db, project.id)
 
 
 @router.post("/orders/sync", response_model=FbsActionOut, dependencies=[Depends(rate_limit_write)])
@@ -696,6 +865,23 @@ async def cancel_order(
     with _fbs_errors():
         await orders_service.cancel_order(db, project.id, wb_order_id)
     return FbsActionOut(ok=True, message="Задание отменено", affected=1)
+
+
+@router.get("/orders/{wb_order_id}/timeline", response_model=FbsOrderTimelineOut)
+async def get_order_timeline(
+    wb_order_id: int = Path(..., ge=1),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Таймлайн «Статус заказа» задания — модалка как в кабинете WB.
+
+    Read-only, читает наше зеркало (WB историю статусов не отдаёт вовсе):
+    якоря из точных дат (`approx=false`) + журнал переходов, зафиксированных
+    синком (`approx=true`, точность = каденс синка). Отсортировано по времени
+    DESC — свежее сверху.
+    """
+    with _fbs_errors():
+        return await orders_service.get_order_timeline(db, project.id, wb_order_id)
 
 
 # ─── Поставки ────────────────────────────────────────────────────────────────
