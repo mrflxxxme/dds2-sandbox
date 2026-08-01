@@ -23,9 +23,14 @@
 """
 
 import logging
+from dataclasses import dataclass
 from decimal import Decimal
 from statistics import median
+from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.models import WbSppProbe
 from backend.services.pricing.spp_map import GRID
 from backend.utils.time import utcnow
 
@@ -187,8 +192,17 @@ def is_reaction(buyer_before: float, buyer_now: float, tol: float = SCAN_REACTIO
     return abs(buyer_now - buyer_before) >= tol
 
 
+@dataclass
+class _Running:
+    """Проба, которой уже поставлена цена: что вернуть и с чем сравнивать."""
+
+    probe: WbSppProbe
+    target: float
+    buyer_before: float
+
+
 async def run_scan_batch(
-    db,
+    db: AsyncSession,
     project_id: int,
     targets: list[dict],
     *,
@@ -198,7 +212,7 @@ async def run_scan_batch(
     """Поставить всю пачку цен разом, дождаться реакции витрины и вернуть цены.
 
     Пачкой, а не по одной: цены независимы, а ждать реакции всё равно приходится
-    всем вместе — 23 пробы подряд заняли бы сутки, пачкой это минуты.
+    всем вместе — два десятка проб подряд заняли бы сутки, пачкой это минуты.
 
     Реакцией считаем ИЗМЕНЕНИЕ цены клиента в рублях. Если она не двинулась,
     значит ВБ ещё не пересчитал витрину, и наблюдение НЕ пишется: записать старый
@@ -223,34 +237,38 @@ async def run_scan_batch(
     _key, api_key = await _get_wb_key(db, project_id)
     client = WBApiClient(api_key, project_id=project_id)
 
-    started: list[tuple] = []  # (probe, target_price, buyer_before)
+    started: list[_Running] = []
     refused: list[dict] = []
     for t in targets[:SCAN_MAX_BATCH]:
         try:
             probe = await start_probe(db, project_id, int(t["nm_id"]), float(t["price"]))
-            started.append([probe, float(t["price"]), float(probe.buyer_price_before or 0)])
+            started.append(
+                _Running(probe, float(t["price"]), float(probe.buyer_price_before or 0))
+            )
         except ProbeRefused as e:
             refused.append({"nm_id": t["nm_id"], "price": t["price"], "reason": str(e)})
 
-    applied: list[list] = []
+    applied: list[_Running] = []  # цены, реально ушедшие в ВБ, — их обязательно вернуть
     reacted: list[dict] = []
     errors: list[dict] = []
     try:
         for row in started:
-            probe, target, _buyer_before = row
             try:
                 price_arg, disc_arg = _price_and_discount(
-                    target, float(probe.base_price_before), float(probe.discount_before),
+                    row.target,
+                    float(row.probe.base_price_before),
+                    float(row.probe.discount_before),
                     prefer_kopecks=True,
                 )
-                await client.set_price(probe.nm_id, price_arg, disc_arg)
+                await client.set_price(row.probe.nm_id, price_arg, disc_arg)
                 applied.append(row)
             except Exception as e:  # noqa: BLE001 — одна не ставшая цена не рушит пачку
-                probe.status = "ERROR"
-                probe.error = str(e)[:1000]
-                probe.reverted = True  # до ВБ не дошло — возвращать нечего
-                probe.finished_at = utcnow()
-                errors.append({"nm_id": probe.nm_id, "error": str(e)[:200]})
+                row.probe.status = "ERROR"
+                row.probe.error = str(e)[:1000]
+                row.probe.reverted = True  # до ВБ не дошло — возвращать нечего
+                row.probe.finished_at = utcnow()
+                errors.append({"nm_id": row.probe.nm_id, "error": str(e)[:200]})
+        applied_count = len(applied)
         await db.commit()
 
         waiting = list(applied)
@@ -260,66 +278,64 @@ async def run_scan_batch(
             await asyncio.sleep(delay)
             waited += delay
             delay = poll_sec
-            got = await fetch_card_prices([p.nm_id for p, _t, _b in waiting])
+            got = await fetch_card_prices([r.probe.nm_id for r in waiting])
             for row in list(waiting):
-                probe, target, buyer_before = row
-                info = got.get(probe.nm_id)
+                info = got.get(row.probe.nm_id)
                 if not info:
                     continue
                 buyer_now = float(info["product"])
-                probe.polls += 1
-                if not is_reaction(buyer_now, buyer_before):
+                row.probe.polls += 1
+                if not is_reaction(row.buyer_before, buyer_now):
                     continue  # витрина ещё не пересчитана — ждём дальше
-                spp_now = round((1 - buyer_now / target) * 100, 2)
-                probe.buyer_price_after = Decimal(str(buyer_now))
-                probe.seller_price_after = Decimal(str(round(target, 2)))
-                probe.spp_after = Decimal(str(spp_now))
-                probe.reacted_after_sec = waited
-                probe.status = "OK"
-                await record_observation(db, project_id, probe.nm_id, target, buyer_now)
+                spp_now = round((1 - buyer_now / row.target) * 100, 2)
+                row.probe.buyer_price_after = Decimal(str(buyer_now))
+                row.probe.seller_price_after = Decimal(str(round(row.target, 2)))
+                row.probe.spp_after = Decimal(str(spp_now))
+                row.probe.reacted_after_sec = waited
+                row.probe.status = "OK"
+                await record_observation(db, project_id, row.probe.nm_id, row.target, buyer_now)
                 reacted.append({
-                    "nm_id": probe.nm_id,
-                    "price": round(target, 2),
-                    "buyer_before": buyer_before,
+                    "nm_id": row.probe.nm_id,
+                    "price": round(row.target, 2),
+                    "buyer_before": row.buyer_before,
                     "buyer_after": buyer_now,
                     "spp": spp_now,
                     "after_sec": waited,
                 })
                 waiting.remove(row)
-                await _revert(client, db, probe, applied)
+                await _revert(client, row, applied)
             await db.commit()
 
         for row in list(waiting):  # не дождались — цену назад, наблюдение не пишем
-            probe = row[0]
-            probe.status = "NO_REACTION"
-            await _revert(client, db, probe, applied)
+            row.probe.status = "NO_REACTION"
+            await _revert(client, row, applied)
         await db.commit()
     finally:
-        for row in applied:  # страховка: всё, что осталось поставленным, вернуть
-            await _revert(client, db, row[0], applied)
+        # по КОПИИ: _revert вычёркивает строку из `applied`, и обход самого списка
+        # пропускал бы каждую вторую невозвращённую цену
+        for row in list(applied):
+            await _revert(client, row, applied)
         await db.commit()
 
     return {
         "launched": len(started),
-        "applied": len(applied) + len(reacted),
+        "applied": applied_count,
         "reacted": reacted,
-        "no_reaction": [p.nm_id for p, _t, _b in started if p.status == "NO_REACTION"],
+        "no_reaction": [r.probe.nm_id for r in started if r.probe.status == "NO_REACTION"],
         "refused": refused,
         "errors": errors,
-        "waited_sec": min(max_wait_sec, SCAN_FIRST_POLL_SEC + poll_sec * 99),
+        "waited_sec": waited if started else 0,
     }
 
 
-async def _revert(client, db, probe, applied: list) -> None:
+async def _revert(client: Any, row: _Running, applied: list[_Running]) -> None:
     """Вернуть цену пробы и вычеркнуть её из списка «поставленных»."""
     from backend.services.pricing.spp_probe import _price_and_discount
 
-    for row in list(applied):
-        if row[0] is probe:
-            applied.remove(row)
-            break
-    else:
+    if row not in applied:
         return  # уже возвращена
+    applied.remove(row)
+    probe = row.probe
     try:
         back_price, back_disc = _price_and_discount(
             float(probe.seller_price_before),
@@ -337,7 +353,7 @@ async def _revert(client, db, probe, applied: list) -> None:
 
 
 async def get_scan_plan(
-    db, project_id: int, *, date_from: str | None = None, date_to: str | None = None, top: int = SCAN_TOP
+    db: AsyncSession, project_id: int, *, date_from: str | None = None, date_to: str | None = None, top: int = SCAN_TOP
 ) -> dict:
     """План прогонов по живым данным проекта: очередь целей + во что она обойдётся."""
     from backend.services.pricing import spp_map as spp_map_service
