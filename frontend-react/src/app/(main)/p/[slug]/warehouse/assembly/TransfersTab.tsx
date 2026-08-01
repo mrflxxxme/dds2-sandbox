@@ -264,7 +264,9 @@ export default function TransfersTab({ slug }: Props) {
             exportValue: (row: StockTransfer) => transferUnits(row),
         },
         {
-            key: 'pallets_count', label: 'Палеты', align: 'right', width: '120px',
+            key: 'pallets_count', label: 'Ед. отгрузки', align: 'right', width: '130px',
+            // Не «Палеты»: единица у переезда своя (shipped_as_boxes), и
+            // коробочный переезд под паллетной шапкой читался бы как паллеты.
             headerTitle: 'Транспортная единица переезда: паллеты или короба (как у заявки на сборку)',
             getValue: (row: StockTransfer) => row.pallets_count ?? -1,
             render: (_v: unknown, row: StockTransfer) => (

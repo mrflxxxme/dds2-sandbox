@@ -1332,7 +1332,11 @@ export default function AssemblyListPage() {
             exportValue: itemsQty,
         },
         {
-            key: 'pallets_count', label: 'Палеты', align: 'right',
+            key: 'pallets_count', label: 'Ед. отгрузки', align: 'right',
+            // Не «Палеты»: заявка бывает коробочной (shipped_as_boxes), и голое
+            // число под паллетной шапкой читалось бы как паллеты. Единицу
+            // подписываем прямо в ячейке — редактируемое поле осталось числом.
+            headerTitle: 'Паллеты или короба — единица задаётся в самой заявке',
             // kind=fbs: паллет/машин/веса у учётного зеркала нет — прочерк.
             render: (_v, row: AssemblyRequest) => assemblyKindOf(row.kind) === 'fbs' ? (
                 <span style={{ color: 'var(--color-text-muted)' }}>—</span>
@@ -1344,6 +1348,9 @@ export default function AssemblyListPage() {
                         highlight={row.status === 'IN_PROGRESS' && (!row.pallets_count || row.pallets_count <= 0)}
                         onSave={(val) => handlePalletsChange(row, val)}
                     />
+                    <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>
+                        {row.shipped_as_boxes ? 'кор' : 'пал'}
+                    </span>
                     {palletsMismatch(row) && (
                         <span
                             className="badge badge-warning"
