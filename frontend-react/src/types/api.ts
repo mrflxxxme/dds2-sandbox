@@ -1353,6 +1353,20 @@ export interface StockTransfer {
   pallet_weight_kg?: string | number | null;
   shipped_as_boxes?: boolean;
 
+  /**
+   * Переезд ведёт Газелька — машину назначает агрегатор, вручную нельзя
+   * (зеркало `AssemblyRequest.via_gazelka`). Приходит и в списке, и в карточке.
+   */
+  via_gazelka?: boolean;
+  /**
+   * Забор переезда (`OutboundShipment` со `stock_transfer_id`) — носитель денег:
+   * через него переезд виден во вкладке «Оплаты» и в отчёте логистики. Пусто —
+   * забора нет: либо переезд ещё не уехал, либо уехал без оформленной логистики
+   * (тогда его надо добрать через «Указать перевозчика и стоимость»).
+   */
+  pickup_shipment_id?: number | null;
+  pickup_shipment_number?: string | null;
+
   // Обогащение, которое сервис заполняет пачкой (не relationship).
   // Всё, чего в схеме НЕТ, объявлять тут нельзя: «поле есть, тип верный, в
   // рантайме вечный null» не ловится ни типами, ни ревью. Данных расхода по
@@ -2652,10 +2666,19 @@ export interface AssemblyApplyWeightBulkResult {
 
 // ─── Gazelka integration ─────────────────────────────────────────────────────
 
+/** Какой наш документ закрывает заказ портала Газельки. */
+export type GazelkaLinkKind = 'assembly' | 'transfer';
+
 export interface GazelkaConfig {
   configured: boolean;
   warehouse_id: number | null;
   warehouse_name: string | null;
+  /**
+   * Все склады, с которых Газельке можно отдавать груз (сегодня — ровно один).
+   * ПЕРЕЕЗД гейтится по складу-ИСТОЧНИКУ, поэтому спрашиваем список, а не поле:
+   * второй ключ интеграции не должен ломать контракт.
+   */
+  warehouse_ids?: number[];
 }
 
 export interface GazelkaSelectOption {
@@ -2690,6 +2713,14 @@ export interface GazelkaFormOptions {
 }
 
 export interface GazelkaPrefill {
+  /**
+   * 'yes' — груз едет на маркетплейс (сборка), 'no' — переезд между нашими
+   * складами. Раньше значение было зашито в модалке константой; теперь его
+   * задаёт бэкенд, иначе переезд не мог бы адресоваться на наш склад.
+   */
+  is_marketplace?: string;
+  /** Прайс-лист (город-источник) портала. null — брать дефолт из options. */
+  price_id?: string | null;
   customer_phone: string | null;
   delivery_address: string | null;
   delivery_address_x2: string | null;
@@ -2775,6 +2806,18 @@ export interface GazelkaOrderRow {
   linked_assembly_status: string | null;
   suggested_assembly_id: number | null;
   suggested_assembly_number: string | null;
+  /**
+   * Обобщённая связь: заказ портала закрывает сборку ЛИБО переезд.
+   * Для сборки бэкенд заполняет и `linked_assembly_*`, и эти поля; для переезда
+   * — только эти. UI должен читать `linked_kind`, а не гадать по id.
+   */
+  linked_kind?: GazelkaLinkKind | null;
+  linked_id?: number | null;
+  linked_number?: string | null;
+  linked_status?: string | null;
+  suggested_kind?: GazelkaLinkKind | null;
+  suggested_id?: number | null;
+  suggested_number?: string | null;
   route_number: string | null;
   route_date: string | null;
   carrier: string | null;
@@ -2797,6 +2840,8 @@ export interface GazelkaEditDraft {
 }
 
 export interface GazelkaMatchCandidate {
+  /** Тип документа. Для переезда `assembly_id` несёт id ПЕРЕЕЗДА — различать по `kind`. */
+  kind?: GazelkaLinkKind;
   assembly_id: number;
   number: string;
   warehouse_name: string | null;
@@ -2811,6 +2856,9 @@ export interface GazelkaMatchResult {
   ok: boolean;
   linked_assembly_id: number | null;
   linked_assembly_number: string | null;
+  linked_kind?: GazelkaLinkKind | null;
+  linked_id?: number | null;
+  linked_number?: string | null;
 }
 
 export interface GazelkaUnmatchResult {

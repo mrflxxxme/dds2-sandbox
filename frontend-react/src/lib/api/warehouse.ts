@@ -209,12 +209,25 @@ export function addWarehouseMethods(api: ApiClient) {
         getTransfers(
             inTransitOnly = false,
             warehouseId?: number,
-            opts?: { status?: StockTransferStatus; hasVehicle?: boolean },
+            opts?: {
+                status?: StockTransferStatus;
+                /**
+                 * Несколько статусов одним запросом (`status_in=SHIPPED,DELIVERED`).
+                 * Нужен срезу «уехало, а денег нет»: раньше каждый статус стоил
+                 * отдельного round-trip, и три среза Листа логиста давали три запроса.
+                 */
+                statuses?: StockTransferStatus[];
+                hasVehicle?: boolean;
+                /** false — стоимость забора не заполнена (переезд не доехал до оплат). */
+                hasPickupCost?: boolean;
+            },
         ) {
             const qs = new URLSearchParams({ in_transit: String(inTransitOnly) });
             if (warehouseId !== undefined) qs.set('warehouse_id', String(warehouseId));
             if (opts?.status) qs.set('status', opts.status);
+            if (opts?.statuses?.length) qs.set('status_in', opts.statuses.join(','));
             if (opts?.hasVehicle !== undefined) qs.set('has_vehicle', String(opts.hasVehicle));
+            if (opts?.hasPickupCost !== undefined) qs.set('has_pickup_cost', String(opts.hasPickupCost));
             return api.request<StockTransfer[]>('GET', `/api/v1/warehouse/transfers?${qs.toString()}`);
         },
         /**
@@ -341,6 +354,27 @@ export function addWarehouseMethods(api: ApiClient) {
         /** POST /warehouse/transfers/{id}/unassign-vehicle — снять машину: VEHICLE_ASSIGNED → READY. */
         unassignTransferVehicle(transferId: number) {
             return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/unassign-vehicle`);
+        },
+        /**
+         * POST /warehouse/transfers/{id}/logistics — перевозчик и стоимость на
+         * УЖЕ УЕХАВШЕМ переезде (SHIPPED / DELIVERED / RETURNED / CLOSED).
+         *
+         * 🔴 Это НЕ `assign-vehicle`: статус не меняется, сток не двигается.
+         * Единственный способ дать логистику старым переездам (TR-1…TR-31 уехали
+         * до появления машины на перемещении и потому не имеют забора — их нет
+         * ни во вкладке «Переезды», ни в «Оплатах»). Вызов создаёт/обновляет
+         * забор `OutboundShipment`, через который переезд и попадает в деньги.
+         * Тело — тот же контракт, что у назначения машины.
+         */
+        setTransferLogistics(transferId: number, data: TransferAssignVehiclePayload) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/logistics`, data);
+        },
+        /**
+         * POST /warehouse/transfers/logistics-bulk — одна машина на N уехавших
+         * переездов (`{ids, payload}`). Атомарен: первый отказ откатывает всё.
+         */
+        setTransferLogisticsBulk(ids: number[], payload: TransferAssignVehiclePayload) {
+            return api.request<StockTransfer[]>('POST', '/api/v1/warehouse/transfers/logistics-bulk', { ids, payload });
         },
         /**
          * POST /warehouse/assembly/{id}/to-transfer — переделать заявку на сборку
@@ -1097,6 +1131,19 @@ export function addWarehouseMethods(api: ApiClient) {
         sendToGazelka(assemblyId: number, body: import('@/types/api').GazelkaSendRequest) {
             return api.request<import('@/types/api').GazelkaSendResult>('POST', `/api/v1/gazelka/assembly/${assemblyId}/send`, body);
         },
+        /**
+         * GET /gazelka/transfer/{id}/draft — то же окно, но для ПЕРЕЕЗДА между
+         * нашими складами. Отличия предзаполнения: `is_marketplace='no'`,
+         * маркетплейса и № поставки нет, адрес доставки — свободным текстом
+         * (склада получателя в dropdown портала не существует).
+         */
+        getGazelkaTransferDraft(transferId: number) {
+            return api.request<import('@/types/api').GazelkaDraft>('GET', `/api/v1/gazelka/transfer/${transferId}/draft`);
+        },
+        /** POST /gazelka/transfer/{id}/send — РЕАЛЬНОЕ создание заказа у перевозчика. */
+        sendTransferToGazelka(transferId: number, body: import('@/types/api').GazelkaSendRequest) {
+            return api.request<import('@/types/api').GazelkaSendResult>('POST', `/api/v1/gazelka/transfer/${transferId}/send`, body);
+        },
         getGazelkaPlanned() {
             return api.request<import('@/types/api').GazelkaOrderList>('GET', '/api/v1/gazelka/planned');
         },
@@ -1119,20 +1166,30 @@ export function addWarehouseMethods(api: ApiClient) {
             const url = URL.createObjectURL(blob);
             window.open(url, '_blank');
         },
-        getGazelkaMatchCandidates(search?: string) {
+        getGazelkaMatchCandidates(search?: string, kind?: import('@/types/api').GazelkaLinkKind) {
             const qs = new URLSearchParams();
             if (search) qs.set('search', search);
+            if (kind) qs.set('kind', kind);
             const tail = qs.toString();
             return api.request<import('@/types/api').GazelkaMatchCandidate[]>(
                 'GET',
                 `/api/v1/gazelka/match-candidates${tail ? `?${tail}` : ''}`,
             );
         },
-        matchGazelkaOrder(planId: number, assemblyId: number) {
+        /**
+         * Ручная связка заказа портала с нашим документом. `kind` решает, в какое
+         * поле уедет id: заказ Газельки закрывает ЛИБО сборку, ЛИБО переезд —
+         * обе ссылки сразу запрещены CHECK'ом в БД.
+         */
+        matchGazelkaOrder(
+            planId: number,
+            entityId: number,
+            kind: import('@/types/api').GazelkaLinkKind = 'assembly',
+        ) {
             return api.request<import('@/types/api').GazelkaMatchResult>(
                 'POST',
                 `/api/v1/gazelka/order/${planId}/match`,
-                { assembly_id: assemblyId },
+                kind === 'transfer' ? { transfer_id: entityId } : { assembly_id: entityId },
             );
         },
         unmatchGazelkaOrder(planId: number) {

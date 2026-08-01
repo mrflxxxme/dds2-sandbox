@@ -362,6 +362,18 @@ class StockTransferSchema(BaseModel):
     # обоим складам (~300 КБ), а на складе «Натали» уже 432 заявки при лимите
     # 500 — связка вот-вот перестала бы находиться вовсе.
     ff_links: list[TransferFfLink] = []
+    #: Переезд ведёт Газелька — машину назначает агрегатор, вручную нельзя
+    #: (зеркало `AssemblyRequest.via_gazelka`). Заполняется пачкой в
+    #: `_attach_transfer_labels`, поэтому есть и в списке, и в карточке.
+    via_gazelka: bool = False
+    #: Забор переезда (`OutboundShipment.stock_transfer_id`) — носитель денег:
+    #: через него переезд попадает в «Оплаты» и в отчёт логистики. Отдаём id и
+    #: номер, чтобы карточка показывала «ОТГ-…» и вела в лист оплат, не догружая
+    #: список отгрузок. Денормализованной колонки на `stock_transfers` НЕТ
+    #: намеренно — обратная ссылка уже уникальна частичным индексом
+    #: `uq_outbound_shipments_stock_transfer`, а вторая копия FK разъезжается.
+    pickup_shipment_id: int | None = None
+    pickup_shipment_number: str | None = None
 
 
 class TransferAssignVehicle(BaseModel):

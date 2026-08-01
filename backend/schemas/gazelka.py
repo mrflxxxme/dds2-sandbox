@@ -14,8 +14,13 @@ Number() перед formatNumber (см. .claude/rules/learnings.md).
 
 from datetime import date
 from decimal import Decimal
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+#: Какой наш документ закрывает заказ портала. `assembly` — заявка на сборку
+#: (едет на маркетплейс), `transfer` — переезд между нашими складами.
+GazelkaLinkKind = Literal["assembly", "transfer"]
 
 
 class GazelkaSelectOption(BaseModel):
@@ -61,8 +66,19 @@ class GazelkaFormOptions(BaseModel):
 
 
 class GazelkaPrefill(BaseModel):
-    """Предзаполнение из AssemblyRequest — логист правит в диалоге."""
+    """Предзаполнение из документа (AssemblyRequest либо StockTransfer) — логист
+    правит в диалоге."""
 
+    #: yes | no. У сборки всегда «yes» (едет на маркетплейс), у ПЕРЕЕЗДА — «no»:
+    #: маршрут «наш склад → наш склад» маркетплейса не касается. Раньше значение
+    #: было зашито на фронте константой, из-за чего переезд физически не мог
+    #: предложить «no», а `_validate_schedule` требовал бы от него график
+    #: маркетплейсного направления.
+    is_marketplace: str = "yes"
+    #: Прайс-лист (город-источник) портала. У сборки не заполняем — берётся
+    #: дефолт `PRICE_LIST_HOME`; у переезда источником бывает чужой город, и
+    #: подсказка нужна логисту явно.
+    price_id: str | None = None
     customer_phone: str | None = None
     delivery_address: str | None = None  # их склад-dropdown, если удалось сматчить
     delivery_address_x2: str | None = None  # свободный адрес/склад текстом
@@ -87,6 +103,12 @@ class GazelkaConfigResponse(BaseModel):
     configured: bool
     warehouse_id: int | None = None
     warehouse_name: str | None = None
+    #: Все склады, с которых Газельке можно отдавать груз. Сегодня это ровно
+    #: `[warehouse_id]` — ключ интеграции привязан к одному складу. Поле нужно
+    #: ПЕРЕЕЗДУ: гейт у него по складу-ИСТОЧНИКУ (`from_warehouse_id`), и когда
+    #: ключей станет два, единственное `warehouse_id` пришлось бы менять
+    #: ломающе. Фронт спрашивает список, а не поле.
+    warehouse_ids: list[int] = Field(default_factory=list)
 
 
 class GazelkaDraftResponse(BaseModel):
@@ -176,6 +198,19 @@ class GazelkaOrderRow(BaseModel):
     # Авто-подсказка для матчинга по № поставки WB (если ещё не связана)
     suggested_assembly_id: int | None = None
     suggested_assembly_number: str | None = None
+    # ─── Обобщённая связь: заказ портала закрывает сборку ЛИБО переезд ───────
+    # Поля `linked_assembly_*` оставлены как есть и заполняются по-прежнему —
+    # ими живёт готовый UI, и ломать его на ровном месте незачем. Новые
+    # `linked_*` — тот же факт без привязки к типу: `kind` говорит, что за
+    # документ, `id`/`number`/`status` — он сам. Для сборки бэкенд заполняет
+    # ОБА набора (старый и новый), для переезда — только новый.
+    linked_kind: GazelkaLinkKind | None = None
+    linked_id: int | None = None
+    linked_number: str | None = None
+    linked_status: str | None = None
+    suggested_kind: GazelkaLinkKind | None = None
+    suggested_id: int | None = None
+    suggested_number: str | None = None
     # Логистика активной заявки (в маршруте)
     route_number: str | None = None
     route_date: str | None = None
@@ -200,22 +235,49 @@ class GazelkaEditDraft(BaseModel):
     values: GazelkaSendRequest
 
 
-# ─── Матчинг существующих заявок портала с нашими сборками ────────────────────
+# ─── Матчинг существующих заявок портала с нашими документами ────────────────
 
 
 class GazelkaMatchRequest(BaseModel):
-    assembly_id: int
+    """Ручная связка заказа портала с нашим документом.
+
+    `assembly_id` остаётся ради готового UI и старых клиентов; `transfer_id` —
+    вторая ветка. Ровно одно из двух: пустое тело связало бы заказ с ничем, а
+    оба сразу нарушили бы CHECK `ck_gazelka_orders_single_link` уже в БД —
+    лучше отбить 422 на границе, чем ловить IntegrityError.
+    """
+
+    assembly_id: int | None = None
+    transfer_id: int | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "GazelkaMatchRequest":
+        if (self.assembly_id is None) == (self.transfer_id is None):
+            raise ValueError("Укажите ровно одно: assembly_id или transfer_id")
+        return self
 
 
 class GazelkaMatchResult(BaseModel):
     ok: bool
     linked_assembly_id: int | None = None
     linked_assembly_number: str | None = None
+    # Обобщённая пара — как в `GazelkaOrderRow`: для сборки заполняются оба
+    # набора, для переезда только этот.
+    linked_kind: GazelkaLinkKind | None = None
+    linked_id: int | None = None
+    linked_number: str | None = None
 
 
 class GazelkaMatchCandidate(BaseModel):
-    """Наша сборка — кандидат на ручное сопоставление с заявкой Газельки."""
+    """Наш документ — кандидат на ручное сопоставление с заявкой Газельки.
 
+    `assembly_id` для переезда несёт id ПЕРЕЕЗДА (поле оставлено ради готового
+    UI и его ключей списка) — различать типы обязан `kind`, а не догадка по id.
+    """
+
+    #: Тип документа. Дефолт `assembly` — старые клиенты поля не знают и читают
+    #: список как список сборок, каким он и был.
+    kind: GazelkaLinkKind = "assembly"
     assembly_id: int
     number: str
     warehouse_name: str | None = None

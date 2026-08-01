@@ -9,7 +9,7 @@ Gazelka (gazelka.space) — audit-запись отправки заявки л�
 История попыток (не уникальность): повторная отправка той же сборки = новая строка.
 """
 
-from sqlalchemy import ForeignKey, Index, Integer, String, Text
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,6 +34,19 @@ class GazelkaOrder(Base, TimestampMixin):
     assembly_request_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("assembly_requests.id", ondelete="SET NULL"), nullable=True
     )
+    # Второй тип документа, который Газелька умеет везти, — ПЕРЕЕЗД между нашими
+    # складами (StockTransfer). Отдельная колонка, а не полиморфная пара
+    # (kind, id): FK ловит битую ссылку в БД, а не в коде, и `ondelete=SET NULL`
+    # оставляет audit-запись жить после удаления документа — попытка отправки
+    # состоялась, и её нельзя терять вместе с заявкой.
+    #
+    # 🔴 Ровно ОДНА из двух ссылок не NULL (CHECK ниже). Обе сразу означали бы,
+    # что один заказ портала закрывает и сборку, и переезд: `_linked_map`
+    # показал бы его дважды, а `_reconcile_active_order` дважды применил бы
+    # машину — второй раз к чужому документу.
+    stock_transfer_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("stock_transfers.id", ondelete="SET NULL"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     gazelka_ref: Mapped[str | None] = mapped_column(String(50), nullable=True)
     payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # snapshot отправленных полей (без кредов)
@@ -45,4 +58,11 @@ class GazelkaOrder(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_gazelka_orders_project_id", "project_id"),
         Index("ix_gazelka_orders_assembly_request_id", "assembly_request_id"),
+        Index("ix_gazelka_orders_stock_transfer_id", "stock_transfer_id"),
+        # Обе ссылки NULL — законно: так выглядит попытка отправки, чей документ
+        # потом удалили (ondelete=SET NULL). Запрещена только пара «обе сразу».
+        CheckConstraint(
+            "assembly_request_id IS NULL OR stock_transfer_id IS NULL",
+            name="ck_gazelka_orders_single_link",
+        ),
     )
