@@ -76,7 +76,23 @@ services:
       FULFILLMENT_SYNC_SLOW_WAREHOUSE_IDS: ""
       FULFILLMENT_SYNC_SLOW_INTERVAL_MINUTES: "30"
     entrypoint: ["./entrypoint-worker.sh"]
-    command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "120", "--limit-max-requests", "5000"]
+    # gunicorn-мастер, как у backend: рециркуляция по max-requests (её тут
+    # набивают healthcheck'и, а не нагрузка) больше не роняет контейнер целиком
+    # — scheduler переезжает в свежий воркер под graceful-timeout вместо
+    # обрыва джоб на полуслове. Воркер строго ОДИН: scheduler — единственный
+    # экземпляр (см. entrypoint-worker.sh).
+    command: ["gunicorn", "backend.main:app",
+              "--worker-class", "uvicorn_worker.UvicornWorker",
+              "--workers", "1",
+              "--bind", "0.0.0.0:8000",
+              "--max-requests", "5000",
+              "--max-requests-jitter", "500",
+              "--timeout", "300",
+              "--graceful-timeout", "60",
+              "--keep-alive", "120",
+              "--no-control-socket",
+              "--access-logfile", "-",
+              "--error-logfile", "-"]
     stop_grace_period: 60s
     ports:
       - "10.0.0.2:8001:8000"
