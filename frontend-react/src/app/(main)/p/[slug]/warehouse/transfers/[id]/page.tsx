@@ -37,8 +37,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
-import { Toast, AssignVehicleModal, TransferFfLinkModal } from '@/components';
-import type { AssignVehicleValues } from '@/components';
+import { Toast, TransferFfLinkModal } from '@/components';
 import MigfullInboundModal from '../../[id]/MigfullInboundModal';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
@@ -61,7 +60,6 @@ import {
     canPushTransferToFf,
     canReturnTransfer,
     canSendTransfer,
-    canUnassignTransferVehicle,
     ffLinkLabel,
     ffLinkStage,
     splitTransferFfLinks,
@@ -92,10 +90,6 @@ export default function TransferDetailPage() {
 
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [nomenclature, setNomenclature] = useState<Nomenclature[]>([]);
-
-    const [showVehicleModal, setShowVehicleModal] = useState(false);
-    const [assigning, setAssigning] = useState(false);
-    const [assignError, setAssignError] = useState('');
 
     /** Сторона, для которой открыт пикер заявок ФФ (null — закрыт). */
     const [ffLinkSide, setFfLinkSide] = useState<TransferFfSide | null>(null);
@@ -206,21 +200,6 @@ export default function TransferDetailPage() {
         }
     };
 
-    const handleAssign = async (values: AssignVehicleValues) => {
-        setAssigning(true);
-        setAssignError('');
-        try {
-            const updated = await api.assignTransferVehicle(id, values);
-            setTransfer(updated);
-            setShowVehicleModal(false);
-            setToast({ message: 'Машина назначена', type: 'success' });
-        } catch (e: unknown) {
-            setAssignError(e instanceof Error ? e.message : 'Ошибка назначения машины');
-        } finally {
-            setAssigning(false);
-        }
-    };
-
     // ─── States: loading / error / empty / data ───────────────────────────
 
     if (loading) {
@@ -283,8 +262,6 @@ export default function TransferDetailPage() {
     // Права редактора — отдельный множитель: у viewer'а нет ни одной кнопки.
     const editor = canEdit();
     const canDraftEdit = editor && canEditTransfer(transfer.status);
-    const canAssignVehicle = editor && canAssignTransferVehicle(transfer.status);
-    const canUnassignVehicle = editor && canUnassignTransferVehicle(transfer.status);
     const receiveProgress = transferReceiveProgress(transfer);
     // Поставку у Натали заводим, пока переезд не принят (после DELIVERED товар
     // уже оприходован — бэк вернёт блокировку). Ранние ступени тоже годятся:
@@ -514,30 +491,16 @@ export default function TransferDetailPage() {
             {/* ─── Машина и логистика ─────────────────────────────────── */}
             <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+                    {/* Машиной карточка НЕ управляет: ни назначения, ни снятия,
+                        ни замены реквизитов. Единственная точка — Лист логиста
+                        (канон юзера 01.08.2026): он ведёт машины пачкой, видит
+                        заявки и переезды в одном списке и назначает одну машину
+                        на несколько документов. Кнопка здесь плодила бы второй
+                        путь и растаскивала процесс по двум экранам.
+                        Ниже — только ЧТЕНИЕ: что за груз и, если машина уже
+                        назначена, чья она. Прятать и это значило бы, что карточка
+                        врёт о состоянии переезда. */}
                     <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Машина и логистика</h2>
-                    <span style={{ flex: 1 }} />
-                    {canAssignVehicle && (
-                        <button className="btn btn-primary btn-sm" onClick={() => { setAssignError(''); setShowVehicleModal(true); }}>
-                            {vehicleAssigned ? 'Изменить машину' : 'Назначить машину'}
-                        </button>
-                    )}
-                    {/* Паритет с секцией Листа логиста: снять машину можно и
-                        оттуда, и с карточки — иначе логист, зашедший в переезд,
-                        вынужден возвращаться на другой экран ради одной кнопки. */}
-                    {canUnassignVehicle && (
-                        <button
-                            className="btn btn-secondary btn-sm"
-                            style={{ color: 'var(--color-danger)' }}
-                            disabled={actionLoading}
-                            title="Переезд вернётся в «Готово». Транспортную единицу груза не трогает"
-                            onClick={() => {
-                                if (!confirm(`Снять машину с ${transfer.number}? Переезд вернётся в «Готово», транспортная единица груза останется как есть.`)) return;
-                                runAction(() => api.unassignTransferVehicle(transfer.id), 'Машина снята');
-                            }}
-                        >
-                            Снять машину
-                        </button>
-                    )}
                 </div>
                 {/* Транспортная единица живёт отдельно от машины: паллеты
                     переезжают из заявки при конвертации, ещё до назначения. */}
@@ -563,7 +526,7 @@ export default function TransferDetailPage() {
                     <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
                         Машина не назначена.
                         {canAssignTransferVehicle(transfer.status)
-                            ? ' Назначьте машину — госномер, водитель, перевозчик, дата и слот забора.'
+                            ? ' Машину назначает логист — в Листе логиста, там переезды идут одним списком с заявками.'
                             : canEditTransfer(transfer.status)
                                 ? ' Машину назначают после того, как переезд собран, — нажмите «Готов».'
                                 : ' Переезд уже уехал — назначение машины закрыто.'}
@@ -697,33 +660,6 @@ export default function TransferDetailPage() {
                 )}
             </div>
 
-            {showVehicleModal && (
-                <AssignVehicleModal
-                    title={`Назначить машину · ${transfer.number}`}
-                    initial={{
-                        vehicle_info: transfer.vehicle_info,
-                        vehicle_brand: transfer.vehicle_brand,
-                        driver_first_name: transfer.driver_first_name,
-                        driver_last_name: transfer.driver_last_name,
-                        driver_phone: transfer.driver_phone,
-                        logistics_by_warehouse: transfer.logistics_by_warehouse,
-                        pickup_date: transfer.pickup_date,
-                        pickup_time_slot: transfer.pickup_time_slot,
-                        pickup_cost: pickupCost,
-                        delivery_date: transfer.delivery_date,
-                        pallets_count: transfer.pallets_count,
-                        pallet_weight_kg: palletWeight,
-                        shipped_as_boxes: transfer.shipped_as_boxes,
-                    }}
-                    pickupWarehouseName={fromWhName}
-                    pickupWarehouseCounterpartyId={fromWh?.counterparty_id ?? null}
-                    deliveryDateLabel="Дата доставки"
-                    submitting={assigning}
-                    error={assignError}
-                    onSubmit={handleAssign}
-                    onClose={() => { setShowVehicleModal(false); setAssignError(''); }}
-                />
-            )}
 
             {ffLinkSide && (
                 <TransferFfLinkModal
