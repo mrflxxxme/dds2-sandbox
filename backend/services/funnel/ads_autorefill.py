@@ -11,6 +11,8 @@ UI обязан показать «доступ к кабинету потеря
 """
 
 import logging
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,7 +33,8 @@ def _num(value: object, default: float = 0.0) -> float:
 
 def to_ui(settings: dict) -> dict:
     """Ответ кабинета → плоский вид для фронта (рубли, без *_cents)."""
-    source = settings.get("source") if isinstance(settings.get("source"), dict) else {}
+    raw_source = settings.get("source")
+    source: dict = raw_source if isinstance(raw_source, dict) else {}
     history = []
     for e in (settings.get("history") or [])[:HISTORY_LIMIT]:
         if not isinstance(e, dict):
@@ -79,7 +82,9 @@ def validate(payload: dict) -> str | None:
     return None
 
 
-async def _with_client(db: AsyncSession, project_id: int, call):
+async def _with_client(
+    db: AsyncSession, project_id: int, call: Callable[[Any], Awaitable[Any]]
+) -> tuple[Any, str]:
     """Общая обвязка: собрать клиент кабинета, выполнить call, разобрать ошибки.
 
     Возвращает (данные | None, session-статус). Протухшую сессию помечаем EXPIRED,
