@@ -318,7 +318,20 @@ export function addWarehouseMethods(api: ApiClient) {
          * → SHIPPED). ДВИГАЕТ СТОК: списывает со склада-источника и вешает транзит
          * на получателя, поэтому после него правка закрыта.
          */
-        sendTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/send`); },
+        /**
+         * `allowNoLogistics` — явное «везём без оформления»: единственный вызов,
+         * которому разрешено отправить READY-переезд без машины/перевозчика/
+         * стоимости. Нужен форме «создать и увезти» на карточке склада, где
+         * кладовщик оформляет уже состоявшуюся переброску. Из Листа логиста НЕ
+         * передаётся: там переезд обязан доехать до оплат.
+         */
+        sendTransfer(transferId: number, opts?: { allowNoLogistics?: boolean }) {
+            return api.request<StockTransfer>(
+                'POST',
+                `/api/v1/warehouse/transfers/${transferId}/send`,
+                { allow_no_logistics: opts?.allowNoLogistics ?? false },
+            );
+        },
         /** POST /warehouse/transfers/{id}/complete — «Принять» (SHIPPED → DELIVERED): приход на получателе. */
         completeTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/complete`); },
         /**
