@@ -19,6 +19,7 @@ from backend.services.pricing import markup as markup_service
 from backend.services.pricing import spp_map as spp_map_service
 from backend.services.pricing import spp_points as spp_points_service
 from backend.services.pricing import spp_probe as spp_probe_service
+from backend.services.pricing import spp_scan as spp_scan_service
 from backend.services.pricing.sync import sync_card_spp, sync_wb_prices
 from backend.utils.rate_limit import rate_limit_write
 
@@ -104,6 +105,43 @@ async def spp_map(
     src = source if source in ("card", "orders") else "card"
     return await spp_map_service.get_spp_map(
         db, project.id, date_from=date_from, date_to=date_to, step=step, source=src, category=category
+    )
+
+
+@router.get("/spp-scan")
+async def spp_scan(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    top: int = Query(40, ge=1, le=200),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """План прогонов: какие цены пробовать, чтобы закрыть белые пятна и пороги.
+
+    Ничего не ставит и не пишет — только считает очередь по накопленным точкам.
+    """
+    return await spp_scan_service.get_scan_plan(
+        db, project.id, date_from=date_from, date_to=date_to, top=top
+    )
+
+
+@router.post("/spp-scan/run")
+async def spp_scan_run(
+    top: int = Query(10, ge=1, le=40, description="сколько первых целей плана поставить"),
+    max_wait_sec: int = Query(1200, ge=60, le=3600),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(rate_limit_write),
+):
+    """Прогон пачкой: поставить цены плана, дождаться реакции витрины, вернуть назад.
+
+    ПИШЕТ ЦЕНЫ В ВБ. Рамки (−300/+1000 ₽, шаг 35 %, копейки, возврат) —
+    в `spp_probe`; здесь только очередь и ожидание.
+    """
+    plan = await spp_scan_service.get_scan_plan(db, project.id, top=top)
+    targets = [{"nm_id": r["donor"]["nm_id"], "price": r["price"]} for r in plan["plan"]]
+    return await spp_scan_service.run_scan_batch(
+        db, project.id, targets, max_wait_sec=max_wait_sec
     )
 
 

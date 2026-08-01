@@ -93,6 +93,51 @@ async def record_observation(
     }])
 
 
+async def recover_stuck_probes(db: AsyncSession) -> int:
+    """Вернуть цены проб, не переживших перезапуск процесса. Зовётся на старте.
+
+    `finally` в `run_probe` спасает от ошибки и от штатной отмены, но не от
+    SIGKILL и не от пересборки контейнера — а деплой во время четырёхчасовой
+    пробы дело обычное. Владелец пробы всегда один процесс, поэтому любая строка
+    в статусе RUNNING на старте — сирота: цену возвращаем, статус закрываем.
+    Цена на витрине важнее аккуратности журнала.
+    """
+    from backend.integrations.wb_api import WBApiClient
+    from backend.services.integrations_service import _get_wb_key
+
+    orphans = (
+        await db.execute(select(WbSppProbe).where(WbSppProbe.status == "RUNNING"))
+    ).scalars().all()
+    healed = 0
+    for probe in orphans:
+        try:
+            _key, api_key = await _get_wb_key(db, probe.project_id)
+            back_price, back_disc = _price_and_discount(
+                float(probe.seller_price_before),
+                float(probe.base_price_before),
+                float(probe.discount_before),
+            )
+            await WBApiClient(api_key, project_id=probe.project_id).set_price(
+                probe.nm_id, back_price, back_disc
+            )
+            probe.status = "RECOVERED"
+            probe.reverted = True
+            healed += 1
+            logger.warning(
+                "проба #%d осиротела при перезапуске — цена %d возвращена к %.2f ₽",
+                probe.id, probe.nm_id, float(probe.seller_price_before),
+            )
+        except Exception as e:  # noqa: BLE001 — одна упавшая не должна ронять старт
+            probe.status = "ERROR"
+            probe.reverted = False
+            probe.error = (probe.error or "") + f" | ЦЕНА НЕ ВОЗВРАЩЕНА ПОСЛЕ РЕСТАРТА: {e}"[:500]
+            logger.error("проба #%d: цена НЕ возвращена после рестарта — %s", probe.id, e)
+        probe.finished_at = utcnow()
+    if orphans:
+        await db.commit()
+    return healed
+
+
 async def start_probe(
     db: AsyncSession,
     project_id: int,
