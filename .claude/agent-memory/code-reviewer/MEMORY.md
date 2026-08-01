@@ -2,3 +2,14 @@
 - [Assembly-draft loose-ban canon](assembly-draft-loose-ban-canon.md) — россыпь запрещена всем (2026-07-08); trim's newcomer-whole-box branch is unwired end-to-end (only tests pass boxOf+newcomers)
 - [Warehouse-need invariants](warehouse-need-invariants.md) — get_warehouse_need: total_need mode-invariance (HIGH-2), eff-maps vs raw-maps rule, three demand horizons + gross_wh comment/code drift
 - [Distribute-all-leftovers invariants](distribute-all-leftovers-invariants.md) — where the real over-commit/idempotency guards live for "Распределить все остатки" (buildPinnedRows cap / applyDraftCellEdit availForBox / idempotent-by-replacement)
+- [Cost auto-opening invariants](cost-valuation-auto-opening-invariants.md) — two-pass `_walk`: what's provably invariant (on_hand, lifetime contour), what shifts, and the zero-cost first-batch trap
+- [Переезд с машиной: конвертация](transfer-vehicle-conversion-invariants.md) — забор держится на пустом assembly_request_id; три слепые зоны гарда двойного списания (FBS-зеркало, живая заявка, гонка)
+- [Transfer-fact auto-receive invariants](transfer-fact-autoreceive-invariants.md) — что в авто-приёме TR по факту ФФ доказуемо идемпотентно (движения), что держится на маркере ff11, почему transfer_transit не задваивает капитал
+- [SKU-ключи: два класса пробела](sku-key-whitespace-classes.md) — btrim ≠ python .strip() (`\r\n`-артикулы), цифры по данным + полный список потребителей карт себестоимости
+- [Разбивка ФОТ: инварианты](payroll-fot-breakdown-invariants.md) — «родитель = Σ детей» точен в Decimal, ломается на ±0.01 после float pro-rata ОПиУ (репро внутри)
+- [FBS: списание и транзит](fbs-writeoff-transit-invariants.md) — blacklist wbStatus ловит ready_for_pickup в «зависло», written_off_at = ещё и метка бэкфилла, ff_fbs lifetime-нетто с глухим капом
+- [RBAC-наследование разделов](rbac-page-inheritance-invariants.md) — отзыв доступа держится на одном бампе pages_updated_at; гарды каталога фронт↔бэк всегда skip в контейнере; семантика PAGE_ADDED_AT
+- [Аналитика этапов FBS](fbs-stage-analytics-invariants.md) — после истории кабинета t_closed ≠ «зеркало поставки есть» (ломает _left_us_expr молча); период не действует на matured/refused и на узлы
+- [Зеркало сборки FBS (kind=fbs)](fbs-assembly-mirror-invariants.md) — kind-фильтр решается по SHIPPED (два in_transit + TG-алярм), seller-имя в wb_warehouse_name_manual, contour_condition ≠ prod-only
+- [Статусы переезда: зеркало заявки](transfer-status-mirror-invariants.md) — «принято по журналу» не нетто (ломает переотправку после возврата), авто-шип проверяет VEHICLE_ASSIGNED не там, где списывает
+- [Поставка Натали: два источника](migfull-inbound-two-sources-invariants.md) — анти-дубль скоуплен по виду документа (кросс-гарда нет, UNCERTAIN-без-guid слепа); почему тут не нужен invalidate_cache
