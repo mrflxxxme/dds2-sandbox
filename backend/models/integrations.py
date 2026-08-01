@@ -394,6 +394,46 @@ class WbSppObservation(Base):
     )
 
 
+class WbSppProbe(Base):
+    """Проба цены: журнал единственного места, где DDS2 пишет цену в ВБ.
+
+    Ставим товару целевую цену, ждём реакции витрины, фиксируем СПП и
+    возвращаем цену назад. Строка живёт и после отката — она и есть результат
+    замера: «на 4999 ₽ СПП стал 36.8 % через 3 ч 40 мин».
+    """
+
+    __tablename__ = "wb_spp_probes"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="RUNNING", nullable=False)
+
+    # снимок «до» — им же откатываемся
+    base_price_before: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    discount_before: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
+    seller_price_before: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    buyer_price_before: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    spp_before: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+
+    target_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    seller_price_after: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    buyer_price_after: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    spp_after: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    reacted_after_sec: Mapped[int | None] = mapped_column(Integer)
+    polls: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reverted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_spp_probes_project_started", "project_id", "started_at"),
+        Index("ix_spp_probes_project_nm", "project_id", "nm_id"),
+    )
+
+
 class WbWarehouseStock(Base):
     """Per-warehouse stock levels from WB API supplier/stocks."""
 

@@ -9364,6 +9364,9 @@ export interface SppHint {
   leverage: number | null;
   buyer_delta: number;
   categories: string[];
+  alt_kind: 'up' | 'down' | null;
+  alt_price: number | null;
+  alt_buyer_price: number | null;
 }
 
 export interface SppLevel {

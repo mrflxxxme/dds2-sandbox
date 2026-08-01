@@ -3,18 +3,22 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, Query
+import asyncio
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_cache
 from backend.database import get_db
-from backend.models import Project
+from backend.models import Project, WbSppProbe
 from backend.project_context import get_current_project
 from backend.schemas.pricing import SppMapResponse
 from backend.services.pricing import ai_advisor
 from backend.services.pricing import markup as markup_service
 from backend.services.pricing import spp_map as spp_map_service
 from backend.services.pricing import spp_points as spp_points_service
+from backend.services.pricing import spp_probe as spp_probe_service
 from backend.services.pricing.sync import sync_card_spp, sync_wb_prices
 from backend.utils.rate_limit import rate_limit_write
 
@@ -116,6 +120,75 @@ async def spp_history(
     src = source if source in ("card", "orders") else "card"
     return {
         "rows": await spp_map_service.get_level_history(db, project.id, ids, days=days, source=src)
+    }
+
+
+@router.post("/spp-probe")
+async def spp_probe(
+    nm_id: int = Query(..., description="артикул-донор"),
+    target_price: float = Query(..., gt=0, description="целевая цена витрины, ₽"),
+    hold_sec: int = Query(spp_probe_service.HOLD_SEC, ge=300, le=spp_probe_service.MAX_HOLD_SEC),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(rate_limit_write),
+):
+    """Проба цены: поставить, дождаться реакции витрины, вернуть назад.
+
+    ЕДИНСТВЕННЫЙ эндпоинт, который пишет цену в ВБ. Возврат гарантирован даже
+    при ошибке; результат остаётся в журнале проб.
+    """
+    try:
+        probe = await spp_probe_service.start_probe(
+            db, project.id, nm_id, target_price, hold_sec=hold_sec
+        )
+    except spp_probe_service.ProbeRefused as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    asyncio.create_task(_run_probe_bg(probe.id, project.id, hold_sec))  # noqa: RUF006
+    return {"probe_id": probe.id, "status": probe.status, "hold_sec": hold_sec}
+
+
+async def _run_probe_bg(probe_id: int, project_id: int, hold_sec: int) -> None:
+    """Фон: проба живёт часами, HTTP-запрос столько ждать не может."""
+    from backend.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        probe = await db.get(WbSppProbe, probe_id)
+        if probe and probe.project_id == project_id:
+            await spp_probe_service.run_probe(db, probe, hold_sec=hold_sec)
+
+
+@router.get("/spp-probes")
+async def spp_probes(
+    limit: int = Query(50, ge=1, le=500),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Журнал проб: что ставили, что увидели, вернули ли цену."""
+    rows = (
+        await db.execute(
+            select(WbSppProbe)
+            .where(WbSppProbe.project_id == project.id)
+            .order_by(WbSppProbe.started_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return {
+        "rows": [
+            {
+                "id": p.id, "nm_id": p.nm_id, "status": p.status,
+                "price_before": float(p.seller_price_before), "target_price": float(p.target_price),
+                "buyer_before": float(p.buyer_price_before) if p.buyer_price_before else None,
+                "buyer_after": float(p.buyer_price_after) if p.buyer_price_after else None,
+                "spp_before": float(p.spp_before) if p.spp_before else None,
+                "spp_after": float(p.spp_after) if p.spp_after else None,
+                "reacted_after_sec": p.reacted_after_sec, "polls": p.polls,
+                "reverted": p.reverted, "error": p.error,
+                "started_at": p.started_at.isoformat(),
+                "finished_at": p.finished_at.isoformat() if p.finished_at else None,
+            }
+            for p in rows
+        ]
     }
 
 

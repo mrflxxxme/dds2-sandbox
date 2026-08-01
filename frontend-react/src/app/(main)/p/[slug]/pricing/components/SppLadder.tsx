@@ -307,18 +307,22 @@ function Hint({ level, small }: { level: { hint_down: SppHint | null; hint_up: S
     const u = level.hint_up;
     if (!d && !u) return <span style={{ color: '#d1d5db' }}>—</span>;
     const source = (cats: string[]) => (cats.length ? ` По данным: ${cats.join(', ')}.` : '');
+    // Второй ход бэкенд уже отверг и приложил как alt_* — договариваем его в подсказке,
+    // чтобы «а почему не опустить до 1999?» имело ответ прямо на месте
+    const alt = (h: SppHint) => (h.alt_price == null ? '' :
+        ` Альтернатива слабее: ${h.alt_kind === 'up' ? 'поднять' : 'опустить'} до ${money(h.alt_price)} ₽ — клиенту ${money(h.alt_buyer_price)} ₽.`);
     return (
         <span style={{ fontSize: small ? 11 : 11.5, display: 'inline-flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
             {d && (
                 <span style={{ color: '#059669' }}
-                    title={`Опустить цену на ${money(level.price - d.price)} ₽ — ${buyerMove(-d.gain)} (рычаг ×${formatNumber(d.leverage ?? 0, 1)}).${source(d.categories)}`}>
+                    title={`Опустить цену на ${money(level.price - d.price)} ₽ — ${buyerMove(-d.gain)} (рычаг ×${formatNumber(d.leverage ?? 0, 1)}): ВБ добавляет покупателю больше, чем уступаем мы.${source(d.categories)}${alt(d)}`}>
                     опустить до <b>{money(d.price)} ₽</b> → клиенту {money(d.buyer_price)} ₽
                     <span style={{ color: '#9ca3af' }}> (−{money(d.gain)})</span>
                 </span>
             )}
             {u && (
                 <span style={{ color: '#1e3a8a' }}
-                    title={`Поднять цену на ${money(u.gain)} ₽ — ${buyerMove(u.buyer_delta)}.${source(u.categories)}`}>
+                    title={`Поднять цену на ${money(u.gain)} ₽ — ${buyerMove(u.buyer_delta)}.${source(u.categories)}${alt(u)}`}>
                     поднять до <b>{money(u.price)} ₽</b> → клиенту {money(u.buyer_price)} ₽
                     {u.buyer_delta !== 0 && (
                         <span style={{ color: '#9ca3af' }}>

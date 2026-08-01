@@ -45,6 +45,7 @@ CLIFF_MIN_DROP = 3.0  # п.п. между соседними уровнями, �
 LEVEL_MIN_N = 1
 HINT_UP_SPAN = 1.0  # ступенька может быть далеко: у «Алмазной мозаики» это 1170 → 1500 ₽
 HINT_UP_MAX_RISE = 50.0  # ₽: подъём допустим, только если клиент переплатит не больше этого
+HINT_PRIMARY_MARGIN = 100.0  # ₽: насколько ход должен выигрывать по цене клиента, чтобы стать главным
 HINT_MIN_SUPPORT = 3  # чужой уровень с одним-двумя товарами — не ориентир
 HINT_MIN_LEVERAGE = 1.2  # снижение показываем, только если клиент выигрывает БОЛЬШЕ нашей уступки
 HINT_MIN_EFFECT_RUB = 100.0  # меньше — не повод трогать цену
@@ -403,6 +404,7 @@ def hint_for(
     max_rise: float = HINT_UP_MAX_RISE,
     min_step: float = HINT_MIN_STEP,
     min_effect: float = HINT_MIN_EFFECT_RUB,
+    primary_margin: float = HINT_PRIMARY_MARGIN,
 ) -> tuple[dict | None, dict | None]:
     """Подсказка «что сделать с ценой» для одной точки → (вниз, вверх).
 
@@ -441,7 +443,11 @@ def hint_for(
             ):
                 hint["gain"] = round(gain, 0)
                 hint["leverage"] = lev
-                down_key = (target,)  # ближе к текущей цене — уступаем меньше
+                # Лучший РЫЧАГ, а не ближайшая цена: у «Панелей» 2101 ₽ ближайший
+                # кандидат 2002 (рычаг 1.9) стоит по ту сторону порога 2000, а тремя
+                # рублями ниже — 1999 с рычагом 3.1 и клиентом на 132 ₽ дешевле.
+                # При равном рычаге берём ход поменьше.
+                down_key = (lev, target)
                 if best_down is None or down_key > best_down[0]:
                     best_down = (down_key, hint)
         elif target > price:
@@ -461,14 +467,23 @@ def hint_for(
 
     down = best_down[1] if best_down else None
     up = best_up[1] if best_up else None
-    # Подъём глушит снижение, только когда клиенту от него НЕ ХУЖЕ: тогда он строго
-    # сильнее (нам больше, клиенту не дороже) и второй совет только спорил бы с ним.
-    # Если же подъём стоит клиенту денег — оба хода остаются: «Панели стеновые»
-    # 2200 ₽ могут пойти вверх на 2335 (клиенту +47) или вниз на 1999, где ступенька
-    # 32.3 % и клиент платит на 368 ₽ меньше. Это выбор маржи против объёма, и он наш.
-    if up and up.get("buyer_delta", 0) <= 0:
-        down = None
+    if down and up:
+        # Ход в строке один. Главный — тот, после которого КЛИЕНТ платит заметно
+        # меньше: цена покупателя двигает заказы, а спор двух советов в одной
+        # строке не двигает ничего. «Панели стеновые» 2101 ₽: подъём до 2225 даёт
+        # клиенту −1 ₽ (то есть ничего), а спуск на ступеньку 1999 — сразу −321 ₽.
+        # Отвергнутый ход не пропадает: он едет рядом как `alt_*` для подсказки.
+        gain_down, gain_up = down["gain"], -up["buyer_delta"]
+        if gain_down - gain_up >= primary_margin:
+            return _with_alt(down, up, "up"), None
+        return None, _with_alt(up, down, "down")
     return down, up
+
+
+def _with_alt(main: dict, other: dict, kind: str) -> dict:
+    """Приложить к главному ходу отвергнутую альтернативу — для тултипа."""
+    return {**main, "alt_kind": kind, "alt_price": other["price"],
+            "alt_buyer_price": other["buyer_price"]}
 
 
 def lag_flags(levels: list[Level], *, min_step: float = HINT_MIN_STEP, tol: float = 1.0) -> None:

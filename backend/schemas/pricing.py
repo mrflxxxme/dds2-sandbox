@@ -161,6 +161,10 @@ class SppHint(BaseModel):
     leverage: float | None = None  # только для «вниз»: выигрыш клиента ÷ наша уступка
     buyer_delta: float = 0  # только для «вверх»: насколько изменится цена клиента
     categories: list[str] = []
+    # отвергнутый второй ход: в строке показываем один, но второй не прячем совсем
+    alt_kind: str | None = None  # "up" | "down"
+    alt_price: float | None = None
+    alt_buyer_price: float | None = None
 
 
 class SppLagHint(BaseModel):

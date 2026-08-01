@@ -463,3 +463,33 @@ class TestSchemaMatchesService:
 
         lv = build_levels(_pts((1980, 36.8), (2010, 36.8)), step=100)[0]
         assert set(vars(lv)) <= set(SppLevel.model_fields)
+
+
+class TestBothMovesWhenUpCostsClient:
+    """Подъём глушит снижение только тогда, когда клиенту от него не хуже.
+
+    «Панели стеновые» 2026-08-01: с 2200 ₽ можно уйти вверх на 2335 (клиенту
+    +47 ₽) или вниз на 1999, где ступенька 32.3 % и клиент платит на 368 ₽
+    меньше. Прятать второй ход нельзя — это выбор маржи против объёма.
+    """
+
+    def _lv(self, price, spp, n=5):
+        return Level(price=price, spp=spp, spp_min=spp, spp_max=spp,
+                     buyer_price=round(price * (1 - spp / 100)), n=n)
+
+    def test_step_down_beats_a_rise_that_gives_client_nothing(self):
+        """Подъём даёт клиенту ~0, спуск на ступеньку — сотни рублей: главный ход вниз."""
+        levels = [self._lv(2101, 20.3), self._lv(1999, 32.3), self._lv(2225, 24.8)]
+        cross_hints(levels, {})
+        lv = levels[0]
+        assert lv.hint_down is not None and lv.hint_down["price"] == 1999
+        assert lv.hint_up is None  # ход в строке один
+        assert lv.hint_down["alt_kind"] == "up"  # отвергнутый подъём — в подсказке
+        assert lv.hint_down["alt_price"] == 2225
+
+    def test_rise_wins_when_it_also_drops_the_client_price(self):
+        """«Ковры» 4700 → 5000: и нам больше, и клиенту дешевле — снижение не нужно."""
+        levels = [self._lv(4700, 24.8), self._lv(4600, 29.0), self._lv(5000, 36.8, n=33)]
+        cross_hints(levels, {})
+        assert levels[0].hint_up is not None and levels[0].hint_up["price"] == 5000
+        assert levels[0].hint_down is None
