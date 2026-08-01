@@ -51,4 +51,20 @@ HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
 ENTRYPOINT ["./entrypoint.sh"]
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "120", "--limit-max-requests", "5000"]
+# gunicorn-мастер, а не голый uvicorn: рециркуляция воркера по max-requests
+# (защита от роста памяти — на 768M ловили OOM, см. docker-compose.app.yml)
+# происходит под мастером, который держит слушающий сокет. Запросы ждут в
+# backlog вместо 502. У uvicorn --limit-max-requests умирал единственный
+# процесс → рестарт контейнера с alembic → ~15с сплошных 502 (01.08.2026).
+CMD ["gunicorn", "backend.main:app", \
+     "--worker-class", "uvicorn_worker.UvicornWorker", \
+     "--workers", "1", \
+     "--bind", "0.0.0.0:8000", \
+     "--max-requests", "5000", \
+     "--max-requests-jitter", "500", \
+     "--timeout", "300", \
+     "--graceful-timeout", "60", \
+     "--keep-alive", "120", \
+     "--no-control-socket", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-"]
