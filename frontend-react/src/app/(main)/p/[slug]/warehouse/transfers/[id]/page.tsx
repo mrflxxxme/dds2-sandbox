@@ -21,15 +21,20 @@
  *    обоих складов. Все эти блоки обязаны переживать отсутствие данных.
  *  • Оплата забора (OUT-xx) в схему перемещения ещё не приехала — блок
  *    показывает то, что есть (стоимость забора), и честно говорит про остальное.
- *  • «Создать поставку у Натали» — тот же контур, что на карточке машины, но
- *    состав берётся из строк ЭТОГО переезда: своей приёмки перемещение не
- *    создаёт, приход у ФФ заводит именно созданная поставка (PVB-…). Кнопка
- *    живёт только когда получатель — склад migfull-портала и переезд ещё не
- *    принят (до DELIVERED, см. canPushTransferToFf); бэкенд повторно проверяет
- *    и то, и другое. Созданная PVB связана с переездом и потому появляется в
- *    блоке «Фулфилмент» — это ДОПОЛНЕНИЕ к связке уже существующих заявок, а
- *    не её дубль: там связывают документ, который у ФФ уже есть, здесь —
- *    заводят новый.
+ *  • Две кнопки «у Натали» — по тому, с какой стороны маршрута стоит склад
+ *    migfull-портала. Одновременно не покажутся: переезд Натали → Натали
+ *    невозможен.
+ *      – ПОЛУЧАТЕЛЬ → «Создать поставку у Натали»: своей приёмки перемещение
+ *        не создаёт, приход у ФФ заводит созданная поставка (PVB-…);
+ *      – ИСТОЧНИК → «Создать отгрузку у Натали»: сборки у переезда нет, вывоз
+ *        у ФФ заводит заявка на отгрузку (ЗАК-…). Гейт статуса тут строже —
+ *        до отгрузки (см. canPushTransferShipmentToFf): у уехавшего переезда
+ *        такая заявка означала бы «выдайте товар второй раз».
+ *    Состав в обоих случаях — строки ЭТОГО переезда; бэкенд повторно проверяет
+ *    и склад, и статус. Созданный документ связан с переездом и потому
+ *    появляется в блоке «Фулфилмент» — это ДОПОЛНЕНИЕ к связке уже
+ *    существующих заявок, а не её дубль: там связывают документ, который у ФФ
+ *    уже есть, здесь — заводят новый.
  */
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -39,6 +44,8 @@ import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import { Toast, TransferFfLinkModal } from '@/components';
 import MigfullInboundModal from '../../[id]/MigfullInboundModal';
+import MigfullModal from '../../assembly/[id]/MigfullModal';
+import FfTransferExpectedCostCard from './FfTransferExpectedCostCard';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
@@ -57,6 +64,7 @@ import {
     canCompleteTransfer,
     canEditTransfer,
     canMarkTransferReady,
+    canPushTransferShipmentToFf,
     canPushTransferToFf,
     canReturnTransfer,
     canSendTransfer,
@@ -64,7 +72,6 @@ import {
     ffLinkStage,
     splitTransferFfLinks,
     toMoney,
-    transferDriverName,
     transferReceiveProgress,
     transferSkuCount,
     transferUnits,
@@ -96,10 +103,12 @@ export default function TransferDetailPage() {
     /** id заявки ФФ, которую сейчас отвязываем — блокирует только её кнопку. */
     const [unlinkingId, setUnlinkingId] = useState<number | null>(null);
 
-    // Склад migfull-портала: кнопка «Создать поставку у Натали» только когда
-    // получатель переезда — именно он. Портал не подключён → кнопки просто нет.
+    // Склад migfull-портала: кнопка «Создать поставку у Натали» — когда он
+    // ПОЛУЧАТЕЛЬ переезда, «Создать отгрузку у Натали» — когда ИСТОЧНИК.
+    // Портал не подключён → кнопок просто нет.
     const [migfullWhId, setMigfullWhId] = useState<number | null>(null);
     const [showNatPush, setShowNatPush] = useState(false);
+    const [showNatShipment, setShowNatShipment] = useState(false);
 
     // ─── Load ─────────────────────────────────────────────────────────────
 
@@ -245,13 +254,28 @@ export default function TransferDetailPage() {
 
     const status = TRANSFER_STATUS_MAP[transfer.status] ?? { label: transfer.status, className: 'badge-secondary' };
     const vehicleAssigned = transferVehicleAssigned(transfer);
-    const driver = transferDriverName(transfer);
     const pickupCost = toMoney(transfer.pickup_cost);
     // pallet_weight_kg — вес ОДНОЙ единицы; общий считаем сами, отдельного поля нет.
     const palletWeight = toMoney(transfer.pallet_weight_kg);
     const totalUnitWeight = palletWeight !== null && transfer.pallets_count != null
         ? palletWeight * transfer.pallets_count
         : null;
+    // Аналог assembly.goods_weight_kg: у заявки его считает бэкенд, в схеме
+    // переезда такого поля НЕТ — складываем сами по справочнику номенклатуры.
+    // `missing` — сколько артикулов состава без веса: расчёт тогда неполный, и
+    // молча занижать вес нельзя (у заявки об этом говорит отдельный баннер).
+    const goodsWeight = (() => {
+        let kg = 0;
+        let known = 0;
+        let missing = 0;
+        for (const it of transfer.items ?? []) {
+            const w = nomByBarcode.get(it.barcode)?.weight_kg;
+            if (w == null || !Number.isFinite(Number(w))) { missing += 1; continue; }
+            kg += Number(w) * it.quantity;
+            known += 1;
+        }
+        return { kg: known > 0 ? kg : null, missing };
+    })();
     const fromWh = warehouseById.get(transfer.from_warehouse_id);
     // Имя склада забора берём из выдачи, справочник — фолбэк (и источник
     // контрагента для тумблера «логистику оказывает склад»).
@@ -270,6 +294,14 @@ export default function TransferDetailPage() {
         && migfullWhId != null
         && transfer.to_warehouse_id === migfullWhId
         && canPushTransferToFf(transfer.status)
+        && (transfer.items?.length ?? 0) > 0;
+    // Обратная сторона: Натали — склад-ИСТОЧНИК, значит у неё заводится не
+    // приёмка, а заявка на отгрузку. Взаимоисключимо с кнопкой выше (переезд
+    // Натали → Натали невозможен), гейт статуса строже — только до отгрузки.
+    const canPushShipmentToNatali = editor
+        && migfullWhId != null
+        && transfer.from_warehouse_id === migfullWhId
+        && canPushTransferShipmentToFf(transfer.status)
         && (transfer.items?.length ?? 0) > 0;
 
     const itemColumns: Column[] = [
@@ -439,6 +471,15 @@ export default function TransferDetailPage() {
                             Создать поставку у Натали
                         </button>
                     )}
+                    {canPushShipmentToNatali && (
+                        <button
+                            className="btn btn-secondary"
+                            onClick={() => setShowNatShipment(true)}
+                            title="Создать заявку на отгрузку в WMS Натали из состава этого перемещения: Натали — склад-источник, товар вывозим от неё"
+                        >
+                            Создать отгрузку у Натали
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -450,23 +491,37 @@ export default function TransferDetailPage() {
                 </div>
             )}
 
-            {/* ─── Даты и происхождение ───────────────────────────────── */}
-            <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 16 }}>
-                    <InfoField label="Создано" value={formatDateTime(transfer.created_at)} />
-                    <InfoField label="Дата забора" value={formatDate(transfer.pickup_date)} />
-                    <InfoField label="Дата доставки" value={formatDate(transfer.delivery_date)} />
+            {/* ─── Информация ─────────────────────────────────────────── */}
+            {/* Наполнение и сетка — 1:1 с карточкой заявки на сборку (канон
+                юзера 01.08.2026): маршрут и вехи, транспортная единица, полный
+                набор реквизитов машины, стоимость, ФФ, комментарий.
+                ⚠️ Поля машины здесь ТОЛЬКО ЧТЕНИЕ, в отличие от заявки: машину
+                назначает исключительно Лист логиста (там переезды идут одним
+                списком с заявками и одна машина берёт несколько документов), а
+                с этой карточки назначение, снятие и модалка уже убраны. Мы
+                приводим к одному виду НАПОЛНЕНИЕ, а не возвращаем действия —
+                поэтому карандашей нет, пустое поле = прочерк. */}
+            <div className="glass-card" style={{ padding: 24, marginBottom: 16 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16 }}>
+                    {/* У заявки здесь «Склад» — у переезда складов два, поэтому маршрут. */}
+                    <InfoField
+                        label="Маршрут"
+                        value={`${fromWhName || `Склад ${transfer.from_warehouse_id}`} → ${toWhName || `Склад ${transfer.to_warehouse_id}`}`}
+                    />
+                    <InfoField label="Создан" value={formatDateTime(transfer.created_at)} />
                     {/* Вехи цепочки. Их НЕ вывести из статуса — он хранит только
                         текущее состояние, а «когда собрали» нужно и после отгрузки. */}
-                    {transfer.actual_ready_date && (
-                        <InfoField label="Собран" value={formatDate(transfer.actual_ready_date)} />
-                    )}
-                    {transfer.vehicle_assigned_at && (
-                        <InfoField label="Машина назначена" value={formatDateTime(transfer.vehicle_assigned_at)} />
-                    )}
-                    {transfer.shipped_at && (
-                        <InfoField label="Отгружен" value={formatDateTime(transfer.shipped_at)} />
-                    )}
+                    <InfoField label="Собран" value={formatDate(transfer.actual_ready_date)} />
+                    <InfoField label="Отгружен" value={formatDateTime(transfer.shipped_at)} />
+                    {/* Как у заявки: дата забора и слот — одним полем. */}
+                    <InfoField
+                        label="Забор"
+                        value={transfer.pickup_date
+                            ? `${formatDate(transfer.pickup_date)}${transfer.pickup_time_slot ? `, ${transfer.pickup_time_slot}` : ''}`
+                            : '—'}
+                    />
+                    <InfoField label="Дата доставки" value={formatDate(transfer.delivery_date)} />
+                    <InfoField label="Машина назначена" value={formatDateTime(transfer.vehicle_assigned_at)} />
                     {transfer.converted_from_assembly_id != null && (
                         <InfoField
                             label="Из заявки"
@@ -481,30 +536,9 @@ export default function TransferDetailPage() {
                             }
                         />
                     )}
-                    {transfer.comment && <InfoField label="Комментарий" value={transfer.comment} />}
-                    {transfer.is_defect && transfer.defect_reason && (
-                        <InfoField label="Причина брака" value={transfer.defect_reason} />
-                    )}
-                </div>
-            </div>
 
-            {/* ─── Машина и логистика ─────────────────────────────────── */}
-            <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-                    {/* Машиной карточка НЕ управляет: ни назначения, ни снятия,
-                        ни замены реквизитов. Единственная точка — Лист логиста
-                        (канон юзера 01.08.2026): он ведёт машины пачкой, видит
-                        заявки и переезды в одном списке и назначает одну машину
-                        на несколько документов. Кнопка здесь плодила бы второй
-                        путь и растаскивала процесс по двум экранам.
-                        Ниже — только ЧТЕНИЕ: что за груз и, если машина уже
-                        назначена, чья она. Прятать и это значило бы, что карточка
-                        врёт о состоянии переезда. */}
-                    <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Машина и логистика</h2>
-                </div>
-                {/* Транспортная единица живёт отдельно от машины: паллеты
-                    переезжают из заявки при конвертации, ещё до назначения. */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 16, marginBottom: vehicleAssigned ? 16 : 12 }}>
+                    {/* Транспортная единица: паллеты/короба переезжают из заявки
+                        при конвертации, ещё до назначения машины. */}
                     <InfoField
                         label={unitCountLabel(transfer.shipped_as_boxes)}
                         value={transfer.pallets_count == null
@@ -515,52 +549,111 @@ export default function TransferDetailPage() {
                         label={unitWeightLabel(transfer.shipped_as_boxes)}
                         value={palletWeight === null ? '—' : `${formatNumber(palletWeight, 1)} кг`}
                     />
-                    {totalUnitWeight !== null && (
-                        <InfoField
-                            label="Общий вес"
-                            value={`${formatNumber(totalUnitWeight, 1)} кг`}
-                        />
-                    )}
-                </div>
-                {!vehicleAssigned ? (
-                    <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
-                        Машина не назначена.
-                        {canAssignTransferVehicle(transfer.status)
-                            ? ' Машину назначает логист — в Листе логиста, там переезды идут одним списком с заявками.'
-                            : canEditTransfer(transfer.status)
-                                ? ' Машину назначают после того, как переезд собран, — нажмите «Готов».'
-                                : ' Переезд уже уехал — назначение машины закрыто.'}
-                    </div>
-                ) : (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 16 }}>
-                        <InfoField label="Госномер" value={transfer.vehicle_info || '—'} />
-                        <InfoField label="Марка" value={transfer.vehicle_brand || '—'} />
-                        <InfoField label="Водитель" value={driver || '—'} />
-                        <InfoField label="Телефон" value={transfer.driver_phone || '—'} />
-                        <InfoField
-                            label="Перевозчик"
-                            value={
-                                transfer.logistics_by_warehouse
+                    <InfoField
+                        label="Общий вес"
+                        value={totalUnitWeight === null ? '—' : `${formatNumber(totalUnitWeight, 1)} кг`}
+                    />
+                    {/* Аналог «Вес товаров (расчёт)» заявки. У заявки его считает
+                        бэкенд (goods_weight_kg), в схеме переезда такого поля нет —
+                        считаем на клиенте по справочнику номенклатуры. */}
+                    <InfoField
+                        label="Вес товаров (расчёт)"
+                        value={
+                            goodsWeight.kg === null ? '—' : (
+                                <span
+                                    title={goodsWeight.missing > 0
+                                        ? `Без веса в номенклатуре: ${formatNumber(goodsWeight.missing, 0)} арт. — расчёт неполный`
+                                        : 'Сумма веса артикулов состава'}
+                                >
+                                    {formatNumber(goodsWeight.kg, 1)} кг
+                                    {goodsWeight.missing > 0 && (
+                                        <span style={{ color: 'var(--color-warning)' }}> *</span>
+                                    )}
+                                </span>
+                            )
+                        }
+                    />
+
+                    {/* Машина — весь набор реквизитов заявки, только чтение. */}
+                    <InfoField label="Госномер" value={transfer.vehicle_info || '—'} />
+                    <InfoField label="Марка" value={transfer.vehicle_brand || '—'} />
+                    <InfoField label="Телефон" value={transfer.driver_phone || '—'} />
+                    <InfoField label="Имя водителя" value={transfer.driver_first_name || '—'} />
+                    <InfoField label="Фамилия водителя" value={transfer.driver_last_name || '—'} />
+                    <InfoField
+                        label="Подрядчик"
+                        value={
+                            transfer.logistics_by_warehouse
+                                ? (
+                                    <span title="Перевозчик — контрагент склада забора">
+                                        Логистика склада забора{fromWhName ? ` (${fromWhName})` : ''}
+                                    </span>
+                                )
+                                // Имя приходит с бэкенда; пока его нет — честный
+                                // id, а не выдуманное название.
+                                : transfer.counterparty_id != null
                                     ? (
-                                        <span title="Перевозчик — контрагент склада забора">
-                                            Логистика склада забора{fromWhName ? ` (${fromWhName})` : ''}
-                                        </span>
+                                        <Link
+                                            href={`/p/${slug}/refs/counterparty/${transfer.counterparty_id}`}
+                                            style={{ color: 'var(--color-accent)' }}
+                                            title="Карточка перевозчика"
+                                        >
+                                            {transfer.counterparty_name || `Контрагент #${transfer.counterparty_id}`} →
+                                        </Link>
                                     )
-                                    // Имя приходит с бэкенда; пока его нет —
-                                    // честный id, а не выдуманное название.
-                                    : (transfer.counterparty_name
-                                        || (transfer.counterparty_id != null
-                                            ? `Контрагент #${transfer.counterparty_id}`
-                                            : '—'))
+                                    : '—'
+                        }
+                    />
+                    <InfoField
+                        label="Стоимость"
+                        value={pickupCost === null ? '—' : `${formatNumber(pickupCost, 0)} ₽`}
+                    />
+
+                    {/* Заявки ФФ — сводкой, как у сборки. Связать/отвязать по
+                        сторонам маршрута — ниже, в блоке «Фулфилмент». */}
+                    {(transfer.ff_links?.length ?? 0) > 0 && (
+                        <InfoField
+                            label={(transfer.ff_links?.length ?? 0) > 1
+                                ? `Заявки ФФ (${formatNumber(transfer.ff_links?.length ?? 0, 0)})`
+                                : 'Заявка ФФ'}
+                            value={
+                                <span style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 12 }}>
+                                    {(transfer.ff_links ?? []).map(link => (
+                                        <Link
+                                            key={link.id}
+                                            href={`/p/${slug}/warehouse/${link.warehouse_id}/ff-request/${link.id}`}
+                                            title="Открыть ФФ-заявку и сверку состава"
+                                            style={{ color: 'var(--color-accent)' }}
+                                        >
+                                            {ffLinkLabel(link)} ({ffLinkStage(link)}) →
+                                        </Link>
+                                    ))}
+                                </span>
                             }
                         />
-                        <InfoField label="Слот забора" value={transfer.pickup_time_slot || '—'} />
-                        <InfoField
-                            label="Стоимость забора"
-                            value={pickupCost === null ? '—' : `${formatNumber(pickupCost, 0)} ₽`}
-                        />
-                    </div>
-                )}
+                    )}
+                    {transfer.is_defect && transfer.defect_reason && (
+                        <InfoField label="Причина брака" value={transfer.defect_reason} />
+                    )}
+
+                    {/* Машины нет — говорим, кто её назначает: молчаливые прочерки
+                        читаются как поломка, а кнопки здесь быть не должно. */}
+                    {!vehicleAssigned && (
+                        <div style={{ gridColumn: '1 / -1', color: 'var(--color-text-muted)', fontSize: 13 }}>
+                            Машина не назначена.
+                            {canAssignTransferVehicle(transfer.status)
+                                ? ' Машину назначает логист — в Листе логиста, там переезды идут одним списком с заявками.'
+                                : canEditTransfer(transfer.status)
+                                    ? ' Машину назначают после того, как переезд собран, — нажмите «Готов».'
+                                    : ' Переезд уже уехал — назначение машины закрыто.'}
+                        </div>
+                    )}
+                    {transfer.comment && (
+                        <div style={{ gridColumn: '1 / -1' }}>
+                            <InfoField label="Комментарий" value={transfer.comment} />
+                        </div>
+                    )}
+                </div>
             </div>
 
             {/* ─── Оплата ─────────────────────────────────────────────── */}
@@ -593,6 +686,13 @@ export default function TransferDetailPage() {
                     </div>
                 )}
             </div>
+
+            {/* ─── Ожидаемая стоимость услуг ФФ ───────────────────────── */}
+            {/* Как у заявки на сборку — сразу после «Оплаты»: это тоже деньги,
+                только не наши логисту, а складу-ИСТОЧНИКУ за сборку переезда.
+                Ставка берётся с его карточки (вкладка «Тарифы ФФ»), поэтому
+                блок живёт своей загрузкой и переживает её ошибку молча. */}
+            <FfTransferExpectedCostCard transferId={transfer.id} slug={slug} fromWarehouseName={fromWhName} />
 
             {/* ─── Фулфилмент ─────────────────────────────────────────── */}
             {/* Две стороны маршрута — РАЗНЫЕ склады и разные документы ФФ:
@@ -687,6 +787,21 @@ export default function TransferDetailPage() {
                         // PVB уже связана с переездом (stock_transfer_id), а связки
                         // живут в самой схеме переезда — перечитываем карточку,
                         // чтобы поставка появилась в блоке «Фулфилмент» без F5.
+                        reloadTransfer();
+                    }}
+                />
+            )}
+
+            {showNatShipment && (
+                <MigfullModal
+                    source={{ kind: 'transfer', id: transfer.id }}
+                    sourceLabel={`Перемещение ${transfer.number}`}
+                    onClose={() => setShowNatShipment(false)}
+                    onSuccess={() => {
+                        setShowNatShipment(false);
+                        setToast({ message: 'Отгрузка у Натали создана', type: 'success' });
+                        // Созданная заявка уже связана с переездом (stock_transfer_id)
+                        // и приезжает в `ff_links` стороной «отгрузка у источника».
                         reloadTransfer();
                     }}
                 />

@@ -103,6 +103,18 @@ import type {
     MessageResponse,
 } from '@/types/api';
 
+/**
+ * Путь заявки на отгрузку у Натали по источнику состава. У переезда сегмент
+ * `transfer` уже занят ПРИЁМКОЙ (migfullInbound*), поэтому отгрузочные ручки
+ * живут с префиксом `shipment-`.
+ */
+const shipmentPath = (
+    source: import('@/types/api').MigfullShipmentSource,
+    tail: 'draft' | 'send',
+) => (source.kind === 'transfer'
+    ? `/api/v1/migfull-portal/transfer/${source.id}/shipment-${tail}`
+    : `/api/v1/migfull-portal/assembly/${source.id}/${tail}`);
+
 export function addWarehouseMethods(api: ApiClient) {
     return {
         // ─── Warehouses CRUD ─────────────────────────────────────────
@@ -1134,10 +1146,14 @@ export function addWarehouseMethods(api: ApiClient) {
         migfullPortalConfig() {
             return api.request<import('@/types/api').MigfullPortalConfig>('GET', '/api/v1/migfull-portal/config');
         },
-        migfullPortalDraft(assemblyId: number) {
+        // Два источника состава заявки на отгрузку: наша сборка (`assembly`) и
+        // перемещение, у которого Натали — склад-ИСТОЧНИК (`transfer`). Контракт
+        // запроса/ответа общий, различается только путь, поэтому методы принимают
+        // источник целиком (как migfullInbound* для приёмки).
+        migfullPortalDraft(source: import('@/types/api').MigfullShipmentSource) {
             return api.request<import('@/types/api').MigfullDraftResponse>(
                 'GET',
-                `/api/v1/migfull-portal/assembly/${assemblyId}/draft`,
+                shipmentPath(source, 'draft'),
             );
         },
         /**
@@ -1146,11 +1162,14 @@ export function addWarehouseMethods(api: ApiClient) {
          * схлопывает статус в текст ошибки, поэтому здесь тегируем 409 в .code='conflict',
          * чтобы модалка показала подтверждение и переслала с force_resend=true.
          */
-        async migfullPortalSend(assemblyId: number, body: import('@/types/api').MigfullSendRequest) {
+        async migfullPortalSend(
+            source: import('@/types/api').MigfullShipmentSource,
+            body: import('@/types/api').MigfullSendRequest,
+        ) {
             try {
                 return await api.request<import('@/types/api').MigfullSendResult>(
                     'POST',
-                    `/api/v1/migfull-portal/assembly/${assemblyId}/send`,
+                    shipmentPath(source, 'send'),
                     body,
                 );
             } catch (e) {

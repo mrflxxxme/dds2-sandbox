@@ -54,7 +54,6 @@ from backend.models import (
     MigfullShipmentStatus,
     Nomenclature,
     StockTransfer,
-    Warehouse,
 )
 from backend.models.fulfillment import FfRequestKind
 from backend.models.warehouse import InboundStatus, TransferStatus
@@ -78,6 +77,8 @@ from backend.services.migfull_portal_service import (
     MigfullPortalServiceError,
     _client_from_key,
     _get_key,
+    _load_transfer,
+    _warehouse_names,
     _with_portal_session,
     load_opis_context,
 )
@@ -208,19 +209,6 @@ async def _source_from_receipt(db: AsyncSession, project_id: int, receipt_id: in
     )
 
 
-async def _load_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> StockTransfer | None:
-    result = await db.execute(
-        select(StockTransfer)
-        .where(
-            StockTransfer.id == transfer_id,
-            StockTransfer.project_id == project_id,
-            StockTransfer.is_deleted.is_(False),
-        )
-        .options(selectinload(StockTransfer.items))
-    )
-    return result.scalar_one_or_none()
-
-
 def _transfer_qty_maps(transfer: StockTransfer) -> tuple[dict[str, int], dict[str, int]]:
     """Состав перемещения → {ШК: штук}, {ШК: nomenclature_id}.
 
@@ -237,22 +225,6 @@ def _transfer_qty_maps(transfer: StockTransfer) -> tuple[dict[str, int], dict[st
         if it.nomenclature_id:
             nom_by_bc.setdefault(bc, it.nomenclature_id)
     return qty_by_bc, nom_by_bc
-
-
-async def _warehouse_names(db: AsyncSession, project_id: int, ids: set[int]) -> dict[int, str]:
-    """Имена складов маршрута одним запросом (для примечания «источник → Натали»)."""
-    if not ids:
-        return {}
-    rows = (
-        await db.execute(
-            select(Warehouse.id, Warehouse.name).where(
-                Warehouse.project_id == project_id,
-                Warehouse.id.in_(ids),
-                Warehouse.is_deleted.is_(False),
-            )
-        )
-    ).all()
-    return {wid: name for wid, name in rows}
 
 
 async def _source_from_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> InboundSource:

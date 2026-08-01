@@ -6,11 +6,10 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
 import {
     TRANSFER_STATUS_MAP,
-    canCancelTransfer,
     canCompleteTransfer,
     canEditTransfer,
-    canMarkTransferReady,
-    canSendTransfer,
+    ffLinkLabel,
+    splitTransferFfLinks,
     transferReceiveProgress,
     transferSkuCount,
     transferUnits,
@@ -26,10 +25,14 @@ import type {
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 import Toast from '@/components/Toast';
+import TransferFfLinkModal from '@/components/TransferFfLinkModal';
 import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffSkippedNotice, ffStageBadge, ffStatusBadge, ffStatusLabel, ffEventBadge, ffEventSummary } from './ff-shared';
 import FfBillingTab from './FfBillingTab';
 import MigfullInboundModal from './MigfullInboundModal';
 import { FfMismatchModal } from '@/components/FfMismatchModal';
+// Тег «📦 Перемещение» — общий с Листом логиста: переезд в чужом списке
+// помечается ОДНИМ и тем же бейджем, а не похожим локальным.
+import { TransferTag } from '../logistics/components/TransferWorkRow';
 import { whNamesMatch } from '@/lib/utils/ffLinkCandidates';
 
 /* ─── Transfers helpers (общие для страницы и вкладки) ───────────────────── */
@@ -750,10 +753,20 @@ const NEXT_VEHICLE_ACTION: Record<string, { status: string; label: string; color
 function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { warehouseId: number; slug: string; ffConnected: boolean; onFfLinked?: () => void }) {
     const router = useRouter();
     const [vehicles, setVehicles] = useState<ExpectedVehicleRow[]>([]);
+    // Переезды, которые физически едут НА этот склад. Второй источник блока:
+    // машина из Китая и переезд с соседнего склада — для приёмщика одно и то же
+    // («что к нам едет»), а найти переезд на карточке склада раньше было негде:
+    // вкладка «Фулфилмент → Приёмки» — зеркало документов провайдера (PVB-…),
+    // нашего TR-… там не бывает по определению.
+    const [incomingTransfers, setIncomingTransfers] = useState<StockTransfer[]>([]);
     // Модалка «Связать заявки ФФ» — машина, к чьей приёмке привязываем
     const [linkFor, setLinkFor] = useState<ExpectedVehicleRow | null>(null);
     // Модалка «Создать поставку у Натали» — машина, из чьей приёмки создаём
     const [natPushFor, setNatPushFor] = useState<ExpectedVehicleRow | null>(null);
+    // Те же две модалки, но для переезда: он здесь полноправная ожидаемая
+    // поставка, а не карточка-указатель, и действия у него те же.
+    const [transferLinkFor, setTransferLinkFor] = useState<StockTransfer | null>(null);
+    const [transferNatPushFor, setTransferNatPushFor] = useState<StockTransfer | null>(null);
     // Склад migfull-портала (кнопка «Создать поставку у Натали» — только на нём)
     const [migfullWhId, setMigfullWhId] = useState<number | null>(null);
     const [toast, setToast] = useState('');
@@ -762,7 +775,18 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
         api.getExpectedVehicles(warehouseId).then(setVehicles).catch(() => {});
     }, [warehouseId]);
 
+    // SHIPPED — «уже уехал и физически едет»; серверный срез по статусу, чтобы
+    // не тянуть весь список переездов склада. `warehouse_id` у бэкенда — это
+    // «источник ИЛИ получатель», поэтому направление доотсекаем здесь: исходящие
+    // к нам не едут и в «ожидаемых» им не место.
+    const loadIncomingTransfers = useCallback(() => {
+        api.getTransfers(false, warehouseId, { status: 'SHIPPED' })
+            .then(rows => setIncomingTransfers(rows.filter(t => t.to_warehouse_id === warehouseId)))
+            .catch(() => { /* необязательный источник — блок не падает из-за него */ });
+    }, [warehouseId]);
+
     useEffect(() => { loadVehicles(); }, [loadVehicles]);
+    useEffect(() => { loadIncomingTransfers(); }, [loadIncomingTransfers]);
 
     useEffect(() => {
         let cancelled = false;
@@ -782,12 +806,14 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
         }
     };
 
-    if (vehicles.length === 0) return null;
+    // Пусто — только когда пусто И то, и другое: блок про «что к нам едет»,
+    // а едет к нам и машина, и переезд.
+    if (vehicles.length === 0 && incomingTransfers.length === 0) return null;
 
     return (
         <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span>🚛</span> Ожидаемые поставки ({vehicles.length})
+                <span>🚛</span> Ожидаемые поставки ({formatNumber(vehicles.length + incomingTransfers.length, 0)})
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
                 {vehicles.map(v => {
@@ -874,6 +900,99 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
                         </div>
                     );
                 })}
+                {incomingTransfers.map(t => {
+                    // «Принято X из Y» — порционный приём: без этой цифры
+                    // «доехало всё» не отличить от «доехала половина».
+                    const progress = transferReceiveProgress(t);
+                    const dest = splitTransferFfLinks(t.ff_links).dest;
+                    return (
+                        <div
+                            key={`transfer-${t.id}`}
+                            onClick={() => router.push(`/p/${slug}/warehouse/transfers/${t.id}`)}
+                            style={{
+                                padding: '12px 14px', borderRadius: 12,
+                                border: '1px solid var(--color-border)',
+                                cursor: 'pointer', transition: 'all 0.15s',
+                            }}
+                            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--color-primary)'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
+                            onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--color-border)'; e.currentTarget.style.transform = ''; }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 600, fontSize: 13 }}>
+                                    {/* Иконка и бейдж — единственное, чем переезд
+                                        отличается от машины: у машины 🚛 и своя
+                                        шкала статусов, у переезда 📦 и общий
+                                        словарь TRANSFER_STATUS_MAP. */}
+                                    <span>📦</span>
+                                    <Link
+                                        href={`/p/${slug}/warehouse/transfers/${t.id}`}
+                                        onClick={e => e.stopPropagation()}
+                                        style={{ color: 'inherit', textDecoration: 'none' }}
+                                    >
+                                        {t.number}
+                                    </Link>
+                                </span>
+                                <span
+                                    className={`badge ${TRANSFER_STATUS_MAP[t.status]?.className ?? 'badge-secondary'}`}
+                                    style={{ fontSize: 10, padding: '2px 8px' }}
+                                >
+                                    {transferStatusLabel(t.status)}
+                                </span>
+                            </div>
+                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>
+                                {t.from_warehouse_name || `#${t.from_warehouse_id}`} → {t.to_warehouse_name || `#${t.to_warehouse_id}`}
+                            </div>
+                            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                <span>{formatNumber(transferSkuCount(t), 0)} SKU / {formatNumber(transferUnits(t), 0)} шт</span>
+                                {t.shipped_at && (
+                                    <span style={{ color: 'var(--color-text)' }}>📅 {formatDate(t.shipped_at)}</span>
+                                )}
+                            </div>
+                            {progress && (
+                                <div style={{
+                                    marginTop: 4, fontSize: 12, fontWeight: 600,
+                                    color: progress.received >= progress.total ? 'var(--color-success)' : 'var(--color-text-muted)',
+                                }}>
+                                    Принято {formatNumber(progress.received, 0)} из {formatNumber(progress.total, 0)}
+                                </div>
+                            )}
+                            {dest.length > 0 && (
+                                <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Заявки ФФ:</span>
+                                    {dest.map(l => (
+                                        <span key={l.id} className="badge badge-success" style={{ fontSize: 11, padding: '2px 8px' }}>
+                                            {ffLinkLabel(l)}
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                            {(ffConnected || migfullWhId === warehouseId) && (
+                                <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                    {ffConnected && (
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            style={{ fontSize: 11, padding: '3px 10px' }}
+                                            onClick={e => { e.stopPropagation(); setTransferLinkFor(t); }}
+                                            title="Связать заявки ФФ приёмки на складе-получателе с этим переездом"
+                                        >
+                                            Связать заявки ФФ
+                                        </button>
+                                    )}
+                                    {migfullWhId === warehouseId && (
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            style={{ fontSize: 11, padding: '3px 10px' }}
+                                            onClick={e => { e.stopPropagation(); setTransferNatPushFor(t); }}
+                                            title="Создать поставку (приёмку) в WMS Натали из состава этого переезда"
+                                        >
+                                            Создать поставку у Натали
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    );
+                })}
             </div>
 
             {linkFor && linkFor.receipt_id != null && (
@@ -902,6 +1021,35 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
                         setToast(`Поставка у Натали создана: ${res.shipment_number || res.shipment_guid || '—'}`);
                         loadVehicles();
                         onFfLinked?.();  // вкладки ФФ перезагружают списки (PVB прилетит синком уже связанной)
+                    }}
+                />
+            )}
+            {/* Переезд связываем ТОЙ ЖЕ модалкой, что и его карточка: сторона
+                `dest` — приёмка у склада-получателя, то есть у этого склада. */}
+            {transferLinkFor && (
+                <TransferFfLinkModal
+                    transferId={transferLinkFor.id}
+                    transferNumber={transferLinkFor.number}
+                    side="dest"
+                    warehouseId={transferLinkFor.to_warehouse_id}
+                    warehouseName={transferLinkFor.to_warehouse_name ?? null}
+                    onClose={() => setTransferLinkFor(null)}
+                    onLinked={() => {
+                        setToast(`Заявки ФФ связаны с переездом ${transferLinkFor.number}`);
+                        loadIncomingTransfers();  // ff_links приходят и в списке — бейджи обновятся
+                        onFfLinked?.();           // вкладки ФФ перезагружают списки
+                    }}
+                />
+            )}
+            {transferNatPushFor && (
+                <MigfullInboundModal
+                    source={{ kind: 'transfer', id: transferNatPushFor.id }}
+                    sourceLabel={`Перемещение ${transferNatPushFor.number}`}
+                    onClose={() => setTransferNatPushFor(null)}
+                    onSuccess={res => {
+                        setToast(`Поставка у Натали создана: ${res.shipment_number || res.shipment_guid || '—'}`);
+                        loadIncomingTransfers();
+                        onFfLinked?.();
                     }}
                 />
             )}
@@ -1242,8 +1390,21 @@ function AllTab({ warehouseId }: { warehouseId: number }) {
 
 /* ─── Tab: Приёмки ──────────────────────────────────────────────────────── */
 
+/**
+ * Строка списка «Приёмки» — три РАЗНЫХ документа в одном журнале.
+ *
+ * `transfer` появился по канону юзера 01.08.2026: «перемещение это то же самое,
+ * как и обычная приёмка на этом складе». Для склада-получателя входящий переезд
+ * и есть приход — искать его в отдельной вкладке приёмщику незачем. Едут сюда
+ * только уже уехавшие (SHIPPED) и принятые (DELIVERED): до отгрузки
+ * приходовать нечего.
+ *
+ * Тип документа несёт `docType` — от него зависят и словарь статусов (у
+ * переезда свой, TRANSFER_STATUS_MAP), и адрес карточки. Полей, которых у
+ * переезда нет (плановая дата приёмки, пометка брака), не выдумываем.
+ */
 type UnifiedDoc = {
-    docType: 'receipt' | 'mark';
+    docType: 'receipt' | 'mark' | 'transfer';
     id: number;
     number: string;
     status: string;
@@ -1257,6 +1418,7 @@ type UnifiedDoc = {
     created_at: string | null;
     receipt?: InboundReceipt;
     mark?: DefectMarkOperation;
+    transfer?: StockTransfer;
 };
 
 function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
@@ -1277,11 +1439,19 @@ function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
         setLoading(true);
         setError('');
         try {
-            const [r, transfers, marks] = await Promise.all([
+            // Переезды берём ДВУМЯ серверными срезами по статусу и по складу:
+            // ручка принимает один статус за раз, а `warehouse_id` у неё —
+            // «источник ИЛИ получатель» (направление отсекаем ниже). Прежний
+            // `getTransfers(true)` тянул ВСЕ переезды проекта ради одного
+            // блока брака — здесь он больше не нужен.
+            const [r, shippedIn, deliveredIn, marks] = await Promise.all([
                 api.getReceipts(warehouseId),
-                api.getTransfers(true),
+                api.getTransfers(false, warehouseId, { status: 'SHIPPED' }),
+                api.getTransfers(false, warehouseId, { status: 'DELIVERED' }),
                 api.getDefectMarkOperations(warehouseId),
             ]);
+            const incomingTransfers = [...shippedIn, ...deliveredIn]
+                .filter((t: StockTransfer) => t.to_warehouse_id === warehouseId);
             const receiptDocs: UnifiedDoc[] = r.map((x: InboundReceipt) => {
                 const expected = x.items.reduce((s, it: any) => s + (it.expected_qty || 0), 0);
                 const actual = x.items.reduce((s, it: any) => s + (it.actual_qty || 0), 0);
@@ -1319,16 +1489,45 @@ function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
                     mark: m,
                 };
             });
-            const unified = [...receiptDocs, ...markDocs].sort((a, b) => {
+            // Едет к нам, но ещё не принято — SHIPPED (бывший IN_TRANSIT).
+            const incoming = incomingTransfers.filter((t: StockTransfer) =>
+                t.is_defect && t.status === 'SHIPPED'
+            );
+            // Брак в пути живёт отдельным блоком с кнопкой «Принять» —
+            // дублировать его строкой в журнале не надо. Всё остальное
+            // входящее (включая уже ПРИНЯТЫЙ брак) идёт в общий список.
+            const bannerIds = new Set(incoming.map(t => t.id));
+            const transferDocs: UnifiedDoc[] = incomingTransfers
+                .filter(t => !bannerIds.has(t.id))
+                .map((t: StockTransfer) => {
+                    // «Принято X из Y» есть только у SHIPPED; у DELIVERED приход
+                    // закрыт целиком, и факт равен составу.
+                    const progress = transferReceiveProgress(t);
+                    const units = transferUnits(t);
+                    return {
+                        docType: 'transfer' as const,
+                        id: t.id,
+                        number: t.number,
+                        status: t.status,
+                        is_defect: !!t.is_defect,
+                        is_mark: false,
+                        positions: transferSkuCount(t),
+                        total_qty: units,
+                        actual_qty: t.status === 'DELIVERED' ? units : (progress ? progress.received : null),
+                        // Плановой даты приёмки у переезда нет — вместо неё дата
+                        // отгрузки (день, когда товар уехал к нам).
+                        planned_date: t.shipped_at || null,
+                        reason: (t.is_defect ? t.defect_reason : t.comment) || '—',
+                        created_at: t.created_at || null,
+                        transfer: t,
+                    };
+                });
+            const unified = [...receiptDocs, ...markDocs, ...transferDocs].sort((a, b) => {
                 const ta = a.created_at ? Date.parse(a.created_at) : 0;
                 const tb = b.created_at ? Date.parse(b.created_at) : 0;
                 return tb - ta;
             });
             setDocs(unified);
-            // Едет к нам, но ещё не принято — SHIPPED (бывший IN_TRANSIT).
-            const incoming = transfers.filter((t: StockTransfer) =>
-                t.is_defect && t.to_warehouse_id === warehouseId && t.status === 'SHIPPED'
-            );
             setIncomingDefects(incoming);
             onCountChange(unified.length + incoming.length);
         } catch (e: unknown) {
@@ -1362,6 +1561,19 @@ function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
         return <span style={{ color, background: bg, padding: '2px 8px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>{label}</span>;
     };
 
+    // У переезда СВОЙ словарь статусов (SHIPPED = «В пути», а не «Отгружена»):
+    // подставлять сюда шкалу приёмки значило бы показать сырой SHIPPED.
+    const docStatusBadge = (row: UnifiedDoc) => row.docType === 'transfer'
+        ? (
+            <span
+                className={`badge ${TRANSFER_STATUS_MAP[row.status as StockTransferStatus]?.className ?? 'badge-secondary'}`}
+                style={{ fontSize: 12 }}
+            >
+                {transferStatusLabel(row.status)}
+            </span>
+        )
+        : statusBadge(row.status);
+
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
 
     const cols: Column[] = [
@@ -1370,26 +1582,45 @@ function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
             render: (v: string, row: UnifiedDoc) => (
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                     <span style={{ fontWeight: 600 }}>{v}</span>
+                    {/* Тег — тот же, что в Листе логиста: в общем списке переезд
+                        отличается ровно им, а не отдельной таблицей. */}
+                    {row.docType === 'transfer' && <TransferTag />}
                     {row.is_mark && <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>Пометка брака</span>}
                     {row.is_defect && !row.is_mark && <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>Брак</span>}
                 </span>
             ),
         },
-        { key: 'status', label: 'Статус', render: (v: string) => statusBadge(v) },
+        {
+            key: 'status', label: 'Статус',
+            render: (_: string, row: UnifiedDoc) => docStatusBadge(row),
+            exportValue: (row: UnifiedDoc) => row.docType === 'transfer' ? transferStatusLabel(row.status) : row.status,
+        },
         {
             key: 'positions', label: 'Позиции',
             render: (_: unknown, row: UnifiedDoc) => (
                 <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                    {row.positions} поз., {formatNumber(row.total_qty, 0)} {row.docType === 'mark' ? 'шт.' : 'ожид.'}
+                    {row.positions} поз., {formatNumber(row.total_qty, 0)} {row.docType === 'receipt' ? 'ожид.' : 'шт.'}
                     {row.docType === 'receipt' && row.actual_qty !== null && (
                         <span style={{ color: row.actual_qty < row.total_qty ? '#b45309' : 'var(--color-success)', fontWeight: 600 }}> / {formatNumber(row.actual_qty, 0)} факт</span>
+                    )}
+                    {/* У переезда «факт» — сколько уже зачислено получателю:
+                        приём бывает порционным. */}
+                    {row.docType === 'transfer' && row.actual_qty !== null && (
+                        <span style={{ color: row.actual_qty < row.total_qty ? '#b45309' : 'var(--color-success)', fontWeight: 600 }}> / {formatNumber(row.actual_qty, 0)} принято</span>
                     )}
                 </span>
             ),
         },
         {
             key: 'planned_date', label: 'Плановая дата',
-            render: (_: unknown, row: UnifiedDoc) => row.planned_date ? formatDate(row.planned_date) : '—',
+            render: (_: unknown, row: UnifiedDoc) => {
+                if (!row.planned_date) return '—';
+                // У переезда в этом поле дата ОТГРУЗКИ — подписываем, чтобы
+                // её не прочитали как плановую дату приёмки.
+                return row.docType === 'transfer'
+                    ? `отгружен ${formatDate(row.planned_date)}`
+                    : formatDate(row.planned_date);
+            },
         },
         {
             key: 'reason', label: 'Комментарий / причина',
@@ -1444,6 +1675,9 @@ function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
                         router.push(`/p/${slug}/warehouse/${warehouseId}/receipt/${row.id}`);
                     } else if (row.docType === 'mark') {
                         router.push(`/p/${slug}/warehouse/${warehouseId}/mark-operation/${row.id}`);
+                    } else if (row.docType === 'transfer') {
+                        // Карточка переезда — там же, где все действия над ним.
+                        router.push(`/p/${slug}/warehouse/transfers/${row.id}`);
                     }
                 }}
             />
@@ -1453,6 +1687,25 @@ function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
 
 /* ─── Tab: Отгрузки ─────────────────────────────────────────────────────── */
 
+/**
+ * Строка списка «Отгрузки» — зеркало `UnifiedDoc` приёмок для обратного
+ * направления: наша отгрузка и ИСХОДЯЩИЙ переезд (`from_warehouse_id` = этот
+ * склад) — для склада одно и то же событие «товар уехал».
+ */
+type UnifiedShipmentDoc = {
+    docType: 'shipment' | 'transfer';
+    id: number;
+    number: string;
+    status: string;
+    positions: number;
+    total_qty: number;
+    /** Куда уехало: назначение отгрузки либо склад-получатель переезда. */
+    destination: string;
+    shipped_date: string | null;
+    created_at: string | null;
+    is_defect: boolean;
+};
+
 function ShipmentsTab({ warehouseId, warehouseType, onCountChange }: {
     warehouseId: number;
     warehouseType: string;
@@ -1461,7 +1714,7 @@ function ShipmentsTab({ warehouseId, warehouseType, onCountChange }: {
     const params = useParams();
     const router = useRouter();
     const slug = params.slug as string;
-    const [shipments, setShipments] = useState<OutboundShipment[]>([]);
+    const [shipments, setShipments] = useState<UnifiedShipmentDoc[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
@@ -1469,9 +1722,47 @@ function ShipmentsTab({ warehouseId, warehouseType, onCountChange }: {
         setLoading(true);
         setError('');
         try {
-            const r = await api.getShipments(warehouseId);
-            setShipments(r);
-            onCountChange(r.length);
+            // Переезды — два серверных среза по статусу (ручка принимает один
+            // статус за раз), направление «от нас» отсекаем здесь: у бэкенда
+            // `warehouse_id` — это «источник ИЛИ получатель».
+            const [r, shippedOut, deliveredOut] = await Promise.all([
+                api.getShipments(warehouseId),
+                api.getTransfers(false, warehouseId, { status: 'SHIPPED' }),
+                api.getTransfers(false, warehouseId, { status: 'DELIVERED' }),
+            ]);
+            const shipmentDocs: UnifiedShipmentDoc[] = r.map((x: OutboundShipment) => ({
+                docType: 'shipment',
+                id: x.id,
+                number: x.number,
+                status: x.status,
+                positions: x.items.length,
+                total_qty: x.items.reduce((s: number, it: { quantity: number }) => s + it.quantity, 0),
+                destination: x.destination || '—',
+                shipped_date: x.shipped_date || null,
+                created_at: x.created_at || null,
+                is_defect: false,
+            }));
+            const transferDocs: UnifiedShipmentDoc[] = [...shippedOut, ...deliveredOut]
+                .filter((t: StockTransfer) => t.from_warehouse_id === warehouseId)
+                .map((t: StockTransfer) => ({
+                    docType: 'transfer' as const,
+                    id: t.id,
+                    number: t.number,
+                    status: t.status,
+                    positions: transferSkuCount(t),
+                    total_qty: transferUnits(t),
+                    destination: t.to_warehouse_name || `#${t.to_warehouse_id}`,
+                    shipped_date: t.shipped_at || null,
+                    created_at: t.created_at || null,
+                    is_defect: !!t.is_defect,
+                }));
+            const unified = [...shipmentDocs, ...transferDocs].sort((a, b) => {
+                const ta = a.created_at ? Date.parse(a.created_at) : 0;
+                const tb = b.created_at ? Date.parse(b.created_at) : 0;
+                return tb - ta;
+            });
+            setShipments(unified);
+            onCountChange(unified.length);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
@@ -1497,14 +1788,38 @@ function ShipmentsTab({ warehouseId, warehouseType, onCountChange }: {
     }
 
     const cols: Column[] = [
-        { key: 'number', label: '№' },
-        { key: 'status', label: 'Статус', render: (v: string) => statusBadge(v) },
         {
-            key: 'items', label: 'Позиции',
-            render: (_: unknown, row: OutboundShipment) => {
-                const qty = row.items.reduce((s: number, it: { quantity: number }) => s + it.quantity, 0);
-                return <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{row.items.length} поз., {formatNumber(qty)} шт.</span>;
-            },
+            key: 'number', label: '№',
+            render: (v: string, row: UnifiedShipmentDoc) => (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontWeight: 600 }}>{v}</span>
+                    {row.docType === 'transfer' && <TransferTag />}
+                    {row.is_defect && <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>Брак</span>}
+                </span>
+            ),
+        },
+        {
+            key: 'status', label: 'Статус',
+            // У переезда свой словарь ступеней — общий с его карточкой и Листом логиста.
+            render: (v: string, row: UnifiedShipmentDoc) => row.docType === 'transfer'
+                ? (
+                    <span
+                        className={`badge ${TRANSFER_STATUS_MAP[row.status as StockTransferStatus]?.className ?? 'badge-secondary'}`}
+                        style={{ fontSize: 12 }}
+                    >
+                        {transferStatusLabel(row.status)}
+                    </span>
+                )
+                : statusBadge(v),
+            exportValue: (row: UnifiedShipmentDoc) => row.docType === 'transfer' ? transferStatusLabel(row.status) : row.status,
+        },
+        {
+            key: 'positions', label: 'Позиции',
+            render: (_: unknown, row: UnifiedShipmentDoc) => (
+                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                    {formatNumber(row.positions, 0)} поз., {formatNumber(row.total_qty, 0)} шт.
+                </span>
+            ),
         },
         { key: 'destination', label: 'Назначение' },
         { key: 'shipped_date', label: 'Дата отгрузки', format: 'date' },
@@ -1515,7 +1830,17 @@ function ShipmentsTab({ warehouseId, warehouseType, onCountChange }: {
         <>
             {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
 
-            <TanStackDataTable columns={cols} data={shipments} emptyText="Нет отгрузок" emptyIcon="📤" onRowClick={(row) => router.push(`/p/${slug}/warehouse/${warehouseId}/shipment/${row.id}`)} />
+            <TanStackDataTable
+                columns={cols}
+                data={shipments}
+                emptyText="Нет отгрузок"
+                emptyIcon="📤"
+                onRowClick={(row: UnifiedShipmentDoc) => router.push(
+                    row.docType === 'transfer'
+                        ? `/p/${slug}/warehouse/transfers/${row.id}`
+                        : `/p/${slug}/warehouse/${warehouseId}/shipment/${row.id}`,
+                )}
+            />
         </>
     );
 }
@@ -1591,15 +1916,29 @@ function AssembliesTab({ warehouseId, slug, onCountChange }: {
 
 /* ─── Tab: Перемещения ──────────────────────────────────────────────────── */
 
+/**
+ * Список перемещений склада — ТОЛЬКО список.
+ *
+ * Кнопок переходов («Готов» / «Отправить» / «Принять» / отмена) здесь нет
+ * намеренно (канон юзера 01.08.2026: «всё то же самое, как с отгрузкой и
+ * приёмкой»). Приёмки и отгрузки на этом же экране — тоже списки, а действия
+ * живут на карточке документа. Статусная цепочка переезда — зеркало заявки на
+ * сборку, с таблицей разрешённых переходов и движениями стока на двух из них;
+ * дублировать её кнопками в чужом списке значит завести второй путь мимо
+ * гардов. Место действий над переездом — его карточка (и Лист логиста для
+ * машины), ровно поэтому же оттуда убрано назначение машины.
+ */
 function TransfersTab({ warehouseId, onCountChange }: {
     warehouseId: number;
     onCountChange: (n: number) => void;
 }) {
+    const params = useParams();
+    const router = useRouter();
+    const slug = params.slug as string;
     const [transfers, setTransfers] = useState<StockTransfer[]>([]);
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-    const [actingId, setActingId] = useState<number | null>(null);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -1621,59 +1960,6 @@ function TransfersTab({ warehouseId, onCountChange }: {
     useEffect(() => { load(); }, [load]);
 
     const whName = (id: number) => warehouses.find(w => w.id === id)?.name || `#${id}`;
-
-    const handleSend = async (t: StockTransfer) => {
-        if (!confirm(`Отправить ${t.number}? Товар спишется со склада-источника.`)) return;
-        setActingId(t.id);
-        try {
-            await api.sendTransfer(t.id);
-            await load();
-        } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка отправки');
-        } finally {
-            setActingId(null);
-        }
-    };
-
-    // «Готов» без подтверждения: сток не двигает, а откат — «Снять машину»
-    // или правка на карточке.
-    const handleReady = async (t: StockTransfer) => {
-        setActingId(t.id);
-        try {
-            await api.markTransferReady(t.id);
-            await load();
-        } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка');
-        } finally {
-            setActingId(null);
-        }
-    };
-
-    const handleAccept = async (t: StockTransfer) => {
-        if (!confirm(`Принять ${t.number}? Товар зачислится на этот склад.`)) return;
-        setActingId(t.id);
-        try {
-            await api.completeTransfer(t.id);
-            await load();
-        } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка приёмки');
-        } finally {
-            setActingId(null);
-        }
-    };
-
-    const handleCancel = async (t: StockTransfer) => {
-        if (!confirm(`Удалить ${t.number}? Переезд ещё не уезжал — сток не тронут.`)) return;
-        setActingId(t.id);
-        try {
-            await api.cancelTransfer(t.id);
-            await load();
-        } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка удаления');
-        } finally {
-            setActingId(null);
-        }
-    };
 
     // Цвет — по классу из общего словаря, а не по своему списку статусов:
     // иначе каждая новая ступень приезжала бы сюда бесцветной.
@@ -1726,64 +2012,6 @@ function TransfersTab({ warehouseId, onCountChange }: {
         },
         { key: 'comment', label: 'Комментарий' },
         { key: 'created_at', label: 'Создано', format: 'date' },
-        {
-            key: 'id', label: '', align: 'center',
-            exportValue: () => '',
-            render: (_v: number, row: StockTransfer) => {
-                const acting = actingId === row.id;
-                // Исходящие: до отгрузки — «Готов» либо «Отправить» (что именно,
-                // решает статус) плюс удаление. Кнопку, которую бэкенд встретит
-                // четырёхсоткой, не показываем: гейты общие, из lib/transfer.ts.
-                if (canEditTransfer(row.status) && row.from_warehouse_id === warehouseId) {
-                    return (
-                        <span style={{ display: 'inline-flex', gap: 6 }}>
-                            {canMarkTransferReady(row.status) && (
-                                <button
-                                    className="btn btn-sm btn-secondary"
-                                    onClick={() => handleReady(row)}
-                                    disabled={acting}
-                                    title="Переезд собран — можно назначать машину"
-                                >
-                                    {acting ? '...' : 'Готов'}
-                                </button>
-                            )}
-                            {canSendTransfer(row.status) && (
-                                <button className="btn btn-sm btn-primary" onClick={() => handleSend(row)} disabled={acting}>
-                                    {acting ? '...' : 'Отправить'}
-                                </button>
-                            )}
-                            <button className="btn btn-sm btn-danger" onClick={() => handleCancel(row)} disabled={acting} title="Отменить переезд">
-                                ×
-                            </button>
-                        </span>
-                    );
-                }
-                // Машина назначена — везти уже можно, но правки закрыты
-                // (состав посчитан под машину). Отмена ещё доступна.
-                if (canSendTransfer(row.status) && row.from_warehouse_id === warehouseId) {
-                    return (
-                        <span style={{ display: 'inline-flex', gap: 6 }}>
-                            <button className="btn btn-sm btn-primary" onClick={() => handleSend(row)} disabled={acting}>
-                                {acting ? '...' : 'Отправить'}
-                            </button>
-                            {canCancelTransfer(row.status) && (
-                                <button className="btn btn-sm btn-danger" onClick={() => handleCancel(row)} disabled={acting} title="Отменить переезд">
-                                    ×
-                                </button>
-                            )}
-                        </span>
-                    );
-                }
-                if (canCompleteTransfer(row.status) && row.to_warehouse_id === warehouseId) {
-                    return (
-                        <button className="btn btn-sm btn-success" onClick={() => handleAccept(row)} disabled={acting}>
-                            {acting ? '...' : 'Принять'}
-                        </button>
-                    );
-                }
-                return null;
-            },
-        },
     ];
 
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
@@ -1798,6 +2026,7 @@ function TransfersTab({ warehouseId, onCountChange }: {
                 emptyText="Нет перемещений"
                 emptyIcon="🔄"
                 exportName="transfers"
+                onRowClick={(row: StockTransfer) => router.push(`/p/${slug}/warehouse/transfers/${row.id}`)}
             />
         </>
     );

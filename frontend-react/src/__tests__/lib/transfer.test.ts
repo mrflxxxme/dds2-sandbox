@@ -26,6 +26,7 @@ import {
     canCompleteTransfer,
     canEditTransfer,
     canMarkTransferReady,
+    canPushTransferShipmentToFf,
     canPushTransferToFf,
     canReturnTransfer,
     canSendTransfer,
@@ -227,6 +228,16 @@ describe('гейты действий по статусу', () => {
             .toEqual(['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED', 'SHIPPED']);
     });
 
+    it('«Создать отгрузку у Натали» — только ДО отгрузки, без «В пути»', () => {
+        // Зеркало поставки, но строже ровно на один статус: у уехавшего переезда
+        // Натали товар уже отдала (сток списан), и новая заявка на отгрузку
+        // означала бы «соберите и выдайте ещё раз» — двойная отгрузка у ФФ.
+        expect(BACKEND_STATUSES.filter(canPushTransferShipmentToFf))
+            .toEqual(['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED']);
+        expect(canPushTransferShipmentToFf('SHIPPED')).toBe(false);
+        expect(canPushTransferToFf('SHIPPED')).toBe(true);
+    });
+
     it('терминальные статусы не предлагают ничего', () => {
         for (const status of ['CLOSED', 'CANCELLED']) {
             expect(canEditTransfer(status)).toBe(false);
@@ -237,6 +248,7 @@ describe('гейты действий по статусу', () => {
             expect(canReturnTransfer(status)).toBe(false);
             expect(canCloseTransfer(status)).toBe(false);
             expect(canPushTransferToFf(status)).toBe(false);
+            expect(canPushTransferShipmentToFf(status)).toBe(false);
         }
     });
 
@@ -246,6 +258,7 @@ describe('гейты действий по статусу', () => {
         expect(canSendTransfer('WAT')).toBe(false);
         expect(canCloseTransfer('WAT')).toBe(false);
         expect(canPushTransferToFf('WAT')).toBe(false);
+        expect(canPushTransferShipmentToFf('WAT')).toBe(false);
     });
 });
 

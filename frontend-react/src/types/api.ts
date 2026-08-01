@@ -2830,15 +2830,26 @@ export interface MigfullDeliveryTypeOption {
   label: string;
 }
 
+/**
+ * Источник заявки на отгрузку у Натали: какой документ DDS даёт состав.
+ * `assembly` — наша сборка (склад Натали), `transfer` — перемещение, у которого
+ * Натали склад-ИСТОЧНИК (сборки у переезда нет, вывоз заводит эта заявка).
+ */
+export interface MigfullShipmentSource {
+  kind: 'assembly' | 'transfer';
+  id: number;
+}
+
 export interface MigfullShipmentPrefill {
-  number: string | null;                       // № поставки WB
+  number: string | null;                       // № поставки WB либо TR-… переезда
   shipment_date: string | null;                // YYYY-MM-DD
   filter_delivery_type: 'direct' | 'transit' | 'pickup';
   notes: string | null;
-  wb_warehouse_name: string | null;            // инфо: куда отгрузка (WB-склад)
+  wb_warehouse_name: string | null;            // инфо: куда отгрузка (WB-склад / склад-получатель переезда)
   destination_name: string | null;            // распознанный склад в ФФ (выставим при создании)
   destination_matched: boolean;               // удалось ли сматчить склад назначения
-  assembly_number: string | null;
+  assembly_number: string | null;             // инфо: наша сборка (ASM-…)
+  transfer_number: string | null;             // инфо: наше перемещение (TR-…)
 }
 
 export interface MigfullOpisLine {
@@ -7628,7 +7639,7 @@ export interface VibeStats {
 // (контракт: backend/schemas/ff_billing.py)
 // ═══════════════════════════════════════════════════════════════════════════
 
-export type FfServiceType = 'PALLETIZING' | 'BOX_PROCESSING' | 'STORAGE' | 'TRUCK_UNLOADING' | 'LOADING';
+export type FfServiceType = 'PALLETIZING' | 'BOX_PROCESSING' | 'STORAGE' | 'TRUCK_UNLOADING' | 'LOADING' | 'TRANSFER_ASSEMBLY';
 export type FfTariffUnit = 'PALLET' | 'BOX';
 export type FfInvoiceKind = 'SHIPMENT' | 'STORAGE' | 'RECEIVING' | 'LOGISTICS' | 'MIXED';
 export type FfInvoiceStatus = 'NEW' | 'RECONCILED' | 'DISPUTED' | 'PAID';
@@ -7640,7 +7651,7 @@ export interface FfTariffRow {
   id: number;
   warehouse_id: number;
   service_type: FfServiceType;
-  /** Только для LOADING: чем биллит склад. У прочих услуг null. */
+  /** Только для LOADING и TRANSFER_ASSEMBLY: чем биллит склад. У прочих услуг null. */
   unit: FfTariffUnit | null;
   rate: number;
   valid_from: string;
@@ -7674,16 +7685,19 @@ export interface FfStorageDailyRow {
   storage_cost: number | null;
 }
 
-/** Компонент ожидаемой стоимости услуг ФФ по заявке сборки. */
+/** Компонент ожидаемой стоимости услуг ФФ по заявке сборки / переезду. */
 export interface FfExpectedComponent {
   service_type: FfServiceType | 'CUSTOM';
-  /** PALLET | BOX | VEHICLE | null (CUSTOM) */
+  /** PALLET | BOX | VEHICLE | null (CUSTOM). При unit_mismatch — единица ТАРИФА. */
   unit: string | null;
   qty: number | null;
   /** null = тариф не задан на складе */
   rate: number | null;
-  /** qty × rate; null если нет тарифа */
+  /** qty × rate; null если нет тарифа или единицы не совпали */
   cost: number | null;
+  /** Ставка есть, но в другой единице, чем документ (₽/паллета vs коробочный
+   *  переезд) — суммы нет намеренно, пересчёт по выдуманному курсу запрещён. */
+  unit_mismatch: boolean;
 }
 
 export interface FfAssemblyExpectedCost {
@@ -7699,6 +7713,31 @@ export interface FfAssemblyExpectedCost {
   total: number | null;
   /** service_type без ставки на дату */
   missing_tariffs: string[];
+}
+
+/** Ожидаемая стоимость услуг ФФ по ПЕРЕЕЗДУ (тариф склада-ИСТОЧНИКА).
+ *  Услуга одна — TRANSFER_ASSEMBLY (₽/паллета или ₽/короб), плюс CUSTOM. */
+export interface FfTransferExpectedCost {
+  transfer_id: number;
+  transfer_number: string;
+  from_warehouse_id: number;
+  from_warehouse_name: string | null;
+  to_warehouse_id: number;
+  /** Единица переезда: PALLET (по умолчанию) | BOX (shipped_as_boxes) */
+  unit: FfTariffUnit;
+  /** pallets_count в этой единице (нет объёма → 0) */
+  qty: number;
+  /** Дата, на которую резолвились ставки (готов → отправлен → заведён) */
+  on_date: string;
+  components: FfExpectedComponent[];
+  custom_cost: number | null;
+  custom_cost_comment: string | null;
+  /** Σ cost компонент (null, если считать нечего) */
+  total: number | null;
+  /** service_type без ставки на дату */
+  missing_tariffs: string[];
+  /** Хоть один компонент с несовпадением единиц — итог его НЕ учитывает */
+  unit_mismatch: boolean;
 }
 
 export interface FfCustomCostPayload {

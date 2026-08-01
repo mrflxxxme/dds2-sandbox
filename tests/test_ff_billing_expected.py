@@ -1,7 +1,8 @@
 # ruff: noqa: RUF001, RUF002, RUF003
 """
 Tests: FF billing — тарифы (resolve по датам, закрытие периода) и ожидаемая
-стоимость услуг ФФ по заявке сборки (compute_assembly_expected_cost).
+стоимость услуг ФФ по заявке сборки (compute_assembly_expected_cost) и по
+переезду между складами (compute_transfer_expected_cost).
 """
 
 from datetime import date, datetime
@@ -16,12 +17,14 @@ from sqlalchemy import text
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.cost import BoxQtyPerWarehouse
 from backend.models.ff_billing import WarehouseTariff
-from backend.models.warehouse import Warehouse
-from backend.schemas.ff_billing import FfTariffPayload
+from backend.models.warehouse import StockTransfer, TransferStatus, Warehouse
+from backend.schemas.ff_billing import FfCustomCostPayload, FfTariffPayload
 from backend.services.ff_billing import (
     compute_assembly_expected_cost,
+    compute_transfer_expected_cost,
     create_tariff,
     resolve_rates,
+    set_transfer_custom_cost,
 )
 
 BC1 = "FFB_EXP_BC1"
@@ -252,4 +255,195 @@ async def test_expected_cost_rate_on_shipped_date(db_session, env):
 async def test_expected_cost_project_isolation(db_session, env):
     with pytest.raises(HTTPException) as ei:
         await compute_assembly_expected_cost(db_session, env.other_project_id, env.req_id)
+    assert ei.value.status_code == 404
+
+
+# ─── compute_transfer_expected_cost ─────────────────────────────────────────
+
+
+@pytest_asyncio.fixture
+async def tenv(db_session, project, other_project):
+    """Переезд СКЛАД-ИСТОЧНИК → СКЛАД-ПОЛУЧАТЕЛЬ, 3 паллеты, собран 2026-07-10."""
+    src = Warehouse(project_id=project.id, name="FFB TRV SRC", warehouse_type="FULFILLMENT")
+    dst = Warehouse(project_id=project.id, name="FFB TRV DST", warehouse_type="FULFILLMENT")
+    db_session.add_all([src, dst])
+    await db_session.flush()
+
+    tr = StockTransfer(
+        project_id=project.id,
+        from_warehouse_id=src.id,
+        to_warehouse_id=dst.id,
+        number="TR-FFB-1",
+        status=TransferStatus.READY.value,
+        pallets_count=3,
+        shipped_as_boxes=False,
+        actual_ready_date=date(2026, 7, 10),
+    )
+    db_session.add(tr)
+    await db_session.commit()
+    return SimpleNamespace(
+        project_id=project.id,
+        other_project_id=other_project.id,
+        src_id=src.id,
+        dst_id=dst.id,
+        transfer_id=tr.id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_transfer_cost_rate_from_source_warehouse_and_date(db_session, tenv):
+    """Ставка — склада-ИСТОЧНИКА и на дату готовности (не получателя, не сегодня)."""
+    db_session.add_all(
+        [
+            _tariff(tenv.project_id, tenv.src_id, "TRANSFER_ASSEMBLY", "400", unit="PALLET",
+                    vf=date(2026, 7, 1), vt=date(2026, 7, 14)),
+            _tariff(tenv.project_id, tenv.src_id, "TRANSFER_ASSEMBLY", "900", unit="PALLET",
+                    vf=date(2026, 7, 15)),
+            # Ставка склада-ПОЛУЧАТЕЛЯ не должна попасть в расчёт.
+            _tariff(tenv.project_id, tenv.dst_id, "TRANSFER_ASSEMBLY", "5000", unit="PALLET"),
+        ]
+    )
+    await db_session.commit()
+
+    res = await compute_transfer_expected_cost(db_session, tenv.project_id, tenv.transfer_id)
+    assert res.from_warehouse_id == tenv.src_id
+    assert res.from_warehouse_name == "FFB TRV SRC"
+    assert res.on_date == date(2026, 7, 10)
+    assert res.unit == "PALLET"
+    assert res.qty == 3
+    comp = next(c for c in res.components if c.service_type == "TRANSFER_ASSEMBLY")
+    assert comp.rate == Decimal("400")
+    assert comp.cost == Decimal("1200.00")
+    assert comp.unit_mismatch is False
+    assert res.total == Decimal("1200.00")
+    assert res.missing_tariffs == []
+    assert res.unit_mismatch is False
+
+
+@pytest.mark.asyncio
+async def test_transfer_cost_date_falls_back_to_shipped_at(db_session, tenv):
+    """Нет вехи готовности → дата отправки (следующий период ставки)."""
+    db_session.add_all(
+        [
+            _tariff(tenv.project_id, tenv.src_id, "TRANSFER_ASSEMBLY", "400", unit="PALLET",
+                    vf=date(2026, 7, 1), vt=date(2026, 7, 14)),
+            _tariff(tenv.project_id, tenv.src_id, "TRANSFER_ASSEMBLY", "900", unit="PALLET",
+                    vf=date(2026, 7, 15)),
+        ]
+    )
+    tr = await db_session.get(StockTransfer, tenv.transfer_id)
+    tr.actual_ready_date = None
+    tr.shipped_at = datetime(2026, 7, 20, 9, 0, 0)
+    await db_session.commit()
+
+    res = await compute_transfer_expected_cost(db_session, tenv.project_id, tenv.transfer_id)
+    assert res.on_date == date(2026, 7, 20)
+    comp = next(c for c in res.components if c.service_type == "TRANSFER_ASSEMBLY")
+    assert comp.rate == Decimal("900")
+    assert comp.cost == Decimal("2700.00")
+
+
+@pytest.mark.asyncio
+async def test_transfer_cost_unit_mismatch_gives_flag_not_money(db_session, tenv):
+    """Тариф ₽/короб, переезд паллетный → признак несовпадения, суммы НЕТ."""
+    db_session.add(
+        _tariff(tenv.project_id, tenv.src_id, "TRANSFER_ASSEMBLY", "50", unit="BOX")
+    )
+    await db_session.commit()
+
+    res = await compute_transfer_expected_cost(db_session, tenv.project_id, tenv.transfer_id)
+    comp = next(c for c in res.components if c.service_type == "TRANSFER_ASSEMBLY")
+    assert comp.unit_mismatch is True
+    assert comp.unit == "BOX"  # единица ТАРИФА, не переезда
+    assert comp.rate == Decimal("50")
+    assert comp.cost is None  # выдуманный курс коробов в паллетах не считаем
+    assert res.unit == "PALLET"
+    assert res.unit_mismatch is True
+    assert res.total is None  # ничего не посчитано — итог не врёт нулём
+    assert res.missing_tariffs == []  # ставка ЕСТЬ, просто в другой единице
+
+
+@pytest.mark.asyncio
+async def test_transfer_cost_boxes_unit_matches(db_session, tenv):
+    """Коробочный переезд × тариф ₽/короб — считается по коробам."""
+    db_session.add(
+        _tariff(tenv.project_id, tenv.src_id, "TRANSFER_ASSEMBLY", "50", unit="BOX")
+    )
+    tr = await db_session.get(StockTransfer, tenv.transfer_id)
+    tr.shipped_as_boxes = True
+    tr.pallets_count = 12
+    await db_session.commit()
+
+    res = await compute_transfer_expected_cost(db_session, tenv.project_id, tenv.transfer_id)
+    assert res.unit == "BOX"
+    assert res.qty == 12
+    assert res.unit_mismatch is False
+    assert res.total == Decimal("600.00")
+
+
+@pytest.mark.asyncio
+async def test_transfer_cost_missing_tariff(db_session, tenv):
+    """Тарифа нет → строка без ставки, итог None (а не «ноль рублей»)."""
+    res = await compute_transfer_expected_cost(db_session, tenv.project_id, tenv.transfer_id)
+    comp = next(c for c in res.components if c.service_type == "TRANSFER_ASSEMBLY")
+    assert comp.rate is None
+    assert comp.cost is None
+    assert comp.qty == 3
+    assert comp.unit == "PALLET"
+    assert res.missing_tariffs == ["TRANSFER_ASSEMBLY"]
+    assert res.total is None
+
+
+@pytest.mark.asyncio
+async def test_transfer_custom_cost_in_total_and_clear(db_session, tenv):
+    """ff_custom_cost — отдельная строка и слагаемое итога; amount=None очищает."""
+    db_session.add(
+        _tariff(tenv.project_id, tenv.src_id, "TRANSFER_ASSEMBLY", "400", unit="PALLET")
+    )
+    await db_session.commit()
+
+    res = await set_transfer_custom_cost(
+        db_session, tenv.project_id, tenv.transfer_id,
+        FfCustomCostPayload(amount=Decimal("250.50"), comment="стрейч"),
+    )
+    assert res.custom_cost == Decimal("250.50")
+    assert res.custom_cost_comment == "стрейч"
+    custom = next(c for c in res.components if c.service_type == "CUSTOM")
+    assert custom.cost == Decimal("250.50")
+    assert res.total == Decimal("1450.50")  # 3×400 + 250.50
+
+    cleared = await set_transfer_custom_cost(
+        db_session, tenv.project_id, tenv.transfer_id, FfCustomCostPayload(amount=None)
+    )
+    assert cleared.custom_cost is None
+    assert cleared.custom_cost_comment is None
+    assert all(c.service_type != "CUSTOM" for c in cleared.components)
+    assert cleared.total == Decimal("1200.00")
+
+
+@pytest.mark.asyncio
+async def test_transfer_custom_cost_alone_without_tariff(db_session, tenv):
+    """Без тарифа в итог входит только ручная сумма, услуга — в missing_tariffs."""
+    res = await set_transfer_custom_cost(
+        db_session, tenv.project_id, tenv.transfer_id,
+        FfCustomCostPayload(amount=Decimal("777.00"), comment="маркировка"),
+    )
+    assert res.total == Decimal("777.00")
+    assert res.missing_tariffs == ["TRANSFER_ASSEMBLY"]
+
+
+@pytest.mark.asyncio
+async def test_transfer_cost_project_isolation(db_session, tenv):
+    with pytest.raises(HTTPException) as ei:
+        await compute_transfer_expected_cost(db_session, tenv.other_project_id, tenv.transfer_id)
+    assert ei.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_transfer_cost_soft_deleted_not_found(db_session, tenv):
+    tr = await db_session.get(StockTransfer, tenv.transfer_id)
+    tr.soft_delete()
+    await db_session.commit()
+    with pytest.raises(HTTPException) as ei:
+        await compute_transfer_expected_cost(db_session, tenv.project_id, tenv.transfer_id)
     assert ei.value.status_code == 404

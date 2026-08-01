@@ -60,18 +60,25 @@ class MigfullOpisLine(BaseModel):
 
 
 class MigfullShipmentPrefill(BaseModel):
-    """Предзаполнение шапки из AssemblyRequest — пользователь правит в модалке."""
+    """Предзаполнение шапки из AssemblyRequest либо StockTransfer — правится в модалке.
 
-    number: str | None = None  # № поставки WB (= wb_fbo_supply.wb_supply_id)
+    Инфо-поля источника взаимоисключающие: у сборки заполнен ``assembly_number``,
+    у перемещения — ``transfer_number``.
+    """
+
+    number: str | None = None  # № поставки WB (= wb_fbo_supply.wb_supply_id) либо TR-… переезда
     shipment_date: date | None = None
     # Самовывоз — портал migfull персистит склад назначения ТОЛЬКО при pickup
     # (при direct/transit значение молча роняется); реальные заявки Натали — самовывоз.
     filter_delivery_type: DeliveryType = "pickup"
     notes: str | None = None
-    wb_warehouse_name: str | None = None  # инфо: куда отгрузка (WB-склад назначения, наше имя)
+    # Инфо: куда отгрузка НАШИМ именем — WB-склад назначения сборки либо
+    # склад-получатель перемещения (по нему же резолвится направление у Натали).
+    wb_warehouse_name: str | None = None
     destination_name: str | None = None  # распознанный склад назначения в ФФ (показ в модалке)
     destination_matched: bool = False  # удалось ли сматчить склад → выставим при создании
-    assembly_number: str | None = None
+    assembly_number: str | None = None  # инфо: наша сборка (ASM-…)
+    transfer_number: str | None = None  # инфо: наше перемещение (TR-…)
 
 
 class MigfullDraftResponse(BaseModel):

@@ -43,7 +43,7 @@ const FF_STATUS_LABEL: Record<FfBulkCreateAssemblyResult['status'], string> = {
  *  Возвращает итог строкой статуса; ⚠ = у описи были предупреждения (россыпь). */
 async function sendNataliFromDraft(assemblyId: number, draft: MigfullDraftResponse): Promise<CellState> {
     try {
-        const res = await api.migfullPortalSend(assemblyId, {
+        const res = await api.migfullPortalSend({ kind: 'assembly', id: assemblyId }, {
             filter_delivery_type: draft.prefill.filter_delivery_type,
             number: draft.prefill.number ?? null,
             shipment_date: draft.prefill.shipment_date ?? null,
@@ -409,8 +409,8 @@ export default function CreatedRequestsModal({ slug, rows, listQuery, onClose }:
             {migfullFor && (
                 <div onClick={e => e.stopPropagation()}>
                     <MigfullModal
-                        assemblyId={migfullFor.id}
-                        assemblyNumber={migfullFor.number}
+                        source={{ kind: 'assembly', id: migfullFor.id }}
+                        sourceLabel={`Сборка ${migfullFor.number}`}
                         onClose={() => setMigfullFor(null)}
                         onSuccess={() => setFf(migfullFor.id, { st: 'done', note: 'Создана (Натали)' })}
                     />
@@ -467,7 +467,7 @@ function NataliBatchModal({ rows, onClose, onRowResult }: {
             for (const row of rows) {
                 if (cancelled) return;
                 try {
-                    acc.set(row.id, await api.migfullPortalDraft(row.id));
+                    acc.set(row.id, await api.migfullPortalDraft({ kind: 'assembly', id: row.id }));
                 } catch (e: unknown) {
                     acc.set(row.id, { error: e instanceof Error ? e.message : 'Ошибка загрузки описи' });
                 }

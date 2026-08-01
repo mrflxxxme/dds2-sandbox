@@ -1824,8 +1824,8 @@ export default function AssemblyDetailPage() {
             {/* Migfull-портал («Натали») — заявка на отгрузку из сборки */}
             {showMigfullModal && assembly && (
                 <MigfullModal
-                    assemblyId={assembly.id}
-                    assemblyNumber={assembly.number}
+                    source={{ kind: 'assembly', id: assembly.id }}
+                    sourceLabel={`Сборка ${assembly.number}`}
                     onClose={() => setShowMigfullModal(false)}
                     onSuccess={() => { load(); }}
                 />

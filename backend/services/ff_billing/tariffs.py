@@ -15,9 +15,14 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached, invalidate_cache
-from backend.models.ff_billing import FfServiceType, WarehouseTariff
+from backend.models.ff_billing import WarehouseTariff
 from backend.models.warehouse import Warehouse
-from backend.schemas.ff_billing import FfTariffPayload, FfTariffRow, FfTariffUpdatePayload
+from backend.schemas.ff_billing import (
+    UNIT_SERVICES,
+    FfTariffPayload,
+    FfTariffRow,
+    FfTariffUpdatePayload,
+)
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.ff_billing")
@@ -120,8 +125,10 @@ async def update_tariff(
     db: AsyncSession, project_id: int, tariff_id: int, payload: FfTariffUpdatePayload
 ) -> WarehouseTariff:
     tariff = await _get_tariff(db, project_id, tariff_id)
-    if payload.unit is not None and tariff.service_type != FfServiceType.LOADING.value:
-        raise HTTPException(status_code=422, detail="unit допустим только для LOADING")
+    if payload.unit is not None and tariff.service_type not in UNIT_SERVICES:
+        raise HTTPException(
+            status_code=422, detail="unit допустим только для LOADING и TRANSFER_ASSEMBLY"
+        )
     if payload.unit is not None:
         tariff.unit = payload.unit
     if payload.rate is not None:

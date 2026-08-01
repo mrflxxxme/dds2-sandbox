@@ -1,9 +1,18 @@
 # ruff: noqa: RUF002, RUF003
 """
-Router: /migfull-portal — создание заявки на отгрузку в портале ФФ «Натали» (migfull).
+Router: /migfull-portal — создание документов в портале ФФ «Натали» (migfull).
 
-HTTP + валидация; логика — в services/migfull_portal_service. У migfull нет write-API:
-интеграция ходит как браузер (Livewire-сессия). `send` — РЕАЛЬНОЕ создание заявки
+Четыре пары ручек, по документу и источнику состава:
+  • `/assembly/{id}/draft|send`                — ОТГРУЗКА из нашей сборки;
+  • `/transfer/{id}/shipment-draft|shipment-send` — ОТГРУЗКА из перемещения
+    (склад Натали — ИСТОЧНИК переезда);
+  • `/inbound/{id}/draft|send`                — ПРИЁМКА из нашей приёмки машины;
+  • `/transfer/{id}/draft|send`               — ПРИЁМКА из перемещения
+    (склад Натали — ПОЛУЧАТЕЛЬ переезда).
+
+HTTP + валидация; логика — в services/migfull_portal_service (отгрузка) и
+services/migfull_portal_inbound (приёмка). У migfull нет write-API: интеграция
+ходит как браузер (Livewire-сессия). `send` — РЕАЛЬНОЕ создание документа
 (НЕОБРАТИМО, у клиента портала нет delete/cancel), под rate_limit_write.
 
 НЕ путать с read-only API migfull (вкладка остатков/заявок ФФ).
@@ -152,6 +161,50 @@ async def migfull_portal_transfer_send(
     """РЕАЛЬНОЕ создание поставки из перемещения (НЕОБРАТИМО). Пишет audit."""
     try:
         return await migfull_portal_inbound.send_transfer_submission(
+            db, project.id, transfer_id, payload, actor=_actor(user)
+        )
+    except MigfullPortalServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+# ─── ОТГРУЗКА из ПЕРЕМЕЩЕНИЯ (Натали → наш склад) ───────────────────────────
+# Вторая сторона того же переезда: когда склад Натали — ИСТОЧНИК, у неё заводится
+# не приёмка, а заявка на отгрузку (контур /assembly, состав — строки переезда).
+# Пути с суффиксом `shipment-`, чтобы не столкнуться с приёмочными выше.
+
+
+@router.get("/transfer/{transfer_id}/shipment-draft", response_model=MigfullDraftResponse)
+async def migfull_portal_transfer_shipment_draft(
+    transfer_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> MigfullDraftResponse:
+    """Превью заявки на отгрузку из перемещения: prefill шапки + строки описи."""
+    try:
+        return await migfull_portal_service.build_transfer_shipment_draft(db, project.id, transfer_id)
+    except MigfullPortalServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post(
+    "/transfer/{transfer_id}/shipment-send",
+    response_model=MigfullSendResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def migfull_portal_transfer_shipment_send(
+    transfer_id: int,
+    payload: MigfullSendRequest,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MigfullSendResult:
+    """РЕАЛЬНОЕ создание заявки на отгрузку из перемещения (НЕОБРАТИМО). Пишет audit."""
+    try:
+        return await migfull_portal_service.send_transfer_shipment(
             db, project.id, transfer_id, payload, actor=_actor(user)
         )
     except MigfullPortalServiceError as e:

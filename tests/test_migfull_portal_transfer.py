@@ -1,14 +1,20 @@
 # ruff: noqa: RUF001, RUF002, RUF003
-"""Тесты создания ПОСТАВКИ у Натали из нашего ПЕРЕМЕЩЕНИЯ (StockTransfer).
+"""Тесты обеих сторон переезда у Натали: ПОСТАВКА (приёмка) и ОТГРУЗКА.
 
-Второй источник того же контура, что и поставка из приёмки машины: перемещение
-наш склад → Натали своей приёмки не создаёт (приход у ФФ заводит именно эта
-поставка), поэтому состав/шапка берутся из строк переезда TR-….
+Один и тот же ``StockTransfer`` даёт документ у ФФ с той стороны, где стоит
+склад Натали:
 
-Портал-клиент замокан (никаких живых POST на боевой портал!) — переиспользуем
-``FakePortalClient`` из соседнего модуля. Проверяем: состав и prefill draft'а,
-цепочку кратности, send с packing, анти-дубль 409/force_resend, чужой склад →
-400, принятый переезд → 400 и автосвязь ``FulfillmentRequest.stock_transfer_id``.
+* Натали — ПОЛУЧАТЕЛЬ (наш склад → Натали): своей приёмки переезд не создаёт,
+  приход у ФФ заводит ПОСТАВКА (``migfull_portal_inbound``);
+* Натали — ИСТОЧНИК (Натали → наш склад, кейс TR-33 «натали → фф питер
+  Газпром»): сборки у переезда нет, вывоз у ФФ заводит ЗАЯВКА НА ОТГРУЗКУ
+  (``migfull_portal_service``).
+
+Портал-клиент замокан в обоих случаях (никаких живых POST на боевой портал!):
+``FakePortalClient`` из соседнего модуля — для поставки, ``FakeShipmentClient``
+ниже — для отгрузки. Проверяем: состав и prefill draft'а, цепочку кратности,
+send, анти-дубль 409/force_resend, гейты склада и статуса, автосвязь
+``FulfillmentRequest.stock_transfer_id`` и путь «направление не разрезолвилось».
 """
 
 import uuid
@@ -18,6 +24,11 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
+from backend.integrations.migfull_portal_client import (
+    MigfullCreateResult,
+    MigfullPortalError,
+    MigfullUploadResult,
+)
 from backend.models import (
     FulfillmentRequest,
     FulfillmentStock,
@@ -32,8 +43,14 @@ from backend.models import (
 )
 from backend.models.fulfillment import FfRequestKind
 from backend.models.warehouse import InboundStatus, TransferStatus
-from backend.schemas.migfull_portal import MigfullInboundSendRequest, MigfullPackingLine
+from backend.schemas.migfull_portal import (
+    MigfullInboundSendRequest,
+    MigfullPackingLine,
+    MigfullSendRequest,
+)
 from backend.services import migfull_portal_inbound as svc
+from backend.services import migfull_portal_service as ship_svc
+from backend.services.fulfillment_service import list_transfer_ff_links
 from backend.services.migfull_portal_service import MigfullPortalServiceError
 from backend.utils.crypto import encrypt
 from backend.utils.time import utcnow
@@ -585,6 +602,536 @@ async def test_transfer_router_maps_service_errors(client, auth_headers):
 
     resp = await client.post(
         "/api/v1/migfull-portal/transfer/1/send", json={"force_resend": False}, headers=headers
+    )
+    assert resp.status_code == 400
+    assert "не настроена" in resp.json()["error"]["message"]
+
+
+# ═══ ОТГРУЗКА из переезда: Натали — склад-ИСТОЧНИК ═══════════════════════════
+# Вторая сторона той же монеты. Кейс пользователя: TR-33 «натали → фф питер
+# Газпром» — заявку на сборку у Натали завести было нечем, кнопка «Создать
+# поставку» появлялась только когда Натали ПОЛУЧАТЕЛЬ.
+
+
+class FakeShipmentClient:
+    """Мок портального клиента ОТГРУЗКИ: пишет вызовы, отдаёт настроенные исходы."""
+
+    def __init__(
+        self,
+        create_result: MigfullCreateResult | None = None,
+        upload_result: MigfullUploadResult | None = None,
+        create_exc: Exception | None = None,
+        upload_exc: Exception | None = None,
+    ):
+        self.create_result = create_result or MigfullCreateResult(guid=GUID)
+        self.upload_result = upload_result or MigfullUploadResult(ok=True, reference="ЗАК-0000401")
+        self.create_exc = create_exc
+        self.upload_exc = upload_exc
+        self.created_headers: list[dict] = []
+        self.uploads: list[tuple[str, str, str]] = []
+
+    async def __aenter__(self) -> "FakeShipmentClient":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def create_shipment(self, header: dict) -> MigfullCreateResult:
+        self.created_headers.append(header)
+        if self.create_exc:
+            raise self.create_exc
+        return self.create_result
+
+    async def upload_opis(self, guid: str, filename: str, content: bytes, content_type: str) -> MigfullUploadResult:
+        assert content  # опись собрана
+        self.uploads.append((guid, filename, content_type))
+        if self.upload_exc:
+            raise self.upload_exc
+        return self.upload_result
+
+
+def _use_fake_shipment_client(monkeypatch, fake: FakeShipmentClient) -> None:
+    monkeypatch.setattr(ship_svc, "_client_from_key", lambda key: fake)
+
+    async def _no_session(client, fn):
+        return await fn()
+
+    monkeypatch.setattr(ship_svc, "_with_portal_session", _no_session)
+
+
+@pytest_asyncio.fixture
+async def ship_env(db_session, project):
+    """Склад «Натали» + портальный ключ + переезд Натали → наш транзит (40 шт + 9 шт)."""
+    natali = Warehouse(project_id=project.id, name="натали", warehouse_type="FULFILLMENT")
+    dest_wh = Warehouse(project_id=project.id, name="фф питер Газпром", warehouse_type="FULFILLMENT")
+    db_session.add_all([natali, dest_wh])
+    await db_session.flush()
+
+    db_session.add(
+        IntegrationKey(
+            project_id=project.id,
+            service="migfull_portal",
+            encrypted_key=encrypt("portal-pass"),
+            config={"login": "test@example.com"},
+            warehouse_id=natali.id,
+            is_active=True,
+        )
+    )
+    nom = Nomenclature(project_id=project.id, barcode=EAN, article_seller="ELKA")
+    nom2 = Nomenclature(project_id=project.id, barcode=EAN2, article_seller="KOVER-DEF")
+    db_session.add_all([nom, nom2])
+    await db_session.flush()
+
+    transfer = StockTransfer(
+        project_id=project.id,
+        from_warehouse_id=natali.id,
+        to_warehouse_id=dest_wh.id,
+        number=_transfer_number(),
+        status=TransferStatus.READY.value,
+        pickup_date=date(2026, 8, 10),
+        delivery_date=date(2026, 8, 14),
+    )
+    db_session.add(transfer)
+    await db_session.flush()
+    db_session.add_all([
+        StockTransferItem(
+            project_id=project.id, transfer_id=transfer.id,
+            nomenclature_id=nom.id, barcode=EAN, quantity=40,
+        ),
+        StockTransferItem(
+            project_id=project.id, transfer_id=transfer.id,
+            nomenclature_id=nom2.id, barcode=EAN2, quantity=9,
+        ),
+    ])
+    # Зеркало остатков ФФ: короб (ITF14, 5 шт) → россыпь (EAN13) только для EAN.
+    db_session.add(
+        FulfillmentStock(
+            project_id=project.id,
+            warehouse_id=natali.id,
+            provider="migfull",
+            barcode=ITF,
+            name="ELKA короб 5 шт.",
+            base_barcode=EAN,
+            units_per_box=5,
+        )
+    )
+    await db_session.commit()
+
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        project_id=project.id, warehouse=natali, dest_wh=dest_wh, transfer=transfer
+    )
+
+
+# ─── Draft отгрузки ───────────────────────────────────────────────────────────
+
+
+async def test_transfer_shipment_draft_composition_and_prefill(db_session, ship_env):
+    """Опись — строки переезда; шапка — TR-…, дата забора, «источник → получатель»."""
+    draft = await ship_svc.build_transfer_shipment_draft(db_session, ship_env.project_id, ship_env.transfer.id)
+
+    assert draft.eligible is True
+    assert draft.already_sent is False
+    by_bc = {ln.barcode: ln for ln in draft.opis_lines}
+    assert by_bc[ITF].is_box is True and by_bc[ITF].quantity == 8  # 40 шт = 8 коробов по 5
+    assert by_bc[EAN2].is_box is False and by_bc[EAN2].quantity == 9  # кратности нет — россыпь
+    assert draft.total_boxes == 8
+    assert draft.total_pieces == 49
+
+    assert draft.prefill.number == ship_env.transfer.number
+    assert draft.prefill.transfer_number == ship_env.transfer.number
+    assert draft.prefill.assembly_number is None  # источник — переезд, не сборка
+    assert draft.prefill.shipment_date == date(2026, 8, 10)  # дата забора, не доставки
+    notes = draft.prefill.notes or ""
+    assert ship_env.transfer.number in notes
+    assert "перемещение" in notes
+    assert "натали" in notes
+    assert "фф питер Газпром" in notes
+    # Куда — наш склад-получатель; у Натали такого направления нет и не будет.
+    assert draft.prefill.wb_warehouse_name == "фф питер Газпром"
+    assert draft.prefill.destination_matched is False
+    assert any("БЕЗ направления" in w for w in draft.warnings)
+
+
+async def test_transfer_shipment_source_warehouse_must_be_natali(db_session, ship_env, monkeypatch):
+    """Натали — ПОЛУЧАТЕЛЬ (это приёмочный кейс) → отгрузку создавать нечем: 400."""
+    fake = FakeShipmentClient()
+    _use_fake_shipment_client(monkeypatch, fake)
+    inbound_side = StockTransfer(
+        project_id=ship_env.project_id,
+        from_warehouse_id=ship_env.dest_wh.id,
+        to_warehouse_id=ship_env.warehouse.id,  # Натали получатель — зеркальный кейс
+        number=_transfer_number(),
+        status=TransferStatus.READY.value,
+    )
+    db_session.add(inbound_side)
+    await db_session.commit()
+
+    with pytest.raises(MigfullPortalServiceError) as exc:
+        await ship_svc.send_transfer_shipment(
+            db_session, ship_env.project_id, inbound_side.id, MigfullSendRequest()
+        )
+    assert exc.value.status_code == 400
+    assert "не со склада ФФ" in str(exc.value)
+    assert fake.created_headers == []
+
+    draft = await ship_svc.build_transfer_shipment_draft(db_session, ship_env.project_id, inbound_side.id)
+    assert draft.eligible is False
+
+
+async def test_transfer_shipment_missing_and_deleted_are_404(db_session, ship_env):
+    with pytest.raises(MigfullPortalServiceError) as exc:
+        await ship_svc.build_transfer_shipment_draft(db_session, ship_env.project_id, 987654321)
+    assert exc.value.status_code == 404
+
+    ship_env.transfer.soft_delete()
+    await db_session.commit()
+    with pytest.raises(MigfullPortalServiceError) as exc:
+        await ship_svc.build_transfer_shipment_draft(db_session, ship_env.project_id, ship_env.transfer.id)
+    assert exc.value.status_code == 404
+
+
+async def test_transfer_shipment_isolated_by_project(db_session, ship_env, other_project):
+    """Изоляция по проекту: чужой переезд не виден загрузчику даже по прямому id."""
+    with pytest.raises(MigfullPortalServiceError) as exc:
+        await ship_svc._source_from_transfer(db_session, other_project.id, ship_env.transfer.id)
+    assert exc.value.status_code == 404
+
+
+async def test_transfer_shipment_prefill_date_falls_back(db_session, ship_env):
+    """Дата шапки: дата забора → дата доставки → сегодня."""
+    ship_env.transfer.pickup_date = None
+    await db_session.commit()
+    draft = await ship_svc.build_transfer_shipment_draft(db_session, ship_env.project_id, ship_env.transfer.id)
+    assert draft.prefill.shipment_date == date(2026, 8, 14)
+
+    ship_env.transfer.delivery_date = None
+    await db_session.commit()
+    draft = await ship_svc.build_transfer_shipment_draft(db_session, ship_env.project_id, ship_env.transfer.id)
+    assert draft.prefill.shipment_date == utcnow().date()
+
+
+# ─── Send отгрузки (портал замокан) ───────────────────────────────────────────
+
+
+async def test_transfer_shipment_send_goes_without_destination(db_session, ship_env, monkeypatch):
+    """Направление не разрезолвилось → уходит None: клиент такое поле просто не шлёт."""
+    fake = FakeShipmentClient()
+    _use_fake_shipment_client(monkeypatch, fake)
+
+    res = await ship_svc.send_transfer_shipment(
+        db_session, ship_env.project_id, ship_env.transfer.id, MigfullSendRequest()
+    )
+
+    assert res.ok is True
+    assert res.shipment_guid == GUID
+    assert res.shipment_number == "ЗАК-0000401"
+    header = fake.created_headers[0]
+    assert header["destination_marketplace_id"] is None  # ключ есть, значение пустое
+    assert header["number"] == ship_env.transfer.number
+    assert header["shipment_date"] == "2026-08-10"
+    assert header["filter_delivery_type"] == "pickup"
+    assert ship_env.transfer.number in header["notes"]
+    assert fake.uploads[0][1] == f"opis_{ship_env.transfer.number}.xlsx"
+
+    order = (
+        await db_session.execute(
+            select(MigfullShipmentOrder).where(MigfullShipmentOrder.project_id == ship_env.project_id)
+        )
+    ).scalar_one()
+    assert order.status == MigfullShipmentStatus.SENT
+    assert order.stock_transfer_id == ship_env.transfer.id
+    assert order.assembly_request_id is None
+    # В audit-payload направление не попадает (None-поля вычищены) — видно, что ушло без него.
+    assert "destination_marketplace_id" not in order.payload["header"]
+
+
+async def test_transfer_shipment_send_sets_destination_when_resolved(db_session, ship_env, monkeypatch):
+    """Если направление ВСЁ-ТАКИ нашлось в справочнике Натали — выставляем его строкой."""
+    fake = FakeShipmentClient()
+    _use_fake_shipment_client(monkeypatch, fake)
+    # Индекс направлений строится из зеркала отгрузок склада (raw заявок migfull).
+    db_session.add(
+        FulfillmentRequest(
+            project_id=ship_env.project_id,
+            warehouse_id=ship_env.warehouse.id,
+            provider="migfull",
+            external_id="mirror-guid",
+            kind=FfRequestKind.ASSEMBLY.value,
+            status="new",
+            raw={
+                "destination_marketplace_id": 17,
+                "destination_marketplace": {"name": "Питер Газпром"},
+                "delivery_type": "direct",
+                "marketplace_id": 2,
+            },
+        )
+    )
+    await db_session.commit()
+
+    draft = await ship_svc.build_transfer_shipment_draft(db_session, ship_env.project_id, ship_env.transfer.id)
+    assert draft.prefill.destination_matched is True
+    assert draft.prefill.destination_name == "Питер Газпром"
+    assert not any("БЕЗ направления" in w for w in draft.warnings)
+
+    res = await ship_svc.send_transfer_shipment(
+        db_session, ship_env.project_id, ship_env.transfer.id, MigfullSendRequest()
+    )
+    assert res.ok is True
+    assert fake.created_headers[0]["destination_marketplace_id"] == "17"
+
+
+async def test_transfer_shipment_portal_error_reaches_user_verbatim(db_session, ship_env, monkeypatch):
+    """Портал потребовал направление → его текст доезжает до пользователя КАК ЕСТЬ."""
+    portal_text = "migfull-портал: заявка не создана — Поле «Склад назначения» обязательно"
+    fake = FakeShipmentClient(create_exc=MigfullPortalError(portal_text, status_code=422))
+    _use_fake_shipment_client(monkeypatch, fake)
+
+    res = await ship_svc.send_transfer_shipment(
+        db_session, ship_env.project_id, ship_env.transfer.id, MigfullSendRequest()
+    )
+    assert res.ok is False
+    assert res.message == portal_text  # не подменяем общей фразой
+
+    order = (
+        await db_session.execute(
+            select(MigfullShipmentOrder).where(MigfullShipmentOrder.project_id == ship_env.project_id)
+        )
+    ).scalar_one()
+    assert order.status == MigfullShipmentStatus.FAILED
+    assert order.error == portal_text
+    assert order.stock_transfer_id == ship_env.transfer.id
+
+
+async def test_transfer_shipment_autolinks_ff_request_on_source_side(db_session, ship_env, monkeypatch):
+    """Созданная заявка сразу связана с переездом и встаёт в ff_links стороной `source`."""
+    _use_fake_shipment_client(monkeypatch, FakeShipmentClient())
+    res = await ship_svc.send_transfer_shipment(
+        db_session, ship_env.project_id, ship_env.transfer.id, MigfullSendRequest()
+    )
+    assert res.ok is True
+
+    ff = (
+        await db_session.execute(
+            select(FulfillmentRequest).where(
+                FulfillmentRequest.project_id == ship_env.project_id,
+                FulfillmentRequest.external_id == GUID,
+            )
+        )
+    ).scalar_one()
+    assert ff.stock_transfer_id == ship_env.transfer.id
+    assert ff.assembly_request_id is None
+    assert ff.inbound_receipt_id is None
+    assert ff.kind == FfRequestKind.ASSEMBLY.value
+    assert ff.provider == "migfull"
+    assert ff.warehouse_id == ship_env.warehouse.id  # склад-ИСТОЧНИК переезда
+    assert ff.number == "ЗАК-0000401"
+    assert ff.total_qty == 49
+    assert ff.dest_warehouse == "фф питер Газпром"
+
+    links = await list_transfer_ff_links(db_session, ship_env.project_id, ship_env.transfer)
+    assert [ln["side"] for ln in links] == ["source"]
+    assert links[0]["number"] == "ЗАК-0000401"
+
+
+async def test_transfer_shipment_ff_link_claims_single_source_slot(db_session, ship_env, monkeypatch):
+    """Автосвязь выставляет РОВНО одну ссылку: соседние слоты обнуляются.
+
+    Гонка с read-sync: строка по тому же guid уже есть и держит чужую приёмку.
+    Читатели связок (`list_transfer_ff_candidates`, `_load_linked_doc_items`)
+    стоят на инварианте «максимум одна ссылка на наш документ».
+    """
+    _use_fake_shipment_client(monkeypatch, FakeShipmentClient())
+    foreign = InboundReceipt(
+        project_id=ship_env.project_id,
+        warehouse_id=ship_env.warehouse.id,
+        number=f"IN-{uuid.uuid4().hex[:5]}",
+        status=InboundStatus.EXPECTED.value,
+    )
+    db_session.add(foreign)
+    await db_session.flush()
+    db_session.add(
+        FulfillmentRequest(
+            project_id=ship_env.project_id,
+            warehouse_id=ship_env.warehouse.id,
+            provider="migfull",
+            external_id=GUID,                 # тот же guid, что вернёт портал
+            kind=FfRequestKind.ASSEMBLY.value,
+            status="new",
+            inbound_receipt_id=foreign.id,    # «чужая» ссылка от прошлой жизни строки
+        )
+    )
+    await db_session.commit()
+
+    res = await ship_svc.send_transfer_shipment(
+        db_session, ship_env.project_id, ship_env.transfer.id, MigfullSendRequest()
+    )
+    assert res.ok is True
+
+    ff = (
+        await db_session.execute(
+            select(FulfillmentRequest).where(
+                FulfillmentRequest.project_id == ship_env.project_id,
+                FulfillmentRequest.external_id == GUID,
+            )
+        )
+    ).scalar_one()
+    assert ff.stock_transfer_id == ship_env.transfer.id
+    assert ff.inbound_receipt_id is None
+    assert ff.assembly_request_id is None
+
+
+# ─── Анти-дубль отгрузки ──────────────────────────────────────────────────────
+
+
+async def test_transfer_shipment_resend_blocked_then_forced(db_session, ship_env, monkeypatch):
+    """Повтор без force → 409; с force_resend — вторая отправка проходит."""
+    fake = FakeShipmentClient()
+    _use_fake_shipment_client(monkeypatch, fake)
+    first = await ship_svc.send_transfer_shipment(
+        db_session, ship_env.project_id, ship_env.transfer.id, MigfullSendRequest()
+    )
+    assert first.ok is True
+
+    with pytest.raises(MigfullPortalServiceError) as exc:
+        await ship_svc.send_transfer_shipment(
+            db_session, ship_env.project_id, ship_env.transfer.id, MigfullSendRequest()
+        )
+    assert exc.value.status_code == 409
+    assert "перемещения" in str(exc.value)
+    assert len(fake.created_headers) == 1  # второй POST на портал не ушёл
+
+    forced = await ship_svc.send_transfer_shipment(
+        db_session, ship_env.project_id, ship_env.transfer.id, MigfullSendRequest(force_resend=True)
+    )
+    assert forced.ok is True
+    assert len(fake.created_headers) == 2
+
+    draft = await ship_svc.build_transfer_shipment_draft(db_session, ship_env.project_id, ship_env.transfer.id)
+    assert draft.already_sent is True
+    assert draft.sent_number == "ЗАК-0000401"
+
+
+async def test_inbound_side_link_does_not_block_shipment(db_session, ship_env, monkeypatch):
+    """Приёмка склада-получателя (kind=inbound) — штатное состояние, не дубль отгрузки."""
+    fake = FakeShipmentClient()
+    _use_fake_shipment_client(monkeypatch, fake)
+    db_session.add(
+        FulfillmentRequest(
+            project_id=ship_env.project_id,
+            warehouse_id=ship_env.dest_wh.id,
+            provider="migfull",
+            external_id="inbound-side-guid",
+            number="PVB-0000777",
+            kind=FfRequestKind.INBOUND.value,
+            status="new",
+            stock_transfer_id=ship_env.transfer.id,
+        )
+    )
+    await db_session.commit()
+
+    draft = await ship_svc.build_transfer_shipment_draft(db_session, ship_env.project_id, ship_env.transfer.id)
+    assert draft.already_sent is False
+
+    res = await ship_svc.send_transfer_shipment(
+        db_session, ship_env.project_id, ship_env.transfer.id, MigfullSendRequest()
+    )
+    assert res.ok is True
+
+
+def test_shipment_source_filters_target_their_own_column():
+    """Скоуп анти-дубля — по КОЛОНКЕ источника (id сборок и переездов совпадают численно)."""
+    common = {
+        "id": 777, "warehouse_id": 1, "qty_by_bc": {}, "nom_by_bc": {}, "dest_name": None,
+        "prefill_number": None, "prefill_date": None, "notes": "", "opis_number": None,
+        "filename_base": "x",
+    }
+    assembly_src = ship_svc.ShipmentSource(kind="assembly", **common)
+    transfer_src = ship_svc.ShipmentSource(kind="transfer", **common)
+
+    assert "assembly_request_id" in str(ship_svc._order_source_filter(assembly_src))
+    assert "stock_transfer_id" in str(ship_svc._order_source_filter(transfer_src))
+    assert "assembly_request_id" in str(ship_svc._ff_source_filter(assembly_src))
+    transfer_ff = str(ship_svc._ff_source_filter(transfer_src))
+    assert "stock_transfer_id" in transfer_ff
+    assert "kind" in transfer_ff  # приёмочная сторона того же переезда не считается дублем
+
+
+# ─── Гейты статуса и состава ──────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("status", "fragment"),
+    [
+        (TransferStatus.SHIPPED.value, "уже отгружено"),
+        (TransferStatus.DELIVERED.value, "уже принято"),
+        (TransferStatus.RETURNED.value, "вернулось"),
+        (TransferStatus.CLOSED.value, "закрыто"),
+        (TransferStatus.CANCELLED.value, "отменённому"),
+    ],
+)
+async def test_transfer_shipment_blocked_by_status(db_session, ship_env, monkeypatch, status, fragment):
+    """Уехавший/завершённый/отменённый переезд — отгрузку у ФФ создавать нельзя.
+
+    Уехавший особенно: сток уже списан, а новая заявка означала бы «отдайте ещё
+    раз» — Натали отгрузила бы товар дважды.
+    """
+    fake = FakeShipmentClient()
+    _use_fake_shipment_client(monkeypatch, fake)
+    ship_env.transfer.status = status
+    await db_session.commit()
+
+    with pytest.raises(MigfullPortalServiceError) as exc:
+        await ship_svc.send_transfer_shipment(
+            db_session, ship_env.project_id, ship_env.transfer.id, MigfullSendRequest()
+        )
+    assert exc.value.status_code == 400
+    assert fragment in str(exc.value)
+    assert fake.created_headers == []
+
+    # Draft при этом доступен всегда — превью не должно падать вслед за гейтом.
+    draft = await ship_svc.build_transfer_shipment_draft(db_session, ship_env.project_id, ship_env.transfer.id)
+    assert draft.eligible is True
+
+
+async def test_empty_transfer_shipment_blocked(db_session, ship_env, monkeypatch):
+    """Переезд без строк — описи не из чего строить → 400, на портал не идём."""
+    fake = FakeShipmentClient()
+    _use_fake_shipment_client(monkeypatch, fake)
+    empty = StockTransfer(
+        project_id=ship_env.project_id,
+        from_warehouse_id=ship_env.warehouse.id,
+        to_warehouse_id=ship_env.dest_wh.id,
+        number=_transfer_number(),
+        status=TransferStatus.PENDING.value,
+    )
+    db_session.add(empty)
+    await db_session.commit()
+
+    with pytest.raises(MigfullPortalServiceError) as exc:
+        await ship_svc.send_transfer_shipment(
+            db_session, ship_env.project_id, empty.id, MigfullSendRequest()
+        )
+    assert exc.value.status_code == 400
+    assert "нет позиций" in str(exc.value)
+    assert fake.created_headers == []
+
+
+async def test_transfer_shipment_router_maps_service_errors(client, auth_headers):
+    """Новые ручки живут своими путями и мапят доменные ошибки (400 «не настроена»)."""
+    resp = await client.post("/api/v1/projects", json={"name": "MP Transfer Ship"}, headers=auth_headers)
+    assert resp.status_code in (200, 201)
+    headers = {**auth_headers, "X-Project-Id": str(resp.json()["id"])}
+
+    resp = await client.get("/api/v1/migfull-portal/transfer/1/shipment-draft", headers=headers)
+    assert resp.status_code == 400
+    assert "не настроена" in resp.json()["error"]["message"]
+
+    resp = await client.post(
+        "/api/v1/migfull-portal/transfer/1/shipment-send",
+        json={"filter_delivery_type": "pickup", "force_resend": False},
+        headers=headers,
     )
     assert resp.status_code == 400
     assert "не настроена" in resp.json()["error"]["message"]

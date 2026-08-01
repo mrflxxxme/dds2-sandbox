@@ -12,6 +12,8 @@ import type {
     FfTariffUpdatePayload,
     FfStorageDailyRow,
     FfAssemblyExpectedCost,
+    FfTransferExpectedCost,
+    FfExpectedComponent,
     FfCustomCostPayload,
     FfInvoiceRow,
     FfInvoiceLineRow,
@@ -46,14 +48,23 @@ function coerceStorageRow(r: FfStorageDailyRow): FfStorageDailyRow {
     return { ...r, storage_rate: numOrNull(r.storage_rate), storage_cost: numOrNull(r.storage_cost) };
 }
 
+function coerceComponent(comp: FfExpectedComponent): FfExpectedComponent {
+    return { ...comp, rate: numOrNull(comp.rate), cost: numOrNull(comp.cost) };
+}
+
 function coerceExpectedCost(c: FfAssemblyExpectedCost): FfAssemblyExpectedCost {
     return {
         ...c,
-        components: (c.components ?? []).map(comp => ({
-            ...comp,
-            rate: numOrNull(comp.rate),
-            cost: numOrNull(comp.cost),
-        })),
+        components: (c.components ?? []).map(coerceComponent),
+        custom_cost: numOrNull(c.custom_cost),
+        total: numOrNull(c.total),
+    };
+}
+
+function coerceTransferExpectedCost(c: FfTransferExpectedCost): FfTransferExpectedCost {
+    return {
+        ...c,
+        components: (c.components ?? []).map(coerceComponent),
         custom_cost: numOrNull(c.custom_cost),
         total: numOrNull(c.total),
     };
@@ -141,6 +152,19 @@ export function addFfBillingMethods(api: ApiClient) {
         async setFfCustomCost(requestId: number, payload: FfCustomCostPayload): Promise<FfAssemblyExpectedCost> {
             const res = await api.request<FfAssemblyExpectedCost>('PATCH', `/api/v1/warehouse/assembly/${requestId}/ff-custom-cost`, payload);
             return coerceExpectedCost(res);
+        },
+
+        // ── Ожидаемая стоимость услуг ФФ по переезду ───────────────────────
+        /** GET /warehouse/transfers/{id}/ff-expected-cost — тариф склада-ИСТОЧНИКА */
+        async getFfTransferExpectedCost(transferId: number): Promise<FfTransferExpectedCost> {
+            const res = await api.request<FfTransferExpectedCost>('GET', `/api/v1/warehouse/transfers/${transferId}/ff-expected-cost`);
+            return coerceTransferExpectedCost(res);
+        },
+
+        /** PATCH /warehouse/transfers/{id}/ff-custom-cost — доп-услуги ФФ (null = очистить) */
+        async setFfTransferCustomCost(transferId: number, payload: FfCustomCostPayload): Promise<FfTransferExpectedCost> {
+            const res = await api.request<FfTransferExpectedCost>('PATCH', `/api/v1/warehouse/transfers/${transferId}/ff-custom-cost`, payload);
+            return coerceTransferExpectedCost(res);
         },
 
         // ── Счета ──────────────────────────────────────────────────────────

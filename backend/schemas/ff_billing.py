@@ -14,6 +14,9 @@ API-контракт (роутер backend/routers/ff_billing.py, префикс
   Ожидаемая стоимость услуг ФФ по заявке сборки:
     GET    /warehouse/assembly/{request_id}/ff-expected-cost     → FfAssemblyExpectedCost
     PATCH  /warehouse/assembly/{request_id}/ff-custom-cost       ← FfCustomCostPayload
+  Ожидаемая стоимость услуг ФФ по переезду (склад-ИСТОЧНИК):
+    GET    /warehouse/transfers/{transfer_id}/ff-expected-cost   → FfTransferExpectedCost
+    PATCH  /warehouse/transfers/{transfer_id}/ff-custom-cost     ← FfCustomCostPayload
   Счета:
     GET    /ff-invoices?warehouse_id&status&kind                 → FfInvoiceListResponse
     POST   /ff-invoices                                          ← FfInvoiceCreatePayload
@@ -35,8 +38,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-FfServiceTypeLiteral = Literal["PALLETIZING", "BOX_PROCESSING", "STORAGE", "TRUCK_UNLOADING", "LOADING"]
+FfServiceTypeLiteral = Literal[
+    "PALLETIZING", "BOX_PROCESSING", "STORAGE", "TRUCK_UNLOADING", "LOADING", "TRANSFER_ASSEMBLY"
+]
 FfTariffUnitLiteral = Literal["PALLET", "BOX"]
+#: Услуги, у которых склад сам выбирает единицу биллинга (₽/паллета или ₽/короб);
+#: у остальных единица фиксирована типом услуги и unit обязан быть None.
+UNIT_SERVICES: frozenset[str] = frozenset({"LOADING", "TRANSFER_ASSEMBLY"})
 FfInvoiceKindLiteral = Literal["SHIPMENT", "STORAGE", "RECEIVING", "LOGISTICS", "MIXED"]
 FfInvoiceStatusLiteral = Literal["NEW", "RECONCILED", "DISPUTED", "PAID"]
 FfInvoiceLineKindLiteral = Literal["ASSEMBLY", "STORAGE", "RECEIVING", "LOGISTICS", "CUSTOM"]
@@ -46,19 +54,19 @@ FfInvoiceLineKindLiteral = Literal["ASSEMBLY", "STORAGE", "RECEIVING", "LOGISTIC
 
 class FfTariffPayload(BaseModel):
     service_type: FfServiceTypeLiteral
-    # Только для LOADING: чем биллит склад (паллета/короб). У прочих услуг
-    # единица фиксирована типом — unit обязан быть None.
+    # Только для UNIT_SERVICES (LOADING, TRANSFER_ASSEMBLY): чем биллит склад
+    # (паллета/короб). У прочих услуг единица фиксирована типом — unit=None.
     unit: FfTariffUnitLiteral | None = None
     rate: Decimal = Field(ge=0, le=Decimal("9999999999999999.99"))
     valid_from: date | None = None  # None = с сегодня
     valid_to: date | None = None
 
     @model_validator(mode="after")
-    def _unit_only_for_loading(self) -> "FfTariffPayload":
-        if self.service_type == "LOADING" and self.unit is None:
-            raise ValueError("Для LOADING укажите unit: PALLET или BOX")
-        if self.service_type != "LOADING" and self.unit is not None:
-            raise ValueError("unit допустим только для LOADING")
+    def _unit_only_for_unit_services(self) -> "FfTariffPayload":
+        if self.service_type in UNIT_SERVICES and self.unit is None:
+            raise ValueError(f"Для {self.service_type} укажите unit: PALLET или BOX")
+        if self.service_type not in UNIT_SERVICES and self.unit is not None:
+            raise ValueError("unit допустим только для LOADING и TRANSFER_ASSEMBLY")
         return self
 
 
@@ -119,6 +127,11 @@ class FfExpectedComponent(BaseModel):
     qty: int | None = None
     rate: Decimal | None = None  # None = тариф не задан на складе
     cost: Decimal | None = None  # qty × rate; None если нет тарифа
+    #: Ставка есть, но её единица (unit) не та, в которой измерен документ
+    #: (тариф ₽/паллета, а переезд коробочный). Пересчёт по выдуманному курсу
+    #: «коробов в паллете» дал бы неверные деньги, поэтому cost=None и
+    #: строка помечена признаком — считает человек, не мы.
+    unit_mismatch: bool = False
 
 
 class FfAssemblyExpectedCost(BaseModel):
@@ -132,6 +145,32 @@ class FfAssemblyExpectedCost(BaseModel):
     custom_cost_comment: str | None = None
     total: Decimal | None = None  # Σ cost компонент (None, если ни одного тарифа)
     missing_tariffs: list[str] = []  # service_type без ставки на дату
+
+
+class FfTransferExpectedCost(BaseModel):
+    """Ожидаемая стоимость услуг ФФ по переезду — зеркало заявки на сборку.
+
+    Тариф берётся у склада-ИСТОЧНИКА (`from_warehouse_id`): собирает переезд
+    он. Услуга одна — TRANSFER_ASSEMBLY (₽/паллета ИЛИ ₽/короб по unit тарифа),
+    плюс ручная строка CUSTOM. `qty` измерен в `unit` переезда
+    (shipped_as_boxes → BOX), тарифная единица может от него отличаться —
+    тогда компонент помечен `unit_mismatch` и в `total` НЕ входит.
+    """
+
+    transfer_id: int
+    transfer_number: str
+    from_warehouse_id: int
+    from_warehouse_name: str | None = None
+    to_warehouse_id: int
+    unit: FfTariffUnitLiteral  # единица переезда: PALLET | BOX
+    qty: int  # pallets_count в этой единице (нет объёма → 0)
+    on_date: date  # дата, на которую резолвились ставки
+    components: list[FfExpectedComponent]
+    custom_cost: Decimal | None = None
+    custom_cost_comment: str | None = None
+    total: Decimal | None = None  # Σ cost компонент (None, если считать нечего)
+    missing_tariffs: list[str] = []  # service_type без ставки на дату
+    unit_mismatch: bool = False  # хоть один компонент с несовпадением единиц
 
 
 class FfCustomCostPayload(BaseModel):

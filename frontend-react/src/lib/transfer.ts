@@ -142,6 +142,25 @@ export function canPushTransferToFf(status: StockTransferStatus | string): boole
 }
 
 /**
+ * «Создать отгрузку у Натали» — завести заявку на отгрузку (ЗАК-…) в WMS ФФ,
+ * когда склад Натали у переезда ИСТОЧНИК (кейс TR-33 «натали → фф питер
+ * Газпром»). Зеркало `canPushTransferToFf`, но БЕЗ «в пути».
+ *
+ * Отличие ровно одно и оно осознанное: у уехавшего переезда (SHIPPED) товар
+ * Натали уже отдала, сток списан — новая заявка на отгрузку означала бы
+ * «соберите и выдайте ещё раз», и ФФ отгрузил бы те же единицы дважды. У
+ * приёмки такой опасности нет (приход у ФФ как раз и заводится этой поставкой),
+ * поэтому там «в пути» разрешён. Бэкенд отвечает 400 на те же статусы.
+ */
+export const TRANSFER_FF_SHIPMENT_PUSHABLE_STATUSES: ReadonlySet<StockTransferStatus> =
+    new Set<StockTransferStatus>(['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED']);
+
+export function canPushTransferShipmentToFf(status: StockTransferStatus | string): boolean {
+    return canPushTransferToFf(status)
+        && TRANSFER_FF_SHIPMENT_PUSHABLE_STATUSES.has(status as StockTransferStatus);
+}
+
+/**
  * Отмена (DELETE = CANCELLED + soft-delete). Шире правки: машину сняли не
  * обязательно — отменить назначенный переезд бэкенд разрешает. А вот
  * отгруженный уже нет: сток списан, отмена его не вернёт (для этого «Вернуть
