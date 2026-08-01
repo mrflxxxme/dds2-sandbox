@@ -1,36 +1,74 @@
 'use client';
 
 /**
- * «Ступеньки СПП» — где снижение нашей цены на рубли роняет цену клиента на сотни.
+ * Карта СПП: по каждой категории — лесенка своих цен и живой СПП на каждой ступени.
  *
- * Советник: ничего не пишет в ВБ, цены меняет человек руками. Каждая строка несёт
- * основание (сколько наблюдений и какой давности), потому что доверять здесь можно
- * только своей истории товара — сравнение «дешёвые товары против дорогих» врёт.
+ * Источник — снимок витрины (card-API), а не среднее из финотчёта: только он
+ * реагирует на сегодняшнюю цену. Красная граница — ОБРЫВ: выше него ВБ
+ * перестаёт доплачивать. Строка раскрывается в список артикулов уровня —
+ * разброс СПП на одной цене видно поимённо.
+ *
+ * Оформление — общие токены раздела «Воронка продаж» (`funnelUi`), который сам
+ * повторяет «Управление рекламой»: тёмная липкая шапка, тулбар-полоса внутри
+ * карточки, моноширинные цифры, сегментированные переключатели.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
-import TanStackDataTable from '@/components/TanStackDataTable';
-import type { Column } from '@/components/DataTable';
-import type { SppLadderResponse, SppLadderRow } from '@/types/api';
+import { MONO } from '../../funnel/components/FunnelTable';
+import {
+    CARD_FOOTER,
+    CARD_TOOLBAR,
+    Segmented,
+    StatCard,
+    TABLE_CARD,
+    thFlat,
+} from '../../funnel/components/funnelUi';
+import type { SppMapResponse, SppCategory } from '@/types/api';
 
 const money = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 0));
 const pct = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 1) + '%');
-const int0 = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 0));
 
-const confColor = (c: string) =>
-    c === 'высокая' ? 'var(--color-success)' : c === 'средняя' ? 'var(--color-warning)' : 'var(--color-text-dim)';
+/** Цвет ступени: чем ближе СПП к лучшему в категории, тем зеленее. */
+const levelColor = (spp: number, best: number) => {
+    if (best <= 0) return '#6b7280';
+    const share = spp / best;
+    return share > 0.95 ? '#059669' : share > 0.6 ? '#d97706' : '#dc2626';
+};
+
+/** Числовая ячейка «как в воронке»: моно, tabular-nums, вправо, плотная. */
+const num = (extra?: React.CSSProperties): React.CSSProperties => ({
+    textAlign: 'right', verticalAlign: 'middle', padding: '3px 10px',
+    fontSize: 12, lineHeight: '15px', fontFamily: MONO, fontVariantNumeric: 'tabular-nums',
+    whiteSpace: 'nowrap', borderBottom: '1px solid #f3f4f6', ...extra,
+});
+
+const DAYS = [
+    { key: '1', label: 'Сегодня' },
+    { key: '3', label: '3 дня' },
+    { key: '7', label: 'Неделя' },
+    { key: '30', label: 'Месяц' },
+] as const;
+const STEPS = [
+    { key: '50', label: '50 ₽' },
+    { key: '100', label: '100 ₽' },
+    { key: '250', label: '250 ₽' },
+    { key: '500', label: '500 ₽' },
+] as const;
 
 export default function SppLadder({ dateFrom, dateTo }: { dateFrom: string; dateTo: string }) {
-    const [resp, setResp] = useState<SppLadderResponse | null>(null);
+    void dateFrom;
+    void dateTo; // карта строится по снимкам витрины — период отчёта на неё не влияет
+
+    const [resp, setResp] = useState<SppMapResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-    const [minLeverage, setMinLeverage] = useState(2);
-    const [maxDrop, setMaxDrop] = useState(10);
-    const [onlyInStock, setOnlyInStock] = useState(true);
+    const [days, setDays] = useState('1');
+    const [step, setStep] = useState('100');
     const [observing, setObserving] = useState(false);
     const [obsMsg, setObsMsg] = useState('');
+    const [openCat, setOpenCat] = useState<string | null>(null);
 
     const reqRef = useRef(0);
     const load = useCallback(async () => {
@@ -38,37 +76,31 @@ export default function SppLadder({ dateFrom, dateTo }: { dateFrom: string; date
         setLoading(true);
         setError('');
         try {
-            const res = await api.getSppLadder({
-                date_from: dateFrom,
-                date_to: dateTo,
-                min_leverage: minLeverage,
-                max_drop_pct: maxDrop,
-                only_in_stock: onlyInStock,
-            });
+            const res = await api.getSppMap({ days: Number(days), step: Number(step) });
             if (reqRef.current !== myReq) return;
             setResp(res);
+            setOpenCat((prev) => prev ?? res.categories[0]?.category ?? null);
         } catch (e) {
             if (reqRef.current !== myReq) return;
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         } finally {
             if (reqRef.current === myReq) setLoading(false);
         }
-    }, [dateFrom, dateTo, minLeverage, maxDrop, onlyInStock]);
+    }, [days, step]);
 
     useEffect(() => {
         const t = setTimeout(load, 250);
         return () => clearTimeout(t);
     }, [load]);
 
-    const doObserve = async (backfillDays: number) => {
+    const doObserve = async () => {
         setObserving(true);
         setObsMsg('');
         try {
-            const r = await api.observeSpp(backfillDays);
+            const r = await api.observeSpp(0);
             setObsMsg(
-                `снимок: ${r.snapshot.written} точек` +
-                    (r.snapshot.stale ? ` (${r.snapshot.stale} пропущено — витрина ушла вперёд синка цен)` : '') +
-                    (backfillDays ? ` · из заказов: ${r.backfill.written}` : ''),
+                `снято ${r.snapshot.written} точек из ${r.snapshot.requested}` +
+                    (r.snapshot.stale ? ` · ${r.snapshot.stale} пропущено: витрина ушла вперёд синка цен` : ''),
             );
             await load();
         } catch (e) {
@@ -78,207 +110,215 @@ export default function SppLadder({ dateFrom, dateTo }: { dateFrom: string; date
         }
     };
 
-    const rows = resp?.rows ?? [];
+    const cats = resp?.categories ?? [];
     const stats = resp?.stats;
-    const steps = resp?.steps ?? [];
-
-    const totals = useMemo(() => {
-        const down = rows.filter((r) => r.verdict === 'step_down');
-        return {
-            down: down.length,
-            hold: rows.length - down.length,
-            give: down.reduce((s, r) => s + (r.drop_seller ?? 0), 0),
-            gain: down.reduce((s, r) => s + (r.drop_buyer ?? 0), 0),
-        };
-    }, [rows]);
-
-    const columns: Column[] = useMemo(
-        () => [
-            {
-                key: 'vendor_code', label: 'Артикул', width: '200px', sortable: true,
-                render: (v: string | null, r: SppLadderRow) => (
-                    <div>
-                        <div style={{ fontWeight: 600 }}>{v || r.nm_id}</div>
-                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
-                            {r.nm_id} · {r.category || '—'}
-                        </div>
-                    </div>
-                ),
-            },
-            {
-                key: 'verdict', label: 'Что делать', width: '150px', sortable: true,
-                render: (v: string, r: SppLadderRow) =>
-                    v === 'step_down' ? (
-                        <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>
-                            ↓ до {money(r.target_price)} ₽
-                        </span>
-                    ) : (
-                        <span style={{ color: 'var(--color-warning)' }} title={`Порог ${money(r.threshold)} ₽`}>
-                            ✋ не поднимать
-                        </span>
-                    ),
-            },
-            { key: 'current_price', label: 'Цена сейчас', align: 'right', sortable: true, render: (v: number | null) => money(v) },
-            {
-                key: 'buyer_price', label: 'Клиент платит', align: 'right', sortable: true,
-                render: (v: number | null, r: SppLadderRow) => (
-                    <span title={`СПП ${pct(r.spp_rate)}`} style={{ fontWeight: 600 }}>{money(v)}</span>
-                ),
-            },
-            {
-                key: 'target_buyer_price', label: 'Станет платить', align: 'right', sortable: true,
-                render: (v: number | null, r: SppLadderRow) =>
-                    v == null ? '—' : (
-                        <span title={`СПП ${pct(r.target_spp)}`} style={{ color: 'var(--color-success)', fontWeight: 600 }}>
-                            {money(v)}
-                        </span>
-                    ),
-            },
-            { key: 'drop_seller', label: 'Отдаём ₽', align: 'right', sortable: true, render: (v: number | null) => money(v) },
-            {
-                key: 'drop_buyer', label: 'Выигрыш клиента ₽', align: 'right', sortable: true,
-                render: (v: number | null) => <span style={{ color: 'var(--color-success)' }}>{money(v)}</span>,
-            },
-            {
-                key: 'leverage', label: 'Рычаг', align: 'right', sortable: true,
-                render: (v: number | null) =>
-                    v == null ? '—' : (
-                        <span style={{ fontWeight: 700, color: v >= 5 ? 'var(--color-success)' : undefined }}
-                            title="Во сколько раз выигрыш клиента больше, чем наша уступка">
-                            ×{formatNumber(v, 1)}
-                        </span>
-                    ),
-            },
-            { key: 'jump', label: 'СПП +п.п.', align: 'right', sortable: true, render: (v: number | null) => (v == null ? '—' : '+' + formatNumber(v, 1)) },
-            {
-                key: 'confidence', label: 'Основание', width: '230px', sortable: true,
-                render: (v: string, r: SppLadderRow) => (
-                    <div style={{ fontSize: 11 }}>
-                        <span style={{ color: confColor(v), fontWeight: 600 }}>{v}</span>
-                        <span style={{ color: 'var(--color-text-dim)' }}> · {r.jump_source}</span>
-                        <div style={{ color: 'var(--color-text-dim)' }}>{r.evidence}</div>
-                    </div>
-                ),
-            },
-            {
-                key: 'unit_profit_after', label: 'Прибыль/шт после', align: 'right', sortable: true,
-                render: (v: number | null, r: SppLadderRow) =>
-                    v == null ? '—' : (
-                        <span title={`сейчас ${money(r.unit_profit_now)} ₽`} style={{ color: v > 0 ? undefined : 'var(--color-danger)' }}>
-                            {money(v)}
-                        </span>
-                    ),
-            },
-            { key: 'floor', label: 'Пол цены', align: 'right', sortable: true, render: (v: number | null) => money(v) },
-            { key: 'orders_count', label: 'Заказы', align: 'right', sortable: true, render: (v: number | null) => int0(v) },
-            { key: 'wb_stock', label: 'Остаток ВБ', align: 'right', sortable: true, render: (v: number | null) => int0(v) },
-        ],
-        [],
-    );
+    const current = useMemo(() => cats.find((c) => c.category === openCat) ?? cats[0], [cats, openCat]);
 
     const doExport = () =>
         exportToExcel(
-            rows.map((r) => ({
-                'Артикул': r.vendor_code ?? '', 'nm_id': r.nm_id, 'Категория': r.category ?? '',
-                'Что делать': r.verdict === 'step_down' ? 'снизить' : 'не поднимать',
-                'Цена сейчас': r.current_price, 'Целевая цена': r.target_price,
-                'Клиент платит': r.buyer_price, 'Станет платить': r.target_buyer_price,
-                'СПП сейчас %': r.spp_rate, 'СПП станет %': r.target_spp,
-                'Отдаём ₽': r.drop_seller, 'Выигрыш клиента ₽': r.drop_buyer, 'Рычаг': r.leverage,
-                'Основание': `${r.confidence} · ${r.jump_source} · ${r.evidence}`,
-                'Прибыль/шт сейчас': r.unit_profit_now, 'Прибыль/шт после': r.unit_profit_after,
-                'Пол цены': r.floor, 'Заказы': r.orders_count, 'Остаток ВБ': r.wb_stock,
-            })),
-            'spp_ladder',
+            cats.flatMap((c) =>
+                c.levels.flatMap((lv) =>
+                    lv.items.map((it) => ({
+                        'Категория': c.category,
+                        'Уровень цены': lv.price,
+                        'СПП уровня %': lv.spp,
+                        'Артикул': it.vendor_code ?? '',
+                        'nm_id': it.nm_id,
+                        'Цена до СПП': it.price,
+                        'СПП %': it.spp,
+                        'Клиент платит': it.buyer_price,
+                        'Обрыв выше': c.cliffs.some((cl) => cl.keep_below === lv.price) ? 'да' : '',
+                    })),
+                ),
+            ),
+            'spp_map',
         );
 
     return (
-        <div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', margin: '16px 0' }}>
-                <label style={{ fontSize: 12, display: 'flex', gap: 6, alignItems: 'center' }}>
-                    Рычаг от
-                    <input type="number" className="btn btn-sm" style={{ width: 70 }} min={1} max={50} step={0.5}
-                        value={minLeverage} onChange={(e) => setMinLeverage(Number(e.target.value) || 1)} />
-                </label>
-                <label style={{ fontSize: 12, display: 'flex', gap: 6, alignItems: 'center' }}>
-                    Снижать не более, %
-                    <input type="number" className="btn btn-sm" style={{ width: 70 }} min={1} max={50}
-                        value={maxDrop} onChange={(e) => setMaxDrop(Number(e.target.value) || 10)} />
-                </label>
-                <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center', cursor: 'pointer' }}>
-                    <input type="checkbox" checked={onlyInStock} onChange={(e) => setOnlyInStock(e.target.checked)} />
-                    с остатком ВБ
-                </label>
-                <div style={{ flex: 1 }} />
-                <button className="btn btn-sm btn-secondary" onClick={doExport} disabled={!rows.length}>📥 Excel</button>
-                <button className="btn btn-sm btn-secondary" onClick={() => doObserve(90)} disabled={observing}
-                    title="Разобрать 90 дней заказов в точки истории — разово после установки">
-                    {observing ? '⏳…' : '📚 Из заказов за 90 дн'}
-                </button>
-                <button className="btn btn-sm btn-primary" onClick={() => doObserve(0)} disabled={observing}
-                    title="Снять точку «цена → СПП → цена клиента» прямо сейчас">
-                    {observing ? '⏳ Снимаю…' : '🔄 Снять точку'}
-                </button>
-            </div>
+        <div style={{ marginTop: 14 }}>
+            <div className="glass-card" style={{ ...TABLE_CARD, marginBottom: 14 }}>
+                <div style={CARD_TOOLBAR}>
+                    <span style={{ fontSize: 12, color: '#6b7280' }}>Снимки за</span>
+                    <Segmented value={days} options={DAYS.map((d) => ({ key: d.key, label: d.label }))} onChange={setDays} compact />
+                    <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 8 }}>Шаг сетки</span>
+                    <Segmented value={step} options={STEPS.map((s) => ({ key: s.key, label: s.label }))} onChange={setStep} compact />
+                    <div style={{ flex: 1 }} />
+                    <button className="btn btn-sm btn-secondary" onClick={doExport} disabled={!cats.length}>📥 Excel</button>
+                    <button className="btn btn-sm btn-primary" onClick={doObserve} disabled={observing}
+                        title="Опросить витрину и записать СПП по всем артикулам прямо сейчас">
+                        {observing ? '⏳ Снимаю…' : '🔄 Снять срез сейчас'}
+                    </button>
+                </div>
 
-            {obsMsg && <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>{obsMsg}</div>}
+                <div style={{ padding: '10px 16px', fontSize: 12.5, lineHeight: 1.5, color: '#374151' }}>
+                    <b>Как это читать.</b> Для каждой категории — уровни цен, на которых реально стоят наши товары, и СПП,
+                    который ВБ даёт на каждом уровне <b>сейчас</b> (опрос витрины, не среднее из финотчёта). Красная
+                    граница — <b>обрыв</b>: выше неё ВБ резко перестаёт доплачивать. Сравнивать цены имеет смысл только
+                    внутри одной категории. Разброс в строке значит, что на одном уровне СПП у товаров разный, —
+                    разверните строку и увидите, у каких именно.
+                </div>
 
-            <div className="glass-card" style={{ padding: 14, marginBottom: 16, fontSize: 13, lineHeight: 1.5 }}>
-                <b>Как это читать.</b> СПП назначает ВБ, и он ступенчатый: иногда 10 ₽ нашей уступки роняют цену
-                клиента на 200 ₽. Ищем именно такие точки — рычаг = выигрыш клиента ÷ наша уступка. Вывод строится
-                на истории <b>этого же товара</b>: сравнение «дешёвые товары против дорогих» даёт ложные пороги
-                (на замере 01.08 кросс-секция обещала на 2000 ₽ скачок +11 п.п., а товары, реально переходившие
-                этот порог, показали −0.4). Ниже цены безубытка советов нет.
+                {obsMsg && <div style={CARD_FOOTER}>{obsMsg}</div>}
             </div>
 
             {stats && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8, marginBottom: 16 }}>
-                    <Kpi label="Снизить цену" value={int0(totals.down)} color="var(--color-success)" sub={`отдаём ${money(totals.give)} ₽ → клиент выигрывает ${money(totals.gain)} ₽`} />
-                    <Kpi label="Держать (у порога)" value={int0(totals.hold)} sub="поднимать цену нельзя" />
-                    <Kpi label="Точек истории" value={int0(stats.points)} sub={`${int0(stats.nm_with_points)} артикулов · ${stats.days} дн`} />
-                    <Kpi label="Порогов по проекту" value={int0(stats.steps_found)} sub={steps.map((s) => money(s.threshold)).join(', ') || 'подтверждённых нет'} />
-                    <Kpi label="Отсеяно безубытком" value={int0(stats.skipped_below_floor)} sub="ступенька ниже пола цены" />
-                    <Kpi label="Свежесть" value={stats.last_point_on ?? '—'} sub="последняя точка" />
-                </div>
-            )}
-
-            {steps.length > 0 && (
-                <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>
-                    Пороги, подтверждённые парным тестом:{' '}
-                    {steps.map((s) => (
-                        <span key={s.threshold} style={{ marginRight: 12 }}>
-                            <b>{money(s.threshold)} ₽</b> +{formatNumber(s.jump, 1)} п.п. ({s.n_products} товаров, согласны {formatNumber(s.agree_pct, 0)} %)
-                        </span>
-                    ))}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8, marginBottom: 14 }}>
+                    <StatCard label="Категорий" value={formatNumber(stats.categories_count, 0)} color="#1e3a8a"
+                        hint={<div style={{ fontSize: 11, color: '#6b7280' }}>с обрывами {stats.with_cliffs}</div>} />
+                    <StatCard label="Точек в срезе" value={formatNumber(stats.points, 0)} color="#374151" />
+                    <StatCard label="Последний срез" value={stats.last_snapshot_on ?? '—'} color="#059669"
+                        hint={<div style={{ fontSize: 11, color: '#6b7280' }}>{stats.source === 'card' ? 'витрина' : 'заказы'}</div>} />
                 </div>
             )}
 
             {error && <div style={{ padding: 16, color: 'var(--color-danger)' }}>❌ {error}</div>}
-            {!error && (
-                <TanStackDataTable
-                    columns={columns}
-                    data={rows}
-                    loading={loading}
-                    emptyIcon="🪜"
-                    emptyText={
-                        stats && stats.points === 0
-                            ? 'Истории ещё нет. Нажмите «Из заказов за 90 дн» — точки соберутся из ваших же заказов.'
-                            : 'Ступенек не найдено: ни у одного товара нет цены ниже, где СПП был бы заметно выше.'
-                    }
-                    pageSize={50}
-                    maxHeight={640}
-                />
+            {loading && !resp && <div style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-dim)' }}>Загрузка…</div>}
+            {!error && !loading && !cats.length && (
+                <div style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-dim)' }}>
+                    🪜 Срезов ещё нет — нажмите «Снять срез сейчас».
+                </div>
+            )}
+
+            {!!cats.length && (
+                <div className="glass-card" style={{ ...TABLE_CARD, flexDirection: 'row', maxHeight: 660 }}>
+                    <div style={{ width: 250, borderRight: '1px solid #e5e7eb', overflowY: 'auto', flexShrink: 0, background: '#f9fafb' }}>
+                        {cats.map((c) => {
+                            const on = c.category === current?.category;
+                            return (
+                                <button key={c.category} type="button" onClick={() => setOpenCat(c.category)}
+                                    style={{
+                                        display: 'block', width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer',
+                                        padding: '7px 12px', fontSize: 12.5, whiteSpace: 'nowrap', overflow: 'hidden',
+                                        textOverflow: 'ellipsis', borderBottom: '1px solid #f3f4f6',
+                                        background: on ? '#fff' : 'transparent',
+                                        color: on ? '#1e3a8a' : '#374151', fontWeight: on ? 600 : 500,
+                                        borderLeft: on ? '3px solid var(--color-accent)' : '3px solid transparent',
+                                    }}>
+                                    {c.category}
+                                    <span style={{ color: '#9ca3af', fontFamily: MONO, fontSize: 11 }}> {c.nm_count}</span>
+                                    {!!c.cliffs.length && <span style={{ color: '#dc2626', fontWeight: 700 }}> ⚠{c.cliffs.length}</span>}
+                                </button>
+                            );
+                        })}
+                    </div>
+                    {current && <CategoryLadder cat={current} />}
+                </div>
             )}
         </div>
     );
 }
 
-function Kpi({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
+function CategoryLadder({ cat }: { cat: SppCategory }) {
+    const best = Math.max(...cat.levels.map((l) => l.spp), 0);
+    const cliffAbove = new Set(cat.cliffs.map((c) => c.keep_below));
+    const [open, setOpen] = useState<Set<number>>(new Set());
+    const toggle = (price: number) =>
+        setOpen((prev) => {
+            const n = new Set(prev);
+            if (n.has(price)) n.delete(price);
+            else n.add(price);
+            return n;
+        });
+
     return (
-        <div className="glass-card" style={{ padding: '10px 12px' }}>
-            <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{label}</div>
-            <div style={{ fontSize: 20, fontWeight: 700, color }}>{value}</div>
-            {sub && <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{sub}</div>}
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            <div style={{ ...CARD_TOOLBAR, gap: 8 }}>
+                <span style={{ fontSize: 14, fontWeight: 700 }}>{cat.category}</span>
+                <span style={{ fontSize: 11.5, color: '#6b7280' }}>{cat.nm_count} артикулов в срезе</span>
+            </div>
+
+            {!!cat.cliffs.length && (
+                <div style={{ padding: '8px 16px 2px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {cat.cliffs.map((c) => (
+                        <div key={c.breaks_at}
+                            style={{
+                                padding: '6px 10px', fontSize: 12.5, lineHeight: 1.45, borderRadius: 8,
+                                background: '#fef2f2', borderLeft: '3px solid #dc2626', color: '#374151',
+                            }}>
+                            Держать цену <b>≤ {money(c.keep_below)} ₽</b>: там СПП {pct(c.spp_below)}, а уже на{' '}
+                            {money(c.breaks_at)} ₽ — {pct(c.spp_above)} (−{formatNumber(c.drop, 1)} п.п.).
+                            {c.leverage != null && (
+                                <> Уступаем {money(c.seller_gives)} ₽ — клиент выигрывает{' '}
+                                    <b style={{ color: '#059669' }}>{money(c.buyer_gains)} ₽</b>, рычаг ×{formatNumber(c.leverage, 1)}.</>
+                            )}
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '8px 0 0' }}>
+                <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, background: '#fff' }}>
+                    <thead>
+                        <tr>
+                            <th style={{ ...thFlat, textAlign: 'left', paddingLeft: 16 }}>Цена до СПП</th>
+                            <th style={thFlat}>СПП</th>
+                            <th style={thFlat}>Клиент платит</th>
+                            <th style={thFlat}>Разброс СПП</th>
+                            <th style={{ ...thFlat, paddingRight: 16 }}>Артикулов</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {cat.levels.map((lv) => {
+                            const isOpen = open.has(lv.price);
+                            const cliff = cliffAbove.has(lv.price);
+                            return (
+                                <React.Fragment key={lv.price}>
+                                    <tr onClick={() => toggle(lv.price)}
+                                        style={{ cursor: 'pointer', background: isOpen ? '#f8fafc' : undefined }}>
+                                        <td style={num({
+                                            textAlign: 'left', paddingLeft: 16, fontWeight: 700, fontSize: 12.5,
+                                            borderBottom: cliff ? '2px solid #dc2626' : '1px solid #f3f4f6',
+                                        })}>
+                                            <span style={{ color: '#9ca3af', marginRight: 6 }}>{isOpen ? '▾' : '▸'}</span>
+                                            {money(lv.price)} ₽
+                                        </td>
+                                        <td style={num({
+                                            fontWeight: 700, color: levelColor(lv.spp, best),
+                                            borderBottom: cliff ? '2px solid #dc2626' : '1px solid #f3f4f6',
+                                        })}>{pct(lv.spp)}</td>
+                                        <td style={num({ borderBottom: cliff ? '2px solid #dc2626' : '1px solid #f3f4f6' })}>
+                                            {money(lv.buyer_price)} ₽
+                                        </td>
+                                        <td style={num({
+                                            color: '#9ca3af',
+                                            borderBottom: cliff ? '2px solid #dc2626' : '1px solid #f3f4f6',
+                                        })}>
+                                            {lv.spp_max - lv.spp_min > 0.2 ? `${pct(lv.spp_min)} – ${pct(lv.spp_max)}` : '—'}
+                                        </td>
+                                        <td style={num({
+                                            color: '#6b7280', paddingRight: 16,
+                                            borderBottom: cliff ? '2px solid #dc2626' : '1px solid #f3f4f6',
+                                        })}>{lv.n}</td>
+                                    </tr>
+                                    {isOpen && lv.items.map((it) => (
+                                        <tr key={it.nm_id} style={{ background: '#fcfcfd' }}>
+                                            <td style={num({ textAlign: 'left', paddingLeft: 38, fontFamily: 'inherit', fontSize: 11.5 })}>
+                                                <a href={`https://www.wildberries.ru/catalog/${it.nm_id}/detail.aspx`}
+                                                    target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}
+                                                    onClick={(e) => e.stopPropagation()}>
+                                                    {it.vendor_code || it.nm_id}
+                                                </a>
+                                                <span style={{ color: '#9ca3af', fontFamily: MONO }}> {it.nm_id}</span>
+                                            </td>
+                                            <td style={num({ fontSize: 11.5, color: levelColor(it.spp, best), fontWeight: 600 })}>{pct(it.spp)}</td>
+                                            <td style={num({ fontSize: 11.5 })}>{money(it.buyer_price)} ₽</td>
+                                            <td style={num({ fontSize: 11.5, color: '#9ca3af' })}>{money(it.price)} ₽</td>
+                                            <td style={num({ paddingRight: 16 })} />
+                                        </tr>
+                                    ))}
+                                </React.Fragment>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+
+            {!!cat.gaps.length && (
+                <div style={CARD_FOOTER}>
+                    Не проверены уровни: {cat.gaps.map((g) => `${g} ₽`).join(', ')} — там нет ни одного нашего товара,
+                    и узнать СПП можно только поставив туда цену.
+                </div>
+            )}
         </div>
     );
 }

@@ -10,10 +10,11 @@ from backend.cache import invalidate_cache
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
-from backend.schemas.pricing import SppLadderResponse
+from backend.schemas.pricing import SppMapResponse
 from backend.services.pricing import ai_advisor
 from backend.services.pricing import markup as markup_service
-from backend.services.pricing import spp_ladder as spp_ladder_service
+from backend.services.pricing import spp_map as spp_map_service
+from backend.services.pricing import spp_points as spp_points_service
 from backend.services.pricing.sync import sync_card_spp, sync_wb_prices
 from backend.utils.rate_limit import rate_limit_write
 
@@ -85,28 +86,36 @@ async def sync_prices(
     }
 
 
-@router.get("/spp-ladder", response_model=SppLadderResponse)
-async def spp_ladder(
-    date_from: str | None = Query(None),
-    date_to: str | None = Query(None),
-    days: int = Query(120, ge=14, le=365),
-    min_leverage: float = Query(2.0, ge=1.0, le=50.0),
-    max_drop_pct: float = Query(10.0, ge=1.0, le=50.0),
-    only_in_stock: bool = Query(True),
+@router.get("/spp-map", response_model=SppMapResponse)
+async def spp_map(
+    days: int = Query(1, ge=1, le=90),
+    step: int = Query(100, ge=10, le=1000),
+    source: str = Query("card"),
+    category: str | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """«Ступеньки СПП»: где снижение цены на рубли роняет цену клиента на сотни."""
-    return await spp_ladder_service.get_spp_ladder(
-        db,
-        project.id,
-        date_from=date_from,
-        date_to=date_to,
-        days=days,
-        min_leverage=min_leverage,
-        max_drop_pct=max_drop_pct,
-        only_in_stock=only_in_stock,
+    """Карта «категория × цена → СПП»: лесенка уровней и обрывы, где СПП падает."""
+    src = source if source in ("card", "orders") else "card"
+    return await spp_map_service.get_spp_map(
+        db, project.id, days=days, step=step, source=src, category=category
     )
+
+
+@router.get("/spp-history")
+async def spp_history(
+    nm_ids: str = Query(..., description="nm_id через запятую"),
+    days: int = Query(30, ge=1, le=180),
+    source: str = Query("card"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """История «цена → СПП» по дням для набора артикулов."""
+    ids = [int(x) for x in nm_ids.split(",") if x.strip().isdigit()][:500]
+    src = source if source in ("card", "orders") else "card"
+    return {
+        "rows": await spp_map_service.get_level_history(db, project.id, ids, days=days, source=src)
+    }
 
 
 @router.post("/spp-observe")
@@ -117,9 +126,9 @@ async def spp_observe(
     _rl: None = Depends(rate_limit_write),
 ):
     """Снять точку СПП сейчас (card-API); `backfill_days>0` — ещё и ретро из заказов."""
-    snap = await spp_ladder_service.snapshot_from_card(db, project.id)
+    snap = await spp_points_service.snapshot_from_card(db, project.id)
     back = (
-        await spp_ladder_service.backfill_from_orders(db, project.id, days=backfill_days)
+        await spp_points_service.backfill_from_orders(db, project.id, days=backfill_days)
         if backfill_days
         else {"written": 0, "days": 0}
     )

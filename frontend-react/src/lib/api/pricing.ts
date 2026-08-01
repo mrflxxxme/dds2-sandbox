@@ -1,6 +1,6 @@
 /** Ценообразование (наценка по артикулам) API methods */
 import { ApiClient } from './client';
-import type { PricingResponse, PricingAiResponse, SppLadderResponse } from '@/types/api';
+import type { PricingResponse, PricingAiResponse, SppMapResponse } from '@/types/api';
 
 export interface PricingMarkupParams {
     date_from?: string;
@@ -41,22 +41,13 @@ export function addPricingMethods(api: ApiClient) {
                 '/api/v1/pricing/sync-spp',
             );
         },
-        getSppLadder(params?: {
-            date_from?: string;
-            date_to?: string;
-            days?: number;
-            min_leverage?: number;
-            max_drop_pct?: number;
-            only_in_stock?: boolean;
-        }) {
+        getSppMap(params?: { days?: number; step?: number; source?: string; category?: string }) {
             const q = new URLSearchParams();
-            if (params?.date_from) q.set('date_from', params.date_from);
-            if (params?.date_to) q.set('date_to', params.date_to);
             if (params?.days) q.set('days', String(params.days));
-            if (params?.min_leverage) q.set('min_leverage', String(params.min_leverage));
-            if (params?.max_drop_pct) q.set('max_drop_pct', String(params.max_drop_pct));
-            if (params?.only_in_stock === false) q.set('only_in_stock', 'false');
-            return api.request<SppLadderResponse>('GET', `/api/v1/pricing/spp-ladder?${q.toString()}`);
+            if (params?.step) q.set('step', String(params.step));
+            if (params?.source) q.set('source', params.source);
+            if (params?.category) q.set('category', params.category);
+            return api.request<SppMapResponse>('GET', `/api/v1/pricing/spp-map?${q.toString()}`);
         },
         observeSpp(backfillDays = 0) {
             const q = backfillDays ? `?backfill_days=${backfillDays}` : '';

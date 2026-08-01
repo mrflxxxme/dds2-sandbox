@@ -9336,64 +9336,58 @@ export interface ExchangeSessionStatus {
     supplier_id?: string | null;
 }
 
-// ─── «Ступеньки СПП» (советник по цене) ────────────────────────────────────
+// ─── Карта СПП: категория × уровень цены → СПП ────────────────────────────
 
-export interface SppStep {
-  threshold: number;
-  spp_below: number;
-  spp_above: number;
-  jump: number;
-  n_below: number;
-  n_above: number;
-  n_products: number;
-  agree_pct: number;
-}
-
-export interface SppLadderRow {
+export interface SppLevelItem {
   nm_id: number;
   vendor_code: string | null;
-  brand: string | null;
-  category: string | null;
-  current_price: number;
-  buyer_price: number | null;
-  spp_rate: number;
-  cost_price: number | null;
-  orders_count: number;
-  wb_stock: number;
-  verdict: 'step_down' | 'hold';
-  threshold: number;
-  jump: number;
-  jump_source: string;
-  confidence: string;
-  evidence: string;
-  evidence_days_ago: number | null;
-  own_points: number;
-  target_price: number | null;
-  target_spp: number | null;
-  target_buyer_price: number | null;
-  drop_seller: number | null;
-  drop_buyer: number | null;
-  drop_seller_pct: number | null;
+  price: number;
+  spp: number;
+  buyer_price: number;
+}
+
+export interface SppLevel {
+  price: number;
+  spp: number;
+  spp_min: number;
+  spp_max: number;
+  buyer_price: number;
+  n: number;
+  items: SppLevelItem[];
+}
+
+export interface SppCliff {
+  keep_below: number;
+  breaks_at: number;
+  spp_below: number;
+  spp_above: number;
+  drop: number;
+  seller_gives: number;
+  buyer_gains: number;
   leverage: number | null;
-  floor: number | null;
-  unit_profit_now: number | null;
-  unit_profit_after: number | null;
-  impact: number;
+  n_below: number;
+  n_above: number;
 }
 
-export interface SppLadderStats {
-  points: number;
+export interface SppCategory {
+  category: string;
+  nm_count: number;
+  levels: SppLevel[];
+  cliffs: SppCliff[];
+  gaps: number[];
+}
+
+export interface SppMapStats {
+  source: string;
   days: number;
-  nm_with_points: number;
-  steps_found: number;
-  step_down: number;
-  hold: number;
-  skipped_below_floor: number;
-  last_point_on: string | null;
+  step: number;
+  points: number;
+  categories_count: number;
+  with_cliffs: number;
+  last_snapshot_on: string | null;
 }
 
-export interface SppLadderResponse {
-  rows: SppLadderRow[];
-  steps: SppStep[];
-  stats: SppLadderStats;
+export interface SppMapResponse {
+  categories: SppCategory[];
+  stats: SppMapStats;
 }

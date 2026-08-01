@@ -157,7 +157,7 @@ async def sync_card_spp(db: AsyncSession, project_id: int) -> dict:
     # (Redis-карта живёт 2 суток, а лестницу СПП строить не из чего без истории)
     written = 0
     try:
-        from backend.services.pricing.spp_ladder import record_card_points
+        from backend.services.pricing.spp_points import record_card_points
 
         written = (await record_card_points(db, project_id, card)).get("written", 0)
     except Exception as e:  # история — побочный эффект, не валим синк цены с СПП

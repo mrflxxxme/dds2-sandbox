@@ -148,71 +148,64 @@ class PricingResponse(BaseModel):
     has_bdr: bool = False
 
 
-# ─── «Ступеньки СПП» (советник по цене, ничего не пишет в ВБ) ──────────────
+# ─── Карта СПП: категория × уровень цены → СПП ────────────────────────────
 
 
-class SppStep(BaseModel):
-    """Порог цены, на котором СПП скачком меняется (по всему проекту)."""
-
-    threshold: float  # цена, ниже которой СПП выше
-    spp_below: float  # нормированный СПП под порогом, п.п. к дневному фону (справочно)
-    spp_above: float
-    jump: float  # медиана СВОИХ скачков товаров, перешагивавших порог, п.п.
-    n_below: int  # точек в окне (кросс-секция — только для справки, она врёт)
-    n_above: int
-    n_products: int = 0  # товаров с точками по обе стороны — вес доказательства
-    agree_pct: float = 0  # доля таких товаров, подтвердивших скачок
-
-
-class SppLadderRow(BaseModel):
-    """Совет по одному артикулу: встать на ступеньку или не поднимать цену."""
+class SppLevelItem(BaseModel):
+    """Конкретный артикул на уровне цены — из чего сложилась медиана."""
 
     nm_id: int
     vendor_code: str | None = None
-    brand: str | None = None
-    category: str | None = None
-
-    current_price: float  # наша цена витрины сейчас (до СПП)
-    buyer_price: float | None = None  # что платит клиент сейчас
-    spp_rate: float = 0
-    cost_price: float | None = None
-    orders_count: int = 0
-    wb_stock: int = 0
-
-    verdict: str  # step_down (шаг вниз к порогу) | hold (сидим под порогом, не поднимать)
-    threshold: float
-    jump: float  # ожидаемый скачок СПП, п.п.
-    jump_source: str  # «своя история» | «порог по проекту»
-    confidence: str  # высокая | средняя | низкая
-    evidence: str = ""  # на чём основан вывод (наблюдений / товаров-свидетелей)
-    evidence_days_ago: int | None = None  # давность своего доказательства, дней
-    own_points: int = 0  # сколько своих наблюдений у товара
-
-    target_price: float | None = None  # цена на ступеньке (порог − 1 ₽)
-    target_spp: float | None = None
-    target_buyer_price: float | None = None
-    drop_seller: float | None = None  # сколько отдаём мы, ₽
-    drop_buyer: float | None = None  # сколько выигрывает клиент, ₽
-    drop_seller_pct: float | None = None
-    leverage: float | None = None  # Δ клиента / Δ наша — ради чего всё
-    floor: float | None = None  # цена безубытка (ниже неё не советуем)
-    unit_profit_now: float | None = None
-    unit_profit_after: float | None = None
-    impact: float = 0  # Δ клиента × заказы периода — для сортировки
+    price: float
+    spp: float
+    buyer_price: float
 
 
-class SppLadderStats(BaseModel):
+class SppLevel(BaseModel):
+    """Уровень цены внутри категории и живой СПП на нём."""
+
+    price: float  # уровень цены (наша цена до СПП, округлённая до шага сетки)
+    spp: float  # медиана СПП на уровне, %
+    spp_min: float  # разброс: не все товары уровня получают одинаковый СПП
+    spp_max: float
+    buyer_price: float  # медиана цены, которую платит клиент
+    n: int  # сколько артикулов стоит на этом уровне
+    items: list[SppLevelItem] = []  # сами артикулы — раскрывается в таблице
+
+
+class SppCliff(BaseModel):
+    """Обрыв: между соседними уровнями СПП резко падает вверх по цене."""
+
+    keep_below: float  # последний «хороший» уровень
+    breaks_at: float  # уровень, на котором СПП рушится
+    spp_below: float
+    spp_above: float
+    drop: float  # насколько падает, п.п.
+    seller_gives: float  # сколько ₽ уступаем мы, переходя вниз
+    buyer_gains: float  # сколько ₽ выигрывает клиент
+    leverage: float | None = None  # buyer_gains / seller_gives — ради чего всё
+    n_below: int = 0
+    n_above: int = 0
+
+
+class SppCategory(BaseModel):
+    category: str
+    nm_count: int = 0
+    levels: list[SppLevel] = []
+    cliffs: list[SppCliff] = []
+    gaps: list[int] = []  # уровни сетки без единого товара — что проверить пробой
+
+
+class SppMapStats(BaseModel):
+    source: str = "card"  # card (витрина) | orders (с кошельком покупателя)
+    days: int = 1
+    step: int = 100
     points: int = 0
-    days: int = 0
-    nm_with_points: int = 0
-    steps_found: int = 0
-    step_down: int = 0
-    hold: int = 0
-    skipped_below_floor: int = 0  # ступенька есть, но она ниже безубытка
-    last_point_on: str | None = None
+    categories_count: int = 0
+    with_cliffs: int = 0
+    last_snapshot_on: str | None = None
 
 
-class SppLadderResponse(BaseModel):
-    rows: list[SppLadderRow] = []
-    steps: list[SppStep] = []
-    stats: SppLadderStats
+class SppMapResponse(BaseModel):
+    categories: list[SppCategory] = []
+    stats: SppMapStats
