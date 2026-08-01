@@ -41,9 +41,10 @@ export function addPricingMethods(api: ApiClient) {
                 '/api/v1/pricing/sync-spp',
             );
         },
-        getSppMap(params?: { days?: number; step?: number; source?: string; category?: string }) {
+        getSppMap(params?: { date_from?: string; date_to?: string; step?: number; source?: string; category?: string }) {
             const q = new URLSearchParams();
-            if (params?.days) q.set('days', String(params.days));
+            if (params?.date_from) q.set('date_from', params.date_from);
+            if (params?.date_to) q.set('date_to', params.date_to);
             if (params?.step) q.set('step', String(params.step));
             if (params?.source) q.set('source', params.source);
             if (params?.category) q.set('category', params.category);

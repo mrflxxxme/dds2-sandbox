@@ -59,7 +59,7 @@ async def _upsert_points(db: AsyncSession, project_id: int, rows: list[dict]) ->
     # дедуп ключей внутри батча — иначе CardinalityViolation на ON CONFLICT
     uniq: dict[tuple, dict] = {}
     for r in rows:
-        uniq[(r["nm_id"], r["observed_on"], r["source"], r["seller_price"])] = r
+        uniq[(r["nm_id"], r["observed_on"], r.get("observed_hour", 0), r["source"], r["seller_price"])] = r
     payload = list(uniq.values())
 
     written = 0
@@ -131,7 +131,8 @@ async def record_card_points(db: AsyncSession, project_id: int, card: dict[int, 
     if not prices or not card:
         return {"status": "OK", "requested": len(prices), "written": 0, "stale": 0}
 
-    today = pytz.UTC.localize(utcnow()).astimezone(_MSK).date()
+    now_msk = pytz.UTC.localize(utcnow()).astimezone(_MSK)
+    today, hour = now_msk.date(), now_msk.hour
 
     points: list[dict] = []
     stale = 0
@@ -154,6 +155,7 @@ async def record_card_points(db: AsyncSession, project_id: int, card: dict[int, 
             {
                 "nm_id": nm,
                 "observed_on": today,
+                "observed_hour": hour,
                 "source": "card",
                 "seller_price": Decimal(str(round(seller, 2))),
                 "buyer_price": Decimal(str(round(buyer, 2))),
@@ -214,6 +216,7 @@ async def backfill_from_orders(db: AsyncSession, project_id: int, days: int = 90
             {
                 "nm_id": int(nm_id),
                 "observed_on": d,
+                "observed_hour": 0,  # источник дневной: медиана заказов дня
                 "source": "orders",
                 "seller_price": Decimal(str(round(seller, 2))),
                 "buyer_price": Decimal(str(round(buyer, 2))),

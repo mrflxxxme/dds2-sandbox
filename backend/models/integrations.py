@@ -14,6 +14,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -361,9 +362,9 @@ class WbSppObservation(Base):
       * `orders` — ретро из `wb_orders` (поштучный `spp` + `price_with_disc`),
         90 дней истории «бесплатно».
 
-    Один ряд = (проект, nm, день, источник, уровень нашей цены): цена в течение
-    дня меняется редко, а СПП внутри дня гуляет по покупателям — храним медиану
-    дня, а не каждое наблюдение.
+    Один ряд = (проект, nm, день, ЧАС, источник, уровень нашей цены). Час в ключе
+    потому, что СПП двигается в течение дня: без него часовые снимки затирали бы
+    друг друга. Ретро из заказов пишется с часом 0 — там источник дневной.
     """
 
     __tablename__ = "wb_spp_observations"
@@ -373,6 +374,7 @@ class WbSppObservation(Base):
     nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     observed_on: Mapped[date] = mapped_column(Date, nullable=False)  # МСК-день
+    observed_hour: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)  # МСК-час
     source: Mapped[str] = mapped_column(String(8), nullable=False)  # card | orders
 
     seller_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)  # наша цена (до СПП)
@@ -384,7 +386,8 @@ class WbSppObservation(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "project_id", "nm_id", "observed_on", "source", "seller_price", name="uq_spp_obs_point"
+            "project_id", "nm_id", "observed_on", "observed_hour", "source", "seller_price",
+            name="uq_spp_obs_point",
         ),
         Index("ix_spp_obs_project_nm_day", "project_id", "nm_id", "observed_on"),
         Index("ix_spp_obs_project_day", "project_id", "observed_on"),

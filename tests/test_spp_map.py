@@ -13,7 +13,9 @@ from backend.services.pricing.spp_map import (
     Level,
     build_levels,
     coverage_gaps,
+    cross_hints,
     find_cliffs,
+    global_levels,
 )
 
 
@@ -85,3 +87,88 @@ class TestGaps:
 
     def test_no_levels_no_gaps(self):
         assert coverage_gaps([]) == []
+
+
+class TestCrossHints:
+    """Подсказки по другим категориям: ступени ВБ живут в цене, а не в категории."""
+
+    def _lv(self, price, spp, n=5):
+        return Level(price=price, spp=spp, spp_min=spp, spp_max=spp,
+                     buyer_price=round(price * (1 - spp / 100)), n=n)
+
+    def test_suggests_going_down_when_client_wins_more(self):
+        """Уступаем 200 ₽ — клиент выигрывает 390 ₽: это ступенька, а не скидка."""
+        levels = [self._lv(2200, 24.8)]  # клиент платит 1654
+        glob = {2000.0: {"spp": 36.8, "categories": ["Ковры", "Шторы"], "n": 40}}
+        cross_hints(levels, glob)
+        h = levels[0].hint_down
+        assert h is not None
+        assert h["price"] == 2000.0 and h["buyer_price"] == 1264
+        assert h["leverage"] >= 1.2
+
+    def test_plain_discount_is_not_a_hint(self):
+        """СПП тот же: клиент выигрывает ровно нашу уступку минус СПП — молчим."""
+        levels = [self._lv(2200, 24.8)]
+        glob = {2000.0: {"spp": 24.8, "categories": ["Пледы"], "n": 12}}
+        cross_hints(levels, glob)
+        assert levels[0].hint_down is None
+
+    def test_suggests_going_up_when_client_price_holds(self):
+        """Главные деньги: нашу цену поднять можно, а клиент почти не заметит."""
+        levels = [self._lv(2200, 24.8)]  # клиент платит 1654
+        glob = {2600.0: {"spp": 36.0, "categories": ["Пледы"], "n": 12}}  # клиент 1664
+        cross_hints(levels, glob)
+        h = levels[0].hint_up
+        assert h is not None
+        assert h["price"] == 2600.0 and h["gain"] == 400
+        assert abs(h["buyer_delta"]) <= 20
+
+    def test_going_up_that_hurts_client_is_silent(self):
+        levels = [self._lv(2200, 24.8)]
+        glob = {2600.0: {"spp": 24.8, "categories": ["Пледы"], "n": 12}}  # клиент 1955
+        cross_hints(levels, glob)
+        assert levels[0].hint_up is None
+
+    def test_own_level_beats_foreign(self):
+        """Есть свои товары на этой цене — чужой опыт не навязываем."""
+        levels = [self._lv(2000, 10.0), self._lv(2200, 24.8)]
+        glob = {2000.0: {"spp": 36.8, "categories": ["Ковры"], "n": 40}}
+        cross_hints(levels, glob)
+        assert levels[1].hint_down is None
+
+    def test_weak_foreign_level_is_ignored(self):
+        levels = [self._lv(2200, 24.8)]
+        glob = {2000.0: {"spp": 36.8, "categories": ["Палатки"], "n": 2}}  # два товара — не ориентир
+        cross_hints(levels, glob)
+        assert levels[0].hint_down is None
+
+    def test_global_levels_median_across_categories(self):
+        glob = global_levels({
+            "Ковры": [self._lv(2000, 36.8, n=40)],
+            "Шторы": [self._lv(2000, 35.8, n=20)],
+            "Пледы": [self._lv(2000, 36.8, n=5)],
+        })
+        assert glob[2000.0]["spp"] == 36.8
+        assert glob[2000.0]["n"] == 65
+        assert glob[2000.0]["categories"] == ["Ковры", "Пледы", "Шторы"]
+
+    def test_up_hint_uses_own_levels_too(self):
+        """Свой уровень выше по цене, но клиенту там дешевле — это и есть подсказка.
+
+        Живой случай «Ковров» 2026-08-01: 4700 ₽ → клиент 3554 ₽, а 5000 ₽ →
+        клиент 3159 ₽. Раньше свои уровни ГЛУШИЛИ подсказку, и очевидный ход не
+        показывался вовсе.
+        """
+        levels = [self._lv(4700, 24.8, n=2), self._lv(5000, 36.8, n=33)]
+        cross_hints(levels, {})
+        h = levels[0].hint_up
+        assert h is not None
+        assert h["price"] == 5000 and h["gain"] == 300
+        assert h["buyer_delta"] < 0  # и нам больше, и клиенту дешевле
+
+    def test_up_hint_wins_over_down(self):
+        """Если подъём клиенту не хуже снижения — показываем только подъём."""
+        levels = [self._lv(4400, 24.8), self._lv(4300, 24.8), self._lv(5000, 36.8, n=33)]
+        cross_hints(levels, {})
+        assert levels[0].hint_up is not None
+        assert levels[0].hint_down is None

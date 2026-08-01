@@ -88,7 +88,8 @@ async def sync_prices(
 
 @router.get("/spp-map", response_model=SppMapResponse)
 async def spp_map(
-    days: int = Query(1, ge=1, le=90),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
     step: int = Query(100, ge=10, le=1000),
     source: str = Query("card"),
     category: str | None = Query(None),
@@ -98,7 +99,7 @@ async def spp_map(
     """Карта «категория × цена → СПП»: лесенка уровней и обрывы, где СПП падает."""
     src = source if source in ("card", "orders") else "card"
     return await spp_map_service.get_spp_map(
-        db, project.id, days=days, step=step, source=src, category=category
+        db, project.id, date_from=date_from, date_to=date_to, step=step, source=src, category=category
     )
 
 

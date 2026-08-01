@@ -161,6 +161,18 @@ class SppLevelItem(BaseModel):
     buyer_price: float
 
 
+class SppHint(BaseModel):
+    """Ориентир по другим категориям: ступени ВБ живут в цене, а не в категории."""
+
+    price: float  # цена до СПП, на которую предлагается встать
+    spp: float
+    buyer_price: float  # сколько при этом заплатит клиент — главное число подсказки
+    gain: float = 0  # вниз: выигрыш клиента ₽; вверх: прибавка к нашей цене ₽
+    leverage: float | None = None  # только для «вниз»: выигрыш клиента ÷ наша уступка
+    buyer_delta: float = 0  # только для «вверх»: насколько изменится цена клиента
+    categories: list[str] = []
+
+
 class SppLevel(BaseModel):
     """Уровень цены внутри категории и живой СПП на нём."""
 
@@ -171,6 +183,8 @@ class SppLevel(BaseModel):
     buyer_price: float  # медиана цены, которую платит клиент
     n: int  # сколько артикулов стоит на этом уровне
     items: list[SppLevelItem] = []  # сами артикулы — раскрывается в таблице
+    hint_down: SppHint | None = None  # ниже, по опыту других категорий, СПП выше
+    hint_up: SppHint | None = None  # выше можно встать без потери СПП
 
 
 class SppCliff(BaseModel):
@@ -198,7 +212,8 @@ class SppCategory(BaseModel):
 
 class SppMapStats(BaseModel):
     source: str = "card"  # card (витрина) | orders (с кошельком покупателя)
-    days: int = 1
+    date_from: str | None = None
+    date_to: str | None = None
     step: int = 100
     points: int = 0
     categories_count: int = 0

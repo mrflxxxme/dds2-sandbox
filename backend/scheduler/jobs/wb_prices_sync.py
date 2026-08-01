@@ -70,3 +70,40 @@ async def sync_all_projects_wb_prices():
             errors += 1
 
     logger.info("WB prices sync: done — %d ok, %d errors", ok, errors)
+
+
+async def snapshot_all_projects_spp():
+    """Часовой снимок СПП витрины по всем проектам, у которых есть цены.
+
+    Ключ WB не нужен — card-API публичный, а список nm берём из уже синканых
+    `wb_prices`. Поэтому джоб не гейтится на активный ключ интеграции: даже если
+    ключ отключили, лестница СПП продолжает наполняться.
+    """
+    from sqlalchemy import distinct, select
+
+    from backend.models import WbPrice
+    from backend.services.pricing.spp_points import snapshot_from_card
+
+    async with AsyncSessionLocal() as db:
+        project_ids = list(
+            (await db.execute(select(distinct(WbPrice.project_id)))).scalars().all()
+        )
+
+    if not project_ids:
+        logger.info("СПП-снимок: нет проектов с ценами, пропускаем")
+        return
+
+    ok = errors = written = 0
+    for project_id in project_ids:
+        try:
+            async with AsyncSessionLocal() as db:
+                res = await asyncio.wait_for(snapshot_from_card(db, project_id), timeout=900)
+            written += res.get("written", 0)
+            ok += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("СПП-снимок: project %d failed — %s", project_id, e)
+            errors += 1
+
+    logger.info("СПП-снимок: %d проектов ok, %d ошибок, %d точек", ok, errors, written)

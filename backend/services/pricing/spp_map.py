@@ -43,6 +43,10 @@ UNCATEGORIZED = "Без категории"
 GRID = (299, 499, 599, 799, 999, 1199, 1499, 1799, 1999, 2499, 2999, 3499, 3999, 4999, 5999)
 CLIFF_MIN_DROP = 3.0  # п.п. между соседними уровнями, чтобы назвать это обрывом
 LEVEL_MIN_N = 1
+HINT_UP_SPAN = 0.3  # насколько выше текущего уровня ищем «поднять без потери»
+HINT_MIN_SUPPORT = 3  # чужой уровень с одним-двумя товарами — не ориентир
+HINT_MIN_LEVERAGE = 1.2  # снижение показываем, только если клиент выигрывает БОЛЬШЕ нашей уступки
+HINT_UP_TOLERANCE = 0.02  # «поднять незаметно»: цена клиента растёт не более чем на 2 %
 
 
 @dataclass
@@ -54,6 +58,18 @@ class Level:
     buyer_price: float
     n: int
     items: list[dict] = field(default_factory=list)  # артикулы уровня — раскрывается в UI
+    hint_down: dict | None = None  # «в других категориях ниже СПП выше»
+    hint_up: dict | None = None  # «выше можно встать без потери СПП»
+
+
+def _parse_day(value: str | None) -> _date | None:
+    """ISO-строка → дата (None, если пусто или мусор — вызывающий подставит своё)."""
+    if not value:
+        return None
+    try:
+        return _date.fromisoformat(value[:10])
+    except ValueError:
+        return None
 
 
 def _bucket(price: float, step: int) -> float:
@@ -138,6 +154,96 @@ def coverage_gaps(levels: list[Level], grid: tuple[int, ...] = GRID) -> list[int
     return [g for g in grid if span[0] <= g <= span[1] and not any(abs(g - h) <= 50 for h in have)]
 
 
+def global_levels(per_cat: dict[str, list[Level]]) -> dict[float, dict]:
+    """Уровень цены → СПП по ВСЕМ категориям (медиана медиан) + кто это подтверждает.
+
+    Ступени ВБ живут не в категории, а в цене: если в «Коврах» на 1999 ₽ дают
+    36.8 %, то и «Шторам» на этом уровне, скорее всего, дадут столько же. Такой
+    ориентир — единственный способ что-то сказать про уровень, на котором у
+    категории нет ни одного товара.
+    """
+    acc: dict[float, list[tuple[float, str, int]]] = defaultdict(list)
+    for cat, levels in per_cat.items():
+        for lv in levels:
+            acc[lv.price].append((lv.spp, cat, lv.n))
+    return {
+        price: {
+            "spp": round(median([s for s, _, _ in v]), 1),
+            "categories": sorted({c for _, c, _ in v}),
+            "n": sum(n for _, _, n in v),
+        }
+        for price, v in acc.items()
+    }
+
+
+def cross_hints(
+    levels: list[Level],
+    glob: dict[float, dict],
+    *,
+    min_leverage: float = HINT_MIN_LEVERAGE,
+    up_span: float = HINT_UP_SPAN,
+    up_tolerance: float = HINT_UP_TOLERANCE,
+) -> None:
+    """Проставить уровням подсказку «что сделать с ценой» (мутирует `levels`).
+
+    Показываем ровно два случая, в которых цену стоит трогать:
+      * ВНИЗ — клиент выигрывает БОЛЬШЕ, чем мы уступаем (рычаг > 1). Обычная
+        скидка рычагом ≤ 1 подсказкой не является: это просто потеря маржи.
+      * ВВЕРХ — нашу цену поднимаем, а цена клиента не растёт: разницу добирает
+        СПП. Бывает и так, что клиент при этом платит МЕНЬШЕ (Ковры 2026-08-01:
+        4300 ₽ → клиент 3210 ₽, а 5000 ₽ → клиент 3159 ₽) — чистая победа.
+    Всё остальное — молчим, чтобы колонка не пестрила бессмысленными строками.
+
+    Кандидаты — СВОИ уровни категории (лучшее доказательство) плюс чужие оттуда,
+    где своих товаров нет. Приоритет своих: раньше свои уровни, наоборот,
+    ГЛУШИЛИ подсказку, и очевидный подъём 4300 → 5000 оставался незамеченным.
+    """
+    own_prices = {lv.price for lv in levels}
+    candidates: dict[float, dict] = {
+        p: {"spp": g["spp"], "buyer": round(p * (1 - g["spp"] / 100)), "cats": g["categories"][:3], "n": g["n"]}
+        for p, g in glob.items()
+        if p not in own_prices and g["n"] >= HINT_MIN_SUPPORT
+    }
+    candidates.update(
+        {lv.price: {"spp": lv.spp, "buyer": lv.buyer_price, "cats": [], "n": lv.n} for lv in levels}
+    )
+
+    for lv in levels:
+        best_down: tuple[float, dict] | None = None
+        best_up: tuple[float, dict] | None = None
+
+        for p, c in candidates.items():
+            if p == lv.price:
+                continue
+            hint = {
+                "price": p,
+                "spp": c["spp"],
+                "buyer_price": c["buyer"],
+                "categories": c["cats"],
+            }
+            if p < lv.price:
+                give = lv.price - p
+                gain = lv.buyer_price - c["buyer"]
+                lev = round(gain / give, 1) if give > 0 else None
+                if lev is not None and lev >= min_leverage:
+                    hint["gain"] = round(gain, 0)
+                    hint["leverage"] = lev
+                    if best_down is None or p > best_down[0]:  # ближе к текущей — уступаем меньше
+                        best_down = (p, hint)
+            elif p <= lv.price * (1 + up_span) and c["buyer"] <= lv.buyer_price * (1 + up_tolerance):
+                hint["gain"] = round(p - lv.price, 0)  # прибавка к нашей цене
+                hint["buyer_delta"] = round(c["buyer"] - lv.buyer_price, 0)
+                if best_up is None or p > best_up[0]:  # самый дорогой из безболезненных
+                    best_up = (p, hint)
+
+        lv.hint_up = best_up[1] if best_up else None
+        lv.hint_down = best_down[1] if best_down else None
+        # подъём строго лучше снижения (клиенту не хуже, а нам больше) — снижение
+        # в такой строке только сбивает: оставляем один ход
+        if lv.hint_up and lv.hint_down and lv.hint_up["buyer_price"] <= lv.hint_down["buyer_price"]:
+            lv.hint_down = None
+
+
 async def _category_map(db: AsyncSession, project_id: int) -> dict[int, tuple[str, str | None]]:
     """nm_id → (категория, артикул продавца). Категория: override справочника → предмет ВБ."""
     from backend.services.pricing.markup import _load_meta_map
@@ -154,13 +260,16 @@ async def get_spp_map(
     db: AsyncSession,
     project_id: int,
     *,
-    days: int = 1,
+    date_from: str | None = None,
+    date_to: str | None = None,
     step: int = 100,
     source: str = "card",
     category: str | None = None,
 ) -> dict:
-    """Карта «категория × цена → СПП» по снимкам витрины за последние `days` дней."""
-    since = pytz.UTC.localize(utcnow()).astimezone(_MSK).date() - timedelta(days=days - 1)
+    """Карта «категория × цена → СПП» по снимкам витрины за выбранный период."""
+    today = pytz.UTC.localize(utcnow()).astimezone(_MSK).date()
+    since = _parse_day(date_from) or today
+    until = _parse_day(date_to) or today
     rows = (
         await db.execute(
             select(
@@ -173,6 +282,7 @@ async def get_spp_map(
             .where(
                 WbSppObservation.project_id == project_id,
                 WbSppObservation.observed_on >= since,
+                WbSppObservation.observed_on <= until,
                 WbSppObservation.source == source,
             )
             .limit(_MAX_POINTS)
@@ -189,13 +299,16 @@ async def get_spp_map(
         by_cat[cat].append((float(price), float(spp), float(buyer), int(nm), vendor))
         days_seen.add(day)
 
+    per_cat = {cat: build_levels(pts, step) for cat, pts in by_cat.items()}
+    glob = global_levels(per_cat)
+
     out: list[dict] = []
-    for cat, pts in by_cat.items():
-        levels = build_levels(pts, step)
+    for cat, levels in per_cat.items():
+        cross_hints(levels, glob)
         out.append(
             {
                 "category": cat,
-                "nm_count": len(pts),
+                "nm_count": len(by_cat[cat]),
                 "levels": [lv.__dict__ for lv in levels],
                 "cliffs": find_cliffs(levels),
                 "gaps": coverage_gaps(levels),
@@ -207,7 +320,8 @@ async def get_spp_map(
         "categories": out,
         "stats": {
             "source": source,
-            "days": days,
+            "date_from": since.isoformat(),
+            "date_to": until.isoformat(),
             "step": step,
             "points": len(rows),
             "categories_count": len(out),

@@ -9346,6 +9346,16 @@ export interface SppLevelItem {
   buyer_price: number;
 }
 
+export interface SppHint {
+  price: number;
+  spp: number;
+  buyer_price: number;
+  gain: number;
+  leverage: number | null;
+  buyer_delta: number;
+  categories: string[];
+}
+
 export interface SppLevel {
   price: number;
   spp: number;
@@ -9354,6 +9364,8 @@ export interface SppLevel {
   buyer_price: number;
   n: number;
   items: SppLevelItem[];
+  hint_down: SppHint | null;
+  hint_up: SppHint | null;
 }
 
 export interface SppCliff {
@@ -9379,7 +9391,8 @@ export interface SppCategory {
 
 export interface SppMapStats {
   source: string;
-  days: number;
+  date_from: string | null;
+  date_to: string | null;
   step: number;
   points: number;
   categories_count: number;
