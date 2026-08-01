@@ -33,7 +33,7 @@ from backend.services.warehouse_outbound import (
     complete_transfer,
     create_transfer,
     mark_transfer_ready,
-    send_transfer,
+    send_transfer as _send_transfer_raw,
 )
 from backend.services.warehouse_stock_engine import (
     get_stock_movements,
@@ -44,6 +44,17 @@ from backend.services.warehouse_stock_engine import (
 
 def _uid() -> str:
     return uuid.uuid4().hex[:8]
+
+
+async def send_transfer(db_session, project_id, transfer_id, **kwargs):
+    """Отправка бракованного переезда с явным «везём без оформления».
+
+    Файл про БРАК, а не про логистику: с 01.08.2026 голый READY (ни машины, ни
+    перевозчика, ни стоимости) отправить нельзя (TR-32 — сток списывался, а
+    забор не рождался). Гейт проверяется в tests/test_transfer_status.py.
+    """
+    kwargs.setdefault("allow_no_logistics", True)
+    return await _send_transfer_raw(db_session, project_id, transfer_id, **kwargs)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

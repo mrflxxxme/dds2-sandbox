@@ -1,4 +1,4 @@
-import type { StockTransfer, StockTransferStatus, TransferFfLink, TransferFfSide } from '@/types/api';
+import type { GazelkaConfig, StockTransfer, StockTransferStatus, TransferFfLink, TransferFfSide } from '@/types/api';
 import { formatNumber, pluralRu } from '@/lib/utils';
 
 /**
@@ -208,6 +208,22 @@ export function canPushTransferToGazelka(
     return (gazelkaWarehouseIds ?? []).includes(t.from_warehouse_id);
 }
 
+/**
+ * Склады-ИСТОЧНИКИ, с которых Газельке можно отдавать груз, — из конфига
+ * интеграции для `canPushTransferToGazelka`.
+ *
+ * Фолбэк на одиночный `warehouse_id` не косметика: список `warehouse_ids`
+ * приехал вместе с переездом, и в окно деплоя (фронт новый, бэкенд ещё старый)
+ * поля в ответе нет — без фолбэка кнопка «Отправить в Газельку» молча пропала
+ * бы у ВСЕХ переездов, и это читалось бы как «интеграция сломалась».
+ * Не настроенная Газелька — пустой список, а не «все склады».
+ */
+export function gazelkaSourceWarehouseIds(cfg: GazelkaConfig | null | undefined): number[] {
+    if (!cfg?.configured) return [];
+    if (cfg.warehouse_ids?.length) return cfg.warehouse_ids;
+    return cfg.warehouse_id != null ? [cfg.warehouse_id] : [];
+}
+
 /** «Принять» — оприходовать на складе-получателе. */
 export function canCompleteTransfer(status: StockTransferStatus | string): boolean {
     return status === 'SHIPPED';
@@ -364,6 +380,21 @@ export function transferTotalWeight(t: StockTransfer): number | null {
     const one = toMoney(t.pallet_weight_kg);
     if (one === null || t.pallets_count == null) return null;
     return one * t.pallets_count;
+}
+
+/**
+ * ФАКТ ₽ за одну единицу груза (паллету либо короб) — аналог «₽/палета»
+ * заявки, но у переезда это НЕ прогноз: делим уже известную стоимость забора
+ * на количество единиц.
+ *
+ * null — делить нечего (стоимости нет) либо не на что (единицы не заводили).
+ * Ноль единиц отдельно: деление дало бы Infinity, и карточка показала бы «∞ ₽/пал».
+ */
+export function transferCostPerUnit(t: StockTransfer): number | null {
+    const cost = toMoney(t.pickup_cost);
+    if (cost === null) return null;
+    if (!t.pallets_count || t.pallets_count <= 0) return null;
+    return cost / t.pallets_count;
 }
 
 /**

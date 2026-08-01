@@ -79,6 +79,45 @@ async def gazelka_send(
         raise HTTPException(status_code=e.status_code, detail=str(e)) from e
 
 
+# ─── Переезд между нашими складами (StockTransfer) ───────────────────────────
+# Зеркало assembly-путей: у Газельки один и тот же кабинет и одна и та же форма,
+# отличается только источник данных и гейт (склад-ИСТОЧНИК вместо склада отгрузки).
+
+
+@router.get("/transfer/{transfer_id}/draft", response_model=GazelkaDraftResponse)
+async def gazelka_transfer_draft(
+    transfer_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> GazelkaDraftResponse:
+    """Справочники их формы + предзаполнение из переезда (для диалога логиста)."""
+    try:
+        return await gazelka_service.build_transfer_draft(db, project.id, transfer_id)
+    except GazelkaServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+
+
+@router.post(
+    "/transfer/{transfer_id}/send",
+    response_model=GazelkaSendResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def gazelka_transfer_send(
+    transfer_id: int,
+    payload: GazelkaSendRequest,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> GazelkaSendResult:
+    """РЕАЛЬНАЯ отправка переезда в Газельку (необратимо). Пишет audit-строку."""
+    try:
+        return await gazelka_service.send_transfer_order(
+            db, project.id, transfer_id, payload, actor=_actor(user)
+        )
+    except GazelkaServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+
+
 # ─── Заявки из портала (списки / ТТН / редактирование) ───────────────────────
 
 
@@ -171,11 +210,15 @@ async def gazelka_save_edit(
 @router.get("/match-candidates", response_model=list[GazelkaMatchCandidate])
 async def gazelka_match_candidates(
     search: str | None = None,
+    kind: GazelkaLinkKind = "assembly",
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ) -> list[GazelkaMatchCandidate]:
-    """Наши сборки — кандидаты на ручное сопоставление с заявкой Газельки."""
-    return await gazelka_service.list_match_candidates(db, project.id, search=search)
+    """Наши документы — кандидаты на ручное сопоставление с заявкой Газельки.
+
+    `kind=assembly` (дефолт) — сборки, `kind=transfer` — переезды между складами.
+    """
+    return await gazelka_service.list_match_candidates(db, project.id, search=search, kind=kind)
 
 
 @router.post(

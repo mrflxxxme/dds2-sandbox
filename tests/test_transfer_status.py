@@ -32,6 +32,7 @@ from backend.models.warehouse import (
     InboundReceipt,
     InboundStatus,
     MovementType,
+    OutboundShipment,
     StockMovement,
     StockTransfer,
     StockTransferStatusHistory,
@@ -56,7 +57,7 @@ from backend.services.warehouse_outbound import (
     mark_transfer_ready,
     receive_transfer_fact,
     return_transfer,
-    send_transfer,
+    send_transfer as _send_transfer_raw,
     unassign_vehicle_transfer,
     update_transfer,
 )
@@ -66,6 +67,19 @@ pytestmark = pytest.mark.asyncio
 
 def _uid() -> str:
     return uuid.uuid4().hex[:8]
+
+
+async def send_transfer(db_session, project_id, transfer_id, **kwargs):
+    """Отправка с явным «везём без оформления».
+
+    Файл проверяет ЛЕСТНИЦУ, а не гейт логистики: с 01.08.2026 голый READY без
+    машины/перевозчика/стоимости отправить нельзя (TR-32 — сток списывался, а
+    забор не рождался), и без флага половина тестов лестницы падала бы на
+    несвязанной проверке. Сам гейт живёт в `TestSendLogisticsGate` — там
+    вызывается `_send_transfer_raw` напрямую.
+    """
+    kwargs.setdefault("allow_no_logistics", True)
+    return await _send_transfer_raw(db_session, project_id, transfer_id, **kwargs)
 
 
 # ─── Фикстуры ──────────────────────────────────────────────────────────────
@@ -178,6 +192,19 @@ async def _movements(db_session, project, transfer_id, movement_type: MovementTy
         )
     ).all()
     return [int(q or 0) + int(d or 0) for q, d in rows]
+
+
+async def _pickup_count(db_session, project, transfer_id) -> int:
+    """Сколько ЖИВЫХ заборов у переезда — «есть ли у перевозки денежный документ»."""
+    return (
+        await db_session.execute(
+            select(func.count(OutboundShipment.id)).where(
+                OutboundShipment.project_id == project.id,
+                OutboundShipment.stock_transfer_id == transfer_id,
+                OutboundShipment.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalar()
 
 
 async def _history(db_session, project, transfer_id) -> list[tuple]:
@@ -306,16 +333,44 @@ class TestManualLadder:
             ("DELIVERED", "CLOSED"),
         ]
 
-    async def test_send_allowed_from_ready_without_vehicle(
+    async def test_send_from_ready_requires_logistics(
         self, db_session, project, src_wh, dst_wh, barcode
     ):
-        """Карв-аут READY → SHIPPED: переезд возят и без оформления машины."""
+        """Карв-аут READY → SHIPPED жив, но голый READY не пускает (канон 01.08.2026).
+
+        Отказ обязан случиться ДО единой проводки: иначе сток списан, а забор
+        (носитель денег) не создан — переезд уехал бы мимо оплат навсегда.
+        """
         await _stock(db_session, project, src_wh, barcode, 100)
         transfer = await _mk(db_session, project, src_wh, dst_wh, barcode, 10)
         await mark_transfer_ready(db_session, project.id, transfer.id)
 
-        sent = await send_transfer(db_session, project.id, transfer.id)
+        with pytest.raises(ValueError, match="Назначьте машину"):
+            await _send_transfer_raw(db_session, project.id, transfer.id)
+        await db_session.refresh(transfer)
+        assert transfer.status == TransferStatus.READY
+        assert await _movements(db_session, project, transfer.id, MovementType.TRANSFER_OUT) == []
+
+        # Любой признак оформления открывает карв-аут — госномер не обязателен.
+        transfer.pickup_cost = Decimal("7000.00")
+        await db_session.commit()
+        sent = await _send_transfer_raw(db_session, project.id, transfer.id)
         assert sent.status == TransferStatus.SHIPPED
+
+    async def test_send_from_ready_with_explicit_allow_no_logistics(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """«Создать и увезти»: явный флаг — единственный путь для голого READY."""
+        await _stock(db_session, project, src_wh, barcode, 100)
+        transfer = await _mk(db_session, project, src_wh, dst_wh, barcode, 10)
+        await mark_transfer_ready(db_session, project.id, transfer.id)
+
+        sent = await _send_transfer_raw(
+            db_session, project.id, transfer.id, allow_no_logistics=True
+        )
+        assert sent.status == TransferStatus.SHIPPED
+        # И забора нет: платить за внутреннюю переброску некому.
+        assert await _pickup_count(db_session, project, transfer.id) == 0
 
     async def test_send_rejected_before_ready(self, db_session, project, src_wh, dst_wh, barcode):
         await _stock(db_session, project, src_wh, barcode, 100)
@@ -1282,7 +1337,19 @@ class TestStatusRoutesOverHttp:
         assert resp.json()["status"] == "READY"
         assert resp.json()["actual_ready_date"] is not None
 
+        # READY без логистики — тоже 400: гейт живёт и на HTTP, а не только в
+        # сервисе (иначе «Отправить» из Листа логиста увезло бы мимо оплат).
         resp = await client.post(f"/api/v1/warehouse/transfers/{tid}/send", headers=headers)
+        assert resp.status_code == 400, resp.text
+        # Единый конверт ошибок проекта (backend/exceptions.py), а НЕ дефолтный
+        # FastAPI-«detail»: текст лежит в error.message, и фронт читает именно его.
+        assert "Назначьте машину" in resp.json()["error"]["message"]
+
+        resp = await client.post(
+            f"/api/v1/warehouse/transfers/{tid}/send",
+            json={"allow_no_logistics": True},
+            headers=headers,
+        )
         assert resp.status_code == 200, resp.text
         assert resp.json()["status"] == "SHIPPED"
         assert resp.json()["shipped_at"] is not None

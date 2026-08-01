@@ -86,9 +86,17 @@ async def assign_vehicle_transfer(db_session, project_id, transfer_id, payload):
     return await _assign_vehicle_raw(db_session, project_id, transfer_id, payload)
 
 
-async def send_transfer(db_session, project_id, transfer_id):
+async def send_transfer(db_session, project_id, transfer_id, **kwargs):
+    """Отправка с доводкой до READY и с явным «везём без оформления».
+
+    Флаг по умолчанию взведён: с 01.08.2026 голый READY (ни машины, ни
+    перевозчика, ни стоимости) отправить нельзя, а тесты этого файла проверяют
+    сток и забор, а не гейт. Тесты, которым нужен именно гейт, зовут
+    `_send_transfer_raw` напрямую.
+    """
     await _ensure_ready(db_session, project_id, transfer_id)
-    return await _send_transfer_raw(db_session, project_id, transfer_id)
+    kwargs.setdefault("allow_no_logistics", True)
+    return await _send_transfer_raw(db_session, project_id, transfer_id, **kwargs)
 
 
 @pytest_asyncio.fixture
@@ -322,10 +330,15 @@ class TestTransferPickup:
         assert qty == 60
 
     @pytest.mark.asyncio
-    async def test_send_without_vehicle_creates_no_pickup(
+    async def test_send_without_logistics_is_blocked(
         self, db_session, project, src_wh, dst_wh, barcode
     ):
-        """Переезд без машины — внутренняя переброска: пустой забор в листе оплаты не нужен."""
+        """Канон 01.08.2026: голый READY не уезжает — иначе мимо оплат (TR-32).
+
+        С явным «везём без оформления» проходит, но забор и тогда не рождается:
+        внутреннюю переброску, которую никто не оплачивает, в листе оплаты видеть
+        не надо.
+        """
         await _stock(db_session, project, src_wh, barcode, 100)
         transfer = await create_transfer(
             db_session,
@@ -336,7 +349,13 @@ class TestTransferPickup:
                 "items": [{"barcode": barcode, "quantity": 10}],
             },
         )
-        await send_transfer(db_session, project.id, transfer.id)
+        await mark_transfer_ready(db_session, project.id, transfer.id)
+        with pytest.raises(ValueError, match="Назначьте машину"):
+            await _send_transfer_raw(db_session, project.id, transfer.id)
+        await db_session.refresh(transfer)
+        assert transfer.status == TransferStatus.READY
+
+        await _send_transfer_raw(db_session, project.id, transfer.id, allow_no_logistics=True)
         count = (
             await db_session.execute(
                 select(func.count(OutboundShipment.id)).where(

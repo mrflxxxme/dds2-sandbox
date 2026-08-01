@@ -32,13 +32,17 @@ def _uid() -> str:
     return uuid.uuid4().hex[:8]
 
 
-async def send_transfer(db_session, project_id, transfer_id):
+async def send_transfer(db_session, project_id, transfer_id, **kwargs):
     """Отправка переезда с доводкой до READY — см. шапку tests/test_transfer_vehicle.py.
 
     Переезд рождается в PENDING, а `send_transfer` работает из READY /
     VEHICLE_ASSIGNED. Тесты этого файла проверяют движения стока, а не
     лестницу, поэтому ступень «собран» проставляем шорткатом. Из отгруженных
     статусов обёртка ничего не делает — отказ доходит до сервиса как есть.
+
+    `allow_no_logistics` взведён по умолчанию: с 01.08.2026 голый READY без
+    машины/перевозчика/стоимости отправить нельзя (TR-32), а здесь ни один тест
+    логистику не оформляет — она к движениям стока отношения не имеет.
     """
     transfer = await db_session.get(StockTransfer, transfer_id)
     if transfer is not None and TransferStatus(transfer.status) in (
@@ -46,7 +50,8 @@ async def send_transfer(db_session, project_id, transfer_id):
         TransferStatus.IN_PROGRESS,
     ):
         await mark_transfer_ready(db_session, project_id, transfer_id)
-    return await _send_transfer_raw(db_session, project_id, transfer_id)
+    kwargs.setdefault("allow_no_logistics", True)
+    return await _send_transfer_raw(db_session, project_id, transfer_id, **kwargs)
 
 
 @pytest_asyncio.fixture

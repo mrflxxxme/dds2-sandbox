@@ -37,7 +37,7 @@
  *    уже есть, здесь — заводят новый.
  */
 import type React from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
@@ -53,6 +53,7 @@ import type {
     Nomenclature,
     StockTransfer,
     StockTransferItem,
+    TransferAssignVehiclePayload,
     TransferFfLink,
     TransferFfSide,
     Warehouse,
@@ -67,7 +68,8 @@ import {
     canPushTransferShipmentToFf,
     canPushTransferToFf,
     canReturnTransfer,
-    canSendTransfer,
+    canSendTransferNow,
+    canSetTransferLogistics,
     ffLinkLabel,
     ffLinkStage,
     splitTransferFfLinks,
@@ -287,6 +289,73 @@ export default function TransferDetailPage() {
     const editor = canEdit();
     const canDraftEdit = editor && canEditTransfer(transfer.status);
     const receiveProgress = transferReceiveProgress(transfer);
+    // Переезд ведёт агрегатор: машину, стоимость и даты присылает он сам
+    // (синк заказа портала). Ручная правка логистики тут — гарантированный
+    // рассинхрон с тем, что реально поедет, поэтому её просто нет.
+    const viaGazelka = !!transfer.via_gazelka;
+    // «Отправить» показываем ТОЛЬКО когда бэкенд её примет: ни серой кнопки, ни
+    // объяснений — оформи логистику, и кнопка появится (канон юзера 01.08.2026).
+    const sendReady = canSendTransferNow(transfer);
+    // Забор — носитель денег переезда. Есть номер → переезд доехал до «Оплат».
+    const hasPickup = !!transfer.pickup_shipment_number || transfer.pickup_shipment_id != null;
+    // Логистику правим прямо в сетке, если бэкенд её сейчас примет: до отгрузки —
+    // назначением машины, после — отдельной ручкой забора. Газелька забирает
+    // право на реквизиты себе (её присылает агрегатор).
+    const canEditLogistics = editor && !viaGazelka
+        && (canAssignTransferVehicle(transfer.status) || canSetTransferLogistics(transfer.status));
+
+    /**
+     * Правка ОДНОГО поля логистики прямо в карточке — зеркало `handleFieldSave`
+     * заявки на сборку.
+     *
+     * 🔴 Шлём ПОЛНЫЙ снимок, а не одно поле: серверный контракт назначения
+     * присваивает реквизиты безусловно (`transfer.vehicle_info = payload.vehicle_info`),
+     * поэтому частичное тело обнулило бы всё, кроме изменённого. Транспортную
+     * единицу передаём как `null` — там семантика трёхзначная, и null означает
+     * «не трогать», а не «сбросить».
+     *
+     * Эндпоинт зависит от стадии: до отгрузки это НАЗНАЧЕНИЕ машины (READY →
+     * VEHICLE_ASSIGNED), после — дозапись логистики без смены статуса.
+     */
+    const saveLogisticsField = async (field: string, raw: string) => {
+        const prev = transfer;
+        const val = raw.trim();
+        const payload: TransferAssignVehiclePayload = {
+            vehicle_info: transfer.vehicle_info || '',
+            vehicle_brand: transfer.vehicle_brand || '',
+            driver_first_name: transfer.driver_first_name || '',
+            driver_last_name: transfer.driver_last_name || '',
+            driver_phone: transfer.driver_phone || '',
+            logistics_by_warehouse: !!transfer.logistics_by_warehouse,
+            carrier_inn: null,
+            // Имя уже сохранённого перевозчика — чтобы правка соседнего поля не
+            // отвязала его (бэкенд резолвит по паре ИНН/имя).
+            carrier_name: transfer.counterparty_name || null,
+            pickup_date: transfer.pickup_date || '',
+            pickup_time_slot: transfer.pickup_time_slot || '',
+            pickup_cost: toMoney(transfer.pickup_cost) ?? 0,
+            delivery_date: transfer.delivery_date || '',
+            pallets_count: null,
+            pallet_weight_kg: null,
+            shipped_as_boxes: null,
+        };
+        if (field === 'pickup_cost') payload.pickup_cost = val === '' ? 0 : Number(val);
+        else if (field === 'carrier_inn') payload.carrier_inn = val || null;
+        else (payload as unknown as Record<string, string>)[field] = val;
+
+        // Оптимистично — форма заявки ведёт себя так же: поле «замирает» на
+        // сетевой задержке хуже, чем откатывается на ошибке.
+        setTransfer({ ...transfer, [field === 'carrier_inn' ? 'counterparty_name' : field]: val || null });
+        try {
+            const updated = canSetTransferLogistics(prev.status)
+                ? await api.setTransferLogistics(prev.id, payload)
+                : await api.assignTransferVehicle(prev.id, payload);
+            setTransfer(updated);
+        } catch (e: unknown) {
+            setTransfer(prev);
+            setError(e instanceof Error ? e.message : 'Не удалось сохранить логистику');
+        }
+    };
     // Поставку у Натали заводим, пока переезд не принят (после DELIVERED товар
     // уже оприходован — бэк вернёт блокировку). Ранние ступени тоже годятся:
     // поставку у ФФ обычно создают заранее, до фактической отправки машины.
@@ -350,6 +419,14 @@ export default function TransferDetailPage() {
                         {transfer.is_defect && (
                             <span className="badge badge-warning" title={transfer.defect_reason || 'Переезд брака'}>Брак</span>
                         )}
+                        {viaGazelka && (
+                            <span
+                                className="badge badge-info"
+                                title="Переезд везёт Газелька: машину, стоимость и даты присылает агрегатор — вручную их здесь не меняют"
+                            >
+                                🚚 Газелька
+                            </span>
+                        )}
                     </div>
                     <p className="page-subtitle">
                         {transfer.from_warehouse_name || whName(transfer.from_warehouse_id)}
@@ -408,7 +485,13 @@ export default function TransferDetailPage() {
                             {transfer.status === 'RETURNED' ? 'Переотправить' : 'Готов'}
                         </button>
                     )}
-                    {editor && canSendTransfer(transfer.status) && (
+                    {/* 🔴 Кнопки НЕТ, пока машина не назначена (канон юзера
+                        01.08.2026: «удали кнопку отправить, пока машина не
+                        назначена»). Не серая, не с подсказкой — её просто нет:
+                        порядок действий один и тот же везде. Флаг
+                        allow_no_logistics отсюда не шлём — он законен только на
+                        форме «создать и увезти» у кладовщика. */}
+                    {editor && sendReady && (
                         <button
                             className="btn btn-primary"
                             onClick={() => runAction(() => api.sendTransfer(transfer.id), 'Перемещение отправлено — товар в пути')}
@@ -574,12 +657,57 @@ export default function TransferDetailPage() {
                         }
                     />
 
-                    {/* Машина — весь набор реквизитов заявки, только чтение. */}
-                    <InfoField label="Госномер" value={transfer.vehicle_info || '—'} />
-                    <InfoField label="Марка" value={transfer.vehicle_brand || '—'} />
-                    <InfoField label="Телефон" value={transfer.driver_phone || '—'} />
-                    <InfoField label="Имя водителя" value={transfer.driver_first_name || '—'} />
-                    <InfoField label="Фамилия водителя" value={transfer.driver_last_name || '—'} />
+                    {/* 🔴 Машина правится ПРЯМО ЗДЕСЬ, по клику на поле — точно как
+                        в карточке заявки на сборку (EditableInfoField там же).
+                        Канон юзера 01.08.2026: «почему в переездах нельзя указывать
+                        машину, подрядчика и т.д., не заходя в редактирование, как в
+                        заявках на сборку». Раньше карточка только отсылала в Лист
+                        логиста — переход ради четырёх полей, которые логист правит
+                        чаще всего (госномер записали по телефону, стоимость уточнили).
+
+                        Сохранение шлёт ПОЛНЫЙ снимок логистики (см. saveLogisticsField):
+                        серверный контракт назначения присваивает поля безусловно, и
+                        частичное тело обнулило бы всё, кроме отредактированного. */}
+                    <EditableInfoField
+                        label="Госномер"
+                        value={transfer.vehicle_info || ''}
+                        displayValue={transfer.vehicle_info || '—'}
+                        type="text"
+                        editable={canEditLogistics}
+                        onSave={v => saveLogisticsField('vehicle_info', v)}
+                    />
+                    <EditableInfoField
+                        label="Марка"
+                        value={transfer.vehicle_brand || ''}
+                        displayValue={transfer.vehicle_brand || '—'}
+                        type="text"
+                        editable={canEditLogistics}
+                        onSave={v => saveLogisticsField('vehicle_brand', v)}
+                    />
+                    <EditableInfoField
+                        label="Телефон"
+                        value={transfer.driver_phone || ''}
+                        displayValue={transfer.driver_phone || '—'}
+                        type="text"
+                        editable={canEditLogistics}
+                        onSave={v => saveLogisticsField('driver_phone', v)}
+                    />
+                    <EditableInfoField
+                        label="Имя водителя"
+                        value={transfer.driver_first_name || ''}
+                        displayValue={transfer.driver_first_name || '—'}
+                        type="text"
+                        editable={canEditLogistics}
+                        onSave={v => saveLogisticsField('driver_first_name', v)}
+                    />
+                    <EditableInfoField
+                        label="Фамилия водителя"
+                        value={transfer.driver_last_name || ''}
+                        displayValue={transfer.driver_last_name || '—'}
+                        type="text"
+                        editable={canEditLogistics}
+                        onSave={v => saveLogisticsField('driver_last_name', v)}
+                    />
                     <InfoField
                         label="Подрядчик"
                         value={
@@ -604,9 +732,41 @@ export default function TransferDetailPage() {
                                     : '—'
                         }
                     />
-                    <InfoField
+                    {/* ИНН подрядчика — как у заявки: вводом ИНН перевозчик
+                        резолвится/заводится на бэкенде, поле «Подрядчик» выше
+                        подхватит имя после сохранения. */}
+                    <EditableInfoField
+                        label="ИНН подрядчика"
+                        value=""
+                        displayValue={transfer.logistics_by_warehouse ? 'склад забора' : '—'}
+                        type="text"
+                        editable={canEditLogistics && !transfer.logistics_by_warehouse}
+                        onSave={v => saveLogisticsField('carrier_inn', v)}
+                    />
+                    <EditableInfoField
                         label="Стоимость"
-                        value={pickupCost === null ? '—' : `${formatNumber(pickupCost, 0)} ₽`}
+                        value={pickupCost === null ? '' : String(pickupCost)}
+                        displayValue={pickupCost === null ? '—' : `${formatNumber(pickupCost, 0)} ₽`}
+                        type="number"
+                        editable={canEditLogistics}
+                        onSave={v => saveLogisticsField('pickup_cost', v)}
+                    />
+                    {/* Забор (оплата) полем сетки, а не отдельной карточкой:
+                        целый блок ради одной строки ломал компактность, которой
+                        карточка заявки и берёт (канон юзера 01.08.2026). */}
+                    <InfoField
+                        label="Забор (оплата)"
+                        value={hasPickup
+                            ? (
+                                <Link
+                                    href={`/p/${slug}/warehouse/logistics?tab=payments`}
+                                    style={{ color: 'var(--color-accent)' }}
+                                    title="Забор переезда — через него он виден в «Оплатах» и в отчёте «Переезды»"
+                                >
+                                    {transfer.pickup_shipment_number || `#${transfer.pickup_shipment_id}`} →
+                                </Link>
+                            )
+                            : <span title="Забор создаётся при отправке переезда с оформленной логистикой">—</span>}
                     />
 
                     {/* Заявки ФФ — сводкой, как у сборки. Связать/отвязать по
@@ -636,16 +796,20 @@ export default function TransferDetailPage() {
                         <InfoField label="Причина брака" value={transfer.defect_reason} />
                     )}
 
-                    {/* Машины нет — говорим, кто её назначает: молчаливые прочерки
-                        читаются как поломка, а кнопки здесь быть не должно. */}
+                    {/* Одна строка-подсказка вместо трёх прежних блоков: поля
+                        логистики теперь правятся тут же по клику, поэтому длинные
+                        объяснения «кто и где назначает машину» стали неправдой.
+                        Молчаливые прочерки всё равно оставлять нельзя — они
+                        читаются как поломка. */}
                     {!vehicleAssigned && (
                         <div style={{ gridColumn: '1 / -1', color: 'var(--color-text-muted)', fontSize: 13 }}>
-                            Машина не назначена.
-                            {canAssignTransferVehicle(transfer.status)
-                                ? ' Машину назначает логист — в Листе логиста, там переезды идут одним списком с заявками.'
-                                : canEditTransfer(transfer.status)
-                                    ? ' Машину назначают после того, как переезд собран, — нажмите «Готов».'
-                                    : ' Переезд уже уехал — назначение машины закрыто.'}
+                            {viaGazelka
+                                ? 'Машину, стоимость и даты присылает Газелька — вручную они не правятся.'
+                                : canEditLogistics
+                                    ? 'Машина не назначена. Заполните госномер, подрядчика или стоимость прямо здесь — по клику на поле; «Отправить» появится, как только логистика оформлена.'
+                                    : canEditTransfer(transfer.status)
+                                        ? 'Машину назначают после того, как переезд собран, — нажмите «Готов».'
+                                        : 'Машина не назначена, и стадия переезда её уже не принимает.'}
                         </div>
                     )}
                     {transfer.comment && (
@@ -654,37 +818,6 @@ export default function TransferDetailPage() {
                         </div>
                     )}
                 </div>
-            </div>
-
-            {/* ─── Оплата ─────────────────────────────────────────────── */}
-            <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
-                <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 16px' }}>Оплата</h2>
-                {/* Схема перемещения отдаёт только стоимость забора: статуса
-                    заявки на оплату и номера расхода в ней НЕТ. Обещать «появится
-                    после отправки» нельзя — забор давно создан, просто карточка
-                    его не видит. Поэтому говорим ровно то, что знаем, и уводим
-                    туда, где оплата действительно ведётся. */}
-                {pickupCost !== null ? (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 16 }}>
-                        <InfoField label="Стоимость забора" value={`${formatNumber(pickupCost, 0)} ₽`} />
-                        <InfoField
-                            label="Оплата забора"
-                            value={
-                                <Link
-                                    href={`/p/${slug}/warehouse/logistics?tab=payments`}
-                                    style={{ color: 'var(--color-accent)' }}
-                                    title="Заявки на оплату заборов ведутся на «Листе логиста»"
-                                >
-                                    Лист логиста → Оплаты
-                                </Link>
-                            }
-                        />
-                    </div>
-                ) : (
-                    <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
-                        Стоимость забора не задана — она указывается при назначении машины.
-                    </div>
-                )}
             </div>
 
             {/* ─── Ожидаемая стоимость услуг ФФ ───────────────────────── */}
@@ -773,6 +906,7 @@ export default function TransferDetailPage() {
                 />
             )}
 
+
             {showNatPush && (
                 <MigfullInboundModal
                     source={{ kind: 'transfer', id: transfer.id }}
@@ -815,6 +949,86 @@ function InfoField({ label, value }: { label: string; value: React.ReactNode }) 
         <div>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{label}</div>
             <div style={{ fontSize: 14, fontWeight: 500 }}>{value}</div>
+        </div>
+    );
+}
+
+/**
+ * Поле сетки, правящееся по клику — ДОСЛОВНАЯ копия `EditableInfoField` карточки
+ * заявки на сборку (`warehouse/assembly/[id]/page.tsx`).
+ *
+ * Копия, а не импорт: там компонент объявлен локально и не экспортируется, а
+ * тащить его в общий `components/` ради второго потребителя — отдельная правка
+ * с риском задеть живой экран заявки. Поведение обязано совпадать до мелочей
+ * (Enter — сохранить, Escape — откатить, blur — сохранить, ✎ как приглашение):
+ * логист ходит между двумя карточками весь день, и разное поведение одинаковых
+ * на вид полей он читает как баг.
+ */
+function EditableInfoField({
+    label, value, displayValue, type, editable, onSave,
+}: {
+    label: string; value: string; displayValue: React.ReactNode;
+    type: 'date' | 'number' | 'text'; editable: boolean;
+    onSave: (val: string) => void;
+}) {
+    const [editing, setEditing] = useState(false);
+    const [inputVal, setInputVal] = useState(value);
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (editing && inputRef.current) {
+            inputRef.current.focus();
+            if (type === 'number') inputRef.current.select();
+        }
+    }, [editing, type]);
+
+    const handleSave = () => {
+        setEditing(false);
+        if (inputVal !== value) onSave(inputVal);
+    };
+
+    return (
+        <div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{label}</div>
+            {editing && editable ? (
+                <input
+                    ref={inputRef}
+                    type={type}
+                    min={type === 'number' ? 0 : undefined}
+                    value={inputVal}
+                    onChange={e => setInputVal(e.target.value)}
+                    onBlur={handleSave}
+                    onKeyDown={e => {
+                        if (e.key === 'Enter') inputRef.current?.blur();
+                        if (e.key === 'Escape') { setInputVal(value); setEditing(false); }
+                    }}
+                    className="form-input"
+                    style={{ width: type === 'number' ? 80 : 160, padding: '4px 8px', fontSize: 14, fontWeight: 500 }}
+                />
+            ) : (
+                <div
+                    onClick={editable ? () => { setInputVal(value); setEditing(true); } : undefined}
+                    style={{
+                        fontSize: 14,
+                        fontWeight: 500,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        cursor: editable ? 'pointer' : undefined,
+                        padding: editable ? '2px 8px 2px 0' : undefined,
+                        borderRadius: editable ? 6 : undefined,
+                        transition: 'background 0.15s',
+                    }}
+                    title={editable ? 'Нажмите для редактирования' : undefined}
+                    onMouseEnter={editable ? e => { e.currentTarget.style.background = 'rgba(59,130,246,0.08)'; } : undefined}
+                    onMouseLeave={editable ? e => { e.currentTarget.style.background = ''; } : undefined}
+                >
+                    {displayValue || '—'}
+                    {editable && (
+                        <span style={{ color: 'var(--color-primary, #3b82f6)', fontSize: 13, opacity: 0.6 }}>✎</span>
+                    )}
+                </div>
+            )}
         </div>
     );
 }

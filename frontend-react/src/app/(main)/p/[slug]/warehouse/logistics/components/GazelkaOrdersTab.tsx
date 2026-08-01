@@ -1,8 +1,10 @@
 'use client';
 import React, { useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
+import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
-import type { GazelkaOrderRow, GazelkaOrderList, GazelkaMatchCandidate } from '@/types/api';
+import type { GazelkaLinkKind, GazelkaOrderRow, GazelkaOrderList, GazelkaMatchCandidate } from '@/types/api';
 import GazelkaModal from './GazelkaModal';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -16,27 +18,99 @@ function statusBadgeClass(status: string): string {
     return 'badge-secondary';
 }
 
+// ─── Наш документ за заказом портала ─────────────────────────────────────────
+// Заказ Газельки закрывает ЛИБО сборку, ЛИБО переезд (в БД это гарантирует
+// CHECK). Тип определяет ТОЛЬКО `linked_kind` — угадывать по id нельзя:
+// id сборки и id переезда живут в разных пространствах и свободно совпадают,
+// так что «переезд 42» уводил бы на сборку 42.
+
+interface LinkedDoc {
+    kind: GazelkaLinkKind;
+    /** null — бэкенд дал номер без id (старый ответ): показываем без ссылки. */
+    id: number | null;
+    number: string;
+    status: string | null;
+}
+
+/**
+ * Связанный документ строки. Читаем обобщённые `linked_*`, а старые
+ * `linked_assembly_*` остаются фолбэком: их бэкенд заполняет по-прежнему, и в
+ * окне деплоя (новый фронт против старого бэка) связка не должна исчезать.
+ */
+function linkedDoc(row: GazelkaOrderRow): LinkedDoc | null {
+    if (row.linked_number) {
+        return {
+            kind: row.linked_kind ?? 'assembly',
+            id: row.linked_id ?? null,
+            number: row.linked_number,
+            status: row.linked_status ?? null,
+        };
+    }
+    if (row.linked_assembly_number) {
+        return {
+            kind: 'assembly',
+            id: row.linked_assembly_id ?? null,
+            number: row.linked_assembly_number,
+            status: row.linked_assembly_status ?? null,
+        };
+    }
+    return null;
+}
+
+/** Авто-подсказка матчинга — та же пара (kind, id), с тем же фолбэком. */
+function suggestedDoc(row: GazelkaOrderRow): { kind: GazelkaLinkKind; id: number; number: string } | null {
+    if (row.suggested_id != null && row.suggested_number) {
+        return { kind: row.suggested_kind ?? 'assembly', id: row.suggested_id, number: row.suggested_number };
+    }
+    if (row.suggested_assembly_id != null && row.suggested_assembly_number) {
+        return { kind: 'assembly', id: row.suggested_assembly_id, number: row.suggested_assembly_number };
+    }
+    return null;
+}
+
+/** Куда ведёт номер документа: у переезда своя деталка, у сборки своя. */
+function docHref(slug: string, kind: GazelkaLinkKind, id: number): string {
+    return kind === 'transfer'
+        ? `/p/${slug}/warehouse/transfers/${id}`
+        : `/p/${slug}/warehouse/assembly/${id}`;
+}
+
+/** Подпись документа: «наша ASM-…» / «переезд TR-…» — род и слово разные. */
+function docLabel(kind: GazelkaLinkKind, number: string): string {
+    return kind === 'transfer' ? `переезд ${number}` : `наша ${number}`;
+}
+
+const KIND_TITLE: Record<GazelkaLinkKind, string> = {
+    assembly: 'Сборки',
+    transfer: 'Переезды',
+};
+
 // ─── Match candidate picker ───────────────────────────────────────────────────
 
 interface MatchPickerProps {
     title: string;
-    onPick: (candidate: GazelkaMatchCandidate) => void;
+    /** С какого типа документа открыть пикер (обычно — тип авто-подсказки). */
+    initialKind: GazelkaLinkKind;
+    onPick: (candidate: GazelkaMatchCandidate, kind: GazelkaLinkKind) => void;
     onClose: () => void;
     busy: boolean;
 }
 
-function MatchPicker({ title, onPick, onClose, busy }: MatchPickerProps) {
+function MatchPicker({ title, initialKind, onPick, onClose, busy }: MatchPickerProps) {
     const [search, setSearch] = useState('');
+    // Тип документа — часть ЗАПРОСА, а не фильтр по загруженному: сборок и
+    // переездов вместе бывает много, и бэкенд отдаёт по одному типу за раз.
+    const [kind, setKind] = useState<GazelkaLinkKind>(initialKind);
     const [candidates, setCandidates] = useState<GazelkaMatchCandidate[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const cleanupRef = React.useRef<(() => void) | null>(null);
 
-    const loadCandidates = useCallback((q: string) => {
+    const loadCandidates = useCallback((q: string, k: GazelkaLinkKind) => {
         setLoading(true);
         setError('');
         const controller = new AbortController();
-        api.getGazelkaMatchCandidates(q || undefined).then(rows => {
+        api.getGazelkaMatchCandidates(q || undefined, k).then(rows => {
             if (controller.signal.aborted) return;
             setCandidates(rows);
         }).catch((e: unknown) => {
@@ -48,16 +122,17 @@ function MatchPicker({ title, onPick, onClose, busy }: MatchPickerProps) {
         return () => controller.abort();
     }, []);
 
-    // Перезагрузка при изменении строки поиска (лёгкий debounce 300мс).
+    // Перезагрузка при изменении строки поиска (лёгкий debounce 300мс) и при
+    // смене типа документа — там ждать нечего, список меняется целиком.
     useEffect(() => {
         const t = setTimeout(() => {
-            cleanupRef.current = loadCandidates(search);
+            cleanupRef.current = loadCandidates(search, kind);
         }, search ? 300 : 0);
         return () => {
             clearTimeout(t);
             cleanupRef.current?.();
         };
-    }, [search, loadCandidates]);
+    }, [search, kind, loadCandidates]);
 
     return (
         <div
@@ -82,7 +157,7 @@ function MatchPicker({ title, onPick, onClose, busy }: MatchPickerProps) {
                     padding: '16px 20px', borderBottom: '1px solid var(--color-border)', flexShrink: 0,
                 }}>
                     <div>
-                        <h2 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>Сопоставить со сборкой</h2>
+                        <h2 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>Сопоставить с нашим документом</h2>
                         <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2 }}>{title}</div>
                     </div>
                     <button
@@ -94,14 +169,31 @@ function MatchPicker({ title, onPick, onClose, busy }: MatchPickerProps) {
                     </button>
                 </div>
 
-                {/* Search */}
+                {/* Тип документа + поиск */}
                 <div style={{ padding: '12px 20px', borderBottom: '1px solid var(--color-border)', flexShrink: 0 }}>
+                    <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                        {(['assembly', 'transfer'] as GazelkaLinkKind[]).map(k => (
+                            <button
+                                key={k}
+                                className={`btn btn-sm ${kind === k ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setKind(k)}
+                                disabled={busy}
+                                title={k === 'transfer'
+                                    ? 'Переезды между нашими складами'
+                                    : 'Заявки на сборку (отгрузка на маркетплейс)'}
+                            >
+                                {KIND_TITLE[k]}
+                            </button>
+                        ))}
+                    </div>
                     <input
                         className="form-input"
                         type="search"
                         value={search}
                         onChange={e => setSearch(e.target.value)}
-                        placeholder="Поиск: № сборки, склад или поставка WB"
+                        placeholder={kind === 'transfer'
+                            ? 'Поиск: № переезда или склад'
+                            : 'Поиск: № сборки, склад или поставка WB'}
                         autoFocus
                         style={{ width: '100%' }}
                     />
@@ -117,22 +209,25 @@ function MatchPicker({ title, onPick, onClose, busy }: MatchPickerProps) {
                     {!loading && error && (
                         <div style={{ padding: '16px 20px', color: 'var(--color-danger)', fontSize: 13 }}>
                             {error}
-                            <button className="btn btn-secondary btn-sm" onClick={() => loadCandidates(search)} style={{ marginLeft: 12 }}>
+                            <button className="btn btn-secondary btn-sm" onClick={() => loadCandidates(search, kind)} style={{ marginLeft: 12 }}>
                                 Повторить
                             </button>
                         </div>
                     )}
                     {!loading && !error && candidates.length === 0 && (
                         <div style={{ padding: '32px', textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                            Подходящих сборок не найдено
+                            {kind === 'transfer' ? 'Подходящих переездов не найдено' : 'Подходящих сборок не найдено'}
                         </div>
                     )}
                     {!loading && !error && candidates.map(c => {
                         const linked = !!c.already_linked_to;
+                        const cKind = c.kind ?? kind;
                         return (
                             <button
-                                key={c.assembly_id}
-                                onClick={() => onPick(c)}
+                                // id сборки и id переезда пересекаются — ключ
+                                // обязан нести тип, иначе React схлопнет строки.
+                                key={`${cKind}-${c.assembly_id}`}
+                                onClick={() => onPick(c, cKind)}
                                 disabled={busy}
                                 style={{
                                     display: 'block', width: '100%', textAlign: 'left',
@@ -173,25 +268,47 @@ function MatchPicker({ title, onPick, onClose, busy }: MatchPickerProps) {
 
 interface LinkCellProps {
     row: GazelkaOrderRow;
+    slug: string;
     onUnmatch: (planId: number) => void;
-    onQuickMatch: (planId: number, assemblyId: number) => void;
+    onQuickMatch: (planId: number, entityId: number, kind: GazelkaLinkKind) => void;
     onOpenPicker: (row: GazelkaOrderRow) => void;
     matchBusy: number | null;
 }
 
-function LinkCell({ row, onUnmatch, onQuickMatch, onOpenPicker, matchBusy }: LinkCellProps) {
+/** Номер нашего документа: ссылка на деталку, а без id — просто бейдж. */
+function DocBadge({ doc, slug }: { doc: LinkedDoc; slug: string }) {
+    const label = docLabel(doc.kind, doc.number);
+    const title = doc.kind === 'transfer'
+        ? 'Связанный переезд между нашими складами'
+        : 'Связанная заявка на сборку';
+    if (doc.id == null) {
+        return <span className="badge badge-success" style={{ fontSize: 11 }} title={title}>{label}</span>;
+    }
+    return (
+        <Link
+            href={docHref(slug, doc.kind, doc.id)}
+            className="badge badge-success"
+            style={{ fontSize: 11, textDecoration: 'none' }}
+            title={`${title} — открыть`}
+        >
+            {label} →
+        </Link>
+    );
+}
+
+function LinkCell({ row, slug, onUnmatch, onQuickMatch, onOpenPicker, matchBusy }: LinkCellProps) {
     const planId = Number(row.gazelka_id);
     const busy = matchBusy === planId;
+    const linked = linkedDoc(row);
+    const suggested = suggestedDoc(row);
 
-    if (row.linked_assembly_number) {
+    if (linked) {
         return (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                <span className="badge badge-success" style={{ fontSize: 11 }} title="Связанная сборка">
-                    наша {row.linked_assembly_number}
-                </span>
-                {row.linked_assembly_status && (
-                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }} title="Статус нашей сборки — где она находится">
-                        · {row.linked_assembly_status}
+                <DocBadge doc={linked} slug={slug} />
+                {linked.status && (
+                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }} title="Статус нашего документа — где он находится">
+                        · {linked.status}
                     </span>
                 )}
                 <button
@@ -202,7 +319,7 @@ function LinkCell({ row, onUnmatch, onQuickMatch, onOpenPicker, matchBusy }: Lin
                         color: 'var(--color-danger)', fontSize: 11, cursor: busy ? 'wait' : 'pointer',
                         textDecoration: 'underline',
                     }}
-                    title="Отвязать сборку"
+                    title="Отвязать наш документ от заказа портала"
                 >
                     Отвязать
                 </button>
@@ -210,18 +327,18 @@ function LinkCell({ row, onUnmatch, onQuickMatch, onOpenPicker, matchBusy }: Lin
         );
     }
 
-    // Несвязанная заявка
-    if (row.suggested_assembly_number && row.suggested_assembly_id != null) {
+    // Несвязанный заказ портала
+    if (suggested) {
         return (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 <button
                     className="btn btn-success btn-sm"
-                    onClick={() => onQuickMatch(planId, row.suggested_assembly_id as number)}
+                    onClick={() => onQuickMatch(planId, suggested.id, suggested.kind)}
                     disabled={busy}
                     title="Сопоставить с авто-подсказкой"
                     style={{ fontSize: 12 }}
                 >
-                    {busy ? '...' : `✓ Сопоставить с ${row.suggested_assembly_number}`}
+                    {busy ? '...' : `✓ Сопоставить с ${suggested.number}`}
                 </button>
                 <button
                     onClick={() => onOpenPicker(row)}
@@ -231,9 +348,9 @@ function LinkCell({ row, onUnmatch, onQuickMatch, onOpenPicker, matchBusy }: Lin
                         color: 'var(--color-accent)', fontSize: 11, cursor: busy ? 'wait' : 'pointer',
                         textDecoration: 'underline',
                     }}
-                    title="Выбрать другую сборку"
+                    title="Выбрать другой документ — сборку или переезд"
                 >
-                    другая…
+                    другой…
                 </button>
             </div>
         );
@@ -244,7 +361,7 @@ function LinkCell({ row, onUnmatch, onQuickMatch, onOpenPicker, matchBusy }: Lin
             className="btn btn-secondary btn-sm"
             onClick={() => onOpenPicker(row)}
             disabled={busy}
-            title="Сопоставить со сборкой"
+            title="Сопоставить со сборкой или переездом"
             style={{ fontSize: 12 }}
         >
             {busy ? '...' : 'Сопоставить'}
@@ -277,7 +394,7 @@ function PlannedTable({ items, onTtn, onEdit, ttnLoading, linkProps }: PlannedTa
                     <tr>
                         <th>№ Газельки</th>
                         <th>Статус</th>
-                        <th>Сборка</th>
+                        <th>Наш документ</th>
                         <th>Отправка</th>
                         <th>Доставка</th>
                         <th>Адрес доставки</th>
@@ -392,7 +509,7 @@ function ActiveTable({ items, onTtn, ttnLoading, linkProps }: ActiveTableProps) 
                     <tr>
                         <th>№ Газельки</th>
                         <th>Статус</th>
-                        <th>Сборка</th>
+                        <th>Наш документ</th>
                         <th>Маршрут</th>
                         <th>Перевозчик</th>
                         <th>Водитель</th>
@@ -464,7 +581,7 @@ function ActiveTable({ items, onTtn, ttnLoading, linkProps }: ActiveTableProps) 
 
 // ─── Completed table (из наших данных — у портала архива нет) ─────────────────
 
-function CompletedTable({ items }: { items: GazelkaOrderRow[] }) {
+function CompletedTable({ items, slug }: { items: GazelkaOrderRow[]; slug: string }) {
     if (items.length === 0) {
         return (
             <div style={{ padding: '32px', textAlign: 'center', color: 'var(--color-text-muted)' }}>
@@ -478,7 +595,7 @@ function CompletedTable({ items }: { items: GazelkaOrderRow[] }) {
                 <thead>
                     <tr>
                         <th>№ Газельки</th>
-                        <th>Сборка</th>
+                        <th>Наш документ</th>
                         <th>Статус</th>
                         <th>Перевозчик</th>
                         <th>Водитель</th>
@@ -489,15 +606,17 @@ function CompletedTable({ items }: { items: GazelkaOrderRow[] }) {
                     </tr>
                 </thead>
                 <tbody>
-                    {items.map(row => (
+                    {items.map(row => {
+                        // Завершённые матчить уже нечем (поездка позади) — только
+                        // показываем, что за документ она закрыла.
+                        const linked = linkedDoc(row);
+                        return (
                         <tr key={row.gazelka_id}>
                             <td style={{ whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 12, color: 'var(--color-text-muted)' }}>
                                 {row.gazelka_id}
                             </td>
                             <td style={{ whiteSpace: 'nowrap' }}>
-                                {row.linked_assembly_number
-                                    ? <span className="badge badge-success" style={{ fontSize: 11 }}>наша {row.linked_assembly_number}</span>
-                                    : '—'}
+                                {linked ? <DocBadge doc={linked} slug={slug} /> : '—'}
                             </td>
                             <td style={{ whiteSpace: 'nowrap' }}>
                                 <span className={`badge ${statusBadgeClass(row.status_label || row.status)}`}>
@@ -524,7 +643,8 @@ function CompletedTable({ items }: { items: GazelkaOrderRow[] }) {
                                 {row.rate ? `${formatNumber(Number(row.rate), 0)} ₽` : '—'}
                             </td>
                         </tr>
-                    ))}
+                        );
+                    })}
                 </tbody>
             </table>
         </div>
@@ -534,6 +654,9 @@ function CompletedTable({ items }: { items: GazelkaOrderRow[] }) {
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function GazelkaOrdersTab() {
+    // slug нужен ссылкам на наши документы: у сборки и переезда разные деталки.
+    const params = useParams();
+    const slug = params.slug as string;
     const [planned, setPlanned] = useState<GazelkaOrderRow[]>([]);
     const [active, setActive] = useState<GazelkaOrderRow[]>([]);
     const [completed, setCompleted] = useState<GazelkaOrderRow[]>([]);
@@ -590,11 +713,13 @@ export default function GazelkaOrdersTab() {
         }
     }, []);
 
-    const handleMatch = useCallback(async (planId: number, assemblyId: number) => {
+    const handleMatch = useCallback(async (planId: number, entityId: number, kind: GazelkaLinkKind) => {
         setMatchBusy(planId);
         setMatchError('');
         try {
-            const res = await api.matchGazelkaOrder(planId, assemblyId);
+            // kind решает, в какое поле уедет id: заказ портала закрывает ЛИБО
+            // сборку, ЛИБО переезд — обе ссылки сразу запрещены CHECK'ом в БД.
+            const res = await api.matchGazelkaOrder(planId, entityId, kind);
             if (!res.ok) {
                 setMatchError('Не удалось сопоставить заявку');
                 return;
@@ -614,7 +739,7 @@ export default function GazelkaOrdersTab() {
         try {
             const res = await api.unmatchGazelkaOrder(planId);
             if (!res.ok) {
-                setMatchError('Не удалось отвязать сборку');
+                setMatchError('Не удалось отвязать документ');
                 return;
             }
             load();
@@ -631,6 +756,7 @@ export default function GazelkaOrdersTab() {
     }, [load]);
 
     const linkProps: Omit<LinkCellProps, 'row'> = {
+        slug,
         onUnmatch: handleUnmatch,
         onQuickMatch: handleMatch,
         onOpenPicker: setPickerRow,
@@ -727,7 +853,7 @@ export default function GazelkaOrdersTab() {
                                 отгруженные заявки (у портала архива нет — данные наши)
                             </span>
                         </div>
-                        <CompletedTable items={completed} />
+                        <CompletedTable items={completed} slug={slug} />
                     </div>
                 </>
             )}
@@ -736,7 +862,10 @@ export default function GazelkaOrdersTab() {
             {pickerRow && (
                 <MatchPicker
                     title={`Заявка ${pickerRow.gazelka_id}${pickerRow.supply_id ? ` · ${pickerRow.supply_id}` : ''}`}
-                    onPick={c => handleMatch(Number(pickerRow.gazelka_id), c.assembly_id)}
+                    // Открываем на типе авто-подсказки: если бэкенд уже понял,
+                    // что заказ похож на переезд, логисту не надо это повторять.
+                    initialKind={suggestedDoc(pickerRow)?.kind ?? 'assembly'}
+                    onPick={(c, kind) => handleMatch(Number(pickerRow.gazelka_id), c.assembly_id, kind)}
                     onClose={() => setPickerRow(null)}
                     busy={matchBusy === Number(pickerRow.gazelka_id)}
                 />

@@ -174,6 +174,10 @@ export default function ShipmentPaymentsTab() {
     const handleExport = () => {
         exportToExcel(rows.map(r => ({
             '№ отгрузки': r.number,
+            // Тип документа отдельной колонкой: в выгрузке бейджа нет, а без
+            // него забор переезда неотличим от забора заявки — «ФБО поставка»
+            // и «Направление» у него пустые ровно потому, что их не бывает.
+            'Тип': r.stock_transfer_id != null ? 'Перемещение' : 'Заявка',
             'ФБО поставка': r.wb_supply_number ?? '',
             'Направление': r.destination ?? '',
             'Склад забора': r.source_warehouse ?? '',
@@ -243,6 +247,7 @@ export default function ShipmentPaymentsTab() {
         <div>
             <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
                 Заборы (отгрузки) — создайте заявку на оплату перевозчику на основе забора.
+                {' '}Заборы перемещений между нашими складами идут здесь же, с тегом «📦 Перемещение».
             </div>
 
             {/* Загрузить счёт → распознать → подобрать заборы перевозчика по ИНН + сумме. */}
@@ -382,6 +387,21 @@ export default function ShipmentPaymentsTab() {
                                                 >
                                                     {r.number}{canOpen ? ' ↗' : ''}
                                                 </button>
+                                                {/* Тег переезда — дословно тот же, что в Листе логиста
+                                                    (TransferWorkRow.TransferTag): один и тот же документ
+                                                    обязан выглядеть одинаково на обоих экранах. Без него
+                                                    забор переезда в списке неотличим от забора заявки, а
+                                                    пустые «ФБО поставка» и «Направление» у него читаются
+                                                    как недозаполненные данные, а не как «их не бывает». */}
+                                                {r.stock_transfer_id != null && (
+                                                    <span
+                                                        className="badge badge-secondary"
+                                                        style={{ fontSize: 11, marginLeft: 6 }}
+                                                        title="Забор перемещения между нашими складами: маркетплейса и поставки WB у него нет"
+                                                    >
+                                                        📦 Перемещение
+                                                    </span>
+                                                )}
                                             </td>
                                             <td style={{ padding: '8px 8px', fontFamily: 'monospace', fontSize: 12 }}>{r.wb_supply_number ?? '—'}</td>
                                             <td style={{ padding: '8px 8px', color: 'var(--color-text-muted)' }}>{r.destination ?? '—'}</td>

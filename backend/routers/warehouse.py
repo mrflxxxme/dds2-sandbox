@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models import Project
+from backend.models.warehouse import TransferStatus
 from backend.project_context import get_current_project
 from backend.schemas.box_multiplicity import (
     BoxMultiplicityBatchListResponse,
@@ -52,6 +53,7 @@ from backend.schemas.warehouse import (
     TransferAssignVehicleBulk,
     TransferFfLink,
     TransferLogisticsReport,
+    TransferSendAction,
     TransferStatusAction,
     WarehouseCounterpartyLink,
     WarehouseCreate,
@@ -68,6 +70,10 @@ from backend.services import (
     transfer_logistics,
     warehouse_acceptance_service,
     warehouse_defect,
+    # Ретро-логистика переезда зовётся напрямую из модуля, а не через фасад
+    # `warehouse_service`: фасад — общий файл, и дописывать в него ре-экспорт
+    # ради двух ручек значит ловить конфликт на каждом параллельном лейне.
+    warehouse_outbound,
     warehouse_service,
 )
 from backend.utils.rate_limit import (
@@ -680,7 +686,12 @@ async def list_transfers(
             "|RETURNED|CLOSED|CANCELLED)$"
         ),
     ),
+    # Несколько статусов одним запросом: «SHIPPED,DELIVERED,CLOSED». Валидируем
+    # ЯВНО (а не pattern'ом на всю строку — он нечитаем на девяти статусах и
+    # разъедется с enum при добавлении десятого).
+    status_in: str | None = Query(None),
     has_vehicle: bool | None = Query(None),
+    has_pickup_cost: bool | None = Query(None),
     converted_from_assembly_id: int | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -688,19 +699,31 @@ async def list_transfers(
     """List transfers. ?in_transit=true — только SHIPPED, ?warehouse_id= — источник ИЛИ получатель.
 
     Срез Листа логиста: `?status=READY&has_vehicle=false` — переезды, ждущие машину.
+    Срез «уехало, а денег нет»: `?status_in=SHIPPED,DELIVERED,CLOSED&has_pickup_cost=false`
+    — кандидаты на ретро-ввод логистики (`POST /transfers/{id}/logistics`).
     `?converted_from_assembly_id=` — переезды из конкретной заявки: карточка
     заявки показывает «уже переделана в TR-хх», не ловя 400 повторной попыткой.
 
     🔴 Состав (`items`) в списке ВСЕГДА пустой — вместо него `units_total` и
     `sku_count`. За составом — `GET /warehouse/transfers/{id}`.
     """
+    statuses: list[str] | None = None
+    if status_in is not None:
+        statuses = [s.strip() for s in status_in.split(",") if s.strip()]
+        # Мусорное значение отбиваем 422, а не молча игнорируем: пустой список
+        # читается как «переездов нет» и прячет реальную опечатку во фронте.
+        unknown = [s for s in statuses if s not in TransferStatus.__members__]
+        if unknown:
+            raise HTTPException(422, f"Неизвестный статус перемещения: {', '.join(unknown)}")
     rows = await warehouse_service.list_transfers(
         db,
         project.id,
         in_transit,
         warehouse_id,
         status=status,
+        status_in=statuses,
         has_vehicle=has_vehicle,
+        has_pickup_cost=has_pickup_cost,
         converted_from_assembly_id=converted_from_assembly_id,
     )
     return [StockTransferSchema.model_validate(r) for r in rows]
@@ -725,6 +748,34 @@ async def assign_vehicle_transfer_bulk(
     """
     try:
         rows = await warehouse_service.assign_vehicle_transfer_bulk(
+            db, project.id, payload.ids, payload.payload
+        )
+        return [StockTransferSchema.model_validate(r) for r in rows]
+    except ValueError as e:
+        raise _transfer_error(e) from None
+
+
+@router.post(
+    "/transfers/logistics-bulk",
+    response_model=list[StockTransferSchema],
+    dependencies=[Depends(rate_limit_write)],
+)
+async def set_transfer_logistics_bulk(
+    payload: TransferAssignVehicleBulk,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Одна машина на N УЖЕ УЕХАВШИХ переездов — оптовое оживление старых записей.
+
+    Статус не меняется, сток не двигается; на каждый переезд создаётся (или
+    обновляется) забор, через который перевозка попадает в «Оплаты». Первый
+    отказ откатывает весь вызов.
+
+    🔴 Объявлен ВЫШЕ `/transfers/{transfer_id}`: иначе путь съест
+    «logistics-bulk» как int-параметр и вернёт 422.
+    """
+    try:
+        rows = await warehouse_outbound.set_transfer_logistics_bulk(
             db, project.id, payload.ids, payload.payload
         )
         return [StockTransferSchema.model_validate(r) for r in rows]
@@ -860,6 +911,34 @@ async def assign_vehicle_transfer(
 
 
 @router.post(
+    "/transfers/{transfer_id}/logistics",
+    response_model=StockTransferSchema,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def set_transfer_logistics(
+    transfer_id: int,
+    payload: TransferAssignVehicle,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Перевозчик и стоимость УЖЕ УЕХАВШЕМУ переезду (SHIPPED / DELIVERED / RETURNED / CLOSED).
+
+    🔴 Это НЕ `assign-vehicle`: статус не меняется, сток не двигается. Создаёт
+    (или обновляет) забор — носитель денег, через который переезд попадает в
+    «Оплаты» и в отчёт логистики. Единственный способ оживить старые переезды,
+    уехавшие до появления машины на перемещении. Тело — тот же контракт, что у
+    назначения машины.
+    """
+    try:
+        transfer = await warehouse_outbound.set_transfer_logistics(
+            db, project.id, transfer_id, payload
+        )
+        return StockTransferSchema.model_validate(transfer)
+    except ValueError as e:
+        raise _transfer_error(e) from None
+
+
+@router.post(
     "/transfers/{transfer_id}/unassign-vehicle",
     response_model=StockTransferSchema,
     dependencies=[Depends(rate_limit_write)],
@@ -920,12 +999,24 @@ async def mark_transfer_ready(
 @router.post("/transfers/{transfer_id}/send", dependencies=[Depends(rate_limit_write)])
 async def send_transfer(
     transfer_id: int,
+    payload: TransferSendAction | None = None,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """READY | VEHICLE_ASSIGNED → SHIPPED: списать с источника, повесить транзитом на получателя."""
+    """READY | VEHICLE_ASSIGNED → SHIPPED: списать с источника, повесить транзитом на получателя.
+
+    У READY требуется оформленная логистика (машина / перевозчик / стоимость) —
+    иначе 400: сток бы списался, а забор не родился, и переезд уехал бы мимо
+    оплат. Обойти это может только явный `{"allow_no_logistics": true}` формы
+    «создать и увезти». Тело необязательное — пустой POST равен `false`.
+    """
     try:
-        transfer = await warehouse_service.send_transfer(db, project.id, transfer_id)
+        transfer = await warehouse_service.send_transfer(
+            db,
+            project.id,
+            transfer_id,
+            allow_no_logistics=bool(payload and payload.allow_no_logistics),
+        )
         return StockTransferSchema.model_validate(transfer)
     except ValueError as e:
         raise _transfer_error(e) from None
