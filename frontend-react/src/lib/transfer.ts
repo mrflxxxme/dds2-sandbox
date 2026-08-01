@@ -103,9 +103,109 @@ export function canUnassignTransferVehicle(status: StockTransferStatus | string)
     return status === 'VEHICLE_ASSIGNED';
 }
 
-/** «Отправить»: списывает сток с источника и вешает транзит на получателя. */
+/**
+ * СТАТУСНЫЙ гейт «Отправить» — зеркало серверного `_TRANSFER_SEND_FROM`.
+ * Сам по себе кнопку не включает: у READY нужна ещё логистика, см.
+ * `canSendTransferNow`. Оставлен отдельно, потому что это разные вопросы —
+ * «стадия подходит» и «документ оформлен».
+ */
 export function canSendTransfer(status: StockTransferStatus | string): boolean {
     return TRANSFER_SENDABLE_STATUSES.has(status as StockTransferStatus);
+}
+
+/**
+ * Оформлена ли логистика — зеркало серверного `has_logistics`
+ * (`warehouse_outbound._create_transfer_pickup`). Ровно тот же набор полей:
+ * разъедься они, фронт показал бы «Отправить» там, где бэкенд ответит 400, либо
+ * спрятал бы кнопку у переезда, который бэкенд отправить готов.
+ *
+ * `logistics_by_warehouse` входит сюда осознанно: «логистику оказывает склад
+ * забора» — это ОФОРМЛЕННАЯ логистика (перевозчик берётся из контрагента
+ * склада), просто без госномера.
+ */
+export function transferHasLogistics(t: StockTransfer): boolean {
+    return !!(
+        t.vehicle_assigned_at
+        || t.vehicle_info
+        || t.vehicle_brand
+        || t.driver_phone
+        || t.counterparty_id
+        || toMoney(t.pickup_cost) !== null
+        || t.pickup_date
+        || t.delivery_date
+        || t.logistics_by_warehouse
+    );
+}
+
+/**
+ * Можно ли жать «Отправить» ПРЯМО СЕЙЧАС.
+ *
+ * 🔴 Канон юзера 01.08.2026: «сначала же назначить машину, а потом либо ФФ
+ * закрывает заявку и она отправляется автоматически, либо сам логист отправит».
+ * Раньше кнопка висела на голом READY (TR-32: машины нет, стоимости нет) —
+ * нажатие списывало сток со склада-источника, а забор при этом НЕ создавался
+ * (гард `has_logistics`), то есть переезд уезжал мимо оплат и мимо отчёта
+ * логистики, и добрать его задним числом было нечем.
+ *
+ * VEHICLE_ASSIGNED проходит всегда — машина там по определению. У READY
+ * требуем хотя бы признак оформления: это сохраняет живые сценарии «везёт сам
+ * склад» и «машины нет, но стоимость известна», не заставляя логиста выдумывать
+ * госномер.
+ */
+export function canSendTransferNow(t: StockTransfer): boolean {
+    if (!canSendTransfer(t.status)) return false;
+    if (t.status === 'VEHICLE_ASSIGNED') return true;
+    return transferHasLogistics(t);
+}
+
+/**
+ * Подсказка, почему «Отправить» недоступна. null — доступна либо неприменима
+ * (не тот статус). Пустая задизейбленная кнопка без объяснения читается как
+ * поломка интерфейса.
+ */
+export function transferSendBlockReason(t: StockTransfer): string | null {
+    if (!canSendTransfer(t.status)) return null;
+    if (canSendTransferNow(t)) return null;
+    return 'Сначала назначьте машину — иначе переезд уедет мимо оплат и отчёта логистики';
+}
+
+/**
+ * «Указать перевозчика и стоимость» на УЖЕ УЕХАВШЕМ переезде.
+ *
+ * 🔴 Это НЕ `canAssignTransferVehicle`: там назначение машины со сменой статуса
+ * READY → VEHICLE_ASSIGNED (зеркало `TRANSFER_TRANSITIONS`), а здесь статус не
+ * меняется и сток не двигается — дописывается только логистика и создаётся
+ * забор. Единственный способ дать деньги старым переездам (TR-1…TR-31 уехали до
+ * появления машины на перемещении: у них нет ни забора, ни строки в отчёте
+ * «Переезды», ни строки в «Оплатах»).
+ *
+ * CANCELLED сюда не входит: отменённый переезд никто не вёз.
+ */
+export const TRANSFER_LOGISTICS_EDITABLE_STATUSES: ReadonlySet<StockTransferStatus> =
+    new Set<StockTransferStatus>(['SHIPPED', 'DELIVERED', 'RETURNED', 'CLOSED']);
+
+export function canSetTransferLogistics(status: StockTransferStatus | string): boolean {
+    return TRANSFER_LOGISTICS_EDITABLE_STATUSES.has(status as StockTransferStatus);
+}
+
+/**
+ * Переезд можно отдать Газельке: склад-ИСТОЧНИК обслуживается ключом
+ * интеграции, стадия — до отгрузки, и агрегатор его ещё не ведёт.
+ *
+ * Зеркало `isGazelkaEligible` заявки, но гейт по `from_warehouse_id`: у заявки
+ * это `warehouse_id` (откуда забирают), у переезда — тот конец маршрута, с
+ * которого груз увозят.
+ */
+export const TRANSFER_GAZELKA_STATUSES: ReadonlySet<StockTransferStatus> =
+    new Set<StockTransferStatus>(['READY', 'VEHICLE_ASSIGNED']);
+
+export function canPushTransferToGazelka(
+    t: StockTransfer,
+    gazelkaWarehouseIds: number[] | null | undefined,
+): boolean {
+    if (t.via_gazelka) return false;
+    if (!TRANSFER_GAZELKA_STATUSES.has(t.status)) return false;
+    return (gazelkaWarehouseIds ?? []).includes(t.from_warehouse_id);
 }
 
 /** «Принять» — оприходовать на складе-получателе. */
