@@ -23,6 +23,9 @@ bcrypt==4.3.0
 redis==5.3.1
 miniopy-async==1.23.5
 httpx==0.28.1
+# Публичный card-API WB режет по TLS-отпечатку клиента: httpx получает 403 на
+# любых заголовках, браузер и curl — 200. curl_cffi повторяет TLS/JA3 браузера.
+curl_cffi==0.7.4
 cryptography==48.0.1
 pytest==8.4.2
 pytest-asyncio==1.4.0

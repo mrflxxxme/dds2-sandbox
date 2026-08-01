@@ -10,12 +10,22 @@
 Неофициальный и нестабильный: версия дрейфует (v2→v4), узлы CDN иногда отдают
 пустой ответ → батчи + ретраи. СПП теперь единый по регионам, поэтому dest
 фиксирован.
+
+ПОЧЕМУ НЕ httpx. Антибот WB (Angie) режет по TLS-отпечатку клиента: httpx —
+403 Forbidden на любых заголовках, хостах и версиях HTTP, и с сервера, и с
+локальной машины. Отсюда ходим через curl_cffi (libcurl с подменой отпечатка).
+Замер 2026-08-01: профили `chrome99/chrome110/edge101` и голый libcurl дают 200,
+а `chrome120/chrome124/safari*` — те же 403, поэтому список профилей
+консервативный и на 403 мы перебираем следующий.
+
+Пока этого не было, синк молча получал ноль строк, а «Цена с СПП» на странице
+«Ценообразование» жила на фолбэке из BDR — среднем СПП за 30 дней, которое по
+устройству не может отреагировать на сегодняшнюю цену.
 """
 
 import asyncio
+import json
 import logging
-
-import httpx
 
 logger = logging.getLogger("dds.pricing")
 
@@ -25,6 +35,8 @@ _BATCH = 50
 _CONCURRENCY = 1  # последовательно: card-API шейпит частые/параллельные вызовы (пустые 200)
 _RETRIES = 4
 _INTER_REQUEST_DELAY = 0.4  # пауза между батчами — не триггерить анти-бот WB
+#: Отпечатки в порядке предпочтения; "" — голый libcurl (тоже проходит).
+_PROFILES = ("chrome110", "chrome99", "edge101", "")
 
 
 def parse_card_products(data: dict) -> dict[int, dict]:
@@ -83,28 +95,35 @@ async def fetch_card_prices(
     """
     if not nm_ids:
         return {}
+    from curl_cffi.requests import AsyncSession  # тяжёлый импорт — лениво
+
     uniq = list(dict.fromkeys(nm_ids))
     batches = [uniq[i : i + batch_size] for i in range(0, len(uniq), batch_size)]
     result: dict[int, dict] = {}
     sem = asyncio.Semaphore(_CONCURRENCY)
+    profile = _PROFILES[0]  # рабочий отпечаток запоминаем на весь прогон
 
-    async with httpx.AsyncClient(
-        timeout=15.0, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    ) as client:
+    async with AsyncSession(timeout=15.0) as client:
 
         async def one(batch: list[int]) -> dict[int, dict]:
-            # raw URL — сохраняем «;» как разделитель (httpx-params его кодируют)
+            nonlocal profile
+            # raw URL — сохраняем «;» как разделитель (params-энкодер его кодирует)
             nmstr = ";".join(str(n) for n in batch)
             url = f"{_CARD_URL}?appType=1&curr=rub&dest={dest}&nm={nmstr}"
             for attempt in range(_RETRIES):
                 async with sem:
                     try:
-                        r = await client.get(url)
+                        r = await client.get(url, impersonate=profile or None)
                         if r.status_code == 200:
-                            parsed = parse_card_products(r.json())
+                            parsed = parse_card_products(json.loads(r.text))
                             if parsed:
                                 return parsed
-                    except (httpx.HTTPError, ValueError) as exc:
+                        elif r.status_code == 403:
+                            # антибот отверг отпечаток — берём следующий из списка
+                            nxt = _PROFILES[(_PROFILES.index(profile) + 1) % len(_PROFILES)]
+                            logger.warning("card-API 403 на профиле %r → пробуем %r", profile, nxt)
+                            profile = nxt
+                    except (OSError, ValueError) as exc:
                         logger.debug("card-API batch retry %d: %s", attempt + 1, exc)
                 await asyncio.sleep(0.6 * (attempt + 1))
             return {}

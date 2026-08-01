@@ -252,8 +252,8 @@ class TestPersistence:
         await _upsert_points(db_session, project.id, [point])
         await _upsert_points(db_session, other_project.id, [point])
 
-        mine = [p for p in await load_points(db_session, project.id, days=3650) if p.nm_id == 777002]
-        theirs = [p for p in await load_points(db_session, other_project.id, days=3650) if p.nm_id == 777002]
+        mine = [p for p in await load_points(db_session, project.id, days=3650, source="card") if p.nm_id == 777002]
+        theirs = [p for p in await load_points(db_session, other_project.id, days=3650, source="card") if p.nm_id == 777002]
         assert len(mine) == 1 and len(theirs) == 1
 
     async def test_backfill_takes_median_of_day(self, db_session, project):
@@ -320,11 +320,11 @@ class TestPersistence:
             db_session, project.id, {777005: {"product": 1400.0, "basic": 3000.0}}
         )
         assert res["stale"] == 1
-        assert not [p for p in await load_points(db_session, project.id, days=3) if p.nm_id == 777005]
+        assert not [p for p in await load_points(db_session, project.id, days=3, source="card") if p.nm_id == 777005]
 
         ok = await record_card_points(
             db_session, project.id, {777005: {"product": 1400.0, "basic": 2500.0}}
         )
         assert ok["written"] == 1
-        pt = [p for p in await load_points(db_session, project.id, days=3) if p.nm_id == 777005][0]
+        pt = [p for p in await load_points(db_session, project.id, days=3, source="card") if p.nm_id == 777005][0]
         assert pt.spp_rate == pytest.approx(30.0, abs=0.01)  # 1 − 1400/2000

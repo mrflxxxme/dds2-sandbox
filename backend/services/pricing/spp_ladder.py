@@ -469,8 +469,15 @@ async def backfill_from_orders(db: AsyncSession, project_id: int, days: int = 90
     return {"status": "OK", "written": written, "days": days}
 
 
-async def load_points(db: AsyncSession, project_id: int, days: int = 120) -> list[Point]:
-    """Точки проекта за последние `days` дней."""
+async def load_points(
+    db: AsyncSession, project_id: int, days: int = 120, source: str = "orders"
+) -> list[Point]:
+    """Точки проекта за последние `days` дней ОДНОГО источника.
+
+    Источники нельзя смешивать в одной кривой: `card` — обезличенный СПП с
+    витрины, `orders` — СПП конкретного заказа, куда входит кошелёк покупателя.
+    На замере 2026-08-01 разница составила 12.1 п.п. по медиане.
+    """
     since = pytz.UTC.localize(utcnow()).astimezone(_MSK).date() - timedelta(days=days)
     rows = (
         await db.execute(
@@ -482,7 +489,11 @@ async def load_points(db: AsyncSession, project_id: int, days: int = 120) -> lis
                 WbSppObservation.buyer_price,
                 WbSppObservation.obs_count,
             )
-            .where(WbSppObservation.project_id == project_id, WbSppObservation.observed_on >= since)
+            .where(
+                WbSppObservation.project_id == project_id,
+                WbSppObservation.observed_on >= since,
+                WbSppObservation.source == source,
+            )
             .limit(_MAX_POINTS)
         )
     ).all()
