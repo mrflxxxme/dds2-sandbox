@@ -458,6 +458,12 @@ class StockTransfer(Base, TimestampMixin, SoftDeleteMixin):
     # хранит только ТЕКУЩЕЕ состояние.
     actual_ready_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     shipped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Ручная сумма доп-услуг ФФ по этому переезду (стрейч, маркировка и т.п. вне
+    # тарифной сетки) — слагаемое ожидаемой стоимости услуг, зеркало полей
+    # заявки на сборку. Тарифицируемая часть считается по ставке склада-источника
+    # (`FfServiceType.TRANSFER_ASSEMBLY`), эта — то, что в сетку не укладывается.
+    ff_custom_cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    ff_custom_cost_comment: Mapped[str | None] = mapped_column(String(300), nullable=True)
     # Транспортная единица переезда — 1:1 с заявкой на сборку (AssemblyRequest):
     # shipped_as_boxes=False → паллеты (по умолчанию), True → короба. Флаг меняет
     # только ЕДИНИЦУ измерения pallets_count/pallet_weight_kg и подписи в UI
