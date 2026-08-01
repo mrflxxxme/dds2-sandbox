@@ -47,6 +47,22 @@ const STATUS_OPTIONS: { value: '' | StockTransferStatus; label: string }[] = [
         .map(([value, { label }]) => ({ value, label })),
 ];
 
+/** Статусы, после которых переезд — история: работать с ним больше нечем. */
+const TRANSFER_ARCHIVE_STATUSES: ReadonlySet<string> = new Set([
+    'DELIVERED', 'CLOSED', 'CANCELLED',
+]);
+
+/**
+ * Переезд ушёл в архив: завершён ИЛИ везёт брак.
+ *
+ * Брак здесь по требованию юзера (01.08.2026): он ездит отдельным потоком и в
+ * рабочем списке только мешает. Переезд при этом НЕ прячется совсем — вид
+ * «Архив»/«Все» его показывает, а счётчик в шапке считает всё.
+ */
+function isTransferArchived(t: StockTransfer): boolean {
+    return TRANSFER_ARCHIVE_STATUSES.has(t.status) || t.is_defect === true;
+}
+
 /** Номера связанных заявок ФФ одной строкой — обе стороны маршрута подряд. */
 function ffNumbers(t: StockTransfer): string[] {
     return (t.ff_links ?? []).map(ffLinkLabel).filter(n => n && n !== '—');
@@ -72,6 +88,7 @@ export default function TransfersTab({ slug }: Props) {
     const [toId, setToId] = useState<number | ''>('');
     const [statusFilter, setStatusFilter] = useState<'' | StockTransferStatus>('');
     const [noVehicleOnly, setNoVehicleOnly] = useState(false);
+    const [view, setView] = useState<'active' | 'archived' | 'all'>('active');
 
     // Модалка выбора склада-источника перед созданием переезда: форма создания
     // живёт на складе (/warehouse/{id}/transfer/new) и без него не открывается.
@@ -135,11 +152,16 @@ export default function TransfersTab({ slug }: Props) {
             if (toId !== '' && t.to_warehouse_id !== toId) return false;
             if (statusFilter && t.status !== statusFilter) return false;
             if (noVehicleOnly && transferVehicleAssigned(t)) return false;
+            if (view !== 'all' && isTransferArchived(t) !== (view === 'archived')) return false;
             return true;
         });
-    }, [items, search, fromId, toId, statusFilter, noVehicleOnly]);
+    }, [items, search, fromId, toId, statusFilter, noVehicleOnly, view]);
 
-    const hasActiveFilters = search !== '' || fromId !== '' || toId !== '' || statusFilter !== '' || noVehicleOnly;
+    // Сколько всего ушло в архив — показываем ссылкой в шапке, чтобы вид
+    // «Активные» не выглядел как «переездов больше нет».
+    const archivedCount = useMemo(() => items.filter(isTransferArchived).length, [items]);
+
+    const hasActiveFilters = search !== '' || fromId !== '' || toId !== '' || statusFilter !== '' || noVehicleOnly || view !== 'active';
 
     const resetFilters = () => {
         setSearch('');
@@ -147,6 +169,7 @@ export default function TransfersTab({ slug }: Props) {
         setToId('');
         setStatusFilter('');
         setNoVehicleOnly(false);
+        setView('active');
     };
 
     const openDetail = (id: number) => router.push(`/p/${slug}/warehouse/transfers/${id}`);
@@ -335,6 +358,22 @@ export default function TransfersTab({ slug }: Props) {
                 <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
                     Переезды между нашими складами: {formatNumber(filtered.length, 0)}
                     {filtered.length !== items.length && ` из ${formatNumber(items.length, 0)}`}
+                    {view === 'active' && archivedCount > 0 && (
+                        <>
+                            {' · '}
+                            <button
+                                type="button"
+                                onClick={() => setView('archived')}
+                                title="Принятые, закрытые, отменённые и брак"
+                                style={{
+                                    background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                                    font: 'inherit', color: 'var(--color-accent)',
+                                }}
+                            >
+                                в архиве {formatNumber(archivedCount, 0)}
+                            </button>
+                        </>
+                    )}
                 </div>
                 <span style={{ flex: 1 }} />
                 {canEdit() && (
@@ -408,6 +447,18 @@ export default function TransfersTab({ slug }: Props) {
                             {warehouses.map(w => (
                                 <option key={w.id} value={w.id}>{w.name}</option>
                             ))}
+                        </select>
+                    </div>
+                    <div className="form-group">
+                        <select
+                            className="form-input"
+                            value={view}
+                            onChange={e => setView(e.target.value as 'active' | 'archived' | 'all')}
+                            title="Принятые, закрытые, отменённые и брак уходят в архив"
+                        >
+                            <option value="active">Активные</option>
+                            <option value="archived">Архив</option>
+                            <option value="all">Все</option>
                         </select>
                     </div>
                     <div className="form-group">
