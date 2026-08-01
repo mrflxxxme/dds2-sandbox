@@ -291,7 +291,7 @@ export default function NewTransferPage() {
                 onChange={setRows}
                 nomenclature={nomenclature}
                 stockMap={isDefect ? defectMap : stockMap}
-                stockLabel={isDefect ? 'В БРАКЕ' : 'НА СКЛАДЕ'}
+                stockLabel={isDefect ? 'В браке' : 'На складе'}
                 stockAccent={isDefect}
             />
 

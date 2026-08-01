@@ -11,7 +11,10 @@
  *    400, хуже отсутствующей. Гейты — в lib/transfer.ts (canSendTransfer и др.),
  *    одни на все экраны переездов.
  *  • Править переезд можно до отгрузки (PENDING / IN_PROGRESS / READY): состав
- *    живой, пока сток не списан. Машину назначают из READY, снятие вернёт туда же.
+ *    живой, пока сток не списан. Правка живёт на ОТДЕЛЬНОЙ странице
+ *    (`transfers/[id]/edit`) — ровно как у заявки на сборку; модалки правки
+ *    больше нет, второго пути редактирования быть не должно. Машину назначают
+ *    из READY, снятие вернёт туда же.
  *  • Имена концов маршрута приходят в самой схеме; справочник складов грузим
  *    ради контрагента склада забора (и как фолбэк имени). ФФ-связки приходят
  *    в самой схеме (`ff_links`) — раньше карточка ради них тянула ВСЕ заявки
@@ -30,11 +33,11 @@
  */
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
-import { Toast, AssignVehicleModal, TransferEditModal, TransferFfLinkModal } from '@/components';
+import { Toast, AssignVehicleModal, TransferFfLinkModal } from '@/components';
 import type { AssignVehicleValues } from '@/components';
 import MigfullInboundModal from '../../[id]/MigfullInboundModal';
 import TanStackDataTable from '@/components/TanStackDataTable';
@@ -46,7 +49,6 @@ import type {
     StockTransferItem,
     TransferFfLink,
     TransferFfSide,
-    TransferUpdatePayload,
     Warehouse,
 } from '@/types/api';
 import {
@@ -76,6 +78,8 @@ import {
 
 export default function TransferDetailPage() {
     const params = useParams();
+    const router = useRouter();
+    const searchParams = useSearchParams();
     const slug = params.slug as string;
     const id = Number(params.id);
     const { canEdit } = usePermissions();
@@ -92,10 +96,6 @@ export default function TransferDetailPage() {
     const [showVehicleModal, setShowVehicleModal] = useState(false);
     const [assigning, setAssigning] = useState(false);
     const [assignError, setAssignError] = useState('');
-
-    const [showEditModal, setShowEditModal] = useState(false);
-    const [saving, setSaving] = useState(false);
-    const [saveError, setSaveError] = useState('');
 
     /** Сторона, для которой открыт пикер заявок ФФ (null — закрыт). */
     const [ffLinkSide, setFfLinkSide] = useState<TransferFfSide | null>(null);
@@ -123,6 +123,15 @@ export default function TransferDetailPage() {
     }, [id]);
 
     useEffect(() => { load(); }, [load]);
+
+    // Возврат со страницы правки (`?saved=1`): тост показывает карточка, потому
+    // что правка живёт на отдельном экране и после сохранения уходит сюда.
+    // Параметр сразу снимаем с URL — иначе тост возвращался бы на каждый F5.
+    useEffect(() => {
+        if (searchParams.get('saved') !== '1') return;
+        setToast({ message: 'Перемещение обновлено', type: 'success' });
+        router.replace(`/p/${slug}/warehouse/transfers/${id}`, { scroll: false });
+    }, [searchParams, router, slug, id]);
 
     useEffect(() => {
         // Справочники — фоном: без них страница живёт (покажет id вместо имени).
@@ -171,22 +180,6 @@ export default function TransferDetailPage() {
             setToast({ message: e instanceof Error ? e.message : 'Ошибка', type: 'error' });
         } finally {
             setActionLoading(false);
-        }
-    };
-
-    const handleSave = async (payload: TransferUpdatePayload) => {
-        setSaving(true);
-        setSaveError('');
-        try {
-            // Ответ PUT — полная схема с items и ff_links: перезапрашивать нечего.
-            const updated = await api.updateTransfer(id, payload);
-            setTransfer(updated);
-            setShowEditModal(false);
-            setToast({ message: 'Перемещение обновлено', type: 'success' });
-        } catch (e: unknown) {
-            setSaveError(e instanceof Error ? e.message : 'Ошибка сохранения');
-        } finally {
-            setSaving(false);
         }
     };
 
@@ -379,14 +372,15 @@ export default function TransferDetailPage() {
                         <button className="btn btn-secondary">← К списку</button>
                     </Link>
                     {canDraftEdit && (
-                        <button
-                            className="btn btn-secondary"
-                            onClick={() => { setSaveError(''); setShowEditModal(true); }}
-                            disabled={actionLoading}
-                            title="Маршрут, комментарий, брак, транспортная единица и состав — пока переезд не уехал"
-                        >
-                            Редактировать
-                        </button>
+                        <Link href={`/p/${slug}/warehouse/transfers/${id}/edit`}>
+                            <button
+                                className="btn btn-secondary"
+                                disabled={actionLoading}
+                                title="Маршрут, комментарий, брак, транспортная единица и состав — пока переезд не уехал"
+                            >
+                                Редактировать
+                            </button>
+                        </Link>
                     )}
                     {editor && canMarkTransferReady(transfer.status) && (
                         <button
@@ -728,18 +722,6 @@ export default function TransferDetailPage() {
                     error={assignError}
                     onSubmit={handleAssign}
                     onClose={() => { setShowVehicleModal(false); setAssignError(''); }}
-                />
-            )}
-
-            {showEditModal && (
-                <TransferEditModal
-                    transfer={transfer}
-                    warehouses={warehouses}
-                    nomenclature={nomenclature}
-                    submitting={saving}
-                    error={saveError}
-                    onSubmit={handleSave}
-                    onClose={() => { setShowEditModal(false); setSaveError(''); }}
                 />
             )}
 

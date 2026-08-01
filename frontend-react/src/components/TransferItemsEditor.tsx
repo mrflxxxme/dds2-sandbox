@@ -45,12 +45,18 @@ interface Props {
      * лучше без неё, чем с честными нулями напротив каждой строки.
      */
     stockMap?: Record<string, number>;
-    /** Заголовок колонки остатка: «НА СКЛАДЕ» / «В БРАКЕ». */
+    /** Заголовок колонки остатка: «На складе» / «В браке». */
     stockLabel?: string;
     /** Брак — колонку остатка подсвечиваем warning-цветом (как на создании). */
     stockAccent?: boolean;
     /** Высота прокручиваемой области таблицы (для модалки). */
     maxHeight?: number;
+    /**
+     * Таблица без собственной glass-карточки — когда редактор уже вложен в
+     * карточку страницы («Позиции (N)» на правке переезда). Вложенная карточка
+     * в карточке даёт двойную рамку, которой нет на эталоне-заявке.
+     */
+    flat?: boolean;
     disabled?: boolean;
 }
 
@@ -61,8 +67,11 @@ function useNomLookup(nomenclature: Nomenclature[]) {
             if (n.barcode) byBarcode.set(n.barcode, n);
         });
         const resolve = (barcode: string): Nomenclature | undefined => byBarcode.get(barcode);
-        const label = (n: Nomenclature): string => n.article_seller || n.subject || n.name || `nmId: ${n.article_wb}`;
-        return { resolve, label };
+        // Товар и артикул — РАЗНЫЕ колонки (как в таблице заявки на сборку):
+        // название читают глазами, артикул ищут глазами же, но по-другому.
+        const label = (n: Nomenclature): string => n.name || n.subject || `nmId: ${n.article_wb}`;
+        const article = (n: Nomenclature): string => n.article_seller || '';
+        return { resolve, label, article };
     }, [nomenclature]);
 }
 
@@ -71,9 +80,10 @@ export default function TransferItemsEditor({
     onChange,
     nomenclature,
     stockMap,
-    stockLabel = 'НА СКЛАДЕ',
+    stockLabel = 'На складе',
     stockAccent = false,
     maxHeight,
+    flat = false,
     disabled = false,
 }: Props) {
     const [search, setSearch] = useState('');
@@ -170,7 +180,9 @@ export default function TransferItemsEditor({
                                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                                 >
                                     <span style={{ fontWeight: 500 }}>{nom.label(n)}</span>
-                                    <span style={{ color: 'var(--color-text-muted)', fontSize: 12, marginLeft: 12 }}>{n.barcode}</span>
+                                    <span style={{ color: 'var(--color-text-muted)', fontSize: 12, marginLeft: 12 }}>
+                                        {nom.article(n) ? `${nom.article(n)} · ` : ''}{n.barcode}
+                                    </span>
                                 </div>
                             ))}
                         </div>
@@ -182,21 +194,24 @@ export default function TransferItemsEditor({
                 </span>
             </div>
 
-            {/* Таблица состава */}
+            {/* Таблица состава. Набор и порядок колонок — 1:1 с таблицей позиций
+                заявки на сборку (assembly/[id]/edit): #, Товар, Артикул, ШК,
+                Кол-во, остаток, удаление. */}
             <div
-                className="glass-card"
+                className={flat ? undefined : 'glass-card'}
                 style={{ overflow: 'auto', padding: 0, maxHeight }}
                 onPaste={handlePaste}
             >
                 {/* TODO: migrate to TanStackDataTable — has inline form inputs (barcode input, quantity input, paste handler) */}
-                <table className="data-table" style={{ marginBottom: 0 }}>
+                <table className="data-table" style={{ fontSize: 13, marginBottom: 0 }}>
                     <thead>
                         <tr>
-                            <th style={{ width: 40, textAlign: 'center' }}>#</th>
-                            <th style={{ minWidth: 220 }}>ТОВАР</th>
-                            <th style={{ minWidth: 160 }}>ШК (БАРКОД)</th>
-                            {stockMap && <th style={{ width: 100, textAlign: 'right' }}>{stockLabel}</th>}
-                            <th style={{ width: 120, textAlign: 'right' }}>КОЛИЧЕСТВО</th>
+                            <th style={{ width: 40 }}>#</th>
+                            <th style={{ minWidth: 200 }}>Товар</th>
+                            <th style={{ width: 180 }}>Артикул</th>
+                            <th style={{ minWidth: 160 }}>ШК</th>
+                            <th style={{ width: 120, textAlign: 'right' }}>Кол-во</th>
+                            {stockMap && <th style={{ width: 110, textAlign: 'right' }}>{stockLabel}</th>}
                             <th style={{ width: 50 }}></th>
                         </tr>
                     </thead>
@@ -207,59 +222,56 @@ export default function TransferItemsEditor({
                             const unknown = !!barcode && !n;
                             return (
                                 <tr key={i} style={{ background: unknown ? 'rgba(239,68,68,0.04)' : undefined }}>
-                                    <td style={{ textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 12 }}>
+                                    <td style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
                                         {barcode ? i + 1 : ''}
                                     </td>
-                                    <td style={{ fontSize: 13, color: n ? 'var(--color-text)' : unknown ? '#ef4444' : 'var(--color-text-muted)' }}>
+                                    <td style={{ fontSize: 12, color: unknown ? 'var(--color-danger)' : 'var(--color-text-muted)' }}>
                                         {n ? nom.label(n) : (unknown ? '(не найден)' : '—')}
+                                    </td>
+                                    <td style={{ fontSize: 12, fontFamily: 'monospace' }}>
+                                        {n && nom.article(n) ? nom.article(n) : '—'}
                                     </td>
                                     <td>
                                         <input
+                                            className="form-input"
                                             value={row.barcode}
                                             onChange={e => updateRow(i, 'barcode', e.target.value)}
-                                            placeholder="Введите баркод..."
+                                            placeholder="Штрихкод"
                                             disabled={disabled}
                                             style={{
-                                                width: '100%', background: 'transparent',
-                                                border: 'none', padding: '8px 4px', fontSize: 13,
-                                                color: unknown ? '#ef4444' : 'var(--color-text)',
-                                                outline: 'none',
+                                                width: '100%', fontSize: 13, fontFamily: 'monospace',
+                                                color: unknown ? 'var(--color-danger)' : 'var(--color-text)',
                                             }}
+                                        />
+                                    </td>
+                                    <td>
+                                        <input
+                                            className="form-input"
+                                            type="number"
+                                            min={0}
+                                            value={row.quantity}
+                                            onChange={e => updateRow(i, 'quantity', e.target.value)}
+                                            placeholder="0"
+                                            disabled={disabled}
+                                            style={{ width: '100%', fontSize: 13, textAlign: 'right' }}
                                         />
                                     </td>
                                     {stockMap && (
                                         <td style={{
-                                            textAlign: 'right', fontSize: 13, fontWeight: 600,
-                                            color: stockAccent ? 'var(--color-warning)' : 'var(--color-text)',
+                                            textAlign: 'right', fontWeight: 500,
+                                            color: stockAccent ? 'var(--color-warning)' : 'var(--color-success)',
                                         }}>
                                             {barcode ? formatNumber(stockMap[barcode] || 0) : ''}
                                         </td>
                                     )}
                                     <td>
-                                        <input
-                                            type="number"
-                                            value={row.quantity}
-                                            onChange={e => updateRow(i, 'quantity', e.target.value)}
-                                            placeholder="0"
-                                            disabled={disabled}
-                                            style={{
-                                                width: '100%', background: 'transparent',
-                                                border: 'none', padding: '8px 4px', fontSize: 13,
-                                                textAlign: 'right', color: 'var(--color-text)',
-                                                outline: 'none',
-                                            }}
-                                        />
-                                    </td>
-                                    <td>
                                         {barcode && (
                                             <button
                                                 type="button"
+                                                className="btn btn-secondary btn-sm"
                                                 onClick={() => removeRow(i)}
                                                 disabled={disabled}
-                                                style={{
-                                                    background: 'none', border: 'none', cursor: 'pointer',
-                                                    color: 'var(--color-text-muted)', fontSize: 16, padding: '4px 6px',
-                                                }}
+                                                style={{ padding: '4px 8px' }}
                                                 title="Удалить строку"
                                             >{'×'}</button>
                                         )}
