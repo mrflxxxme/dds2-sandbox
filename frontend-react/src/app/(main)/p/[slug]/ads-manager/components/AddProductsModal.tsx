@@ -4,6 +4,7 @@ import { api } from '@/lib/api';
 import type { AdSubject, AdNmCard } from '@/types/api';
 import { IcSearch, IcX } from './icons';
 import WbThumb from '@/components/WbThumb';
+import { useOverlayClose } from './adsShared';
 
 const MAX = 50;
 
@@ -71,8 +72,11 @@ export default function AddProductsModal({ initialSelected, onClose, onApply }: 
 
     const subjectName = subjects.find(s => s.id === subjectId)?.name;
 
+    // Подложка закрывает окно только «настоящим» кликом по ней (не концом выделения текста)
+    const overlay = useOverlayClose(onClose);
+
     return (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 1100, background: 'rgba(17,24,39,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} onClick={onClose}>
+        <div style={{ position: 'fixed', inset: 0, zIndex: 1100, background: 'rgba(17,24,39,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} {...overlay}>
             <div className="glass-card static" onClick={e => e.stopPropagation()}
                 style={{ width: 720, maxWidth: '100%', height: '82vh', display: 'flex', flexDirection: 'column', padding: 24, background: '#fff' }}>
                 <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>

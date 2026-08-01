@@ -32,6 +32,20 @@ export function readTargetDrr(fromCampaign?: number | null): number {
 
 export const STATUS_BADGE: Record<number, string> = { 9: 'badge-success', 11: 'badge-danger', 7: 'badge-secondary' };
 
+/** Пропсы подложки модалки: закрываем ТОЛЬКО когда и нажатие, и отпускание были на самой
+ *  подложке. Иначе выделение текста в поле (мышь ушла за край окна) или протяжка по кнопкам
+ *  заканчиваются click'ом на подложке — и окно захлопывается вместе с несохранённой формой. */
+export function useOverlayClose(onClose: () => void) {
+    const downOnOverlay = React.useRef(false);
+    return {
+        onMouseDown: (e: React.MouseEvent) => { downOnOverlay.current = e.target === e.currentTarget; },
+        onClick: (e: React.MouseEvent) => {
+            if (e.target === e.currentTarget && downOnOverlay.current) onClose();
+            downOnOverlay.current = false;
+        },
+    };
+}
+
 export function mskTime(isoStr: string | null): string {
     if (!isoStr) return 'до первого синка';
     try {

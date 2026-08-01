@@ -757,6 +757,72 @@ async def get_ad_campaigns_list(
     )
 
 
+class AutorefillRequest(BaseModel):
+    """Родная настройка автопополнения ВБ (реальные деньги — правило трат в кабинете)."""
+
+    enabled: bool = False
+    threshold: float = 0  # ₽: остаток, ниже которого ВБ доливает
+    amount: float = 1000  # ₽: сумма долива (минимум ВБ — 1000)
+    daily_limit: bool = True  # «не чаще N раз в день»
+    limit: int = 1
+    unified_account: bool = True  # источник списания — единый счёт кабинета
+
+
+@router.get("/campaigns/{campaign_id}/autorefill")
+async def get_campaign_autorefill(
+    campaign_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Автопополнение кампании как оно настроено в кабинете ВБ (+ история доливов).
+
+    Ответ несёт статус кабинетной сессии: ACTIVE / EXPIRED / NONE.
+    """
+    from backend.integrations.wb_portal_client import WbPortalError
+    from backend.services.funnel.ads_autorefill import get_autorefill
+
+    try:
+        return await get_autorefill(db, project.id, campaign_id)
+    except WbPortalError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/campaigns/{campaign_id}/autorefill", dependencies=[Depends(rate_limit_write)])
+async def set_campaign_autorefill(
+    campaign_id: int,
+    body: AutorefillRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Изменить родную настройку автопополнения в кабинете ВБ (реальное правило трат)."""
+    from backend.integrations.wb_portal_client import WbPortalError
+    from backend.services.funnel.ads_autorefill import save_autorefill
+
+    try:
+        result = await save_autorefill(db, project.id, campaign_id, body.model_dump())
+    except WbPortalError as e:
+        # Отказ/лимит кабинета — 400 с текстом ВБ, а не 500: правило НЕ изменилось.
+        raise HTTPException(400, str(e)) from e
+    if not result.get("ok") and result.get("error"):
+        raise HTTPException(400, result["error"])
+    return result
+
+
+@router.get("/campaigns/autopay/log")
+async def get_campaigns_autopay_log(
+    campaign_id: int | None = None,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Журнал пополнений — авто и ручных (новые первыми); campaign_id — фильтр по кампании."""
+    from backend.services.funnel.ads_manager import get_autopay_log
+
+    log = await get_autopay_log(db, project.id)
+    if campaign_id is not None:
+        log = [e for e in log if int(e.get("campaign_id") or 0) == campaign_id]
+    return log
+
+
 class ScheduleSettingRequest(BaseModel):
     campaign_id: int
     enabled: bool = False
@@ -1391,6 +1457,17 @@ async def positions_map_endpoint(
     from backend.services.funnel.search_positions import get_positions_map
 
     return {"nm_id": nm_id, "positions": await get_positions_map(db, project.id, nm_id)}
+
+
+@router.get("/ads/balance")
+async def ads_account_balance_endpoint(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Кошелёк кабинета Продвижения WB: счёт / баланс взаиморасчётов / бонусы."""
+    from backend.services.funnel.ads_manager import get_adv_account_balance
+
+    return await get_adv_account_balance(db, project.id)
 
 
 class DepositRequest(BaseModel):

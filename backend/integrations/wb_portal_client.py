@@ -49,6 +49,9 @@ logger = structlog.get_logger("dds.wb_portal")
 SUPPLY_BASE = "https://seller-supply.wildberries.ru"
 AUTH_BASE = "https://seller.wildberries.ru"
 CMP_BASE = "https://cmp.wildberries.ru"  # кабинет рекламы (стата кампаний) — GET, authorizev3
+#: Денежный шлюз рекламного кабинета: автопополнение бюджета, счета, бюджеты кампаний.
+#: XHR страницы cmp → origin/referer обязаны остаться cmp (как у MARKETPLACE_BASE ниже).
+ADS_GATE_BASE = "https://ads-gate.wildberries.ru"
 # Биржа карточек товаров (card-exchange showcase) — REST (НЕ JSON-RPC), тот же host,
 # та же авторизация authorizev3+cookie. Проксируем витрину/справочник/корзину в DDS2.
 EXC_PREFIX = "/ns/exc-api/monetization/api/v1"
@@ -242,12 +245,19 @@ class WbPortalClient:
             raise WbSessionExpired("auth/token не вернул токен сессии")
         self.wb_seller_lk = token
 
-    async def _raw_post(self, url: str, body: dict | list) -> dict | list:
-        """Один POST через shared-клиент с ретраем на 401 (обновление wb-seller-lk)."""
+    async def _raw_post(self, url: str, body: dict | list, *, origin: str | None = None) -> dict | list:
+        """Один POST через shared-клиент с ретраем на 401 (обновление wb-seller-lk).
+
+        origin — подменить origin/referer, когда запрос это XHR другой страницы кабинета
+        (ads-gate принимает только origin cmp, ср. комментарий про MARKETPLACE_BASE).
+        """
         client = self._ensure_client()
+        headers = self._headers()
+        if origin:
+            headers = {**headers, "origin": origin, "referer": origin + "/"}
         try:
             for attempt in range(2):
-                resp = await client.post(url, headers=self._headers(), json=body)
+                resp = await client.post(url, headers=headers, json=body)
                 if resp.status_code == 401 and attempt == 0:
                     # Протух короткий токен — обновляем и повторяем один раз.
                     await self._refresh_lk()
@@ -465,6 +475,36 @@ class WbPortalClient:
                 }
             )
         return out
+
+    # ─── автопополнение бюджета кампании (родная настройка ВБ) ────────────
+    # РЕАЛЬНЫЕ ДЕНЬГИ: это правило, по которому ВБ сам доливает бюджет. Публичный
+    # advert-api настройку не отдаёт вообще — только этот кабинетный хост.
+    # Контракт снят с живого кабинета 2026-08-01 (см. memory wb-autorefill-cabinet-api):
+    #   GET  /proxy/autorefill/v2/{id}        → {"settings": {..., "history": [...]}}
+    #   POST /proxy/autorefill/v2/{id}        ← {"settings": {bet_min, bet_sum, is_daily_limit, limit, is_enable, source}}
+    #   PUT  /proxy/autorefill/v2/{id}/retry  → повтор неудавшегося долива
+    # Одних cookie мало: без authorizev3 хост отвечает 401 «named cookie not present».
+
+    async def fetch_autorefill(self, campaign_id: int) -> dict:
+        """Настройка автопополнения кампании + история доливов (одним запросом)."""
+        data = await self._raw_get(
+            ADS_GATE_BASE, f"/proxy/autorefill/v2/{campaign_id}", {}, origin=CMP_BASE
+        )
+        settings = data.get("settings") if isinstance(data, dict) else None
+        return settings if isinstance(settings, dict) else {}
+
+    async def save_autorefill(self, campaign_id: int, settings: dict) -> dict:
+        """Сохранить настройку автопополнения в кабинете ВБ. Реальное правило трат.
+
+        Клиент кабинета шлёт ТОЛЬКО рублёвые поля (`*_cents` считает сервер).
+        """
+        data = await self._raw_post(
+            ADS_GATE_BASE + f"/proxy/autorefill/v2/{campaign_id}",
+            {"settings": settings},
+            origin=CMP_BASE,
+        )
+        out = data.get("settings") if isinstance(data, dict) else None
+        return out if isinstance(out, dict) else {}
 
     # ─── биржа карточек товаров (card-exchange showcase) ──────────────────
     # REST на seller.wildberries.ru/ns/exc-api/... (НЕ JSON-RPC): тело POST —
