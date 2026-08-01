@@ -539,7 +539,22 @@ export default function AssemblyDetailPage() {
     // FBO) остаются под canEditFbo / страницей редактирования.
     const canEditFields = assembly && assembly.status !== 'CANCELLED' && !isFbs;
     const canEditAlways = assembly && assembly.status !== 'CANCELLED' && !isFbs;
-    const canEditFbo = assembly && !isFbs && ['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED'].includes(assembly.status);
+    /**
+     * Привязка FBO-поставки. Зеркалит серверный гейт `update_assembly_request`:
+     * до отгрузки поставку можно менять свободно, на закрытых статусах —
+     * ТОЛЬКО проставить недостающую (перепривязать отгруженное нельзя, товар
+     * уехал в прежнюю поставку). CANCELLED не правится вовсе.
+     *
+     * 🔴 Учётные заявки ФФ (kind=fbs) больше не исключены. Раньше стоял глухой
+     * `!isFbs`, и связать их с поставкой было нельзя в принципе: они приезжают
+     * из синка сразу в DELIVERED, то есть ни одного «редактируемого» статуса у
+     * них не бывает. Канон юзера 01.08.2026 — связывать FBO-поставки с заявкой
+     * на сборку от ФФ (ASM-1063).
+     */
+    const canEditFbo = !!assembly
+        && assembly.status !== 'CANCELLED'
+        && (['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED'].includes(assembly.status)
+            || !assembly.wb_fbo_supply_id);
     // Единица поставки — паллета/короб (отдельное поле shipped_as_boxes, НЕ package_type).
     const unitCountLabel = assembly?.shipped_as_boxes ? 'Короба' : 'Палеты';
     const unitWeightLabel = assembly?.shipped_as_boxes ? 'Вес 1 короба' : 'Вес 1 палеты';

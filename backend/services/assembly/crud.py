@@ -1656,10 +1656,20 @@ async def update_assembly_request(
         AssemblyStatus.CLOSED,
     )
 
-    # Update FBO supply link — only on actual change, and not in closed statuses.
+    # Update FBO supply link — only on actual change.
     if payload.wb_fbo_supply_id is not None and payload.wb_fbo_supply_id != req.wb_fbo_supply_id:
-        if _is_closed:
-            raise ValueError("Cannot change FBO supply in status " + req.status)
+        # 🔴 На закрытых статусах запрещена ПЕРЕПРИВЯЗКА, но не ПЕРВАЯ привязка.
+        # Разница принципиальна: перевесить отгруженную сборку на другую поставку
+        # значит переписать историю — товар физически уехал в ту, что стояла
+        # раньше. А проставить связь там, где её не было, историю не трогает: это
+        # заполнение пробела задним числом, и без него учётные заявки ФФ (kind=fbs,
+        # приезжают из синка сразу в DELIVERED) не связать с поставкой НИКОГДА —
+        # редактируемых статусов у них просто не бывает.
+        if _is_closed and req.wb_fbo_supply_id is not None:
+            raise ValueError(
+                f"Сборка в статусе {req.status} уже привязана к другой FBO-поставке — "
+                "перепривязать нельзя, товар уехал в неё."
+            )
         # Validate the FBO supply
         fbo_result = await db.execute(
             select(WbFboSupply).where(
