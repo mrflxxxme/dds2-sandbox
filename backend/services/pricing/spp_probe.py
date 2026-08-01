@@ -24,6 +24,8 @@ import logging
 from datetime import datetime
 from decimal import Decimal
 
+import pytz
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,7 +34,14 @@ from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.pricing")
 
+_MSK = pytz.timezone("Europe/Moscow")
+
 MAX_STEP_PCT = 0.35  # дальше 35 % от текущей цены проба не ходит
+#: Рублёвые рамки маржи (канон Дениса 2026-08-01): вниз ходим коротко — каждый
+#: заказ по сниженной цене стоит нам маржи; вверх можно дальше — там теряются
+#: заказы, но не деньги с них. Проверяются ВСЕГДА, даже если процентный шаг мал.
+MAX_DOWN_RUB = 300.0
+MAX_UP_RUB = 1000.0
 POLL_SEC = 300  # опрос витрины раз в 5 минут
 HOLD_SEC = 4 * 3600  # держим цену 4 часа: столько занимала реакция ВБ в замере
 MAX_HOLD_SEC = 12 * 3600
@@ -55,6 +64,33 @@ def _spp(seller: float, buyer: float | None) -> float | None:
     if not buyer or seller <= 0:
         return None
     return round((1 - buyer / seller) * 100, 2)
+
+
+async def record_observation(
+    db: AsyncSession, project_id: int, nm_id: int, seller: float, buyer: float
+) -> None:
+    """Сохранить замер пробы как точку карты СПП (`source="probe"`).
+
+    Ради этого проба и затевается: цена, на которой наших товаров не стояло,
+    после пробы становится обычным наблюдением, и карта с порогами подхватывают
+    её сами, без отдельного хранилища «результатов прогонов».
+    """
+    from backend.services.pricing.spp_points import _spp_of, _upsert_points
+
+    spp = _spp_of(seller, buyer)
+    if spp is None:
+        return
+    now_msk = pytz.UTC.localize(utcnow()).astimezone(_MSK)
+    await _upsert_points(db, project_id, [{
+        "nm_id": nm_id,
+        "observed_on": now_msk.date(),
+        "observed_hour": now_msk.hour,
+        "source": "probe",
+        "seller_price": round(seller, 2),
+        "buyer_price": round(buyer, 2),
+        "spp_rate": spp,
+        "obs_count": 1,
+    }])
 
 
 async def start_probe(
@@ -102,6 +138,17 @@ async def start_probe(
             f"Шаг {step * 100:.0f} % больше предела {MAX_STEP_PCT * 100:.0f} %: "
             f"{seller_now:.2f} → {target_price:.2f} ₽"
         )
+    delta = target_price - seller_now
+    if delta < -MAX_DOWN_RUB:
+        raise ProbeRefused(
+            f"Снижение на {-delta:.0f} ₽ больше предела {MAX_DOWN_RUB:.0f} ₽: "
+            f"{seller_now:.2f} → {target_price:.2f} ₽"
+        )
+    if delta > MAX_UP_RUB:
+        raise ProbeRefused(
+            f"Повышение на {delta:.0f} ₽ больше предела {MAX_UP_RUB:.0f} ₽: "
+            f"{seller_now:.2f} → {target_price:.2f} ₽"
+        )
     if floor_price is not None and target_price < floor_price:
         raise ProbeRefused(f"Цена {target_price:.2f} ₽ ниже пола {floor_price:.2f} ₽")
 
@@ -128,21 +175,48 @@ async def start_probe(
     return probe
 
 
-def _price_and_discount(target: float, base_price: float, discount: float) -> tuple[int, int]:
+def _price_and_discount(
+    target: float, base_price: float, discount: float, *, prefer_kopecks: bool = False
+) -> tuple[int, int]:
     """Целевая цена витрины → (цена до скидки, скидка %) для API ВБ.
 
-    ВБ принимает базу и скидку, а витрина = база × (1 − скидка). Базу не трогаем
-    (её видит покупатель как зачёркнутую), подбираем скидку — так проба меняет
-    ровно одно число и откат тоже одношаговый.
+    ВБ принимает целую базу и целую скидку, а витрина = база × (1 − скидка/100).
+    Поэтому произвольную цену с копейками при фиксированной базе не поставить:
+    у базы 6518 ₽ соседние достижимые значения — 1955.40 (70 %) и 2020.58 (69 %),
+    и «1999,14» между ними просто нет.
+
+    Ищем пару, дающую цену максимально близко к цели, при прочих равных —
+    с базой, ближайшей к нынешней (её покупатель видит зачёркнутой, и дёргать её
+    сильнее необходимого не надо). Возврат считается тем же путём, поэтому цена
+    возвращается ровно та, что стояла.
+
+    `prefer_kopecks` — при равном промахе выбираем пару, дающую цену С дробной
+    частью: ровное «1999.00» в данных не отличить от обычной цены товара, а с
+    хвостом сразу видно, что цена пробная. На возврате флаг НЕ ставим — там надо
+    вернуть ровно то, что стояло, каким бы оно ни было.
     """
-    if base_price <= 0:
-        return int(round(target)), 0
-    disc = round((1 - target / base_price) * 100)
-    disc = max(0, min(int(disc), 99))
-    return int(round(base_price)), disc
+    if target <= 0:
+        return int(round(base_price or target)), 0
+
+    best: tuple[tuple, int, int] | None = None
+    for disc in range(0, 91):
+        rate = 1 - disc / 100
+        base = round(target / rate)
+        if base <= 0:
+            continue
+        got = base * rate
+        miss = abs(got - target)
+        flat = prefer_kopecks and round(got % 1, 2) == 0  # цена без копеек — хуже
+        key = (round(miss, 2), int(flat), abs(base - (base_price or base)))
+        if best is None or key < best[0]:
+            best = (key, base, disc)
+    assert best is not None
+    return best[1], best[2]
 
 
-async def run_probe(db: AsyncSession, probe: WbSppProbe, *, hold_sec: int = HOLD_SEC) -> WbSppProbe:
+async def run_probe(
+    db: AsyncSession, probe: WbSppProbe, *, hold_sec: int = HOLD_SEC, poll_sec: int = POLL_SEC
+) -> WbSppProbe:
     """Поставить цену, дождаться реакции витрины, вернуть цену обратно.
 
     Возврат — в `finally`: даже если опрос упадёт или процесс отменят, цена
@@ -157,17 +231,21 @@ async def run_probe(db: AsyncSession, probe: WbSppProbe, *, hold_sec: int = HOLD
 
     target = float(probe.target_price)
     base = float(probe.base_price_before)
-    price_arg, disc_arg = _price_and_discount(target, base, float(probe.discount_before))
+    price_arg, disc_arg = _price_and_discount(
+        target, base, float(probe.discount_before), prefer_kopecks=True
+    )
     buyer_before = float(probe.buyer_price_before) if probe.buyer_price_before else None
     started: datetime = probe.started_at
 
+    applied = False
     try:
         await client.set_price(probe.nm_id, price_arg, disc_arg)
+        applied = True  # цена реально ушла в ВБ — теперь её обязательно вернуть
         await db.commit()  # не держим транзакцию через долгое ожидание
 
         deadline = asyncio.get_running_loop().time() + hold_sec
         while asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(POLL_SEC)
+            await asyncio.sleep(poll_sec)
             probe.polls += 1
             buyer_now = await _card_price(probe.nm_id)
             if buyer_now is None:
@@ -177,6 +255,9 @@ async def run_probe(db: AsyncSession, probe: WbSppProbe, *, hold_sec: int = HOLD
             spp_now = _spp(target, buyer_now)
             probe.spp_after = Decimal(str(spp_now)) if spp_now is not None else None
             await db.commit()
+            # точка карты пишется на КАЖДОМ опросе: если процесс упадёт посреди
+            # пробы, добытое знание уже сохранено
+            await record_observation(db, probe.project_id, probe.nm_id, target, buyer_now)
             # витрина сдвинулась — цель достигнута, дальше держать цену незачем
             if buyer_before is None or abs(buyer_now - buyer_before) > 1:
                 probe.reacted_after_sec = int((utcnow() - started).total_seconds())
@@ -192,17 +273,22 @@ async def run_probe(db: AsyncSession, probe: WbSppProbe, *, hold_sec: int = HOLD
         probe.error = str(e)[:1000]
         logger.error("проба #%d: %s", probe.id, e)
     finally:
-        try:
-            back_price, back_disc = _price_and_discount(
-                float(probe.seller_price_before), base, float(probe.discount_before)
-            )
-            await client.set_price(probe.nm_id, back_price, back_disc)
+        if not applied:
+            # до ВБ дело не дошло (например 401 на ключе) — возвращать нечего,
+            # и поднимать тревогу «цена не возвращена» тоже незачем
             probe.reverted = True
-        except Exception as e:  # noqa: BLE001
-            probe.reverted = False
-            probe.error = (probe.error or "") + f" | ЦЕНА НЕ ВОЗВРАЩЕНА: {e}"[:500]
-            probe.status = "ERROR"
-            logger.error("проба #%d: цена НЕ возвращена — %s", probe.id, e)
+        else:
+            try:
+                back_price, back_disc = _price_and_discount(
+                    float(probe.seller_price_before), base, float(probe.discount_before)
+                )
+                await client.set_price(probe.nm_id, back_price, back_disc)
+                probe.reverted = True
+            except Exception as e:  # noqa: BLE001
+                probe.reverted = False
+                probe.error = (probe.error or "") + f" | ЦЕНА НЕ ВОЗВРАЩЕНА: {e}"[:500]
+                probe.status = "ERROR"
+                logger.error("проба #%d: цена НЕ возвращена — %s", probe.id, e)
         probe.finished_at = utcnow()
         await db.commit()
 

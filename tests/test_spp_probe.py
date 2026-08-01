@@ -22,17 +22,30 @@ from backend.services.pricing.spp_probe import (
 
 
 class TestPriceAndDiscount:
-    """Меняем скидку, а не базу: покупатель видит ту же зачёркнутую цену."""
+    """ВБ принимает целую базу и целую скидку — пару подбираем под точную цену.
 
-    def test_discount_derived_from_base(self):
-        assert _price_and_discount(1999.0, 6518.0, 70.0) == (6518, 69)
+    При фиксированной базе произвольную цену с копейками не поставить: у базы
+    6518 ₽ соседние достижимые значения 1955.40 (70 %) и 2020.58 (69 %), а
+    «1999,14» между ними нет — из-за этого первая проба и не могла встать на
+    нужный уровень.
+    """
 
-    def test_discount_clamped(self):
+    @pytest.mark.parametrize("target", [1999.14, 1999.20, 1955.40, 4999.20])
+    def test_pair_hits_target_exactly(self, target):
+        base, disc = _price_and_discount(target, 6518.0, 70.0)
+        assert round(base * (1 - disc / 100), 2) == target
+
+    def test_keeps_current_base_when_it_already_fits(self):
+        """1955.40 достижима нынешней базой — не трогаем зачёркнутую цену зря."""
+        assert _price_and_discount(1955.40, 6518.0, 70.0) == (6518, 70)
+
+    def test_discount_within_wb_limits(self):
         _, disc = _price_and_discount(1.0, 100000.0, 0.0)
-        assert disc == 99
+        assert 0 <= disc <= 90
 
-    def test_no_base_falls_back_to_plain_price(self):
-        assert _price_and_discount(1999.0, 0.0, 0.0) == (1999, 0)
+    def test_no_base_still_works(self):
+        base, disc = _price_and_discount(1999.0, 0.0, 0.0)
+        assert round(base * (1 - disc / 100), 2) == 1999.0
 
 
 class TestSpp:
@@ -95,7 +108,7 @@ class TestGuards:
 @pytest.mark.asyncio
 class TestRun:
     async def test_price_returned_even_after_error(self, db_session, project, monkeypatch):
-        """Ошибка в середине пробы не должна оставлять чужую цену на витрине."""
+        """Цена уже поставлена, дальше всё падает — откат обязан сработать сам."""
         db_session.add(
             WbPrice(
                 project_id=project.id, nm_id=770010, base_price=Decimal("4000.00"),
@@ -108,17 +121,20 @@ class TestRun:
 
         calls: list[tuple] = []
         monkeypatch.setattr(
-            "backend.integrations.wb_api.WBApiClient.set_price",
-            _recording_set_price(calls, fail_first=True),
+            "backend.integrations.wb_api.WBApiClient.set_price", _recording_set_price(calls)
         )
+        monkeypatch.setattr("backend.services.integrations_service._get_wb_key", _fake_key())
+        # цена уже на витрине, а опрос падает — ровно тот случай, когда откат обязан
+        # сработать сам
         monkeypatch.setattr(
-            "backend.services.integrations_service._get_wb_key", _fake_key()
+            "backend.services.pricing.spp_probe._card_price", _boom
         )
 
-        await run_probe(db_session, probe, hold_sec=1)
+        await run_probe(db_session, probe, hold_sec=1, poll_sec=0)
         assert probe.status == "ERROR"
         assert probe.reverted is True
-        assert calls[-1][1:] == (4000, 50)  # вернули исходную скидку
+        back_base, back_disc = calls[-1][1], calls[-1][2]
+        assert round(back_base * (1 - back_disc / 100), 2) == 2000.0  # вернули ту же цену
 
 
 def _fake_card(buyer: float):
@@ -133,10 +149,51 @@ def _fake_key():
     return _inner
 
 
-def _recording_set_price(calls: list, *, fail_first: bool = False):
+def _recording_set_price(calls: list):
     async def _inner(self, nm_id: int, price: int, discount: int | None = None):
         calls.append((nm_id, price, discount))
-        if fail_first and len(calls) == 1:
-            raise ValueError("WB упал")
         return {}
+    return _inner
+
+
+async def _boom(nm_id: int):
+    raise ValueError("card-API упал")
+
+
+@pytest.mark.asyncio
+class TestNotApplied:
+    async def test_failed_first_write_is_not_a_lost_price(self, db_session, project, monkeypatch):
+        """401 на первой же записи: цена не менялась — тревожить «не возвращена» не о чем.
+
+        Живой случай 2026-08-01: локальный ключ ВБ без scope «Цены и скидки»
+        отдал 401, и журнал пугал строкой «ЦЕНА НЕ ВОЗВРАЩЕНА», хотя на витрине
+        ничего не трогали.
+        """
+        db_session.add(
+            WbPrice(
+                project_id=project.id, nm_id=770020, base_price=Decimal("4000.00"),
+                price=Decimal("2000.00"), discount=Decimal("50.00"), currency="RUB",
+            )
+        )
+        await db_session.commit()
+        monkeypatch.setattr("backend.services.pricing.spp_probe._card_price", _fake_card(1500.0))
+        probe = await start_probe(db_session, project.id, 770020, 1900.0)
+
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            "backend.integrations.wb_api.WBApiClient.set_price", _always_401(calls)
+        )
+        monkeypatch.setattr("backend.services.integrations_service._get_wb_key", _fake_key())
+
+        await run_probe(db_session, probe, hold_sec=1, poll_sec=0)
+        assert probe.status == "ERROR"
+        assert probe.reverted is True  # возвращать было нечего
+        assert "НЕ ВОЗВРАЩЕНА" not in (probe.error or "")
+        assert len(calls) == 1  # второй записи не было
+
+
+def _always_401(calls: list):
+    async def _inner(self, nm_id: int, price: int, discount: int | None = None):
+        calls.append((nm_id, price, discount))
+        raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Цены и скидки»")
     return _inner
