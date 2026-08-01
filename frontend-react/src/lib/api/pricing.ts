@@ -1,6 +1,9 @@
 /** Ценообразование (наценка по артикулам) API methods */
 import { ApiClient } from './client';
-import type { PricingResponse, PricingAiResponse, SppMapResponse } from '@/types/api';
+import type {
+    PricingResponse, PricingAiResponse, SppMapResponse,
+    SppScanPlan, SppScanRun, SppProbeRow,
+} from '@/types/api';
 
 export interface PricingMarkupParams {
     date_from?: string;
@@ -49,6 +52,19 @@ export function addPricingMethods(api: ApiClient) {
             if (params?.source) q.set('source', params.source);
             if (params?.category) q.set('category', params.category);
             return api.request<SppMapResponse>('GET', `/api/v1/pricing/spp-map?${q.toString()}`);
+        },
+        getSppScanPlan(top = 40) {
+            const q = new URLSearchParams({ top: String(top) });
+            return api.request<SppScanPlan>('GET', `/api/v1/pricing/spp-scan?${q.toString()}`);
+        },
+        /** ПИШЕТ ЦЕНЫ В ВБ: ставит пачку, ждёт реакции витрины, возвращает назад. */
+        runSppScan(top: number, maxWaitSec = 1200) {
+            const q = new URLSearchParams({ top: String(top), max_wait_sec: String(maxWaitSec) });
+            return api.request<SppScanRun>('POST', `/api/v1/pricing/spp-scan/run?${q.toString()}`);
+        },
+        getSppProbes(limit = 50) {
+            const q = new URLSearchParams({ limit: String(limit) });
+            return api.request<{ rows: SppProbeRow[] }>('GET', `/api/v1/pricing/spp-probes?${q.toString()}`);
         },
         observeSpp(backfillDays = 0) {
             const q = backfillDays ? `?backfill_days=${backfillDays}` : '';
