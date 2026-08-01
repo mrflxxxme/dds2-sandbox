@@ -30,11 +30,17 @@ _INTER_REQUEST_DELAY = 0.4  # пауза между батчами — не тр
 def parse_card_products(data: dict) -> dict[int, dict]:
     """JSON card-API → {nm_id: {"product": ₽, "basic": ₽|None}}.
 
-    product — цена покупателя с СПП; basic — зачёркнутая (до скидок). Цены в
-    ответе в копейках (×100). Берём первый размер с ненулевым product.
+    product — цена покупателя с СПП; basic — цена продавца ДО seller-скидки
+    (зачёркнутая). Цены в ответе в копейках (×100). Берём первый размер с
+    ненулевым product.
+
+    Форма ответа у v4 дрейфует: раньше товары лежали под `data.products`, сейчас
+    (проверено 2026-08-01) приходят на верхнем уровне — читаем обе, иначе синк
+    молча забирает ноль строк и «Цена с СПП» тихо уезжает на BDR-фолбэк.
     """
     out: dict[int, dict] = {}
-    products = ((data or {}).get("data") or {}).get("products") or []
+    d = data or {}
+    products = d.get("products") or (d.get("data") or {}).get("products") or []
     for p in products:
         nm = p.get("id")
         if nm is None:
@@ -61,16 +67,25 @@ def parse_card_products(data: dict) -> dict[int, dict]:
 async def fetch_card_buyer_prices(
     nm_ids: list[int], dest: int = _DEFAULT_DEST, batch_size: int = _BATCH
 ) -> dict[int, float]:
-    """nm_id → цена покупателя с СПП (₽). Батчи + ретраи против флака CDN.
+    """nm_id → цена покупателя с СПП (₽). Тонкая обёртка над `fetch_card_prices`."""
+    full = await fetch_card_prices(nm_ids, dest=dest, batch_size=batch_size)
+    return {nm: info["product"] for nm, info in full.items()}
 
-    Возвращает только успешно полученные nm; провалившиеся батчи пропускаются
-    (best-effort), чтобы один пустой ответ не валил весь синк.
+
+async def fetch_card_prices(
+    nm_ids: list[int], dest: int = _DEFAULT_DEST, batch_size: int = _BATCH
+) -> dict[int, dict]:
+    """nm_id → {"product": цена клиента ₽, "basic": цена до seller-скидки ₽|None}.
+
+    Батчи + ретраи против флака CDN. Возвращает только успешно полученные nm;
+    провалившиеся батчи пропускаются (best-effort), чтобы один пустой ответ не
+    валил весь синк.
     """
     if not nm_ids:
         return {}
     uniq = list(dict.fromkeys(nm_ids))
     batches = [uniq[i : i + batch_size] for i in range(0, len(uniq), batch_size)]
-    result: dict[int, float] = {}
+    result: dict[int, dict] = {}
     sem = asyncio.Semaphore(_CONCURRENCY)
 
     async with httpx.AsyncClient(
@@ -102,6 +117,5 @@ async def fetch_card_buyer_prices(
         maps = await asyncio.gather(*[one_spaced(b) for b in batches])
 
     for m in maps:
-        for nm, info in m.items():
-            result[nm] = info["product"]
+        result.update(m)
     return result

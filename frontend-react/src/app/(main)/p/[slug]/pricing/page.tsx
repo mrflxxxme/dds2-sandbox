@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '@/lib/api';
 import { formatNumber, formatDateTime, exportToExcel } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
+import SppLadder from './components/SppLadder';
 import { sanitizeAIHtml } from '@/lib/sanitize';
 import type { Column } from '@/components/DataTable';
 import type { PricingResponse, PricingRow, PricingGroup } from '@/types/api';
@@ -65,6 +66,7 @@ export default function PricingPage() {
     const [anomalyOnly, setAnomalyOnly] = useState(false);
     const [newOnly, setNewOnly] = useState(false);
     const [groupBy, setGroupBy] = useState<'sku' | 'category' | 'size' | 'imt'>('category');
+    const [tab, setTab] = useState<'markup' | 'spp'>('markup');
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
     const [categoryOptions, setCategoryOptions] = useState<string[]>([]);
@@ -294,6 +296,29 @@ export default function PricingPage() {
                 {syncMsg ? ` · ${syncMsg}` : ''}
             </div>
 
+            {/* Вкладки: наценка ↔ ступеньки СПП */}
+            <div style={{ display: 'flex', gap: 6, marginTop: 14, borderBottom: '1px solid var(--color-border)' }}>
+                {([['markup', '💲 Наценка'], ['spp', '🪜 Ступеньки СПП']] as const).map(([k, label]) => (
+                    <button
+                        key={k}
+                        onClick={() => setTab(k)}
+                        className="btn btn-sm"
+                        style={{
+                            border: 'none', borderRadius: 0, background: 'transparent',
+                            borderBottom: tab === k ? '2px solid var(--color-accent)' : '2px solid transparent',
+                            fontWeight: tab === k ? 700 : 400,
+                            color: tab === k ? 'var(--color-text)' : 'var(--color-text-dim)',
+                        }}
+                    >
+                        {label}
+                    </button>
+                ))}
+            </div>
+
+            {tab === 'spp' ? (
+                <SppLadder dateFrom={dateFrom} dateTo={dateTo} />
+            ) : (
+            <>
             {/* Фильтры */}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', margin: '16px 0' }}>
                 <input type="date" className="btn btn-sm" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
@@ -387,6 +412,8 @@ export default function PricingPage() {
                     onToggle={(k) => setExpanded((prev) => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n; })}
                     loading={loading}
                 />
+            )}
+            </>
             )}
         </div>
     );

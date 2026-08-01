@@ -146,3 +146,73 @@ class PricingResponse(BaseModel):
     summary: PricingSummary
     price_synced_at: datetime | None = None
     has_bdr: bool = False
+
+
+# ─── «Ступеньки СПП» (советник по цене, ничего не пишет в ВБ) ──────────────
+
+
+class SppStep(BaseModel):
+    """Порог цены, на котором СПП скачком меняется (по всему проекту)."""
+
+    threshold: float  # цена, ниже которой СПП выше
+    spp_below: float  # нормированный СПП под порогом, п.п. к дневному фону (справочно)
+    spp_above: float
+    jump: float  # медиана СВОИХ скачков товаров, перешагивавших порог, п.п.
+    n_below: int  # точек в окне (кросс-секция — только для справки, она врёт)
+    n_above: int
+    n_products: int = 0  # товаров с точками по обе стороны — вес доказательства
+    agree_pct: float = 0  # доля таких товаров, подтвердивших скачок
+
+
+class SppLadderRow(BaseModel):
+    """Совет по одному артикулу: встать на ступеньку или не поднимать цену."""
+
+    nm_id: int
+    vendor_code: str | None = None
+    brand: str | None = None
+    category: str | None = None
+
+    current_price: float  # наша цена витрины сейчас (до СПП)
+    buyer_price: float | None = None  # что платит клиент сейчас
+    spp_rate: float = 0
+    cost_price: float | None = None
+    orders_count: int = 0
+    wb_stock: int = 0
+
+    verdict: str  # step_down (шаг вниз к порогу) | hold (сидим под порогом, не поднимать)
+    threshold: float
+    jump: float  # ожидаемый скачок СПП, п.п.
+    jump_source: str  # «своя история» | «порог по проекту»
+    confidence: str  # высокая | средняя | низкая
+    evidence: str = ""  # на чём основан вывод (наблюдений / товаров-свидетелей)
+    evidence_days_ago: int | None = None  # давность своего доказательства, дней
+    own_points: int = 0  # сколько своих наблюдений у товара
+
+    target_price: float | None = None  # цена на ступеньке (порог − 1 ₽)
+    target_spp: float | None = None
+    target_buyer_price: float | None = None
+    drop_seller: float | None = None  # сколько отдаём мы, ₽
+    drop_buyer: float | None = None  # сколько выигрывает клиент, ₽
+    drop_seller_pct: float | None = None
+    leverage: float | None = None  # Δ клиента / Δ наша — ради чего всё
+    floor: float | None = None  # цена безубытка (ниже неё не советуем)
+    unit_profit_now: float | None = None
+    unit_profit_after: float | None = None
+    impact: float = 0  # Δ клиента × заказы периода — для сортировки
+
+
+class SppLadderStats(BaseModel):
+    points: int = 0
+    days: int = 0
+    nm_with_points: int = 0
+    steps_found: int = 0
+    step_down: int = 0
+    hold: int = 0
+    skipped_below_floor: int = 0  # ступенька есть, но она ниже безубытка
+    last_point_on: str | None = None
+
+
+class SppLadderResponse(BaseModel):
+    rows: list[SppLadderRow] = []
+    steps: list[SppStep] = []
+    stats: SppLadderStats

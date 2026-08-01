@@ -9335,3 +9335,65 @@ export interface ExchangeSessionStatus {
     updated_at?: string | null;
     supplier_id?: string | null;
 }
+
+// ─── «Ступеньки СПП» (советник по цене) ────────────────────────────────────
+
+export interface SppStep {
+  threshold: number;
+  spp_below: number;
+  spp_above: number;
+  jump: number;
+  n_below: number;
+  n_above: number;
+  n_products: number;
+  agree_pct: number;
+}
+
+export interface SppLadderRow {
+  nm_id: number;
+  vendor_code: string | null;
+  brand: string | null;
+  category: string | null;
+  current_price: number;
+  buyer_price: number | null;
+  spp_rate: number;
+  cost_price: number | null;
+  orders_count: number;
+  wb_stock: number;
+  verdict: 'step_down' | 'hold';
+  threshold: number;
+  jump: number;
+  jump_source: string;
+  confidence: string;
+  evidence: string;
+  evidence_days_ago: number | null;
+  own_points: number;
+  target_price: number | null;
+  target_spp: number | null;
+  target_buyer_price: number | null;
+  drop_seller: number | null;
+  drop_buyer: number | null;
+  drop_seller_pct: number | null;
+  leverage: number | null;
+  floor: number | null;
+  unit_profit_now: number | null;
+  unit_profit_after: number | null;
+  impact: number;
+}
+
+export interface SppLadderStats {
+  points: number;
+  days: number;
+  nm_with_points: number;
+  steps_found: number;
+  step_down: number;
+  hold: number;
+  skipped_below_floor: number;
+  last_point_on: string | null;
+}
+
+export interface SppLadderResponse {
+  rows: SppLadderRow[];
+  steps: SppStep[];
+  stats: SppLadderStats;
+}

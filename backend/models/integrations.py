@@ -352,6 +352,45 @@ class WbPrice(Base):
     )
 
 
+class WbSppObservation(Base):
+    """Точка наблюдения «наша цена → СПП → цена клиента» по nm_id за день.
+
+    Строится из двух источников:
+      * `card` — снимок публичного card-API (цена клиента сейчас) × `wb_prices`
+        (наша цена витрины). Даёт точку даже без единого заказа.
+      * `orders` — ретро из `wb_orders` (поштучный `spp` + `price_with_disc`),
+        90 дней истории «бесплатно».
+
+    Один ряд = (проект, nm, день, источник, уровень нашей цены): цена в течение
+    дня меняется редко, а СПП внутри дня гуляет по покупателям — храним медиану
+    дня, а не каждое наблюдение.
+    """
+
+    __tablename__ = "wb_spp_observations"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    observed_on: Mapped[date] = mapped_column(Date, nullable=False)  # МСК-день
+    source: Mapped[str] = mapped_column(String(8), nullable=False)  # card | orders
+
+    seller_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)  # наша цена (до СПП)
+    buyer_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)  # что платит клиент
+    spp_rate: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)  # % = 1 − buyer/seller
+    obs_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)  # вес точки (заказов)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "nm_id", "observed_on", "source", "seller_price", name="uq_spp_obs_point"
+        ),
+        Index("ix_spp_obs_project_nm_day", "project_id", "nm_id", "observed_on"),
+        Index("ix_spp_obs_project_day", "project_id", "observed_on"),
+    )
+
+
 class WbWarehouseStock(Base):
     """Per-warehouse stock levels from WB API supplier/stocks."""
 
