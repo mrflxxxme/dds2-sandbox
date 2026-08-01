@@ -14,6 +14,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -349,6 +350,87 @@ class WbPrice(Base):
     __table_args__ = (
         UniqueConstraint("project_id", "nm_id", name="uq_wb_price_nm"),
         Index("ix_wb_prices_project", "project_id"),
+    )
+
+
+class WbSppObservation(Base):
+    """Точка наблюдения «наша цена → СПП → цена клиента» по nm_id за день.
+
+    Строится из двух источников:
+      * `card` — снимок публичного card-API (цена клиента сейчас) × `wb_prices`
+        (наша цена витрины). Даёт точку даже без единого заказа.
+      * `orders` — ретро из `wb_orders` (поштучный `spp` + `price_with_disc`),
+        90 дней истории «бесплатно».
+
+    Один ряд = (проект, nm, день, ЧАС, источник, уровень нашей цены). Час в ключе
+    потому, что СПП двигается в течение дня: без него часовые снимки затирали бы
+    друг друга. Ретро из заказов пишется с часом 0 — там источник дневной.
+    """
+
+    __tablename__ = "wb_spp_observations"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    observed_on: Mapped[date] = mapped_column(Date, nullable=False)  # МСК-день
+    observed_hour: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)  # МСК-час
+    source: Mapped[str] = mapped_column(String(8), nullable=False)  # card | orders
+
+    seller_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)  # наша цена (до СПП)
+    buyer_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)  # что платит клиент
+    spp_rate: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)  # % = 1 − buyer/seller
+    obs_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)  # вес точки (заказов)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "nm_id", "observed_on", "observed_hour", "source", "seller_price",
+            name="uq_spp_obs_point",
+        ),
+        Index("ix_spp_obs_project_nm_day", "project_id", "nm_id", "observed_on"),
+        Index("ix_spp_obs_project_day", "project_id", "observed_on"),
+    )
+
+
+class WbSppProbe(Base):
+    """Проба цены: журнал единственного места, где DDS2 пишет цену в ВБ.
+
+    Ставим товару целевую цену, ждём реакции витрины, фиксируем СПП и
+    возвращаем цену назад. Строка живёт и после отката — она и есть результат
+    замера: «на 4999 ₽ СПП стал 36.8 % через 3 ч 40 мин».
+    """
+
+    __tablename__ = "wb_spp_probes"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="RUNNING", nullable=False)
+
+    # снимок «до» — им же откатываемся
+    base_price_before: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    discount_before: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
+    seller_price_before: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    buyer_price_before: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    spp_before: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+
+    target_price: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    seller_price_after: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    buyer_price_after: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    spp_after: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    reacted_after_sec: Mapped[int | None] = mapped_column(Integer)
+    polls: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reverted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_spp_probes_project_started", "project_id", "started_at"),
+        Index("ix_spp_probes_project_nm", "project_id", "nm_id"),
     )
 
 

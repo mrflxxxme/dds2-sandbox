@@ -169,6 +169,20 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as session:
         await ensure_default_admin(session)
 
+    # Пробы цены живут часами в ЭТОМ процессе (api), и пересборка контейнера
+    # обрывает их вместе с возвратом цены. Любая RUNNING-строка на старте —
+    # сирота: возвращаем цену раньше, чем поднимаем что-либо ещё.
+    if settings.DDS_ROLE != "worker":
+        async with AsyncSessionLocal() as session:
+            try:
+                from backend.services.pricing.spp_probe import recover_stuck_probes
+
+                healed = await recover_stuck_probes(session)
+                if healed:
+                    logger.warning("Возвращены цены %d осиротевших проб СПП", healed)
+            except Exception as e:  # noqa: BLE001 — старт важнее
+                logger.error("Не удалось восстановить пробы цены: %s", e)
+
     # Start background scheduler ONLY in worker container
     from backend.scheduler import start_scheduler, stop_scheduler
 

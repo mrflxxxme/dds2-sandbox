@@ -1,6 +1,9 @@
 /** Ценообразование (наценка по артикулам) API methods */
 import { ApiClient } from './client';
-import type { PricingResponse, PricingAiResponse } from '@/types/api';
+import type {
+    PricingResponse, PricingAiResponse, SppMapResponse,
+    SppScanPlan, SppScanRun, SppProbeRow,
+} from '@/types/api';
 
 export interface PricingMarkupParams {
     date_from?: string;
@@ -40,6 +43,35 @@ export function addPricingMethods(api: ApiClient) {
                 'POST',
                 '/api/v1/pricing/sync-spp',
             );
+        },
+        getSppMap(params?: { date_from?: string; date_to?: string; step?: number; source?: string; category?: string }) {
+            const q = new URLSearchParams();
+            if (params?.date_from) q.set('date_from', params.date_from);
+            if (params?.date_to) q.set('date_to', params.date_to);
+            if (params?.step) q.set('step', String(params.step));
+            if (params?.source) q.set('source', params.source);
+            if (params?.category) q.set('category', params.category);
+            return api.request<SppMapResponse>('GET', `/api/v1/pricing/spp-map?${q.toString()}`);
+        },
+        getSppScanPlan(top = 40) {
+            const q = new URLSearchParams({ top: String(top) });
+            return api.request<SppScanPlan>('GET', `/api/v1/pricing/spp-scan?${q.toString()}`);
+        },
+        /** ПИШЕТ ЦЕНЫ В ВБ: ставит пачку, ждёт реакции витрины, возвращает назад. */
+        runSppScan(top: number, maxWaitSec = 1200) {
+            const q = new URLSearchParams({ top: String(top), max_wait_sec: String(maxWaitSec) });
+            return api.request<SppScanRun>('POST', `/api/v1/pricing/spp-scan/run?${q.toString()}`);
+        },
+        getSppProbes(limit = 50) {
+            const q = new URLSearchParams({ limit: String(limit) });
+            return api.request<{ rows: SppProbeRow[] }>('GET', `/api/v1/pricing/spp-probes?${q.toString()}`);
+        },
+        observeSpp(backfillDays = 0) {
+            const q = backfillDays ? `?backfill_days=${backfillDays}` : '';
+            return api.request<{
+                snapshot: { requested: number; written: number; stale: number };
+                backfill: { written: number; days: number };
+            }>('POST', `/api/v1/pricing/spp-observe${q}`);
         },
         getPricingAiRecommendations(params?: { date_from?: string; date_to?: string; only_in_stock?: boolean }) {
             const q = new URLSearchParams();

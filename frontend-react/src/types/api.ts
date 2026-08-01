@@ -9335,3 +9335,177 @@ export interface ExchangeSessionStatus {
     updated_at?: string | null;
     supplier_id?: string | null;
 }
+
+// ─── Карта СПП: категория × уровень цены → СПП ────────────────────────────
+
+export interface SppLagHint {
+  peer_spp: number;
+  delta: number;
+  peers: number;
+  buyer_price: number;
+}
+
+export interface SppLevelItem {
+  nm_id: number;
+  vendor_code: string | null;
+  price: number;
+  spp: number;
+  buyer_price: number;
+  hint_down: SppHint | null;
+  hint_up: SppHint | null;
+  lag_hint: SppLagHint | null;
+}
+
+export interface SppHint {
+  price: number;
+  spp: number;
+  buyer_price: number;
+  gain: number;
+  leverage: number | null;
+  buyer_delta: number;
+  categories: string[];
+  alt_kind: 'up' | 'down' | null;
+  alt_price: number | null;
+  alt_buyer_price: number | null;
+}
+
+export interface SppLevel {
+  price: number;
+  spp: number;
+  spp_min: number;
+  spp_max: number;
+  buyer_price: number;
+  n: number;
+  safe_price: number;
+  items: SppLevelItem[];
+  hint_down: SppHint | null;
+  hint_up: SppHint | null;
+}
+
+/** Порог цены по всему портфелю: между up_to и from_price СПП меняется скачком. */
+export interface SppThreshold {
+  up_to: number;
+  from_price: number;
+  spp_below: number;
+  spp_above: number;
+  jump: number;
+  n_below: number;
+  n_above: number;
+  band_from: number;
+  band_to: number;
+  categories: string[];
+  categories_count: number;
+  confirmed_by: string[];
+  fuzzy: boolean;
+}
+
+export interface SppCliff {
+  keep_below: number;
+  breaks_at: number;
+  spp_below: number;
+  spp_above: number;
+  drop: number;
+  seller_gives: number;
+  buyer_gains: number;
+  leverage: number | null;
+  n_below: number;
+  n_above: number;
+}
+
+export interface SppCategory {
+  category: string;
+  nm_count: number;
+  levels: SppLevel[];
+  cliffs: SppCliff[];
+  gaps: number[];
+}
+
+export interface SppMapStats {
+  source: string;
+  date_from: string | null;
+  date_to: string | null;
+  step: number;
+  points: number;
+  categories_count: number;
+  with_cliffs: number;
+  last_snapshot_on: string | null;
+}
+
+export interface SppMapResponse {
+  categories: SppCategory[];
+  thresholds: SppThreshold[];
+  stats: SppMapStats;
+}
+
+/** Цель прогона: цена, которой в данных ещё нет, и артикул, которым её пробуем. */
+export interface SppScanTarget {
+  kind: 'narrow' | 'grid' | 'explore';
+  price: number;
+  gap_before: number;
+  gap_after: number;
+  why: string;
+  nearby: number;
+  donor: {
+    nm_id: number;
+    vendor_code: string | null;
+    category: string;
+    price: number;
+    delta: number;
+    step_pct: number;
+  };
+}
+
+export interface SppScanPlan {
+  plan: SppScanTarget[];
+  summary: {
+    probes: number;
+    donors: number;
+    hours_sequential: number;
+    hours_parallel: number;
+    median_step_pct: number;
+  };
+  limits: {
+    max_down_rub: number;
+    max_up_rub: number;
+    max_step_pct: number;
+    hold_hours: number;
+    kopecks: number;
+  };
+  thresholds: SppThreshold[];
+}
+
+export interface SppScanRun {
+  launched: number;
+  applied: number;
+  reacted: {
+    nm_id: number;
+    price: number;
+    buyer_before: number;
+    buyer_after: number;
+    spp: number;
+    after_sec: number;
+  }[];
+  no_reaction: number[];
+  refused: { nm_id: number; price: number; reason: string }[];
+  errors: { nm_id: number; error: string }[];
+  waited_sec: number;
+}
+
+/** Строка журнала проб: что ставили, что увидели, вернулась ли цена. */
+export interface SppProbeRow {
+  id: number;
+  nm_id: number;
+  status: string;
+  price_before: number;
+  target_price: number;
+  buyer_before: number | null;
+  buyer_after: number | null;
+  spp_before: number | null;
+  spp_after: number | null;
+  reacted_after_sec: number | null;
+  polls: number;
+  reverted: boolean;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}

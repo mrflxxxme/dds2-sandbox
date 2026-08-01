@@ -133,15 +133,17 @@ async def sync_card_spp(db: AsyncSession, project_id: int) -> dict:
     флак отдельных батчей не валит синк. Возвращает статистику.
     """
     from backend.cache import get_redis
-    from backend.integrations.wb_card_api import fetch_card_buyer_prices
+    from backend.integrations.wb_card_api import fetch_card_prices
 
     nm_ids = list(
         (await db.execute(select(WbPrice.nm_id).where(WbPrice.project_id == project_id))).scalars().all()
     )
+    await db.commit()  # не держим транзакцию через долгий поход в card-API
     if not nm_ids:
         return {"status": "OK", "requested": 0, "fetched": 0, "synced_at": None}
 
-    prices = await fetch_card_buyer_prices(nm_ids)
+    card = await fetch_card_prices(nm_ids)
+    prices = {nm: info["product"] for nm, info in card.items()}
     synced_at = utcnow().isoformat()
 
     r = await get_redis()
@@ -151,8 +153,27 @@ async def sync_card_spp(db: AsyncSession, project_id: int) -> dict:
         )
         await r.set(spp_cache_key(project_id), payload, ex=_SPP_TTL)
 
-    logger.info("card-СПП sync: project %d — %d/%d nm", project_id, len(prices), len(nm_ids))
-    return {"status": "OK", "requested": len(nm_ids), "fetched": len(prices), "synced_at": synced_at}
+    # тем же ответом пишем точку истории «цена → СПП → цена клиента» за сегодня
+    # (Redis-карта живёт 2 суток, а лестницу СПП строить не из чего без истории)
+    written = 0
+    try:
+        from backend.services.pricing.spp_points import record_card_points
+
+        written = (await record_card_points(db, project_id, card)).get("written", 0)
+    except Exception as e:  # история — побочный эффект, не валим синк цены с СПП
+        logger.warning("СПП-точки: project %d не записаны — %s", project_id, e)
+
+    logger.info(
+        "card-СПП sync: project %d — %d/%d nm, точек истории %d",
+        project_id, len(prices), len(nm_ids), written,
+    )
+    return {
+        "status": "OK",
+        "requested": len(nm_ids),
+        "fetched": len(prices),
+        "points_written": written,
+        "synced_at": synced_at,
+    }
 
 
 async def load_spp_map(project_id: int) -> dict[int, float]:

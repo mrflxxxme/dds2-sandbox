@@ -4,9 +4,26 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '@/lib/api';
 import { formatNumber, formatDateTime, exportToExcel } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
+import SppLadder from './components/SppLadder';
+import SppScanTab from './components/SppScanTab';
 import { sanitizeAIHtml } from '@/lib/sanitize';
 import type { Column } from '@/components/DataTable';
 import type { PricingResponse, PricingRow, PricingGroup } from '@/types/api';
+
+/** Значок в стиле сайдбара: тонкий контур, 1.8, currentColor. */
+const Icon = ({ children, size = 15 }: { children: React.ReactNode; size?: number }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round"
+        style={{ flexShrink: 0 }}>{children}</svg>
+);
+
+// Ценник — тот же, что у раздела в сайдбаре; лесенка — «Ступеньки СПП»; мишень — прогоны.
+const ICON_TAG = <Icon size={22}><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" /><circle cx="7.5" cy="7.5" r=".5" fill="currentColor" /></Icon>;
+const TAB_ICONS: Record<string, React.ReactNode> = {
+    markup: <Icon><path d="M3 3v18h18" /><path d="m19 9-5 5-4-4-3 3" /></Icon>,
+    spp: <Icon><path d="M4 21V3" /><path d="M20 21V3" /><path d="M4 17h16" /><path d="M4 12h16" /><path d="M4 7h16" /></Icon>,
+    scan: <Icon><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /><path d="M12 2v3" /><path d="M12 19v3" /><path d="M2 12h3" /><path d="M19 12h3" /></Icon>,
+};
 
 // ─── format helpers ──────────────────────────────────────────────────────
 const money = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 0));
@@ -65,6 +82,7 @@ export default function PricingPage() {
     const [anomalyOnly, setAnomalyOnly] = useState(false);
     const [newOnly, setNewOnly] = useState(false);
     const [groupBy, setGroupBy] = useState<'sku' | 'category' | 'size' | 'imt'>('category');
+    const [tab, setTab] = useState<'markup' | 'spp' | 'scan'>('markup');
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
     const [categoryOptions, setCategoryOptions] = useState<string[]>([]);
@@ -281,29 +299,50 @@ export default function PricingPage() {
 
     return (
         <div className="animate-in" style={{ padding: 24 }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
-                <h1 style={{ fontSize: 28, fontWeight: 700, margin: 0 }}>💲 Ценообразование</h1>
-                <span style={{ color: 'var(--color-text-dim)', fontSize: 13 }}>
-                    Наценка, юнит-экономика и сигналы для решений о цене по каждому артикулу
+            <h1 style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 28, fontWeight: 700, margin: 0 }}>
+                {ICON_TAG} Ценообразование
+            </h1>
+
+            {/* Вкладки; свежесть цен — тем же рядом, отдельной строкой она была лишней */}
+            <div style={{ display: 'flex', gap: 6, marginTop: 12, alignItems: 'center', borderBottom: '1px solid var(--color-border)' }}>
+                {([['markup', 'Наценка'], ['spp', 'Ступеньки СПП'], ['scan', 'Прогоны цен']] as const).map(([k, label]) => (
+                    <button
+                        key={k}
+                        onClick={() => setTab(k)}
+                        className="btn btn-sm"
+                        style={{
+                            display: 'flex', alignItems: 'center', gap: 7,
+                            border: 'none', borderRadius: 0, background: 'transparent',
+                            borderBottom: tab === k ? '2px solid var(--color-accent)' : '2px solid transparent',
+                            fontWeight: tab === k ? 700 : 400,
+                            color: tab === k ? 'var(--color-text)' : 'var(--color-text-dim)',
+                        }}
+                    >
+                        {TAB_ICONS[k]}{label}
+                    </button>
+                ))}
+                <span style={{ marginLeft: 'auto', paddingBottom: 6, fontSize: 11.5, color: 'var(--color-text-dim)' }}>
+                    {resp?.price_synced_at ? `цены от ${formatDateTime(resp.price_synced_at)}` : 'цены не синхронизированы'}
+                    {syncMsg ? ` · ${syncMsg}` : ''}
                 </span>
             </div>
-            <div style={{ color: 'var(--color-text-dim)', fontSize: 12, marginTop: 6 }}>
-                {resp?.price_synced_at
-                    ? `Цены синхронизированы: ${formatDateTime(resp.price_synced_at)}`
-                    : 'Цены ещё не синхронизированы — нажмите «Обновить цены»'}
-                {syncMsg ? ` · ${syncMsg}` : ''}
-            </div>
 
+            {tab === 'scan' ? (
+                <SppScanTab />
+            ) : tab === 'spp' ? (
+                <SppLadder dateFrom={dateFrom} dateTo={dateTo} />
+            ) : (
+            <>
             {/* Фильтры */}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', margin: '16px 0' }}>
                 <input type="date" className="btn btn-sm" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
                 <span style={{ color: 'var(--color-text-dim)' }}>—</span>
                 <input type="date" className="btn btn-sm" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
                 <select className="btn btn-sm" value={groupBy} onChange={(e) => setGroupBy(e.target.value as 'sku' | 'category' | 'size' | 'imt')} title="Группировка">
-                    <option value="category">📂 По категориям</option>
-                    <option value="size">📏 По размеру</option>
-                    <option value="imt">🧬 По склейке</option>
-                    <option value="sku">📋 По артикулам</option>
+                    <option value="category">По категориям</option>
+                    <option value="size">По размеру</option>
+                    <option value="imt">По склейке</option>
+                    <option value="sku">По артикулам</option>
                 </select>
                 <select className="btn btn-sm" value={category} onChange={(e) => setCategory(e.target.value)}>
                     <option value="">Все категории</option>
@@ -317,22 +356,22 @@ export default function PricingPage() {
                 </label>
                 <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center', cursor: 'pointer', color: anomalyOnly ? 'var(--color-danger)' : undefined }}>
                     <input type="checkbox" checked={anomalyOnly} onChange={(e) => setAnomalyOnly(e.target.checked)} />
-                    ⚠ только аномалии{s?.anomalies ? ` (${s.anomalies})` : ''}
+                    только аномалии{s?.anomalies ? ` (${s.anomalies})` : ''}
                 </label>
                 <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center', cursor: 'pointer', color: newOnly ? 'var(--color-accent)' : undefined }}>
                     <input type="checkbox" checked={newOnly} onChange={(e) => setNewOnly(e.target.checked)} />
-                    🆕 только новинки
+                    только новинки
                 </label>
                 <div style={{ flex: 1 }} />
-                <button className="btn btn-sm btn-secondary" onClick={doExport} disabled={allLeafRows.length === 0}>📥 Excel</button>
+                <button className="btn btn-sm btn-secondary" onClick={doExport} disabled={allLeafRows.length === 0}>Excel</button>
                 <button className="btn btn-sm btn-success" onClick={doAi} disabled={aiLoading || allLeafRows.length === 0}>
-                    {aiLoading ? '🤖 Анализ…' : '🤖 AI-рекомендации'}
+                    {aiLoading ? 'Анализ…' : 'AI-рекомендации'}
                 </button>
                 <button className="btn btn-sm btn-secondary" onClick={doSyncSpp} disabled={sppSyncing} title="Реальная цена покупателя с СПП из card-API">
-                    {sppSyncing ? '⏳ СПП…' : '🔄 СПП'}
+                    {sppSyncing ? 'СПП…' : 'СПП'}
                 </button>
                 <button className="btn btn-sm btn-primary" onClick={doSync} disabled={syncing}>
-                    {syncing ? '⏳ Обновление…' : '🔄 Обновить цены'}
+                    {syncing ? 'Обновление…' : 'Обновить цены'}
                 </button>
             </div>
 
@@ -387,6 +426,8 @@ export default function PricingPage() {
                     onToggle={(k) => setExpanded((prev) => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n; })}
                     loading={loading}
                 />
+            )}
+            </>
             )}
         </div>
     );

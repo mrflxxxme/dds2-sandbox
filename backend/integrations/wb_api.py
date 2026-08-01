@@ -716,6 +716,40 @@ class WBApiClient:
         logger.info("wb_api.prices_fetched", total=len(all_goods))
         return all_goods
 
+    async def set_price(self, nm_id: int, price: int, discount: int | None = None) -> dict:
+        """Поставить цену витрины одному товару. Discounts-Prices: POST /api/v2/upload/task.
+
+        `price` — цена ДО скидки продавца (целые рубли), `discount` — скидка %.
+        Цена витрины (то, что видит покупатель до СПП) = price × (1 − discount/100).
+
+        ВБ принимает задание асинхронно: 200 значит «взял в обработку», а не
+        «применил». Фактическое применение проверяем не по ответу, а по витрине
+        (card-API) — для пробы цены это и есть измеряемое событие.
+
+        Единственный write-метод по ценам в проекте: используется пробой уровня
+        СПП, где цена ставится на минуты и возвращается назад.
+        """
+        payload: dict = {"data": [{"nmID": int(nm_id), "price": int(round(price))}]}
+        if discount is not None:
+            payload["data"][0]["discount"] = int(round(discount))
+
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                url = f"{WB_PRICES_API_BASE}/api/v2/upload/task"
+                logger.info("wb_api.request", method="POST", path="prices/upload/task", nm_id=nm_id, price=price)
+                response = await client.post(url, headers=self.headers, json=payload)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Цены и скидки»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Prices API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 400:
+                    raise ValueError(
+                        f"WB Prices API set_price: HTTP {response.status_code} — {response.text[:300]}"
+                    )
+                return response.json() if response.text else {}
+
     # ─── Goods Returns (Seller Analytics API) ───────────────────────────────
     @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
     async def get_goods_returns(self, date_from: date, date_to: date) -> list[dict]:

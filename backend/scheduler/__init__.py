@@ -63,7 +63,10 @@ from backend.scheduler.jobs.vtb_statement_sync import sync_all_projects_vtb_stat
 from backend.scheduler.jobs.wb_goods_returns_sync import sync_all_projects_wb_returns
 from backend.scheduler.jobs.wb_reviews_sync import sync_all_projects_wb_feedbacks
 from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
-from backend.scheduler.jobs.wb_prices_sync import sync_all_projects_wb_prices
+from backend.scheduler.jobs.wb_prices_sync import (
+    snapshot_all_projects_spp,
+    sync_all_projects_wb_prices,
+)
 from backend.scheduler.jobs.measurements_digest import send_measurement_digests
 from backend.scheduler.jobs.problem_digest import problem_digest_asap_tick, send_problem_digests
 from backend.scheduler.jobs.wb_measurements import sync_all_projects_wb_measurements
@@ -619,6 +622,20 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=3600,
+    )
+
+    # Часовой снимок СПП витрины (card-API) — питает «Ступеньки СПП».
+    # Отдельным джобом от цен: СПП двигается в течение дня (иногда за час), а
+    # цены витрины меняются редко — им хватает 2×/день. Ключ WB тут не нужен:
+    # card-API публичный, ходим только по своим nm из wb_prices.
+    _scheduler.add_job(
+        snapshot_all_projects_spp,
+        trigger=CronTrigger(minute=5, timezone=MSK),
+        id="spp_hourly_snapshot",
+        name="СПП витрины — часовой снимок (:05 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=1800,
     )
 
     # Fulfillment (skladbot, wmscelicom, migfull) stocks + requests mirror —

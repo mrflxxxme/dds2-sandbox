@@ -282,18 +282,22 @@ class TestSklejkaGrouping:
 class TestCardSpp:
     """Публичный card-API: парсер + приоритет реальной цены с СПП в _build_row."""
 
-    def test_parse_card_products(self):
+    PRODUCTS = [
+        {"id": 893149026, "sizes": [{"price": {"basic": 1842000, "product": 984300}}]},
+        {"id": 222, "sizes": [{"price": {"product": 0}}, {"price": {"product": 50000, "basic": 60000}}]},
+        {"id": 333, "sizes": []},  # нет цены → пропуск
+    ]
+
+    @pytest.mark.parametrize("wrapped", [True, False], ids=["data.products", "products"])
+    def test_parse_card_products(self, wrapped):
+        """v4 дрейфует: сейчас товары приходят на верхнем уровне, раньше — под `data`.
+
+        Читаем обе формы: на одной устаревшей фикстуре синк уже молча забирал
+        ноль строк, а «Цена с СПП» тихо уезжала на BDR-фолбэк.
+        """
         from backend.integrations.wb_card_api import parse_card_products
 
-        data = {
-            "data": {
-                "products": [
-                    {"id": 893149026, "sizes": [{"price": {"basic": 1842000, "product": 984300}}]},
-                    {"id": 222, "sizes": [{"price": {"product": 0}}, {"price": {"product": 50000, "basic": 60000}}]},
-                    {"id": 333, "sizes": []},  # нет цены → пропуск
-                ]
-            }
-        }
+        data = {"data": {"products": self.PRODUCTS}} if wrapped else {"products": self.PRODUCTS}
         out = parse_card_products(data)
         assert out[893149026]["product"] == 9843.0  # копейки → рубли
         assert out[893149026]["basic"] == 18420.0

@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { IcSearch } from './icons';
 
 /** Раскрывающийся фильтр с поисковой строкой сверху (одиночный выбор). */
-export default function SearchSelect({ value, onChange, options, placeholder, allLabel = 'Все', minWidth = 160, maxWidth = 260 }: {
+export default function SearchSelect({ value, onChange, options, placeholder, allLabel = 'Все', minWidth = 160, maxWidth = 260, showAll = true, searchPlaceholder = 'Поиск…', customOption }: {
     value: string;
     onChange: (v: string) => void;
     options: { value: string; label: string }[];
@@ -11,10 +11,15 @@ export default function SearchSelect({ value, onChange, options, placeholder, al
     allLabel?: string;
     minWidth?: number;
     maxWidth?: number;
+    showAll?: boolean;  // список без «Все»: там, где пустое значение не имеет смысла (шаг сетки)
+    searchPlaceholder?: string;
+    /** Своё значение прямо из строки поиска: вернуть вариант или null, если ввод не годится. */
+    customOption?: (query: string) => { value: string; label: string } | null;
 }) {
     const [open, setOpen] = useState(false);
     const [q, setQ] = useState('');
-    const selected = options.find(o => o.value === value);
+    const selected = options.find(o => o.value === value) ?? (value ? { value, label: value } : undefined);
+    const custom = customOption?.(q.trim()) ?? null;
     const filtered = useMemo(() => {
         const s = q.trim().toLowerCase();
         return s ? options.filter(o => o.label.toLowerCase().includes(s)) : options;
@@ -45,11 +50,15 @@ export default function SearchSelect({ value, onChange, options, placeholder, al
                 <div style={{ position: 'absolute', left: 0, top: '100%', marginTop: 6, zIndex: 41, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', width: 'max(260px, 100%)', maxWidth: 380, overflow: 'hidden' }}>
                     <div style={{ position: 'relative', padding: 8, borderBottom: '1px solid #f3f4f6' }}>
                         <span style={{ position: 'absolute', left: 17, top: '50%', transform: 'translateY(-50%)', color: '#9ca3af', display: 'inline-flex' }}><IcSearch size={15} /></span>
-                        <input autoFocus placeholder="Поиск…" value={q} onChange={e => setQ(e.target.value)}
+                        <input autoFocus placeholder={searchPlaceholder} value={q} onChange={e => setQ(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter' && custom) pick(custom.value); }}
                             style={{ width: '100%', boxSizing: 'border-box', background: '#fff', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px 6px 32px', fontSize: 13, color: 'var(--color-text)' }} />
                     </div>
                     <div style={{ maxHeight: 280, overflowY: 'auto', padding: 6 }}>
-                        <div className="ss-opt" onClick={() => pick('')} style={value === '' ? { background: '#eff6ff' } : undefined}>{allLabel}</div>
+                        {custom && (
+                            <div className="ss-opt" onClick={() => pick(custom.value)} style={{ color: 'var(--color-accent)' }}>{custom.label}</div>
+                        )}
+                        {showAll && <div className="ss-opt" onClick={() => pick('')} style={value === '' ? { background: '#eff6ff' } : undefined}>{allLabel}</div>}
                         {filtered.map(o => (
                             <div key={o.value} className="ss-opt" onClick={() => pick(o.value)} title={o.label}
                                 style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', ...(value === o.value ? { background: '#eff6ff' } : {}) }}>{o.label}</div>
