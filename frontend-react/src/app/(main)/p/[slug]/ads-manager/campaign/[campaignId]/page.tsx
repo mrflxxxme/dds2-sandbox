@@ -5,8 +5,8 @@ import { formatNumber } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import type { AdsManagerCampaign, AdsScheduleSetting, CampaignClustersResponse, CampaignMetricRow, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionSnapshot, CampaignZones, SearchCluster } from '@/types/api';
-import { IcChart, IcClusters, IcCalendar, IcRefresh, IcPause, IcPlay, IcExternal, IcClock, IcGear, IcHistory, IcCopy } from '../../components/icons';
+import type { AdsManagerCampaign, WbAutorefillSetting, AdsScheduleSetting, CampaignClustersResponse, CampaignMetricRow, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionSnapshot, CampaignZones, SearchCluster } from '@/types/api';
+import { IcChart, IcClusters, IcCalendar, IcRefresh, IcPause, IcPlay, IcExternal, IcClock, IcGear, IcHistory, IcCopy, IcPlus, IcWallet } from '../../components/icons';
 import ClusterTable from '../../components/ClusterTable';
 import CampaignMetricsTable from '../../components/CampaignMetricsTable';
 import CampaignZoneMetricsTable from '../../components/CampaignZoneMetricsTable';
@@ -15,6 +15,8 @@ import CampaignIntradayChart from '../../components/CampaignIntradayChart';
 import CampaignMetricsChart, { DEFAULT_CHART_METRICS, type MetricKey } from '../../components/CampaignMetricsChart';
 import ScheduleModal from '../../components/ScheduleModal';
 import BudgetLedgerModal from '../../components/BudgetLedgerModal';
+import DepositModal from '../../components/DepositModal';
+import AutopayModal from '../../components/AutopayModal';
 import WbThumb from '@/components/WbThumb';
 import AdsPeriodPicker from '../../components/AdsPeriodPicker';
 import Tooltip from '../../components/Tooltip';
@@ -45,6 +47,10 @@ export default function CampaignPage() {
     const [headerCollapsed, setHeaderCollapsed] = useState(false);
     const [scheduleModal, setScheduleModal] = useState(false);
     const [budgetLogModal, setBudgetLogModal] = useState(false);
+    const [depositModal, setDepositModal] = useState(false);
+    const [autopayModal, setAutopayModal] = useState(false);
+    // Родное правило ВБ: undefined — ещё не спрашивали, null — кабинет недоступен
+    const [autorefill, setAutorefill] = useState<WbAutorefillSetting | null | undefined>(undefined);
     const [stateBusy, setStateBusy] = useState(false);
     const [refreshing, setRefreshing] = useState(false);  // живой догруз кампании из WB по «Обновить»
 
@@ -54,7 +60,10 @@ export default function CampaignPage() {
         if (!silent) setCampLoading(true);
         if (!silent) setCampError('');
         try {
-            const [list, sched] = await Promise.all([api.getAdCampaignsList(), api.getCampaignsSchedule().catch(() => ({}))]);
+            const [list, sched] = await Promise.all([
+                api.getAdCampaignsList(),
+                api.getCampaignsSchedule().catch(() => ({})),
+            ]);
             const found = list.find(c => c.campaign_id === campaignId) ?? null;
             setCampaign(found);
             setSchedule(sched);
@@ -65,6 +74,25 @@ export default function CampaignPage() {
     }, [campaignId]);
 
     useEffect(() => { loadCampaign(); }, [loadCampaign]);
+
+    // Правило автопополнения ВБ — отдельным запросом: ходит в кабинет и может быть медленным
+    // или недоступным, страница кампании от этого зависеть не должна.
+    useEffect(() => {
+        if (!Number.isFinite(campaignId)) return;
+        const controller = new AbortController();
+        api.getCampaignAutorefill(campaignId)
+            .then(r => { if (!controller.signal.aborted) setAutorefill(r.settings); })
+            .catch(() => { if (!controller.signal.aborted) setAutorefill(null); });
+        return () => controller.abort();
+    }, [campaignId]);
+
+    // Ручное пополнение прошло: новый остаток от WB — сразу в карточку (оптимистично),
+    // следом тихая сверка с зеркалом. WB иногда не возвращает total — тогда считаем сами.
+    const onDeposited = useCallback((budgetAfter: number | null, amount: number) => {
+        setCampaign(prev => (prev ? { ...prev, budget: budgetAfter ?? Number(prev.budget) + amount } : prev));
+        toast.success(`Бюджет пополнен на ${fmt(amount)} ₽`);
+        loadCampaign(true);
+    }, [loadCampaign, toast]);
 
     // Каталог артикулов (nm_id → артикул продавца/предмет/бренд) для блока «Товары кампании»
     const [catalog, setCatalog] = useState<Record<number, CatalogEntry>>({});
@@ -613,8 +641,14 @@ export default function CampaignPage() {
                                     </Tooltip>
                                 )}
 
-                                <span style={{ fontSize: 12, color: '#6b7280' }}>
+                                <span style={{ fontSize: 12, color: '#6b7280', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                                     Остаток: <b style={{ fontSize: 14, color: campaign.budget <= 0 && campaign.status === 9 ? '#ef4444' : '#111827' }}>{fmt(campaign.budget)} ₽</b>
+                                    <Tooltip text="Пополнить бюджет">
+                                        <button onClick={() => setDepositModal(true)} aria-label="Пополнить бюджет"
+                                            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 22, height: 22, borderRadius: 8, border: '1px solid #a7f3d0', background: '#ecfdf5', color: '#059669', cursor: 'pointer', padding: 0 }}>
+                                            <IcPlus size={13} />
+                                        </button>
+                                    </Tooltip>
                                 </span>
 
                                 {/* Активные зоны показов видны и в свёрнутом виде */}
@@ -692,11 +726,22 @@ export default function CampaignPage() {
                                 </div>
 
                                 {/* Остаток бюджета + расписание паузы — карточки одной высоты, метки на одном уровне.
-                                    Пополнения бюджета из ДДС больше нет: деньгами рулит автопополнение ВБ. */}
+                                    «Пополнить» — разовый долив через публичный API, «Автопополнение» — родное правило
+                                    ВБ из кабинета (читаем и пишем его там же). И то, и другое — реальные деньги. */}
                                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'stretch' }}>
                                     <div style={{ minWidth: 140, padding: '10px 14px', border: '1px solid #d1d5db', borderRadius: 12, background: '#f9fafb', display: 'flex', flexDirection: 'column', gap: 6 }}>
                                         <div style={{ fontSize: 12, color: '#4b5563', fontWeight: 600 }}>Остаток бюджета</div>
                                         <div style={{ fontSize: 24, fontWeight: 700, color: campaign.budget <= 0 && campaign.status === 9 ? '#ef4444' : '#111827' }}>{fmt(campaign.budget)} ₽</div>
+                                        <button onClick={() => setDepositModal(true)} className="btn btn-secondary btn-sm"
+                                            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 13, color: '#10b981', fontWeight: 600 }}
+                                            title="Пополнить бюджет кампании из кабинета WB (реальные деньги)">
+                                            <IcPlus size={14} />Пополнить
+                                        </button>
+                                        <button onClick={() => setAutopayModal(true)} className="btn btn-secondary btn-sm"
+                                            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 13, color: autorefill?.enabled ? '#10b981' : '#6b7280', fontWeight: autorefill?.enabled ? 600 : 500 }}
+                                            title="Автопополнение бюджета — родная настройка кабинета ВБ">
+                                            <IcWallet size={14} />{autorefill?.enabled ? `${fmt(autorefill.amount)} ₽ ниже ${fmt(autorefill.threshold)} ₽` : 'Автопополнение'}
+                                        </button>
                                         <div style={{ fontSize: 12, color: '#6b7280', marginTop: 'auto' }}>Расход сегодня: {fmt(campaign.spend_today)} ₽</div>
                                     </div>
                                     <div style={{ minWidth: 160, padding: '10px 14px', border: '1px solid #d1d5db', borderRadius: 12, background: '#f9fafb', display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -977,6 +1022,13 @@ export default function CampaignPage() {
                         )}
                         {budgetLogModal && (
                             <BudgetLedgerModal campaign={campaign} onClose={() => setBudgetLogModal(false)} />
+                        )}
+                        {depositModal && (
+                            <DepositModal campaign={campaign} onClose={() => setDepositModal(false)} onDeposited={onDeposited} />
+                        )}
+                        {autopayModal && (
+                            <AutopayModal campaign={campaign} onClose={() => setAutopayModal(false)}
+                                onSaved={s => { setAutorefill(s); toast.success(s.enabled ? `Автопополнение ВБ: +${fmt(s.amount)} ₽ при остатке ниже ${fmt(s.threshold)} ₽` : 'Автопополнение в ВБ выключено'); }} />
                         )}
                     </>
                 )}

@@ -1,7 +1,7 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
 import type {
-    AdSubject, AdNmCard, CreateCampaignResult, FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdGlueRow, AdsManagerCampaign, AdsScheduleSetting, AdsScheduleLogEntry, AdsWbAutopayStatus, BudgetLedgerEntry, AdsCampaignStateResult, AdsScheduleSaveResult, AdsBudgetGap, AdsBudgetGapHistory, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionsResponse, PositionsProgress, CollectPositionsResult, CollectOneResult, CampaignZones,
+    AdSubject, AdNmCard, CreateCampaignResult, FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdGlueRow, AdsManagerCampaign, AdsAccountBalance, AdsAutopayLogEntry, WbAutorefillResponse, WbAutorefillSetting, WbAutorefillSaveResult, AdsScheduleSetting, AdsScheduleLogEntry, AdsWbAutopayStatus, BudgetLedgerEntry, AdsCampaignStateResult, AdsScheduleSaveResult, AdsBudgetGap, AdsBudgetGapHistory, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionsResponse, PositionsProgress, CollectPositionsResult, CollectOneResult, CampaignZones,
     CampaignZonesUpdate, ClusterMinusResult, ClusterBidResult, ClusterBidBulkResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse, FunnelTreeResponse, FunnelDimensionsResponse } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
@@ -230,6 +230,25 @@ export function addFunnelMethods(api: ApiClient) {
          *  Можно ввести любую ставку — WB поднимет до минимума (adjusted=true, bid — применённая). */
         setCampaignBid(campaignId: number, bid: number) {
             return api.request<{ ok: boolean; error: string | null; bid: number | null; adjusted?: boolean; min_bid?: number }>('PUT', `/api/v1/funnel/campaigns/${campaignId}/bid`, { bid });
+        },
+        /** Родная настройка автопополнения ВБ из кабинета (+ история доливов ВБ). */
+        getCampaignAutorefill(campaignId: number) {
+            return api.request<WbAutorefillResponse>('GET', `/api/v1/funnel/campaigns/${campaignId}/autorefill`);
+        },
+        /** Изменить автопополнение в кабинете ВБ. Реальное правило трат. */
+        setCampaignAutorefill(campaignId: number, setting: Omit<WbAutorefillSetting, 'status' | 'history'>) {
+            return api.request<WbAutorefillSaveResult>('POST', `/api/v1/funnel/campaigns/${campaignId}/autorefill`, setting);
+        },
+        /** Журнал пополнений (авто + ручные), новые первыми. */
+        getAutopayLog(campaignId?: number) {
+            const q = new URLSearchParams();
+            if (campaignId != null) q.set('campaign_id', String(campaignId));
+            const qs = q.toString();
+            return api.request<AdsAutopayLogEntry[]>('GET', `/api/v1/funnel/campaigns/autopay/log${qs ? `?${qs}` : ''}`);
+        },
+        /** Кошелёк кабинета Продвижения WB: счёт / баланс взаиморасчётов / бонусы. */
+        getAdsBalance() {
+            return api.request<AdsAccountBalance>('GET', '/api/v1/funnel/ads/balance');
         },
         /** Ручное пополнение бюджета кампании (реальные деньги). */
         depositCampaignBudget(campaignId: number, amount: number, source = 0) {

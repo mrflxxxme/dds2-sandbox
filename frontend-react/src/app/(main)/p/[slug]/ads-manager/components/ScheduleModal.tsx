@@ -4,7 +4,7 @@ import { formatDateTime } from '@/lib/utils';
 import type { AdsManagerCampaign, AdsScheduleSetting, AdsScheduleLogEntry, AdsWbAutopayStatus } from '@/types/api';
 import { IcClock } from './icons';
 import Switch from './Switch';
-import { DEFAULT_SCHEDULE, fmt } from './adsShared';
+import { DEFAULT_SCHEDULE, fmt, useOverlayClose } from './adsShared';
 
 // Стили в духе секции «Управление рекламой» — крупнее и контрастнее
 const CARD: React.CSSProperties = { border: '1px solid #e5e7eb', borderRadius: 12, background: '#f9fafb', padding: '18px 20px' };
@@ -43,6 +43,9 @@ export default function ScheduleModal({ campaign, initial, onClose, onSave }: {
         return () => { alive = false; };
     }, [campaign]);
 
+    // Подложка закрывает окно только «настоящим» кликом по ней (не концом выделения текста)
+    const overlay = useOverlayClose(onClose);
+
     const emptyWindow = form.pause_hour === form.resume_hour;
 
     const handleSave = async () => {
@@ -58,7 +61,7 @@ export default function ScheduleModal({ campaign, initial, onClose, onSave }: {
     );
 
     return (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} onClick={onClose}>
+        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} {...overlay}>
             <div className="glass-card" style={{ width: 700, maxWidth: '96vw', maxHeight: '92vh', display: 'flex', flexDirection: 'column', padding: 0, background: '#fff', overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
                 {/* Шапка */}
                 <div style={{ padding: '22px 28px 16px', borderBottom: '1px solid #eef0f2' }}>
@@ -117,7 +120,7 @@ export default function ScheduleModal({ campaign, initial, onClose, onSave }: {
                                     ? 'Смотрим историю бюджета за последние 7 дней…'
                                     : wbAutopay
                                         ? <>ВБ доливал бюджет этой кампании {wbAutopay.count > 1 ? `${wbAutopay.count} раз(а) за 7 дней, ` : ''}последний раз {wbAutopay.last_ts ? formatDateTime(wbAutopay.last_ts) : '—'} на +{fmt(wbAutopay.last_amount)} ₽. Расписание паузы переносит долитый бюджет на дневные часы.</>
-                                        : 'За последние 7 дней доливов бюджета со стороны ВБ не видно. Если автопополнение в кабинете ВБ выключено — к утреннему запуску кампания останется со вчерашним остатком; включите его в кабинете или пополняйте вручную. Определяется по истории бюджета, поэтому у кампании без расходов или только что созданной доливов может не быть видно.'}
+                                        : 'За последние 7 дней доливов бюджета со стороны ВБ не видно. Если автопополнение в кабинете ВБ выключено — к утреннему запуску кампания останется со вчерашним остатком; включите его в кабинете, настройте «Автопополнение» здесь или пополняйте вручную. Определяется по истории бюджета, поэтому у кампании без расходов или только что созданной доливов может не быть видно.'}
                             </div>
                         </div>
                     )}

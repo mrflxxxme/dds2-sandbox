@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import type { AdsManagerCampaign, BudgetLedgerEntry } from '@/types/api';
 import { IcHistory } from './icons';
-import { fmt, thLeft, thStyle, tdLeft, tdStyle } from './adsShared';
+import { fmt, thLeft, thStyle, tdLeft, tdStyle, useOverlayClose } from './adsShared';
 
 type LedgerTab = 'topup' | 'charge';
 
@@ -34,6 +34,9 @@ export default function BudgetLedgerModal({ campaign, onClose }: {
         return () => controller.abort();
     }, [campaign.campaign_id, allCampaigns, tab]);
 
+    // Подложка закрывает окно только «настоящим» кликом по ней (не концом выделения текста)
+    const overlay = useOverlayClose(onClose);
+
     const fmtTs = (ts: string) => {
         try {
             return new Date(ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
@@ -47,7 +50,7 @@ export default function BudgetLedgerModal({ campaign, onClose }: {
     const isTopup = tab === 'topup';
 
     return (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
+        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }} {...overlay}>
             <div className="glass-card" style={{ width: 720, maxHeight: '80vh', overflow: 'auto', padding: 24, background: '#fff' }} onClick={e => e.stopPropagation()}>
                 <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}><IcHistory size={18} />История бюджета</h3>
                 <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>

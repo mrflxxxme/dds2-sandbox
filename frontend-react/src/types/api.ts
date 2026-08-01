@@ -3641,6 +3641,62 @@ export interface AdsScheduleSetting {
   resume_hour: number;  // час МСК, когда запускать обратно
 }
 
+/** РОДНАЯ настройка автопополнения ВБ (кабинет, /proxy/autorefill/v2): остаток упал
+ *  ниже threshold → ВБ доливает amount, не чаще limit раз в день. Правило живёт и
+ *  исполняется на стороне ВБ — мы только читаем и меняем его. */
+export interface WbAutorefillSetting {
+  enabled: boolean;
+  threshold: number;  // ₽: остаток, ниже которого ВБ доливает
+  amount: number;  // ₽: сумма долива (минимум ВБ — 1000)
+  daily_limit: boolean;  // ограничивать число доливов в день
+  limit: number;  // сколько раз в день
+  unified_account: boolean;  // источник списания — единый счёт кабинета
+  status: string | null;  // 'working' — правило активно у ВБ
+  history: WbAutorefillEntry[];  // доливы, сделанные ВБ (приходят тем же запросом)
+}
+
+/** Долив, выполненный автопополнением ВБ. */
+export interface WbAutorefillEntry {
+  id: string;
+  date: string | null;  // ISO UTC
+  source: string | null;  // net — баланс взаиморасчётов, account — счёт
+  sum: number;  // ₽
+}
+
+/** Ответ по автопополнению: session — состояние кабинетной сессии.
+ *  EXPIRED/NONE означает «мы не знаем настройку», а НЕ «автопополнение выключено». */
+export interface WbAutorefillResponse {
+  session: 'ACTIVE' | 'EXPIRED' | 'NONE';
+  settings: WbAutorefillSetting | null;
+}
+
+export interface WbAutorefillSaveResult extends WbAutorefillResponse {
+  ok: boolean;
+  error: string | null;
+}
+
+/** Запись журнала пополнений: и автоматических, и ручных (source «вручную»). */
+export interface AdsAutopayLogEntry {
+  campaign_id: number;
+  ts: string;  // ISO UTC
+  amount: number;  // фактически пополнено ₽ (0, если не удалось)
+  requested: number;  // запрошенная сумма ₽
+  source: string;  // счёт | баланс | вручную
+  status: 'ok' | 'error' | 'unknown';
+  budget_before: number | null;
+  budget_after: number | null;
+  reason: string | null;  // текст ошибки WB, если была
+}
+
+/** Кошелёк кабинета Продвижения WB — источник денег при ручном пополнении бюджета кампании. */
+export interface AdsAccountBalance {
+  ok: boolean;
+  balance: number;  // ₽ на счёте (пополняет продавец)
+  net: number;  // ₽ баланса взаиморасчётов (удержание из будущих продаж)
+  bonus: number;  // ₽ бонусов
+  error: string | null;
+}
+
 /** Долив бюджета со стороны ВБ (детект автопополнения ВБ по событиям бюджета:
  *  API ВБ статус автопея не отдаёт). Кампании без записи — доливов не замечено. */
 export interface AdsWbAutopayStatus {

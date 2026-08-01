@@ -1206,8 +1206,9 @@ async def get_campaign_zone_metrics(
 
 # ─── Пауза по расписанию (project_settings, без миграций) ───────────────────
 #
-# Деньгами рулит родное автопополнение ВБ (доливает в 00:00 МСК). ДДС управляет
-# только показами: ставит кампанию на паузу в окне «плохих» часов (по умолчанию
+# Бюджет доливает автопополнение — родное ВБ (в 00:00 МСК) и/или наше (выше).
+# Расписание деньги не трогает вовсе, оно управляет показами: ставит кампанию
+# на паузу в окне «плохих» часов (по умолчанию
 # 00:00–09:00 МСК) и запускает обратно по его окончании — дневной бюджет не
 # сгорает ночью на низкой конверсии. Возобновляем СТРОГО то, что глушили сами.
 
@@ -1720,6 +1721,34 @@ async def create_campaign(
     return res
 
 
+async def get_adv_account_balance(db: AsyncSession, project_id: int) -> dict:
+    """Кошелёк кабинета Продвижения WB — откуда уходят деньги при пополнении бюджета.
+
+    Возвращает {"ok", "balance", "net", "bonus", "error"}:
+    balance — счёт (его пополняет продавец), net — баланс взаиморасчётов
+    (удержание из будущих продаж), bonus — бонусы. Ошибка не роняет вызывающего:
+    ok=False + текст, суммы нулями.
+    """
+    from backend.services.funnel.wb_advertising_api import fetch_adv_balance
+
+    empty = {"balance": 0.0, "net": 0.0, "bonus": 0.0}
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"ok": False, **empty, "error": "Нет WB-ключа с доступом к рекламе."}
+
+    data = await fetch_adv_balance(api_key)
+    if data is None:
+        return {"ok": False, **empty, "error": "WB не ответил по счёту кабинета Продвижения."}
+
+    def _num(key: str) -> float:
+        try:
+            return float(data.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return {"ok": True, "balance": _num("balance"), "net": _num("net"), "bonus": _num("bonus"), "error": None}
+
+
 async def deposit_campaign_budget_manual(
     db: AsyncSession, project_id: int, campaign_id: int, amount: int, source: int
 ) -> dict:
@@ -1762,7 +1791,15 @@ async def deposit_campaign_budget_manual(
         "budget_after": budget_after,
         "reason": res.get("error"),
     })
-    return {"ok": bool(res.get("ok")), "status": res.get("status"), "budget_after": budget_after, "error": res.get("error")}
+    error = res.get("error")
+    # Исход неизвестен (timeout/5xx): деньги могли уйти — повторять вслепую нельзя,
+    # поэтому в UI уходит не «timeout», а прямая инструкция сверить остаток.
+    if not res.get("ok") and res.get("status") == "unknown":
+        error = (
+            "WB не подтвердил пополнение — деньги могли списаться. "
+            "Проверьте остаток и «Историю бюджета» перед повторной попыткой."
+        )
+    return {"ok": bool(res.get("ok")), "status": res.get("status"), "budget_after": budget_after, "error": error}
 
 
 # ─── Журнал пополнений (ручные, реальные деньги) ─────────────────────────────
