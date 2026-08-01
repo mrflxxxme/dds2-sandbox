@@ -182,9 +182,13 @@ describe('гейты действий по статусу', () => {
             .toEqual(['PENDING', 'IN_PROGRESS', 'READY']);
     });
 
-    it('«Готов» — пока переезд собирают', () => {
+    it('«Готов» — пока переезд собирают, плюс переотправка из возврата', () => {
+        // RETURNED здесь не за компанию: бэкенд разрешает RETURNED → READY и
+        // обещает переотправку в докстринге return_transfer. Без этой ветки
+        // вернувшийся переезд застревал намертво — правка живёт только в
+        // PENDING/IN_PROGRESS/READY, значит оставалось лишь «Закрыть».
         expect(BACKEND_STATUSES.filter(canMarkTransferReady))
-            .toEqual(['PENDING', 'IN_PROGRESS']);
+            .toEqual(['PENDING', 'IN_PROGRESS', 'RETURNED']);
     });
 
     it('машина — из «Готово», замена — из «Машина назначена»', () => {

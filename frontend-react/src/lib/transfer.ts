@@ -74,9 +74,19 @@ export function canEditTransfer(status: StockTransferStatus | string): boolean {
     return TRANSFER_EDITABLE_STATUSES.has(status as StockTransferStatus);
 }
 
-/** «Готов» — отметить сборку переезда законченной. */
+/**
+ * «Готов» — отметить сборку переезда законченной.
+ *
+ * RETURNED тоже здесь: это ПЕРЕОТПРАВКА вернувшегося переезда. Бэкенд её
+ * разрешает (`TRANSFER_TRANSITIONS`) и прямо обещает в докстринге
+ * `return_transfer` («либо переотправляют, либо закрывают»), но без этой ветки
+ * вернувшийся переезд застревал в интерфейсе намертво: ни переотправить, ни
+ * отредактировать (правка живёт в PENDING/IN_PROGRESS/READY), оставалось только
+ * закрыть. Сток при переходе не двигается — он уже возвращён на склад-источник
+ * самим возвратом.
+ */
 export function canMarkTransferReady(status: StockTransferStatus | string): boolean {
-    return status === 'PENDING' || status === 'IN_PROGRESS';
+    return status === 'PENDING' || status === 'IN_PROGRESS' || status === 'RETURNED';
 }
 
 /**

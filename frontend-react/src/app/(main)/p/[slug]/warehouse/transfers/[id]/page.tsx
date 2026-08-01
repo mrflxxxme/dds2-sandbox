@@ -391,11 +391,18 @@ export default function TransferDetailPage() {
                     {editor && canMarkTransferReady(transfer.status) && (
                         <button
                             className="btn btn-primary"
-                            onClick={() => runAction(() => api.markTransferReady(transfer.id), 'Переезд отмечен собранным')}
+                            onClick={() => runAction(
+                                () => api.markTransferReady(transfer.id),
+                                transfer.status === 'RETURNED'
+                                    ? 'Переезд снова готов к отправке'
+                                    : 'Переезд отмечен собранным',
+                            )}
                             disabled={actionLoading}
-                            title="Отметить, что переезд собран и готов к назначению машины. Сток не двигает"
+                            title={transfer.status === 'RETURNED'
+                                ? 'Переотправить вернувшийся переезд: вернёт его в «Готово», откуда назначается машина. Сток не двигает — он уже возвращён на склад-источник'
+                                : 'Отметить, что переезд собран и готов к назначению машины. Сток не двигает'}
                         >
-                            Готов
+                            {transfer.status === 'RETURNED' ? 'Переотправить' : 'Готов'}
                         </button>
                     )}
                     {editor && canSendTransfer(transfer.status) && (
