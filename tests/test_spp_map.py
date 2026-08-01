@@ -11,6 +11,7 @@
 
 import pytest
 
+from backend.services.pricing import spp_scan as scan
 from backend.services.pricing.spp_map import (
     Level,
     build_levels,
@@ -440,6 +441,23 @@ class TestHintCanon:
         assert top.hint_down["price"] == 1999.0
 
 
+    def test_deep_cut_is_not_a_hint(self):
+        """Уступка глубже 300 ₽ — уже не ход на ступеньку, а срезание маржи.
+
+        У «Ковров» со 2 600 ₽ до 1 999 ₽ это −639 ₽ с единицы: клиент выигрывает
+        больше, но такой ход менеджеру предлагать нельзя.
+        """
+        levels = [self._lv(2600, 24.8), self._lv(1999, 36.8, n=80)]
+        cross_hints(levels, {})
+        assert levels[0].hint_down is None
+
+    def test_shallow_cut_survives(self):
+        levels = [self._lv(2200, 24.8), self._lv(1999, 36.8, n=80)]
+        cross_hints(levels, {})
+        assert levels[0].hint_down is not None
+        assert levels[0].price - levels[0].hint_down["price"] <= 300
+
+
 class TestSchemaMatchesService:
     """Схема ответа обязана знать все поля сервиса.
 
@@ -493,3 +511,123 @@ class TestBothMovesWhenUpCostsClient:
         cross_hints(levels, {})
         assert levels[0].hint_up is not None and levels[0].hint_up["price"] == 5000
         assert levels[0].hint_down is None
+
+
+class TestHintsNeedAThreshold:
+    """Совет двигать цену выдаём, только если по дороге есть подтверждённый порог.
+
+    Аудит 19 категорий 2026-08-01 вылавливал ровно этот класс пустых советов:
+    «Панелям стеновым» с 2500 ₽ предлагалось уйти на 2436 ₽ (СПП 24.8 %), но
+    2436 — уровень «Ковров», у которых СПП выше по всему диапазону. Разница
+    категорий, а не цены.
+    """
+
+    def _lv(self, price, spp, n=5):
+        return Level(price=price, spp=spp, spp_min=spp, spp_max=spp,
+                     buyer_price=round(price * (1 - spp / 100)), n=n)
+
+    def _th(self, up_to, from_price):
+        return [{"up_to": up_to, "from_price": from_price}]
+
+    def test_move_without_threshold_is_silent(self):
+        levels = [self._lv(2500, 20.3), self._lv(2436, 24.8)]
+        cross_hints(levels, {}, self._th(1999.69, 2001.0))  # порог далеко внизу
+        assert levels[0].hint_down is None and levels[0].hint_up is None
+
+    def test_move_across_threshold_survives(self):
+        levels = [self._lv(2200, 20.3), self._lv(1999, 32.3)]
+        cross_hints(levels, {}, self._th(1999.69, 2001.0))
+        assert levels[0].hint_down is not None
+
+    def test_target_flush_with_the_threshold_still_counts(self):
+        """`safe` округляется ВНИЗ и упирается в порог: 4999 против 4999.02.
+
+        По букве «hi >= from_price» такой ход не пересекал бы порог, и «Одеяла»
+        4300 → 4999 молча пропадали. Черта — середина зазора.
+        """
+        levels = [self._lv(4300, 24.8), self._lv(4999, 36.8, n=33)]
+        cross_hints(levels, {}, self._th(4726.8, 4999.02))
+        assert levels[0].hint_up is not None and levels[0].hint_up["price"] == 4999
+
+    def test_without_thresholds_nothing_is_filtered(self):
+        levels = [self._lv(2500, 20.3), self._lv(2436, 24.8)]
+        cross_hints(levels, {})  # порогов не передали — старое поведение
+        assert levels[0].hint_down is not None
+
+
+class TestScanPlan:
+    """План прогонов: куда ставить пробы, чтобы узнать то, чего ещё нет в данных."""
+
+    def _pts(self, *rows):
+        """(цена, СПП) → точка с категорией и артикулом-донором."""
+        return [(p, s, "Ковры", 1000 + i, f"art{i}") for i, (p, s) in enumerate(rows)]
+
+    def test_narrows_a_known_threshold_by_half(self):
+        pts = self._pts((4700, 24.8), (4720, 24.8), (4999.02, 36.8), (5000, 36.8))
+        th = [{"up_to": 4726.8, "from_price": 4999.02, "spp_below": 24.8, "spp_above": 36.8}]
+        plan = scan.plan_probes(pts, th)
+        top = plan[0]
+        assert top["kind"] == "narrow"
+        assert 4862 <= top["price"] <= 4864  # середина зазора
+        assert top["gap_before"] > top["gap_after"] * 1.9  # делим пополам
+
+    def test_every_probe_price_has_kopecks(self):
+        pts = self._pts((1400, 4.8), (1410, 4.8), (1700, 32.4), (1750, 32.4))
+        plan = scan.plan_probes(pts, [])
+        assert plan, "на таком разбросе цен пятна обязаны найтись"
+        assert all(p["price"] % 1 != 0 for p in plan)  # ровных рублей не ставим
+
+    def test_round_price_inside_a_gap_wins_over_its_middle(self):
+        """Пороги ВБ садятся на 1999/2999/4999 — пятно проверяем этой ценой."""
+        pts = self._pts((1800, 24.8), (1810, 24.8), (2300, 24.8), (2310, 24.8))
+        plan = scan.plan_probes(pts, [])
+        assert any(p["kind"] == "grid" and int(p["price"]) == 1999 for p in plan)
+
+    def test_target_outside_the_margin_window_is_dropped(self):
+        """Вниз дальше 300 ₽ и вверх дальше 1000 ₽ не ходим — цель без донора выпадает."""
+        pts = self._pts((1000, 4.8), (1010, 4.8), (5000, 36.8), (5010, 36.8))
+        plan = scan.plan_probes(pts, [])
+        for row in plan:
+            d = row["donor"]
+            assert -300 <= d["delta"] <= 1000
+
+    def test_narrow_gap_of_a_rouble_is_not_worth_a_probe(self):
+        pts = self._pts((1990, 36.8), (1999.69, 36.8), (2001, 25.8), (2100, 25.8))
+        th = [{"up_to": 1999.69, "from_price": 2001.0, "spp_below": 36.8, "spp_above": 25.8}]
+        assert all(p["kind"] != "narrow" for p in scan.plan_probes(pts, th))
+
+    def test_empty(self):
+        assert scan.plan_probes([], []) == []
+
+
+class TestProbeGuards:
+    """Рамки маржи проверяет тот, кто пишет цену в ВБ, а не только планировщик."""
+
+    def test_price_for_wb_prefers_kopecks(self):
+        from backend.services.pricing.spp_probe import _price_and_discount
+
+        base, disc = _price_and_discount(1999.14, 6518, 70, prefer_kopecks=True)
+        got = base * (1 - disc / 100)
+        assert round(got % 1, 2) != 0  # ровных рублей в пробе не ставим
+        assert abs(got - 1999.14) < 5  # …и всё же попадаем в цель
+
+    def test_revert_returns_exactly_the_old_price(self):
+        """Возврат обязан вернуть ровно то, что стояло, даже если это ровный рубль."""
+        from backend.services.pricing.spp_probe import _price_and_discount
+
+        base, disc = _price_and_discount(2160.0, 2160, 0)
+        assert base * (1 - disc / 100) == 2160.0
+
+
+class TestBatchReaction:
+    """Наблюдение пишем только после реакции витрины — иначе запишем ложь."""
+
+    def test_price_moved_is_a_reaction(self):
+        assert scan.is_reaction(1675.0, 1353.0) is True
+
+    def test_same_price_is_not_a_reaction(self):
+        """ВБ ещё не пересчитал: старый СПП на новой цене выглядел бы как «ступеньки нет»."""
+        assert scan.is_reaction(1675.0, 1675.0) is False
+
+    def test_kopecks_are_not_a_reaction(self):
+        assert scan.is_reaction(1675.0, 1675.4) is False

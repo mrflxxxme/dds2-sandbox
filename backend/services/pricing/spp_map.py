@@ -25,7 +25,7 @@ from datetime import timedelta
 from statistics import median
 
 import pytz
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbSppObservation
@@ -49,6 +49,7 @@ HINT_PRIMARY_MARGIN = 100.0  # ₽: насколько ход должен вы�
 HINT_MIN_SUPPORT = 3  # чужой уровень с одним-двумя товарами — не ориентир
 HINT_MIN_LEVERAGE = 1.2  # снижение показываем, только если клиент выигрывает БОЛЬШЕ нашей уступки
 HINT_MIN_EFFECT_RUB = 100.0  # меньше — не повод трогать цену
+HINT_MAX_DROP_RUB = 300.0  # глубже снижать не советуем: это уже не ступенька, а распродажа
 HINT_MIN_EFFECT_PCT = 0.03  # …или 3 % от цены, что больше
 HINT_MIN_STEP = 3.0  # п.п. разницы СПП — иначе это не ступенька, а сдвиг цены
 SAFE_TOL = 1.0  # п.п.: товар с таким отклонением от медианы уровня всё ещё «на ступеньке»
@@ -404,7 +405,9 @@ def hint_for(
     max_rise: float = HINT_UP_MAX_RISE,
     min_step: float = HINT_MIN_STEP,
     min_effect: float = HINT_MIN_EFFECT_RUB,
+    max_drop: float = HINT_MAX_DROP_RUB,
     primary_margin: float = HINT_PRIMARY_MARGIN,
+    thresholds: list[dict] | None = None,
 ) -> tuple[dict | None, dict | None]:
     """Подсказка «что сделать с ценой» для одной точки → (вниз, вверх).
 
@@ -422,6 +425,9 @@ def hint_for(
 
     Советуем не ярлык корзины, а `safe` — последнюю цену, на которой ступенька
     реально наблюдалась (1 499 ₽, а не 1 500 ₽: порог может быть внутри корзины).
+
+    Если переданы `thresholds`, ход обязан ПЕРЕСЕКАТЬ подтверждённый порог: иначе
+    разница СПП объясняется не ценой, а составом категорий (см. `crosses_threshold`).
     """
     best_down: tuple[tuple, dict] | None = None
     best_up: tuple[tuple, dict] | None = None
@@ -430,6 +436,8 @@ def hint_for(
         if abs(p - price) < 1:
             continue
         target = c.get("safe") or p
+        if thresholds is not None and not crosses_threshold(price, target, thresholds):
+            continue  # порога по дороге нет — значит нет и ступеньки, о которой советовать
         hint = {"price": target, "spp": c["spp"], "buyer_price": c["buyer"], "categories": c["cats"]}
         if target < price:
             give = price - target
@@ -440,6 +448,9 @@ def hint_for(
                 and lev >= min_leverage
                 and c["spp"] - spp >= min_step
                 and gain >= max(min_effect, buyer * HINT_MIN_EFFECT_PCT)
+                # уступка глубже 300 ₽ — уже не ход на ступеньку, а срезание маржи:
+                # у «Ковров» со 2600 ₽ до 1999 ₽ это −639 ₽ с единицы
+                and give <= max_drop
             ):
                 hint["gain"] = round(gain, 0)
                 hint["leverage"] = lev
@@ -478,6 +489,24 @@ def hint_for(
             return _with_alt(down, up, "up"), None
         return None, _with_alt(up, down, "down")
     return down, up
+
+
+def crosses_threshold(a: float, b: float, thresholds: list[dict]) -> bool:
+    """Лежит ли между ценами `a` и `b` хоть один подтверждённый порог.
+
+    Совет двигать цену имеет смысл ровно тогда, когда по дороге есть ступенька.
+    Без этой проверки в советы лезет разница КАТЕГОРИЙ, а не цен: «Панелям
+    стеновым» с 2500 ₽ предлагалось уйти на 2436 ₽, где СПП 24.8 % — но это
+    уровень «Ковров», у которых СПП выше по всему диапазону. Порогов между 2436
+    и 2500 ₽ нет, значит и ступеньки нет, и совет был пустым.
+
+    Сама черта — середина зазора между наблюдениями: где точно проходит порог, мы
+    не знаем, а требовать `hi >= from_price` нельзя — совет «подняться до 4999 ₽»
+    целится в `safe`-цену, которая округлена ВНИЗ и лежит на две копейки левее
+    начала верхней полки (4999.02). По букве такой ход порога «не пересекал» бы.
+    """
+    lo, hi = (a, b) if a <= b else (b, a)
+    return any(lo < (t["up_to"] + t["from_price"]) / 2 < hi for t in thresholds)
 
 
 def _with_alt(main: dict, other: dict, kind: str) -> dict:
@@ -520,17 +549,26 @@ def lag_flags(levels: list[Level], *, min_step: float = HINT_MIN_STEP, tol: floa
             }
 
 
-def cross_hints(levels: list[Level], glob: dict[float, dict]) -> None:
+def cross_hints(
+    levels: list[Level], glob: dict[float, dict], thresholds: list[dict] | None = None
+) -> None:
     """Проставить подсказки уровням И каждому артикулу внутри уровня (мутирует).
 
     Артикулам отдельно, потому что на одном уровне цены СПП у товаров разный:
     у соседей по строке рекомендации могут не совпадать.
+
+    `thresholds` — подтверждённые пороги портфеля; с ними совет выдаётся, только
+    если по дороге есть ступенька.
     """
     candidates = _build_candidates(levels, glob)
     for lv in levels:
-        lv.hint_down, lv.hint_up = hint_for(lv.price, lv.spp, lv.buyer_price, candidates)
+        lv.hint_down, lv.hint_up = hint_for(
+            lv.price, lv.spp, lv.buyer_price, candidates, thresholds=thresholds
+        )
         for it in lv.items:
-            d, u = hint_for(it["price"], it["spp"], it["buyer_price"], candidates)
+            d, u = hint_for(
+                it["price"], it["spp"], it["buyer_price"], candidates, thresholds=thresholds
+            )
             it["hint_down"], it["hint_up"] = d, u
     lag_flags(levels)
 
@@ -561,6 +599,19 @@ async def get_spp_map(
     today = pytz.UTC.localize(utcnow()).astimezone(_MSK).date()
     since = _parse_day(date_from) or today
     until = _parse_day(date_to) or today
+    if date_from is None and date_to is None:
+        # утром до первого снимка «сегодня» пусто, и вкладка выглядела сломанной —
+        # без явных дат показываем последний день, за который снимки есть
+        last = (
+            await db.execute(
+                select(func.max(WbSppObservation.observed_on)).where(
+                    WbSppObservation.project_id == project_id,
+                    WbSppObservation.source == source,
+                )
+            )
+        ).scalar()
+        if last and last < today:
+            since = until = last
     rows = (
         await db.execute(
             select(
@@ -575,7 +626,9 @@ async def get_spp_map(
                 WbSppObservation.project_id == project_id,
                 WbSppObservation.observed_on >= since,
                 WbSppObservation.observed_on <= until,
-                WbSppObservation.source == source,
+                # проба — тот же замер витрины, только на цене, которую мы поставили
+                # нарочно: в режиме `card` она обязана попадать в карту
+                WbSppObservation.source.in_(("card", "probe") if source == "card" else (source,)),
             )
             .limit(_MAX_POINTS)
         )
@@ -604,10 +657,11 @@ async def get_spp_map(
 
     per_cat = {cat: build_levels(pts, step) for cat, pts in by_cat.items()}
     glob = global_levels(per_cat)
+    thresholds = find_thresholds(all_points)  # советы опираются на них же
 
     out: list[dict] = []
     for cat, levels in per_cat.items():
-        cross_hints(levels, glob)
+        cross_hints(levels, glob, thresholds)
         out.append(
             {
                 "category": cat,
@@ -621,7 +675,7 @@ async def get_spp_map(
 
     return {
         "categories": out,
-        "thresholds": find_thresholds(all_points),
+        "thresholds": thresholds,
         "stats": {
             "source": source,
             "date_from": since.isoformat(),
