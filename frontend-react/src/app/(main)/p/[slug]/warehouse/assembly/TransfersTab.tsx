@@ -2,8 +2,10 @@
 /**
  * Вкладка «Перемещения» страницы сборки — переезды между нашими складами.
  *
- * Переезд = полноценная поездка: у него такая же машина/логистика, как у заявки
- * на сборку, поэтому список показывает и машину, и стоимость забора. Статус —
+ * Список НЕ показывает машину и стоимость забора: и то и другое ведёт Лист
+ * логиста, а здесь они лишь занимали место. Даты свёрнуты в раскрытие строки —
+ * пять колонок оттесняли то, ради чего в список заходят (маршрут, состав,
+ * статус); в Excel они уходят через `exportColumns`. Статус —
  * ЗЕРКАЛО заявки (PENDING → … → DELIVERED), включая отдельную ступень
  * «Машина назначена»; словарь и гейты — общие, из lib/transfer.ts.
  *
@@ -158,7 +160,7 @@ export default function TransfersTab({ slug }: Props) {
         {
             key: 'number', label: '№', width: '150px',
             // Теги — рядом с номером, как у заявки (совместная / предзаявка / ФФ).
-            render: (_v, row: StockTransfer) => (
+            render: (_v: unknown, row: StockTransfer) => (
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 600 }}>{row.number}</span>
                     {row.is_defect && (
@@ -173,7 +175,7 @@ export default function TransfersTab({ slug }: Props) {
         {
             key: 'status', label: 'Статус', width: '150px',
             getValue: (row: StockTransfer) => TRANSFER_STATUS_MAP[row.status]?.label ?? row.status,
-            render: (_v, row: StockTransfer) => {
+            render: (_v: unknown, row: StockTransfer) => {
                 const st = TRANSFER_STATUS_MAP[row.status] ?? { label: row.status, className: 'badge-secondary' };
                 return <span className={`badge ${st.className}`}>{st.label}</span>;
             },
@@ -186,7 +188,7 @@ export default function TransfersTab({ slug }: Props) {
             // приёмка — логисту важен сам факт «документ у ФФ заведён».
             headerTitle: 'Связанные заявки фулфилмента: отгрузка у источника и приёмка у получателя',
             getValue: (row: StockTransfer) => ffNumbers(row).join(', '),
-            render: (_v, row: StockTransfer) => {
+            render: (_v: unknown, row: StockTransfer) => {
                 const nums = ffNumbers(row);
                 return nums.length === 0
                     ? <span style={{ color: 'var(--color-text-muted)' }}>—</span>
@@ -198,7 +200,7 @@ export default function TransfersTab({ slug }: Props) {
             key: 'route', label: 'Маршрут',
             headerTitle: 'Откуда → Куда. Аналог пары «Склад» + «WB-склад» у заявки FBO',
             getValue: (row: StockTransfer) => `${routeFrom(row)} → ${routeTo(row)}`,
-            render: (_v, row: StockTransfer) => (
+            render: (_v: unknown, row: StockTransfer) => (
                 <span style={{ fontSize: 13 }}>
                     {routeFrom(row)}
                     <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)' }}>
@@ -212,7 +214,7 @@ export default function TransfersTab({ slug }: Props) {
             key: 'items_qty', label: 'Товары', align: 'right', width: '150px',
             headerTitle: 'Штук всего и сколько это позиций (SKU)',
             getValue: (row: StockTransfer) => transferUnits(row),
-            render: (_v, row: StockTransfer) => {
+            render: (_v: unknown, row: StockTransfer) => {
                 // Прогресс приёмки есть только у уехавшего переезда и только в
                 // списке (в карточке бэкенд его не считает) — см. transferReceiveProgress.
                 const progress = transferReceiveProgress(row);
@@ -242,7 +244,7 @@ export default function TransfersTab({ slug }: Props) {
             key: 'pallets_count', label: 'Палеты', align: 'right', width: '120px',
             headerTitle: 'Транспортная единица переезда: паллеты или короба (как у заявки на сборку)',
             getValue: (row: StockTransfer) => row.pallets_count ?? -1,
-            render: (_v, row: StockTransfer) => (
+            render: (_v: unknown, row: StockTransfer) => (
                 row.pallets_count == null
                     ? <span style={{ color: 'var(--color-text-muted)' }}>—</span>
                     : <span>{unitCountText(row.pallets_count, row.shipped_as_boxes)}</span>
@@ -258,7 +260,7 @@ export default function TransfersTab({ slug }: Props) {
             // а не ноль: «0 кг» читался бы как «взвесили и получилось ноль».
             headerTitle: 'Вес одной единицы × количество единиц',
             getValue: (row: StockTransfer) => transferTotalWeight(row) ?? -1,
-            render: (_v, row: StockTransfer) => {
+            render: (_v: unknown, row: StockTransfer) => {
                 const w = transferTotalWeight(row);
                 return w === null
                     ? <span style={{ color: 'var(--color-text-muted)' }}>—</span>
@@ -266,86 +268,61 @@ export default function TransfersTab({ slug }: Props) {
             },
             exportValue: (row: StockTransfer) => transferTotalWeight(row) ?? '',
         },
-        {
-            key: 'vehicle', label: 'Машина', width: '190px',
-            // Только ПОКАЗ. Назначение машины живёт на «Листе логиста» — так же,
-            // как у заявок на сборку: логист сажает на одну машину пачку
-            // документов сразу, а не по одному из карточки списка.
-            getValue: (row: StockTransfer) => row.vehicle_info || '',
-            render: (_v, row: StockTransfer) => {
-                if (!transferVehicleAssigned(row)) return <span style={{ color: 'var(--color-text-muted)' }}>—</span>;
-                const driver = transferDriverName(row);
-                return (
-                    <span title={[row.vehicle_brand, driver, row.driver_phone].filter(Boolean).join(' · ') || undefined}>
-                        <span className="badge badge-info">🚚 {row.vehicle_info || 'назначена'}</span>
-                    </span>
-                );
-            },
-            exportValue: (row: StockTransfer) => row.vehicle_info || '',
-        },
-        {
-            key: 'pickup_cost', label: 'Стоимость забора', align: 'right', width: '150px',
-            getValue: (row: StockTransfer) => toMoney(row.pickup_cost) ?? 0,
-            render: (_v, row: StockTransfer) => {
-                const cost = toMoney(row.pickup_cost);
-                return cost === null
-                    ? <span style={{ color: 'var(--color-text-muted)' }}>—</span>
-                    : <span>{formatNumber(cost, 0)} ₽</span>;
-            },
-            exportValue: (row: StockTransfer) => toMoney(row.pickup_cost) ?? '',
-        },
+    ];
+
+    /** Даты — только в раскрытии строки и в Excel: на экране они занимали пять
+     *  колонок и оттесняли то, ради чего в список заходят (маршрут, состав,
+     *  статус). В выгрузку уходят через `exportColumns`. */
+    const dateColumns: Column[] = [
         {
             key: 'pickup_date', label: 'Дата забора', width: '130px',
             getValue: (row: StockTransfer) => row.pickup_date || '',
-            render: (_v, row: StockTransfer) => (
+            render: (_v: unknown, row: StockTransfer) => (
                 row.pickup_date
                     ? <span>{formatDate(row.pickup_date)}</span>
                     : <span style={{ color: 'var(--color-text-muted)' }}>—</span>
             ),
             exportValue: (row: StockTransfer) => (row.pickup_date ? formatDate(row.pickup_date) : ''),
-        },
-        {
+        },        {
             key: 'delivery_date', label: 'Дата доставки', width: '130px',
             getValue: (row: StockTransfer) => row.delivery_date || '',
-            render: (_v, row: StockTransfer) => (
+            render: (_v: unknown, row: StockTransfer) => (
                 row.delivery_date
                     ? <span>{formatDate(row.delivery_date)}</span>
                     : <span style={{ color: 'var(--color-text-muted)' }}>—</span>
             ),
             exportValue: (row: StockTransfer) => (row.delivery_date ? formatDate(row.delivery_date) : ''),
-        },
-        {
+        },        {
             // Вехи цепочки — те же колонки, что у заявки FBO («Дата готовности»).
             // Из статуса не выводятся: он знает только текущее состояние, а
             // «когда собрали» нужно и после отгрузки.
             key: 'actual_ready_date', label: 'Готовность', width: '130px',
             headerTitle: 'Когда переезд отметили собранным (кнопкой «Готов» или синком ФФ)',
             getValue: (row: StockTransfer) => row.actual_ready_date || '',
-            render: (_v, row: StockTransfer) => (
+            render: (_v: unknown, row: StockTransfer) => (
                 row.actual_ready_date
                     ? <span>{formatDate(row.actual_ready_date)}</span>
                     : <span style={{ color: 'var(--color-text-muted)' }}>—</span>
             ),
             exportValue: (row: StockTransfer) => (row.actual_ready_date ? formatDate(row.actual_ready_date) : ''),
-        },
-        {
+        },        {
             key: 'shipped_at', label: 'Отгружен', width: '130px',
             headerTitle: 'Когда переезд уехал со склада-источника. При возврате обнуляется — следующая попытка проставит свой',
             getValue: (row: StockTransfer) => row.shipped_at || '',
-            render: (_v, row: StockTransfer) => (
+            render: (_v: unknown, row: StockTransfer) => (
                 row.shipped_at
                     ? <span>{formatDate(row.shipped_at)}</span>
                     : <span style={{ color: 'var(--color-text-muted)' }}>—</span>
             ),
             exportValue: (row: StockTransfer) => (row.shipped_at ? formatDate(row.shipped_at) : ''),
-        },
-        {
+        },        {
             key: 'created_at', label: 'Создано', width: '130px',
             getValue: (row: StockTransfer) => row.created_at || '',
-            render: (_v, row: StockTransfer) => formatDate(row.created_at),
+            render: (_v: unknown, row: StockTransfer) => formatDate(row.created_at),
             exportValue: (row: StockTransfer) => (row.created_at ? formatDate(row.created_at) : ''),
         },
     ];
+
 
     return (
         <div>
@@ -490,10 +467,33 @@ export default function TransfersTab({ slug }: Props) {
             ) : (
                 <TanStackDataTable
                     columns={columns}
+                    exportColumns={[...columns, ...dateColumns]}
                     data={filtered}
                     onRowClick={(row: StockTransfer) => openDetail(row.id)}
                     pageSize={50}
                     exportName="stock_transfers"
+                    getRowId={(row: StockTransfer) => String(row.id)}
+                    renderSubRow={(row: StockTransfer) => (
+                        <div style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+                            gap: 16,
+                            padding: '4px 8px 8px',
+                        }}>
+                            {dateColumns.map(col => (
+                                <div key={col.key}>
+                                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 2 }}>
+                                        {col.label}
+                                    </div>
+                                    <div style={{ fontSize: 14 }}>
+                                        {col.render
+                                            ? col.render(col.getValue?.(row), row, 0)
+                                            : <span style={{ color: 'var(--color-text-muted)' }}>—</span>}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 />
             )}
 
