@@ -9,13 +9,18 @@
 СПП с 26.4 % до 36.8 %).
 """
 
+import pytest
+
 from backend.services.pricing.spp_map import (
     Level,
     build_levels,
     coverage_gaps,
     cross_hints,
     find_cliffs,
+    find_thresholds,
     global_levels,
+    is_flat,
+    lag_flags,
 )
 
 
@@ -172,3 +177,289 @@ class TestCrossHints:
         cross_hints(levels, {})
         assert levels[0].hint_up is not None
         assert levels[0].hint_down is None
+
+    def test_tiny_move_without_step_is_silent(self):
+        """Соседний уровень, СПП тот же — это сдвиг цены, а не ступенька."""
+        levels = [self._lv(2600, 24.8), self._lv(2500, 24.8)]
+        cross_hints(levels, {})
+        assert levels[0].hint_down is None and levels[0].hint_up is None
+
+    def test_step_too_small_in_roubles_is_silent(self):
+        """СПП скачет, но выигрыш 40 ₽ — ради этого цену не трогают."""
+        levels = [self._lv(1000, 24.8), self._lv(980, 29.0)]
+        cross_hints(levels, {})
+        assert levels[0].hint_down is None
+
+    def test_thin_level_is_not_a_target(self):
+        """Целевой уровень с одним товаром — не ориентир даже в своей категории."""
+        levels = [self._lv(4700, 24.8, n=5), self._lv(5000, 36.8, n=1)]
+        cross_hints(levels, {})
+        assert levels[0].hint_up is None
+
+    def test_items_get_their_own_hints(self):
+        """На одном уровне СПП у товаров разный — совет тоже разный.
+
+        Живой случай: артикул на 2001 ₽ получает 24.8 %, соседи на 1999 ₽ —
+        36.8 %; уступив рубль, он отдал бы клиенту 241 ₽.
+        """
+        lv_hi = self._lv(2000, 36.8, n=40)
+        lv_hi.items = [
+            {"nm_id": 1, "vendor_code": "a", "price": 2001.0, "spp": 24.8, "buyer_price": 1504.0},
+            {"nm_id": 2, "vendor_code": "b", "price": 1999.0, "spp": 36.8, "buyer_price": 1263.0},
+        ]
+        cross_hints([lv_hi], {})
+        assert lv_hi.items[0]["hint_down"]["price"] == 2000.0
+        assert lv_hi.items[0]["hint_down"]["buyer_price"] == 1264
+        assert lv_hi.items[1]["hint_down"] is None and lv_hi.items[1]["hint_up"] is None
+
+
+class TestLagFlag:
+    """СПП ниже соседей С ТОЙ ЖЕ ценой — ВБ ещё не применил ступеньку.
+
+    Разбор 2026-08-01: товар за 1499.00 ₽ имел 6.3 % против 32.4 % у полусотни
+    соседей за 1499.14 ₽ — выглядело как «на целой цене ступенька не работает».
+    Через четыре часа при неизменной цене он получил те же 32.4 %, и был
+    единственным из 734 товаров, кто сдвинулся. Значит дело в задержке.
+    """
+
+    def _lv(self, items):
+        lv = Level(price=1500, spp=32.4, spp_min=6.3, spp_max=32.4, buyer_price=1014, n=len(items))
+        lv.items = items
+        return lv
+
+    def _it(self, nm, price, spp):
+        return {"nm_id": nm, "vendor_code": str(nm), "price": price, "spp": spp,
+                "buyer_price": round(price * (1 - spp / 100))}
+
+    def test_flags_item_behind_its_peers(self):
+        lv = self._lv([self._it(1, 1499.00, 6.3)] + [self._it(i, 1499.14, 32.4) for i in range(2, 6)])
+        lag_flags([lv])
+        assert lv.items[0]["lag_hint"]["delta"] == pytest.approx(26.1, abs=0.1)
+        assert lv.items[0]["lag_hint"]["peers"] == 4
+        assert "lag_hint" not in lv.items[1]
+
+    def test_different_price_is_not_a_lag(self):
+        """2001 ₽ против 1999 ₽ — это порог, а не задержка: сравниваем в пределах рубля."""
+        lv = self._lv([self._it(1, 2001.00, 24.8)] + [self._it(i, 1999.20, 36.8) for i in range(2, 6)])
+        lag_flags([lv])
+        assert "lag_hint" not in lv.items[0]
+
+    def test_needs_enough_peers(self):
+        lv = self._lv([self._it(1, 1499.00, 6.3), self._it(2, 1499.14, 32.4)])
+        lag_flags([lv])
+        assert "lag_hint" not in lv.items[0]
+
+
+class TestFlatCategory:
+    """Категория с ровным СПП: чужие ориентиры внутри её диапазона — ложь.
+
+    «Алмазная мозаика» 2026-08-01: 19 уровней от 550 до 1180 ₽ и СПП 4.8–5.0 %
+    на каждом. Совет «опустить до 870 ₽, там 10.8 %» брался из чужих категорий и
+    вводил в заблуждение — мы на этих ценах стояли и знаем, что цена ни при чём.
+    А вот про 1500 ₽ наши данные не говорят ничего: туда подсказка нужна.
+    """
+
+    def _flat(self):
+        return [
+            Level(price=p, spp=4.9, spp_min=4.9, spp_max=4.9, buyer_price=round(p * 0.951), n=5)
+            for p in (600.0, 800.0, 900.0, 1000.0, 1100.0)
+        ]
+
+    def test_detects_flat(self):
+        assert is_flat(self._flat()) is True
+
+    def test_foreign_inside_range_is_ignored(self):
+        levels = self._flat()
+        cross_hints(levels, {870.0: {"spp": 10.8, "categories": ["Кружки"], "n": 20}})
+        assert all(lv.hint_down is None and lv.hint_up is None for lv in levels)
+
+    def test_foreign_outside_range_still_works(self):
+        """Уровень 1100 ₽ → 1500 ₽: клиент платит 981 вместо 1046 — ему дешевле."""
+        levels = self._flat()
+        cross_hints(levels, {1500.0: {"spp": 34.6, "categories": ["Панели"], "n": 36}})
+        h = levels[4].hint_up  # уровень 1100 ₽
+        assert h is not None and h["price"] == 1500.0
+        assert h["buyer_delta"] < 0
+
+    def test_up_that_costs_client_too_much_is_silent(self):
+        """Кружки 800 → 1500 ₽: нам +700, но клиенту +220 — это не сделка, а рост цены.
+
+        Прежнее правило «ВБ съедает половину подъёма» такой ход пропускало, и в
+        разделе висел совет поднять цену, от которого клиент платит на 273 ₽
+        больше. Порог теперь жёсткий: не дороже 50 ₽ для клиента.
+        """
+        levels = self._flat()
+        cross_hints(levels, {1500.0: {"spp": 34.6, "categories": ["Панели"], "n": 36}})
+        assert levels[1].hint_up is None  # уровень 800 ₽
+
+    def test_small_rise_for_client_is_allowed(self):
+        """Клиенту дороже на 40 ₽ — в пределах допуска, ход показываем."""
+        levels = [
+            Level(price=1000.0, spp=4.9, spp_min=4.9, spp_max=4.9, buyer_price=951, n=5),
+            Level(price=1200.0, spp=17.5, spp_min=17.5, spp_max=17.5, buyer_price=990, n=5),
+        ]
+        cross_hints(levels, {})
+        h = levels[0].hint_up
+        assert h is not None and h["price"] == 1200.0 and h["buyer_delta"] == 39
+
+
+class TestSafePrice:
+    """Советуем цену, которая НАБЛЮДАЛАСЬ, а не ярлык корзины.
+
+    Порог ВБ вполне может проходить внутри одной корзины: 1499.14 ₽ даёт 34.6 %,
+    а 1502 ₽ — уже 4.8 %, и обе цены лежат в «1 500 ₽» при шаге 100. Совет
+    «поднимите до 1 500» в такой ситуации = совет перешагнуть порог.
+    """
+
+    def _items(self, *triples):
+        return [
+            (p, s, round(p * (1 - s / 100), 2), nm, f"art{nm}") for p, s, nm in triples
+        ]
+
+    def test_level_keeps_last_price_that_still_gets_the_step(self):
+        lv = build_levels(
+            self._items((1499.14, 34.6, 1), (1499.14, 34.6, 2), (1499.5, 34.6, 3), (1502.0, 4.8, 4)),
+            step=100,
+        )
+        assert lv[0].price == 1500.0
+        assert lv[0].safe_price == 1499.0  # округляем ВНИЗ: ошибаться безопаснее в эту сторону
+
+    def test_hint_advises_the_safe_price_not_the_bucket(self):
+        levels = [
+            Level(price=1200.0, spp=4.9, spp_min=4.9, spp_max=4.9, buyer_price=1141, n=5),
+            Level(price=1500.0, spp=34.6, spp_min=34.6, spp_max=34.6,
+                  buyer_price=981, n=5, safe_price=1499.0),
+        ]
+        cross_hints(levels, {})
+        h = levels[0].hint_up
+        assert h is not None and h["price"] == 1499.0
+
+    def test_no_items_falls_back_to_the_level(self):
+        lv = build_levels(_pts((1980, 36.8), (2010, 36.8)), step=100)
+        assert lv[0].safe_price == 2000.0
+
+
+class TestUpBeatsDown:
+    def test_only_one_move_is_shown(self):
+        """Раньше строка предлагала разом опустить и поднять — совет спорил с собой."""
+        levels = [
+            Level(price=1200.0, spp=4.8, spp_min=4.8, spp_max=4.8, buyer_price=1142, n=5),
+            Level(price=1070.0, spp=11.4, spp_min=11.4, spp_max=11.4, buyer_price=948, n=5),
+            Level(price=1500.0, spp=34.6, spp_min=34.6, spp_max=34.6, buyer_price=981, n=5),
+        ]
+        cross_hints(levels, {})
+        assert levels[0].hint_up is not None
+        assert levels[0].hint_down is None
+
+
+class TestThresholds:
+    """Пороги цены ищем на общей оси, не оглядываясь на шаг сетки и категорию."""
+
+    def _band(self, start, spp, count, cat="Ковры", step=1.0):
+        return [(start + i * step, spp, cat) for i in range(count)]
+
+    def test_finds_the_price_where_spp_jumps(self):
+        th = find_thresholds(self._band(1400, 4.8, 6) + self._band(1499, 34.6, 6))
+        assert len(th) == 1
+        t = th[0]
+        assert (t["up_to"], t["from_price"]) == (1405.0, 1499.0)
+        assert (t["spp_below"], t["spp_above"]) == (4.8, 34.6)
+        assert t["jump"] == 29.8
+        assert (t["n_below"], t["n_above"]) == (6, 6)
+        assert t["categories"] == ["Ковры"] and t["confirmed_by"] == ["Ковры"]
+        assert t["fuzzy"] is True  # между 1405 и 1499 ₽ товаров нет — место порога грубое
+
+    def test_change_of_category_is_not_a_threshold(self):
+        """Ложный порог 2026-08-01: «Алмазная мозаика» ровно на 4.9 %, «Кружки» — на 10.8 %.
+
+        На общей оси цен место, где одни сменяются другими, выглядит ступенькой,
+        хотя цена тут ни при чём. Порог обязан подтвердиться внутри категории.
+        """
+        pts = self._band(1000, 4.9, 6, "Алмазная мозаика") + self._band(1030, 11.9, 6, "Кружки")
+        assert find_thresholds(pts) == []
+
+    def test_close_boundary_is_not_fuzzy(self):
+        th = find_thresholds(self._band(1495, 34.6, 6, step=0.5) + self._band(1502, 4.8, 6))
+        assert len(th) == 1
+        assert th[0]["fuzzy"] is False
+        assert th[0]["jump"] == -29.8  # вверх по цене СПП рушится — это обрыв
+
+    def test_single_laggard_is_not_a_threshold(self):
+        """Один товар без применённой ступеньки посреди полки — не порог."""
+        pts = self._band(1000, 34.6, 5) + [(1005.0, 4.8, "Ковры")] + self._band(1006, 34.6, 5)
+        assert find_thresholds(pts) == []
+
+    def test_smooth_portfolio_has_no_thresholds(self):
+        assert find_thresholds(self._band(500, 4.9, 40)) == []
+
+    def test_too_few_points(self):
+        assert find_thresholds(self._band(500, 4.9, 3)) == []
+
+
+class TestHintCanon:
+    """Правила подсказок, зафиксированные Денисом 2026-08-01."""
+
+    def _lv(self, price, spp, n=5, items=None):
+        lv = Level(price=price, spp=spp, spp_min=spp, spp_max=spp,
+                   buyer_price=round(price * (1 - spp / 100)), n=n)
+        lv.items = items or []
+        return lv
+
+    def test_client_overpay_capped(self):
+        """Подъём с переплатой клиента больше 50 ₽ не советуем.
+
+        Отвергнутое правило «ВБ съедает половину подъёма» такой ход пропускало:
+        800 → 1500 ₽ при переплате клиента 273 ₽ выглядело приемлемым.
+        """
+        levels = [self._lv(800, 4.9)]
+        cross_hints(levels, {1500.0: {"spp": 34.6, "categories": ["Панели"], "n": 36}})
+        assert levels[0].hint_up is None
+
+    def test_small_overpay_allowed(self):
+        levels = [self._lv(1200, 4.8)]  # клиент 1142
+        cross_hints(levels, {1500.0: {"spp": 34.6, "categories": ["Панели"], "n": 36}})  # клиент 981
+        assert levels[0].hint_up is not None
+
+    def test_single_move_per_row(self):
+        """Есть «поднять» — «опустить» в той же строке не показываем."""
+        levels = [self._lv(4700, 24.8), self._lv(4000, 30.0), self._lv(5000, 36.8, n=33)]
+        cross_hints(levels, {})
+        assert levels[0].hint_up is not None
+        assert levels[0].hint_down is None
+
+    def test_advises_observed_price_not_bucket_label(self):
+        """Советуем 1999 ₽ (так реально стоят), а не 2000 ₽ — ярлык корзины.
+
+        Уровни строим через `build_levels`: реальную цену уровня считает он.
+        """
+        pts = [(2200.0, 24.8, 1654.0, i, str(i)) for i in range(5)]
+        pts += [(1999.0, 36.8, 1264.0, 100 + i, str(i)) for i in range(40)]
+        levels = build_levels(pts, step=100)
+        cross_hints(levels, {})
+        top = [lv for lv in levels if lv.price == 2200.0][0]
+        assert top.hint_down["price"] == 1999.0
+
+
+class TestSchemaMatchesService:
+    """Схема ответа обязана знать все поля сервиса.
+
+    `confirmed_by` жил в сервисе и в типах фронта, но не в `SppThreshold` —
+    FastAPI молча вырезал его по response_model, и раздел падал на
+    `t.confirmed_by.length` уже в браузере. Ошибка ровно того класса, который
+    тесты и должны ловить до выката.
+    """
+
+    def test_threshold_schema_has_every_key(self):
+        from backend.schemas.pricing import SppThreshold
+
+        pts = [(1400 + i, 4.8, "Ковры") for i in range(6)]
+        pts += [(1499 + i, 34.6, "Ковры") for i in range(6)]
+        produced = find_thresholds(pts)
+        assert produced, "нужен хотя бы один порог, иначе тест ничего не проверяет"
+        assert set(produced[0]) <= set(SppThreshold.model_fields)
+
+    def test_level_schema_has_every_key(self):
+        from backend.schemas.pricing import SppLevel
+
+        lv = build_levels(_pts((1980, 36.8), (2010, 36.8)), step=100)[0]
+        assert set(vars(lv)) <= set(SppLevel.model_fields)

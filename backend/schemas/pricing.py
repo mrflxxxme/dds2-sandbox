@@ -151,16 +151,6 @@ class PricingResponse(BaseModel):
 # ─── Карта СПП: категория × уровень цены → СПП ────────────────────────────
 
 
-class SppLevelItem(BaseModel):
-    """Конкретный артикул на уровне цены — из чего сложилась медиана."""
-
-    nm_id: int
-    vendor_code: str | None = None
-    price: float
-    spp: float
-    buyer_price: float
-
-
 class SppHint(BaseModel):
     """Ориентир по другим категориям: ступени ВБ живут в цене, а не в категории."""
 
@@ -173,6 +163,28 @@ class SppHint(BaseModel):
     categories: list[str] = []
 
 
+class SppLagHint(BaseModel):
+    """СПП ниже, чем у соседей с той же ценой — ВБ ещё не применил ступеньку."""
+
+    peer_spp: float  # СПП у соседей с той же ценой
+    delta: float  # насколько это больше нашего, п.п.
+    peers: int  # сколько таких соседей
+    buyer_price: float  # сколько платил бы клиент, догнав соседей
+
+
+class SppLevelItem(BaseModel):
+    """Конкретный артикул на уровне цены — из чего сложилась медиана."""
+
+    nm_id: int
+    vendor_code: str | None = None
+    price: float
+    spp: float
+    buyer_price: float
+    hint_down: SppHint | None = None  # у соседей по уровню СПП разный — совет тоже
+    hint_up: SppHint | None = None
+    lag_hint: SppLagHint | None = None  # ступенька у соседей есть, у нас ещё нет
+
+
 class SppLevel(BaseModel):
     """Уровень цены внутри категории и живой СПП на нём."""
 
@@ -182,6 +194,7 @@ class SppLevel(BaseModel):
     spp_max: float
     buyer_price: float  # медиана цены, которую платит клиент
     n: int  # сколько артикулов стоит на этом уровне
+    safe_price: float = 0  # последняя РЕАЛЬНАЯ цена уровня, на которой СПП ещё держится
     items: list[SppLevelItem] = []  # сами артикулы — раскрывается в таблице
     hint_down: SppHint | None = None  # ниже, по опыту других категорий, СПП выше
     hint_up: SppHint | None = None  # выше можно встать без потери СПП
@@ -210,6 +223,28 @@ class SppCategory(BaseModel):
     gaps: list[int] = []  # уровни сетки без единого товара — что проверить пробой
 
 
+class SppThreshold(BaseModel):
+    """Порог цены по всему портфелю: где СПП меняется скачком.
+
+    Место порога — интервал, а не точка: между 1 499.14 ₽ и 1 502 ₽ наблюдений
+    нет, и куда именно ВБ проводит черту, из данных не видно.
+    """
+
+    up_to: float  # последняя цена ДО порога — на ней поведение ещё прежнее
+    from_price: float  # первая цена ПОСЛЕ порога
+    spp_below: float
+    spp_above: float
+    jump: float  # п.п.: + СПП вырос с ценой, − обрыв
+    n_below: int = 0  # сколько артикулов держат полку слева
+    n_above: int = 0
+    band_from: float = 0  # границы полок — от какой цены до какой держится СПП
+    band_to: float = 0
+    categories: list[str] = []
+    categories_count: int = 0
+    confirmed_by: list[str] = []  # категории, у которых тот же скачок виден по своим товарам
+    fuzzy: bool = False  # зазор между наблюдениями широкий — место порога грубое
+
+
 class SppMapStats(BaseModel):
     source: str = "card"  # card (витрина) | orders (с кошельком покупателя)
     date_from: str | None = None
@@ -223,4 +258,5 @@ class SppMapStats(BaseModel):
 
 class SppMapResponse(BaseModel):
     categories: list[SppCategory] = []
+    thresholds: list[SppThreshold] = []  # пороги цен по всему портфелю, не по категории
     stats: SppMapStats

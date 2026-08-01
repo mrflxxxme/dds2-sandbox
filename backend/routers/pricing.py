@@ -90,7 +90,7 @@ async def sync_prices(
 async def spp_map(
     date_from: str | None = Query(None),
     date_to: str | None = Query(None),
-    step: int = Query(100, ge=10, le=1000),
+    step: int = Query(100, ge=1, le=1000),  # 1 ₽ = без корзин, каждая цена сама себе уровень
     source: str = Query("card"),
     category: str | None = Query(None),
     project: Project = Depends(get_current_project),

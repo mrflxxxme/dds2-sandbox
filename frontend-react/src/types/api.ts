@@ -9338,12 +9338,22 @@ export interface ExchangeSessionStatus {
 
 // ─── Карта СПП: категория × уровень цены → СПП ────────────────────────────
 
+export interface SppLagHint {
+  peer_spp: number;
+  delta: number;
+  peers: number;
+  buyer_price: number;
+}
+
 export interface SppLevelItem {
   nm_id: number;
   vendor_code: string | null;
   price: number;
   spp: number;
   buyer_price: number;
+  hint_down: SppHint | null;
+  hint_up: SppHint | null;
+  lag_hint: SppLagHint | null;
 }
 
 export interface SppHint {
@@ -9363,9 +9373,27 @@ export interface SppLevel {
   spp_max: number;
   buyer_price: number;
   n: number;
+  safe_price: number;
   items: SppLevelItem[];
   hint_down: SppHint | null;
   hint_up: SppHint | null;
+}
+
+/** Порог цены по всему портфелю: между up_to и from_price СПП меняется скачком. */
+export interface SppThreshold {
+  up_to: number;
+  from_price: number;
+  spp_below: number;
+  spp_above: number;
+  jump: number;
+  n_below: number;
+  n_above: number;
+  band_from: number;
+  band_to: number;
+  categories: string[];
+  categories_count: number;
+  confirmed_by: string[];
+  fuzzy: boolean;
 }
 
 export interface SppCliff {
@@ -9402,5 +9430,6 @@ export interface SppMapStats {
 
 export interface SppMapResponse {
   categories: SppCategory[];
+  thresholds: SppThreshold[];
   stats: SppMapStats;
 }
