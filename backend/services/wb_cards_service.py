@@ -547,7 +547,7 @@ async def import_kb_from_cards(db: AsyncSession, project_id: int) -> dict:
         )
     ).scalars().all()
     for r in rows:
-        existing[(int(r.nm_id), r.question_hash)] = r
+        existing[(int(r.nm_id), r.question_hash or "")] = r
 
     created = updated = unchanged = 0
     for card in cards:

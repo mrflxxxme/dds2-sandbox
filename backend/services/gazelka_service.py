@@ -2160,7 +2160,7 @@ async def _transfer_match_candidates(
     project_id: int,
     search: str | None,
     limit: int,
-    linked_to_gazelka: dict[tuple[str, int], str],
+    linked_to_gazelka: dict[tuple[GazelkaLinkKind, int], str],
 ) -> list[GazelkaMatchCandidate]:
     """Переезды-кандидаты. `assembly_id` несёт id ПЕРЕЕЗДА — так задан контракт схемы.
 

@@ -4852,8 +4852,9 @@ async def list_unlinked_assemblies(
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted == False,
             AssemblyRequest.status.in_(_UNLINKED_ASSEMBLY_STATUSES),
-            # kind=fbs не предлагаем к связыванию с заявками ФФ.
-            AssemblyRequest.kind != AssemblyKind.FBS.value,
+            # 🔴 Фильтр kind=fbs снят 2026-08-02 вместе с каноном «зеркала FBS с
+            # заявками ФФ не связываются»: FBS-сборку физически ведёт тот же ФФ,
+            # и её надо видеть в «без нашей сборки», иначе связать нечем.
             ~linked,
         )
         .order_by(AssemblyRequest.created_at.desc(), AssemblyRequest.id.desc())
@@ -7395,9 +7396,9 @@ async def _assembly_candidates(
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted == False,
             AssemblyRequest.status != AssemblyStatus.CANCELLED.value,
-            # Зеркала FBS с заявками ФФ не связываются (канон kind=fbs) —
-            # братья _load_match_suggestions/list_unlinked_assemblies уже фильтруют.
-            AssemblyRequest.kind != AssemblyKind.FBS.value,
+            # 🔴 Фильтра kind=fbs здесь НЕТ (канон отменён 2026-08-02, см. докстринг):
+            # FBS-зеркало обязано быть кандидатом на связь. В `_load_match_suggestions`
+            # фильтр осознанно ОСТАЛСЯ — там авто-подсказка, а не ручной выбор.
         )
         .order_by(AssemblyRequest.created_at.desc(), AssemblyRequest.id.desc())
         .limit(_LINK_CANDIDATES_LIMIT)

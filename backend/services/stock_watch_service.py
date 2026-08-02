@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -198,7 +200,7 @@ async def _draft_restock_reply(
         try:
             kb_map = await reply_service.load_kb_map(db, project_id, [int(watch.nm_id)])
             kb_entries = reply_service.rank_kb_entries(
-                kb_map.get(int(watch.nm_id)) or [], question.text if question else ""
+                kb_map.get(int(watch.nm_id)) or [], (question.text if question else "") or ""
             )
             parsed = await reply_llm.draft_reply(
                 "openai_compatible", "deepseek-chat", None,
@@ -223,7 +225,7 @@ async def stock_watch_tick(
     db: AsyncSession,
     project_id: int,
     *,
-    fetcher=None,
+    fetcher: Callable[..., Any] | None = None,
 ) -> dict:
     """
     Проверить остатки по watching-watches проекта; появившиеся → черновики draft.

@@ -29,7 +29,7 @@ import logging
 import re
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -354,7 +354,7 @@ async def import_kb_from_answered_questions(db: AsyncSession, project_id: int) -
             skipped_empty += 1
             continue
         h = _question_hash(q_text)
-        key = (int(q.nm_id), h)
+        key = (int(q.nm_id or 0), h)
         if key in existing:
             skipped_dupe += 1
             continue
@@ -370,7 +370,7 @@ async def import_kb_from_answered_questions(db: AsyncSession, project_id: int) -
             )
         )
         existing.add(key)
-        nm_set.add(int(q.nm_id))
+        nm_set.add(int(q.nm_id or 0))
         created += 1
         if created % 500 == 0:
             await db.flush()
@@ -514,7 +514,7 @@ async def list_kb_products(db: AsyncSession, project_id: int) -> dict:
             .order_by(WBQuestion.nm_id, WBQuestion.synced_at.desc())
             .subquery()
         )
-        for nm, pname, article, brand in (await db.execute(select(snap.c))).all():
+        for nm, pname, article, brand in (await db.execute(select(*snap.c))).all():
             names[int(nm)] = (pname, article, brand)
         # Фолбэк для товаров без вопросов в зеркале — зеркало отзывов
         missing = [nm for nm in nm_ids if nm not in names or not names[nm][0]]
@@ -529,7 +529,7 @@ async def list_kb_products(db: AsyncSession, project_id: int) -> dict:
                 .order_by(WBFeedback.nm_id, WBFeedback.synced_at.desc())
                 .subquery()
             )
-            for nm, pname, brand in (await db.execute(select(snap_fb.c))).all():
+            for nm, pname, brand in (await db.execute(select(*snap_fb.c))).all():
                 cur = names.get(int(nm), (None, None, None))
                 names[int(nm)] = (cur[0] or pname, cur[1], cur[2] or brand)
 
@@ -757,7 +757,7 @@ async def delete_agent(db: AsyncSession, project_id: int, agent_id: int) -> bool
 _BUSY_STATUSES = ("draft", "approved", "sent")
 
 
-def _busy_targets_subquery(project_id: int, target_type: str):
+def _busy_targets_subquery(project_id: int, target_type: str) -> Select[tuple[str]]:
     return select(WBFeedbackReply.target_wb_id).where(
         WBFeedbackReply.project_id == project_id,
         WBFeedbackReply.target_type == target_type,
@@ -862,7 +862,7 @@ async def run_reply_agent(db: AsyncSession, project_id: int, agent_id: int) -> d
     for cand in candidates:
         checked += 1
         q_text = cand["item"].get("text") or ""
-        kb_entries = rank_kb_entries(kb_map.get(cand.get("nm_id")) or [], q_text)
+        kb_entries = rank_kb_entries(kb_map.get(int(cand.get("nm_id") or 0)) or [], q_text)
 
         if not kb_entries:
             # Нет записей КБ по товару — LLM НЕ вызываем (нечего подставить в
