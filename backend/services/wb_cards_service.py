@@ -547,6 +547,9 @@ async def import_kb_from_cards(db: AsyncSession, project_id: int) -> dict:
         )
     ).scalars().all()
     for r in rows:
+        if r.question_hash is None:
+            # в запросе есть фильтр question_hash.isnot(None) — гвард для сужения типа
+            continue
         existing[(int(r.nm_id), r.question_hash)] = r
 
     created = updated = unchanged = 0

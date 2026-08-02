@@ -29,7 +29,7 @@ import logging
 import re
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -343,6 +343,11 @@ async def import_kb_from_answered_questions(db: AsyncSession, project_id: int) -
     created = skipped_dupe = skipped_empty = 0
     nm_set: set[int] = set()
     for q in rows:
+        if q.nm_id is None:
+            # в запросе есть фильтр nm_id.isnot(None) — гвард для сужения типа
+            skipped_empty += 1
+            continue
+        nm_id = int(q.nm_id)
         q_text = (q.text or "").strip()
         a_text = (q.answer_text or "").strip()
         if not q_text or not a_text:
@@ -354,7 +359,7 @@ async def import_kb_from_answered_questions(db: AsyncSession, project_id: int) -
             skipped_empty += 1
             continue
         h = _question_hash(q_text)
-        key = (int(q.nm_id), h)
+        key = (nm_id, h)
         if key in existing:
             skipped_dupe += 1
             continue
@@ -370,7 +375,7 @@ async def import_kb_from_answered_questions(db: AsyncSession, project_id: int) -
             )
         )
         existing.add(key)
-        nm_set.add(int(q.nm_id))
+        nm_set.add(nm_id)
         created += 1
         if created % 500 == 0:
             await db.flush()
@@ -514,7 +519,7 @@ async def list_kb_products(db: AsyncSession, project_id: int) -> dict:
             .order_by(WBQuestion.nm_id, WBQuestion.synced_at.desc())
             .subquery()
         )
-        for nm, pname, article, brand in (await db.execute(select(snap.c))).all():
+        for nm, pname, article, brand in (await db.execute(select(snap))).all():
             names[int(nm)] = (pname, article, brand)
         # Фолбэк для товаров без вопросов в зеркале — зеркало отзывов
         missing = [nm for nm in nm_ids if nm not in names or not names[nm][0]]
@@ -529,7 +534,7 @@ async def list_kb_products(db: AsyncSession, project_id: int) -> dict:
                 .order_by(WBFeedback.nm_id, WBFeedback.synced_at.desc())
                 .subquery()
             )
-            for nm, pname, brand in (await db.execute(select(snap_fb.c))).all():
+            for nm, pname, brand in (await db.execute(select(snap_fb))).all():
                 cur = names.get(int(nm), (None, None, None))
                 names[int(nm)] = (cur[0] or pname, cur[1], cur[2] or brand)
 
@@ -652,7 +657,7 @@ async def delete_kb(db: AsyncSession, project_id: int, kb_id: int) -> bool:
     k = await _get_kb(db, project_id, kb_id)
     if k is None:
         return False
-    await db.delete(k)
+    await db.delete(k)  # no-soft-delete-check: WBProductKB без SoftDeleteMixin — мягкое отключение через enabled=false
     await db.commit()
     return True
 
@@ -746,7 +751,7 @@ async def delete_agent(db: AsyncSession, project_id: int, agent_id: int) -> bool
     a = await _get_agent(db, project_id, agent_id)
     if a is None:
         return False
-    await db.delete(a)
+    await db.delete(a)  # no-soft-delete-check: WBReplyAgent без SoftDeleteMixin — hard delete осознанный
     await db.commit()
     return True
 
@@ -757,7 +762,7 @@ async def delete_agent(db: AsyncSession, project_id: int, agent_id: int) -> bool
 _BUSY_STATUSES = ("draft", "approved", "sent")
 
 
-def _busy_targets_subquery(project_id: int, target_type: str):
+def _busy_targets_subquery(project_id: int, target_type: str) -> Select[tuple[str]]:
     return select(WBFeedbackReply.target_wb_id).where(
         WBFeedbackReply.project_id == project_id,
         WBFeedbackReply.target_type == target_type,
@@ -862,7 +867,10 @@ async def run_reply_agent(db: AsyncSession, project_id: int, agent_id: int) -> d
     for cand in candidates:
         checked += 1
         q_text = cand["item"].get("text") or ""
-        kb_entries = rank_kb_entries(kb_map.get(cand.get("nm_id")) or [], q_text)
+        cand_nm: int | None = cand.get("nm_id")
+        kb_entries = rank_kb_entries(
+            (kb_map.get(cand_nm) or []) if cand_nm is not None else [], q_text
+        )
 
         if not kb_entries:
             # Нет записей КБ по товару — LLM НЕ вызываем (нечего подставить в
