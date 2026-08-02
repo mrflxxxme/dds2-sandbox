@@ -788,6 +788,8 @@ export interface TelegramChatBinding {
   measurements_notify_enabled: boolean;
   /** Отдельный opt-in под алерты «Расхождение поставок ФФ» (раз в 2ч). */
   supply_notify_enabled: boolean;
+  /** Утренняя сводка дизайн-задач (09:00 МСК) в этот чат (Ф4 модуля дизайна). */
+  design_notify_enabled: boolean;
   ff_board_enabled: boolean;
   /** NULL = табло по всем складам; иначе — заявки только этого склада ФФ. */
   ff_board_warehouse_id: number | null;
@@ -9746,6 +9748,28 @@ export interface DesignCommentInPayload {
 export interface DesignVerdictInPayload {
     verdict: 'ACCEPTED' | 'REJECTED';
     verdict_comment?: string | null;
+}
+
+// АБ-мост (Ф6): POST /{task_id}/ab-test — зеркало DesignAbTestIn/Prefill/Out (schemas/design.py)
+
+export interface DesignAbTestPayload {
+    /** У задачи дизайна кампании нет — без него бэк отдаёт prefill для формы создания. */
+    campaign_id?: number | null;
+}
+
+/** Данные предзаполнения формы /ab-tests/create?nm_id=...&from_design_task=... */
+export interface DesignAbTestPrefill {
+    nm_id: number;
+    /** Номер DES-N — обратная ссылка на задачу. */
+    from_design_task: string;
+    name: string;
+    comment: string;
+}
+
+/** Либо созданный тест (ab_test_id → редирект на его страницу), либо prefill. */
+export interface DesignAbTestOut {
+    ab_test_id: number | null;
+    prefill: DesignAbTestPrefill | null;
 }
 
 export interface DesignTaskListParams {

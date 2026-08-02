@@ -34,10 +34,10 @@ export default function SubmissionsCard({ task, userName, onError }: Submissions
     return (
         <div className="glass-card">
             <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 12px' }}>
-                Версии сдач {submissions.length > 0 && <span style={{ color: 'var(--color-muted)' }}>({formatNumber(submissions.length, 0)})</span>}
+                Версии сдач {submissions.length > 0 && <span style={{ color: 'var(--color-text-muted)' }}>({formatNumber(submissions.length, 0)})</span>}
             </h3>
             {submissions.length === 0 && (
-                <div style={{ fontSize: 13, color: 'var(--color-muted)' }}>Сдач ещё не было.</div>
+                <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Сдач ещё не было.</div>
             )}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {submissions.map((s) => (
@@ -45,7 +45,7 @@ export default function SubmissionsCard({ task, userName, onError }: Submissions
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                             <span style={{ fontWeight: 600, fontSize: 14 }}>Версия {s.version_no}</span>
                             <span className={`badge ${VERDICT_BADGE[s.verdict]}`}>{DESIGN_VERDICT_LABEL[s.verdict]}</span>
-                            <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-muted)' }}>
+                            <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-text-muted)' }}>
                                 {userName(s.submitted_by_user_id)} · {formatDateTime(s.submitted_at)}
                             </span>
                         </div>

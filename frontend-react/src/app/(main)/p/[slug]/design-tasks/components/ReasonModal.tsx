@@ -39,7 +39,7 @@ export default function ReasonModal({
 
     return (
         <ModalShell title={title} onClose={onClose}>
-            <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 6 }}>
+            <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>
                 {label}{required ? ' *' : ''}
             </label>
             <textarea

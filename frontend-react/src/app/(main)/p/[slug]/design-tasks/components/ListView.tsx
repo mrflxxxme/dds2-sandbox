@@ -96,7 +96,7 @@ export default function ListView({ slug }: { slug: string }) {
     }, [tasks, chip, assignee, workType, urgentOnly, q]);
 
     if (loading) {
-        return <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-muted)' }}>Загрузка…</div>;
+        return <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка…</div>;
     }
     if (error) {
         return (
@@ -143,7 +143,7 @@ export default function ListView({ slug }: { slug: string }) {
             </div>
 
             {visible.length === 0 && (
-                <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-muted)', padding: 48 }}>
+                <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 48 }}>
                     {tasks.length === 0
                         ? 'Заявок ещё нет. Создайте первую: «+ Новая заявка».'
                         : 'Нет задач под выбранные фильтры.'}
@@ -154,7 +154,7 @@ export default function ListView({ slug }: { slug: string }) {
                 <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
                         <thead>
-                            <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-muted)', fontSize: 12 }}>
+                            <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-muted)', fontSize: 12 }}>
                                 <th style={{ textAlign: 'left', padding: '12px 16px' }}>Номер</th>
                                 <th style={{ textAlign: 'left', padding: '12px 16px' }}>Товар</th>
                                 <th style={{ textAlign: 'left', padding: '12px 16px' }}>Тип</th>

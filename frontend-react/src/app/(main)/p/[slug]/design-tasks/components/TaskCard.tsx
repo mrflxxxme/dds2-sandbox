@@ -40,7 +40,7 @@ export default function TaskCard({ t, onClick, draggable, onDragStart, onDragOve
                         style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--color-danger)', flexShrink: 0 }}
                     />
                 )}
-                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-muted)' }}>{t.number}</span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-muted)' }}>{t.number}</span>
                 {t.is_urgent && <span className="badge badge-danger" style={{ fontSize: 10 }}>Срочно</span>}
                 {t.is_outsourced && <span className="badge badge-secondary" style={{ fontSize: 10 }}>Аутсорс</span>}
             </div>
@@ -50,14 +50,14 @@ export default function TaskCard({ t, onClick, draggable, onDragStart, onDragOve
                     {t.title}
                 </span>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--color-muted)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {t.assignee_name ?? '—'}
                 </span>
                 {t.due_date && (
                     <span
                         title={t.is_overdue ? 'Просрочена' : 'Срок'}
-                        style={{ marginLeft: 'auto', whiteSpace: 'nowrap', color: t.is_overdue ? 'var(--color-danger)' : 'var(--color-muted)', fontWeight: t.is_overdue ? 600 : 400 }}
+                        style={{ marginLeft: 'auto', whiteSpace: 'nowrap', color: t.is_overdue ? 'var(--color-danger)' : 'var(--color-text-muted)', fontWeight: t.is_overdue ? 600 : 400 }}
                     >
                         {formatDate(t.due_date)}
                     </span>

@@ -99,7 +99,7 @@ export default function BoardView({ columns, canReorder, onOpen, onMoveRequest }
                                 />
                             ))}
                             {tasks.length === 0 && (
-                                <div style={{ fontSize: 12, color: 'var(--color-dim)', textAlign: 'center', padding: 12 }}>
+                                <div style={{ fontSize: 12, color: 'var(--color-text-dim)', textAlign: 'center', padding: 12 }}>
                                     Пусто
                                 </div>
                             )}

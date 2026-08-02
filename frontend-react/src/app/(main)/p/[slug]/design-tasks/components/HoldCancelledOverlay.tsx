@@ -57,7 +57,7 @@ export default function HoldCancelledOverlay({ status, onOpen, onClose }: HoldCa
                 </div>
 
                 {tasks === null && !error && (
-                    <div style={{ color: 'var(--color-muted)', textAlign: 'center', padding: 24 }}>Загрузка…</div>
+                    <div style={{ color: 'var(--color-text-muted)', textAlign: 'center', padding: 24 }}>Загрузка…</div>
                 )}
                 {error && (
                     <div style={{ color: 'var(--color-danger)' }}>
@@ -65,7 +65,7 @@ export default function HoldCancelledOverlay({ status, onOpen, onClose }: HoldCa
                     </div>
                 )}
                 {tasks !== null && tasks.length === 0 && (
-                    <div style={{ color: 'var(--color-muted)', textAlign: 'center', padding: 24 }}>
+                    <div style={{ color: 'var(--color-text-muted)', textAlign: 'center', padding: 24 }}>
                         Нет задач в статусе «{DESIGN_STATUS_LABEL[status]}».
                     </div>
                 )}
@@ -83,10 +83,10 @@ export default function HoldCancelledOverlay({ status, onOpen, onClose }: HoldCa
                                 <WbThumb nmId={t.nm_id} size={28} height={36} />
                                 <span style={{ minWidth: 0 }}>
                                     <span style={{ display: 'block', fontSize: 13 }}>
-                                        <span style={{ color: 'var(--color-muted)', fontWeight: 600, marginRight: 6 }}>{t.number}</span>
+                                        <span style={{ color: 'var(--color-text-muted)', fontWeight: 600, marginRight: 6 }}>{t.number}</span>
                                         {t.title}
                                     </span>
-                                    <span style={{ display: 'block', fontSize: 12, color: 'var(--color-muted)' }}>
+                                    <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)' }}>
                                         {t.assignee_name ?? 'без исполнителя'}
                                         {t.due_date ? ` · до ${formatDate(t.due_date)}` : ''}
                                     </span>

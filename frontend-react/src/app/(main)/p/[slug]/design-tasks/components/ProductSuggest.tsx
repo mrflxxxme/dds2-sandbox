@@ -86,11 +86,11 @@ export default function ProductSuggest({ value, onChange, onPick, placeholder, a
                                 <span style={{ display: 'block', fontSize: 13 }}>
                                     {s.article_seller || `#${s.nm_id}`}
                                 </span>
-                                <span style={{ display: 'block', fontSize: 12, color: 'var(--color-muted)' }}>
+                                <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)' }}>
                                     {[s.brand, s.subject].filter(Boolean).join(' · ') || `nm ${s.nm_id}`}
                                 </span>
                             </span>
-                            <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-dim)' }}>{s.nm_id}</span>
+                            <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-text-dim)' }}>{s.nm_id}</span>
                         </button>
                     ))}
                 </div>

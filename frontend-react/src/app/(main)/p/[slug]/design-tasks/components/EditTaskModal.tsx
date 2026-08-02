@@ -66,19 +66,19 @@ export default function EditTaskModal({ task, onSaved, onClose }: EditTaskModalP
         <ModalShell title={`Редактировать ${task.number}`} onClose={onClose} width={560}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <div>
-                    <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 4 }}>Название *</label>
+                    <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 4 }}>Название *</label>
                     <input className="form-input" style={{ width: '100%' }} value={title} maxLength={300} onChange={(e) => setTitle(e.target.value)} />
                 </div>
                 <div>
-                    <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 4 }}>Суть * (мин. 10 символов)</label>
+                    <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 4 }}>Суть * (мин. 10 символов)</label>
                     <textarea className="form-input" style={{ width: '100%', minHeight: 80, resize: 'vertical' }} value={description} maxLength={5000} onChange={(e) => setDescription(e.target.value)} />
                 </div>
                 <div>
-                    <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 4 }}>Ссылка на ТЗ-таблицу *</label>
+                    <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 4 }}>Ссылка на ТЗ-таблицу *</label>
                     <input className="form-input" style={{ width: '100%' }} value={sheetUrl} onChange={(e) => setSheetUrl(e.target.value)} />
                 </div>
                 <div>
-                    <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 4 }}>Товар</label>
+                    <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 4 }}>Товар</label>
                     {nmId != null ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                             <WbThumb nmId={nmId} size={28} height={36} />
@@ -98,21 +98,21 @@ export default function EditTaskModal({ task, onSaved, onClose }: EditTaskModalP
                 </div>
                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
                     <div>
-                        <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 4 }}>Тип работы</label>
+                        <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 4 }}>Тип работы</label>
                         <select className="form-input" value={workType} onChange={(e) => setWorkType(e.target.value as DesignWorkType)}>
                             {WORK_TYPES.map((w) => <option key={w} value={w}>{DESIGN_WORK_TYPE_LABEL[w]}</option>)}
                         </select>
                     </div>
                     {task.permissions.can_set_complexity && (
                         <div>
-                            <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 4 }}>Сложность</label>
+                            <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 4 }}>Сложность</label>
                             <select className="form-input" value={complexity} onChange={(e) => setComplexity(e.target.value as DesignComplexity)}>
                                 {COMPLEXITIES.map((c) => <option key={c} value={c}>{DESIGN_COMPLEXITY_LABEL[c]}</option>)}
                             </select>
                         </div>
                     )}
                     <div>
-                        <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 4 }}>Срок</label>
+                        <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 4 }}>Срок</label>
                         <input className="form-input" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
                     </div>
                 </div>

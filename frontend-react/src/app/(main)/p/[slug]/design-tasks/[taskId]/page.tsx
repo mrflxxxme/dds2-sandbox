@@ -120,10 +120,38 @@ export default function DesignTaskDetailPage() {
         [task],
     );
 
+    const [abBusy, setAbBusy] = useState(false);
+
+    /** АБ-мост (Ф6): ab_test_id → страница теста; prefill → предзаполненная форма создания. */
+    const createAbTest = useCallback(async () => {
+        setAbBusy(true);
+        try {
+            const res = await api.createDesignAbTest(taskId);
+            if (!mountedRef.current) return;
+            if (res.ab_test_id != null) {
+                router.push(`/p/${params.slug}/ab-tests/${res.ab_test_id}`);
+                return;
+            }
+            if (res.prefill) {
+                const qs = new URLSearchParams({
+                    nm_id: String(res.prefill.nm_id),
+                    from_design_task: res.prefill.from_design_task,
+                });
+                router.push(`/p/${params.slug}/ab-tests/create?${qs.toString()}`);
+                return;
+            }
+            setToast({ type: 'error', message: 'Бэк не вернул ни тест, ни данные предзаполнения' });
+        } catch (e) {
+            if (mountedRef.current) setToast({ type: 'error', message: errText(e, 'Не удалось создать АБ-тест') });
+        } finally {
+            if (mountedRef.current) setAbBusy(false);
+        }
+    }, [taskId, router, params.slug]);
+
     if (loading) {
         return (
             <PageGuard page="design-tasks">
-                <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-muted)' }}>Загрузка…</div>
+                <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка…</div>
             </PageGuard>
         );
     }
@@ -180,7 +208,7 @@ export default function DesignTaskDetailPage() {
                             )}
                         </div>
                         <div style={{ fontSize: 14, whiteSpace: 'pre-wrap', marginBottom: 12 }}>{task.description}</div>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 20px', fontSize: 13, color: 'var(--color-muted)' }}>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 20px', fontSize: 13, color: 'var(--color-text-muted)' }}>
                             <span>Тип: <b style={{ color: 'var(--color-text)' }}>{DESIGN_WORK_TYPE_LABEL[task.work_type]}</b></span>
                             <span>Сложность: <b style={{ color: 'var(--color-text)' }}>{DESIGN_COMPLEXITY_LABEL[task.complexity]}</b></span>
                             <span>
@@ -205,7 +233,7 @@ export default function DesignTaskDetailPage() {
                             <WbThumb nmId={task.nm_id} size={48} height={62} />
                             <span style={{ fontSize: 14 }}>
                                 {task.title}
-                                <span style={{ display: 'block', fontSize: 12, color: 'var(--color-muted)' }}>
+                                <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)' }}>
                                     {task.nm_id != null ? `Артикул ${task.nm_id}` : 'Товар не привязан'}
                                 </span>
                             </span>
@@ -287,6 +315,16 @@ export default function DesignTaskDetailPage() {
                                     → {DESIGN_STATUS_LABEL[t]}
                                 </button>
                             ))}
+                            {perms.can_create_ab_test && (
+                                <button
+                                    className="btn btn-primary btn-sm"
+                                    disabled={abBusy}
+                                    title="Создать АБ-тест фото по принятой версии этой задачи"
+                                    onClick={() => void createAbTest()}
+                                >
+                                    {abBusy ? '⏳ Создаём…' : '🧪 Проверить тестом'}
+                                </button>
+                            )}
                             {perms.can_edit && (
                                 <button className="btn btn-secondary btn-sm" onClick={() => setModal({ kind: 'edit' })}>
                                     ✏️ Редактировать

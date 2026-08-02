@@ -92,17 +92,17 @@ export default function SubmitWorkModal({ taskId, onDone, onClose }: SubmitWorkM
                     {files.map((f, i) => (
                         <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px' }}>
                             <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
-                            <span style={{ color: 'var(--color-dim)', whiteSpace: 'nowrap' }}>{formatNumber(f.size / 1024 / 1024, 1)} МБ</span>
+                            <span style={{ color: 'var(--color-text-dim)', whiteSpace: 'nowrap' }}>{formatNumber(f.size / 1024 / 1024, 1)} МБ</span>
                             <button className="btn btn-sm btn-secondary" style={{ marginLeft: 'auto' }} disabled={submitting} onClick={() => setFiles((list) => list.filter((_, j) => j !== i))}>✕</button>
                         </div>
                     ))}
-                    <div style={{ fontSize: 12, color: totalMb > MAX_TOTAL_MB ? 'var(--color-danger)' : 'var(--color-muted)' }}>
+                    <div style={{ fontSize: 12, color: totalMb > MAX_TOTAL_MB ? 'var(--color-danger)' : 'var(--color-text-muted)' }}>
                         Всего: {formatNumber(totalMb, 1)} МБ из {MAX_TOTAL_MB}
                     </div>
                 </div>
             )}
 
-            <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', margin: '12px 0 6px' }}>Что сделано</label>
+            <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', margin: '12px 0 6px' }}>Что сделано</label>
             <textarea
                 className="form-input"
                 style={{ width: '100%', minHeight: 70, resize: 'vertical' }}

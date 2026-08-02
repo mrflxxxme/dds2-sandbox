@@ -1,6 +1,7 @@
 /** Design Tasks API — модуль «Дизайн карточек» (docs/specs/design/CONTRACT.md, FROZEN). */
 import { ApiClient } from './client';
 import type {
+    DesignAbTestOut,
     DesignAssignPayload,
     DesignBoardResponse,
     DesignCalendarOut,
@@ -132,7 +133,26 @@ export function addDesignTaskMethods(api: ApiClient) {
         addDesignComment(taskId: number, payload: DesignCommentInPayload) {
             return api.request<DesignCommentOut>('POST', `${BASE}/${taskId}/comments`, payload);
         },
+        /**
+         * Комментарий с вложением (multipart, amended 2026-08-03). Текст обязателен —
+         * бэк принимает `body` как Form(1..2000); JSON-схема и multipart в одной ручке
+         * FastAPI не уживаются, поэтому путь отдельный от `addDesignComment`.
+         */
+        addDesignCommentWithFile(taskId: number, body: string, file: File) {
+            const fd = new FormData();
+            fd.append('body', body);
+            fd.append('file', file);
+            // retries: транзиентные 5xx/сетевые обрывы (деплой) — канон learnings.
+            return api.uploadFormData<DesignCommentOut>(`${BASE}/${taskId}/comments/file`, fd, { retries: 2 });
+        },
+        getDesignCommentFile(taskId: number, commentId: number) {
+            return api.requestBlob(`${BASE}/${taskId}/comments/${commentId}/file`);
+        },
 
-        // POST /{task_id}/ab-test — 501 до Ф6, метод и кнопка не строятся (контракт).
+        // ── АБ-мост (Ф6) ──
+        /** Без тела: campaign_id у задачи нет → бэк вернёт либо ab_test_id, либо prefill. */
+        createDesignAbTest(taskId: number) {
+            return api.request<DesignAbTestOut>('POST', `${BASE}/${taskId}/ab-test`);
+        },
     };
 }

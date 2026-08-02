@@ -54,7 +54,7 @@ export default function AssignModal({ slug, currentAssigneeId, onAssign, onClose
 
     return (
         <ModalShell title="Назначить исполнителя" onClose={onClose}>
-            {members === null && !error && <div style={{ color: 'var(--color-muted)' }}>Загрузка участников…</div>}
+            {members === null && !error && <div style={{ color: 'var(--color-text-muted)' }}>Загрузка участников…</div>}
             {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 8 }}>{error}</div>}
             {members !== null && (
                 <>

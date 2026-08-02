@@ -109,7 +109,7 @@ export default function MaterialsCard({ task, onChanged, onError }: MaterialsCar
             )}
 
             {task.materials.length === 0 && (
-                <div style={{ fontSize: 13, color: 'var(--color-muted)' }}>Материалов нет.</div>
+                <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Материалов нет.</div>
             )}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {task.materials.map((m) => (
@@ -126,7 +126,7 @@ export default function MaterialsCard({ task, onChanged, onError }: MaterialsCar
                                     {m.original_filename || `Файл #${m.id}`}
                                 </button>
                                 {m.file_size != null && (
-                                    <span style={{ color: 'var(--color-dim)', whiteSpace: 'nowrap' }}>
+                                    <span style={{ color: 'var(--color-text-dim)', whiteSpace: 'nowrap' }}>
                                         {formatNumber(m.file_size / 1024, 0)} КБ
                                     </span>
                                 )}

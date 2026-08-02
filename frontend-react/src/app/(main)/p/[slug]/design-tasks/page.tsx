@@ -20,6 +20,8 @@ import BoardView from './components/BoardView';
 import ListView from './components/ListView';
 import HoldCancelledOverlay from './components/HoldCancelledOverlay';
 import ReasonModal from './components/ReasonModal';
+import DesignTabs from './components/DesignTabs';
+import StatsPanel from './components/StatsPanel';
 
 interface PendingMove {
     taskId: number;
@@ -74,10 +76,6 @@ function DesignTasksPageInner() {
         [router, params.slug],
     );
 
-    const setView = (v: 'board' | 'list') => {
-        router.replace(`/p/${params.slug}/design-tasks${v === 'list' ? '?view=list' : ''}`);
-    };
-
     /** Оптимистичный move (Р4): применяем локально → POST /move → на 4xx откат + toast бэка + refetch. */
     const doMove = useCallback(
         async (taskId: number, toStatus: DesignBoardStatus, beforeTaskId: number | null, comment?: string) => {
@@ -126,20 +124,7 @@ function DesignTasksPageInner() {
                 subtitle="Задачи на инфографику: заявка → назначение → работа → версии сдач → приёмка"
                 actions={
                     <>
-                        <div style={{ display: 'flex', gap: 4 }}>
-                            <button
-                                className={`btn btn-sm ${view === 'board' ? 'btn-primary' : 'btn-secondary'}`}
-                                onClick={() => setView('board')}
-                            >
-                                Доска
-                            </button>
-                            <button
-                                className={`btn btn-sm ${view === 'list' ? 'btn-primary' : 'btn-secondary'}`}
-                                onClick={() => setView('list')}
-                            >
-                                Список
-                            </button>
-                        </div>
+                        <DesignTabs slug={params.slug} active={view} />
                         {canEdit() && (
                             <button className="btn btn-primary btn-sm" onClick={() => router.push(`/p/${params.slug}/design-tasks/new`)}>
                                 + Новая заявка
@@ -150,7 +135,11 @@ function DesignTasksPageInner() {
             />
 
             {view === 'list' ? (
-                <ListView slug={params.slug} />
+                <>
+                    {/* Панель метрик PRD §10 — над списком (Ф6-довесок, спек F5 п.5в). */}
+                    <StatsPanel />
+                    <ListView slug={params.slug} />
+                </>
             ) : (
                 <>
                     <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
@@ -163,7 +152,7 @@ function DesignTasksPageInner() {
                     </div>
 
                     {loading && (
-                        <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-muted)' }}>Загрузка…</div>
+                        <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка…</div>
                     )}
                     {error && !loading && (
                         <div className="glass-card" style={{ color: 'var(--color-danger)' }}>
@@ -172,7 +161,7 @@ function DesignTasksPageInner() {
                     )}
                     {!loading && !error && columns && (
                         Object.values(columns).every((c) => c.length === 0) && onHoldCount === 0 && cancelledCount === 0 ? (
-                            <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-muted)', padding: 48 }}>
+                            <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 48 }}>
                                 Заявок ещё нет. Создайте первую: «+ Новая заявка».
                             </div>
                         ) : (
@@ -215,7 +204,7 @@ function DesignTasksPageInner() {
 export default function DesignTasksPage() {
     // useSearchParams требует Suspense-границу при статической генерации.
     return (
-        <Suspense fallback={<div style={{ padding: 40, color: 'var(--color-muted)' }}>Загрузка…</div>}>
+        <Suspense fallback={<div style={{ padding: 40, color: 'var(--color-text-muted)' }}>Загрузка…</div>}>
             <DesignTasksPageInner />
         </Suspense>
     );

@@ -172,8 +172,8 @@ export default function DesignTaskCreatePage() {
             <div className="glass-card" style={{ maxWidth: 720 }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                     <div>
-                        <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 6 }}>
-                            Название товара * <span style={{ color: 'var(--color-dim)' }}>(подсказка привяжет артикул, но не обязывает)</span>
+                        <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                            Название товара * <span style={{ color: 'var(--color-text-dim)' }}>(подсказка привяжет артикул, но не обязывает)</span>
                         </label>
                         <ProductSuggest
                             value={title}
@@ -202,8 +202,8 @@ export default function DesignTaskCreatePage() {
                     </div>
 
                     <div>
-                        <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 6 }}>
-                            Суть заявки * <span style={{ color: 'var(--color-dim)' }}>(2–3 строки, минимум 10 символов)</span>
+                        <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>
+                            Суть заявки * <span style={{ color: 'var(--color-text-dim)' }}>(2–3 строки, минимум 10 символов)</span>
                         </label>
                         <textarea
                             className="form-input"
@@ -216,7 +216,7 @@ export default function DesignTaskCreatePage() {
                     </div>
 
                     <div>
-                        <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 6 }}>
+                        <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>
                             Ссылка на ТЗ-таблицу (Google Sheets) *
                         </label>
                         <input
@@ -230,13 +230,13 @@ export default function DesignTaskCreatePage() {
 
                     <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}>
                         <div>
-                            <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 6 }}>Тип работы</label>
+                            <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>Тип работы</label>
                             <select className="form-input" value={workType} onChange={(e) => setWorkType(e.target.value as DesignWorkType)}>
                                 {WORK_TYPES.map((w) => <option key={w} value={w}>{DESIGN_WORK_TYPE_LABEL[w]}</option>)}
                             </select>
                         </div>
                         <div>
-                            <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 6 }}>Срок</label>
+                            <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>Срок</label>
                             <input className="form-input" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
                         </div>
                         <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 14, cursor: 'pointer', paddingBottom: 8 }}>
@@ -246,7 +246,7 @@ export default function DesignTaskCreatePage() {
                     </div>
 
                     <div>
-                        <label style={{ display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 6 }}>Исходные материалы</label>
+                        <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>Исходные материалы</label>
                         <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
                             {([['FILE', 'Файл'], ['LINK', 'Ссылка'], ['NM', 'Артикул-пример']] as const).map(([k, label]) => (
                                 <button
