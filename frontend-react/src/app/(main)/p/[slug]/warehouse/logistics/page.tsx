@@ -10,13 +10,16 @@ import KpiCard from '@/components/KpiCard';
 import type { Column } from '@/components/DataTable';
 import type { AssemblyRequest, AssemblyStatus, LogisticsAnalyticsResponse, LogisticsRouteStat, LogisticsShipmentRow, LogisticsAnomalyType, CostForecastResponse, CostForecastWarehouse, GazelkaConfig, StockTransfer, TransferAssignVehiclePayload, Warehouse } from '@/types/api';
 import {
+    TRANSFER_STATUS_MAP,
     canSetTransferLogistics,
     gazelkaSourceWarehouseIds,
     initialUnitMode,
     toMoney,
     transferDaysStuck,
+    transferSkuCount,
     transferStatusLabel,
     transferTotalWeight,
+    transferUnits,
     unitCountLabel,
     unitModeToFlag,
     unitShort,
@@ -1412,6 +1415,105 @@ export default function LogisticsPage() {
                         </div>
                     </div>
 
+                    {/* ─── Уехали без стоимости ──────────────────────────────
+                        Рабочий список «переезд уехал, а денег на нём нет». Живёт
+                        ЗДЕСЬ, а не в отчёте «Переезды», потому что отчёт строится
+                        на заборах — а забора у этих переездов как раз и нет, и
+                        завести его больше неоткуда. Свёрнут по умолчанию: это
+                        разовая уборка долгов, а не ежедневная работа логиста. */}
+                    {noCostTransfers.length > 0 && (
+                        <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+                            <div
+                                onClick={() => setNoCostOpen(v => !v)}
+                                style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', flexWrap: 'wrap' }}
+                            >
+                                <span style={{ fontSize: 15, fontWeight: 600 }}>
+                                    {noCostOpen ? '▾' : '▸'} Уехали без стоимости
+                                </span>
+                                <span className="badge badge-warning">
+                                    {formatNumber(noCostTransfers.length, 0)}
+                                </span>
+                                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                    не попали ни в «Оплаты», ни в отчёт «Переезды» — укажите перевозчика и стоимость
+                                </span>
+                            </div>
+                            {noCostOpen && (
+                                <div style={{ marginTop: 12 }}>
+                                    {checkedNoCostIds.size > 0 && (
+                                        <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                                            <button
+                                                className="btn btn-primary btn-sm"
+                                                onClick={() => openLogisticsModal([...checkedNoCostIds])}
+                                                disabled={actionLoading}
+                                            >
+                                                Указать на {formatNumber(checkedNoCostIds.size, 0)} перемещ.
+                                            </button>
+                                            <button className="btn btn-secondary btn-sm" onClick={() => setCheckedNoCostIds(new Set())}>
+                                                Снять выбор
+                                            </button>
+                                        </div>
+                                    )}
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
+                                        {noCostTransfers.map(t => {
+                                            const st = TRANSFER_STATUS_MAP[t.status] ?? { label: t.status, className: 'badge-secondary' };
+                                            const checked = checkedNoCostIds.has(t.id);
+                                            return (
+                                                <div
+                                                    key={t.id}
+                                                    className="glass-card"
+                                                    style={{
+                                                        padding: 16,
+                                                        border: checked ? '2px solid var(--color-primary)' : undefined,
+                                                        cursor: 'pointer',
+                                                    }}
+                                                    onClick={() => toggleCheckedNoCost(t.id)}
+                                                >
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={checked}
+                                                                onChange={() => toggleCheckedNoCost(t.id)}
+                                                                onClick={e => e.stopPropagation()}
+                                                                style={{ width: 18, height: 18, accentColor: 'var(--color-primary)', cursor: 'pointer' }}
+                                                            />
+                                                            <Link
+                                                                href={`/p/${slug}/warehouse/transfers/${t.id}`}
+                                                                style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-text)' }}
+                                                                onClick={e => e.stopPropagation()}
+                                                            >
+                                                                {t.number}
+                                                            </Link>
+                                                        </div>
+                                                        <span className={`badge ${st.className}`}>{st.label}</span>
+                                                    </div>
+                                                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                                        <div style={{ fontSize: 11, fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                                                            Откуда → Куда
+                                                        </div>
+                                                        <div style={{ fontWeight: 600, color: 'var(--color-text)', marginBottom: 4 }}>
+                                                            {transferFromName(t)} <span style={{ color: 'var(--color-text-muted)' }}>→</span> {transferToName(t)}
+                                                        </div>
+                                                        <div>Позиций: {formatNumber(transferSkuCount(t), 0)} · {formatNumber(transferUnits(t), 0)} шт</div>
+                                                        {t.shipped_at && <div>Уехал: {formatDate(t.shipped_at)}</div>}
+                                                    </div>
+                                                    <button
+                                                        className="btn btn-secondary btn-sm"
+                                                        style={{ marginTop: 8 }}
+                                                        onClick={e => { e.stopPropagation(); openLogisticsModal([t.id]); }}
+                                                        disabled={actionLoading}
+                                                    >
+                                                        Указать перевозчика и стоимость
+                                                    </button>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
                     {/* Content */}
                     {loading ? (
                         <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>
@@ -2310,6 +2412,11 @@ export default function LogisticsPage() {
             {/* ─── Gazelka modal ─── */}
             {showGazelkaModal && gazelkaAssemblyId !== null && (
                 <GazelkaModal
+                    // 🔴 kind обязателен: без него модалка открывалась бы в режиме
+                    // СБОРКИ, а id несёт переезд — draft ушёл бы на чужой документ,
+                    // а send создал бы РЕАЛЬНЫЙ заказ у перевозчика по чужому
+                    // маршруту. Отката у Газельки нет (нет API, только form-POST).
+                    kind={gazelkaKind}
                     assemblyId={gazelkaAssemblyId}
                     assemblyNumber={gazelkaAssemblyNumber}
                     onClose={() => setShowGazelkaModal(false)}
@@ -2317,6 +2424,19 @@ export default function LogisticsPage() {
                         setShowGazelkaModal(false);
                         load();
                     }}
+                />
+            )}
+
+            {/* ─── Перевозчик и стоимость уехавшему переезду ─── */}
+            {logisticsTargets.length > 0 && (
+                <TransferLogisticsModal
+                    transfers={logisticsTargets}
+                    pickupWarehouseName={logisticsPickupWarehouse?.name ?? null}
+                    pickupWarehouseCounterpartyId={logisticsPickupWarehouse?.counterparty_id ?? null}
+                    submitting={actionLoading}
+                    error={logisticsError}
+                    onSubmit={handleSetTransferLogistics}
+                    onClose={() => { setLogisticsTargets([]); setLogisticsError(''); }}
                 />
             )}
         </div>
