@@ -1041,9 +1041,16 @@ async def send_transfer(
 
     # Канон юзера 01.08.2026: «сначала же назначить машину». Отбиваем ДО единой
     # проводки — иначе сток списан, а забор (носитель денег) не родился.
+    # 🔴 Перекладка ВНУТРИ одного склада исключена (канон юзера 02.08.2026):
+    # источник и получатель совпадают, товар за ворота не выехал — везти его
+    # некому и платить не за что. Брак признаком НЕ считается: переезд
+    # «склад → склад» остаётся обычной перевозкой, даже когда едет брак.
+    # Зеркало фронтового `isInternalTransfer` (frontend-react/src/lib/transfer.ts).
+    _is_internal = transfer.from_warehouse_id == transfer.to_warehouse_id
     if (
         current is TransferStatus.READY
         and not allow_no_logistics
+        and not _is_internal
         and not _transfer_has_logistics(transfer)
     ):
         raise ValueError(

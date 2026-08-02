@@ -128,7 +128,16 @@ export default function TransferLogisticsModal({
 
     return (
         <div className="modal-overlay" onClick={onClose}>
-            <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 560, maxHeight: '90vh', overflow: 'auto' }}>
+            {/* modal-card-solid — непрозрачный фон темы. Обычная `modal-card`
+                стеклянная (blur + полупрозрачность), и поверх плотной сетки
+                карточек «Уехали без стоимости» сквозь неё просвечивали чужие
+                номера и кнопки: форму было physически трудно читать. Ширина
+                тоже больше: полей здесь двенадцать, в 560px они жались. */}
+            <div
+                className="modal-card modal-card-wide modal-card-solid"
+                onClick={e => e.stopPropagation()}
+                style={{ maxHeight: '90vh', overflow: 'auto' }}
+            >
                 <h2 className="modal-title">
                     Перевозчик и стоимость{transfers.length > 1 ? ` (${transfers.length})` : ''}
                 </h2>

@@ -13,6 +13,7 @@ import {
     TRANSFER_STATUS_MAP,
     canSetTransferLogistics,
     gazelkaSourceWarehouseIds,
+    isInternalTransfer,
     initialUnitMode,
     toMoney,
     transferDaysStuck,
@@ -530,7 +531,12 @@ export default function LogisticsPage() {
                 statuses: ['SHIPPED', 'DELIVERED'],
                 hasPickupCost: false,
             });
-            const sorted = [...rows].sort((a, b) => b.id - a.id);
+            // Внутренние перекладки (склад сам в себя) сюда не попадают: платить
+            // за них не за что, и в списке «дай денег этому рейсу» они были бы
+            // вечными висяками, которые никто никогда не закроет.
+            const sorted = [...rows]
+                .filter(t => !isInternalTransfer(t))
+                .sort((a, b) => b.id - a.id);
             setNoCostTransfers(sorted);
             // Строка могла уйти из среза (стоимость завели в другом окне) —
             // выбор чистим, иначе массовая кнопка считает призраков.
