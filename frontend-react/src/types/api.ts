@@ -6770,6 +6770,47 @@ export interface ReplySendResult {
   pending: number;
 }
 
+// ─── Слежение за поступлением товара (wb_stock_watches) ─────────────────────
+
+export type StockWatchStatus = 'watching' | 'drafted' | 'dismissed';
+
+/** Одно слежение «вопрос → ждём поступление товара». */
+export interface StockWatchItem {
+  id: number;
+  nm_id: number;
+  question_wb_id: string;
+  status: StockWatchStatus;
+  reply_id: number | null;
+  /** Остаток (totalQuantity) при последней проверке тика */
+  last_qty: number | null;
+  created_at: string | null;
+  resolved_at: string | null;
+  question_text: string | null;
+  product_name: string | null;
+}
+
+export interface StockWatchListResponse {
+  items: StockWatchItem[];
+  total: number;
+  /** Счётчики по статусам: { watching: n, drafted: n, dismissed: n } */
+  counts: Record<string, number>;
+}
+
+/** Итог on-demand скана вопросов о наличии. */
+export interface StockWatchScanResult {
+  scanned: number;
+  created: number;
+  dismissed: number;
+}
+
+/** Итог ручного прогона проверки остатков. */
+export interface StockWatchTickResult {
+  checked: number;
+  drafted: number;
+  waiting: number;
+  errors: number;
+}
+
 // ─── База знаний товаров (wb_product_kb) ────────────────────────────────────
 
 /** Темы записей базы знаний. */

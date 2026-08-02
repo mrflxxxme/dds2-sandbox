@@ -47,6 +47,7 @@ class WBStockWatch(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="watching")
     reply_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("wb_feedback_replies.id"))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime)  # когда drafted/dismissed
+    last_qty: Mapped[int | None] = mapped_column(Integer)  # totalQuantity при последней проверке
 
     __table_args__ = (
         UniqueConstraint("project_id", "question_wb_id", name="uq_wb_stock_watches_project_question"),

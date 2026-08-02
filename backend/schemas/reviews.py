@@ -580,6 +580,7 @@ class StockWatchItem(BaseModel):
     question_wb_id: str
     status: str  # watching|drafted|dismissed
     reply_id: int | None = None
+    last_qty: int | None = None  # остаток (totalQuantity) при последней проверке тика
     created_at: str | None = None
     resolved_at: str | None = None
     question_text: str | None = None
@@ -600,3 +601,12 @@ class StockWatchScanResult(BaseModel):
     scanned: int = 0  # неотвеченных вопросов о наличии найдено
     created: int = 0  # создано watches
     dismissed: int = 0  # снято слежение (вопрос отвечен)
+
+
+class StockWatchTickResult(BaseModel):
+    """Итог ручного прогона проверки остатков (stock_watch_tick)."""
+
+    checked: int = 0  # проверено watching-watches
+    drafted: int = 0  # создано черновиков «товар появился»
+    waiting: int = 0  # всё ещё ждут поступления
+    errors: int = 0  # сетевые/прочие ошибки (не валят тик)

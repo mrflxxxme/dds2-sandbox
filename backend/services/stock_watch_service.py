@@ -260,6 +260,7 @@ async def stock_watch_tick(
     for watch in watches:
         checked += 1
         qty = int(quantities.get(int(watch.nm_id)) or 0)
+        watch.last_qty = qty  # фиксируем остаток при каждой проверке (и waiting, и drafted)
         if qty <= 0:
             waiting += 1
             continue
@@ -308,6 +309,9 @@ async def stock_watch_tick(
             errors += 1
             logger.warning("stock watch tick: watch %d failed: %s", watch.id, e)
 
+    # last_qty по waiting-часам (drafted/dismissed коммитятся в своих ветках выше)
+    await db.commit()
+
     logger.info(
         "stock watch tick: project %d — checked=%d, drafted=%d, waiting=%d, errors=%d",
         project_id, checked, drafted, waiting, errors,
@@ -325,11 +329,40 @@ def _watch_to_dict(w: WBStockWatch, question: WBQuestion | None = None) -> dict:
         "question_wb_id": w.question_wb_id,
         "status": w.status,
         "reply_id": w.reply_id,
+        "last_qty": w.last_qty,
         "created_at": w.created_at.isoformat() if w.created_at else None,
         "resolved_at": w.resolved_at.isoformat() if w.resolved_at else None,
         "question_text": question.text if question else None,
         "product_name": question.product_name if question else None,
     }
+
+
+async def dismiss_stock_watch(db: AsyncSession, project_id: int, watch_id: int) -> dict | None:
+    """
+    Снять слежение вручную: watching → dismissed.
+
+    None — watch не найден в проекте (404); ValueError — статус не watching (409).
+    """
+    watch = await db.scalar(
+        select(WBStockWatch).where(
+            WBStockWatch.id == watch_id,
+            WBStockWatch.project_id == project_id,
+        )
+    )
+    if watch is None:
+        return None
+    if watch.status != "watching":
+        raise ValueError(f"Снять можно только активное слежение (текущий статус: {watch.status})")
+    watch.status = "dismissed"
+    watch.resolved_at = utcnow()
+    await db.commit()
+    question = await db.scalar(
+        select(WBQuestion).where(
+            WBQuestion.project_id == project_id,
+            WBQuestion.wb_id == watch.question_wb_id,
+        )
+    )
+    return _watch_to_dict(watch, question)
 
 
 async def list_stock_watches(

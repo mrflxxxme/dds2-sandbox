@@ -1082,13 +1082,21 @@ async def list_replies(
     project_id: int,
     *,
     status: str | None = None,
+    target_type: str | None = None,
     take: int = 100,
     skip: int = 0,
 ) -> dict:
-    """Список ответов/черновиков проекта с данными цели (join к зеркалу)."""
+    """
+    Список ответов/черновиков проекта с данными цели (join к зеркалу).
+
+    target_type ('feedback'|'question') — фильтр по типу цели; counts по
+    статусам возвращаются с учётом этого фильтра (для раздельных очередей UI).
+    """
     stmt = select(WBFeedbackReply).where(WBFeedbackReply.project_id == project_id)
     if status:
         stmt = stmt.where(WBFeedbackReply.status == status)
+    if target_type:
+        stmt = stmt.where(WBFeedbackReply.target_type == target_type)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = (
         await db.execute(
@@ -1101,14 +1109,14 @@ async def list_replies(
         target = await _target_snapshot(db, project_id, r.target_type, r.target_wb_id)
         items.append(_reply_to_dict(r, target))
 
-    counts = {
-        s: int(await db.scalar(
-            select(func.count(WBFeedbackReply.id)).where(
-                WBFeedbackReply.project_id == project_id, WBFeedbackReply.status == s
-            )
-        ) or 0)
-        for s in ("draft", "approved", "sent", "error", "rejected")
-    }
+    counts_stmt = select(WBFeedbackReply.status, func.count(WBFeedbackReply.id)).where(
+        WBFeedbackReply.project_id == project_id
+    )
+    if target_type:
+        counts_stmt = counts_stmt.where(WBFeedbackReply.target_type == target_type)
+    counts_rows = (await db.execute(counts_stmt.group_by(WBFeedbackReply.status))).all()
+    counts_raw = {s: int(c) for s, c in counts_rows}
+    counts = {s: counts_raw.get(s, 0) for s in ("draft", "approved", "sent", "error", "rejected")}
     return {"items": items, "total": int(total or 0), "counts": counts}
 
 

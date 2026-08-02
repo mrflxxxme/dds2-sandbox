@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
-import type { LlmProvider, RepliesListResponse, Reply, ReplyAction, ReplyAgent, ReplyAgentRunResult, ReplyAgentSave, ReplyAgentTarget, ReplyStatus } from '@/types/api';
+import type { LlmProvider, RepliesListResponse, Reply, ReplyAction, ReplyAgent, ReplyAgentRunResult, ReplyAgentSave, ReplyAgentTarget, ReplyStatus, ReplyTargetType } from '@/types/api';
 
 type SubTab = 'queue' | 'agents';
 
@@ -213,7 +213,7 @@ const STATUS_FILTERS: { key: ReplyStatus | ''; label: string }[] = [
     { key: '', label: 'Все' },
 ];
 
-function RepliesQueue() {
+function RepliesQueue({ targetType }: { targetType: ReplyTargetType }) {
     const [meta, setMeta] = useState<RepliesListResponse | null>(null);
     const [items, setItems] = useState<Reply[]>([]);
     const [status, setStatus] = useState<ReplyStatus | ''>('draft');
@@ -247,7 +247,7 @@ function RepliesQueue() {
         setLoading(true);
         setError('');
         try {
-            const res = await api.getReplies({ status: currentStatus || undefined, take: QUEUE_PAGE, skip: 0 });
+            const res = await api.getReplies({ status: currentStatus || undefined, targetType, take: QUEUE_PAGE, skip: 0 });
             setMeta(res);
             setItems(res.items);
             setSelected(new Set()); // после перезагрузки списка выбор сбрасываем
@@ -258,12 +258,12 @@ function RepliesQueue() {
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [targetType]);
 
     const loadMore = useCallback(async () => {
         setLoadingMore(true);
         try {
-            const res = await api.getReplies({ status: status || undefined, take: QUEUE_PAGE, skip: items.length });
+            const res = await api.getReplies({ status: status || undefined, targetType, take: QUEUE_PAGE, skip: items.length });
             setMeta(res);
             setItems(prev => [...prev, ...res.items]);
         } catch (e) {
@@ -271,7 +271,7 @@ function RepliesQueue() {
         } finally {
             setLoadingMore(false);
         }
-    }, [status, items.length]);
+    }, [status, targetType, items.length]);
 
     useEffect(() => {
         load(status);
@@ -463,7 +463,9 @@ function RepliesQueue() {
                     <p style={{ color: 'var(--color-text-dim)', margin: 0 }}>
                         {status
                             ? 'С таким статусом ничего нет.'
-                            : 'Запустите агента в настройках или создайте черновик вручную из вкладок «Отзывы» / «Вопросы».'}
+                            : targetType === 'feedback'
+                                ? 'Запустите агента в настройках или создайте черновик вручную из вкладки «Отзывы».'
+                                : 'Запустите агента в настройках или создайте черновик вручную из вкладки «❓ Вопросы». Черновики о поступлении товара появляются из вкладки «📦 Поступления».'}
                     </p>
                 </div>
             )}
@@ -862,9 +864,9 @@ function AgentsSettings() {
     );
 }
 
-// ─── Вкладка «Автоответы» ────────────────────────────────────────────────────
+// ─── Вкладка автоответов (очередь по типу цели + общие настройки агентов) ────
 
-export default function AutoRepliesTab() {
+export default function AutoRepliesTab({ targetType }: { targetType: ReplyTargetType }) {
     const [sub, setSub] = useState<SubTab>('queue');
 
     return (
@@ -878,7 +880,7 @@ export default function AutoRepliesTab() {
                 </button>
             </div>
 
-            {sub === 'queue' && <RepliesQueue />}
+            {sub === 'queue' && <RepliesQueue targetType={targetType} />}
             {sub === 'agents' && <AgentsSettings />}
         </div>
     );

@@ -297,6 +297,157 @@ async def test_tick_no_watches_noop(db_session, project):
     assert res == {"checked": 0, "drafted": 0, "waiting": 0, "errors": 0}
 
 
+# ─── last_qty в тике ─────────────────────────────────────────────────────────
+
+
+async def test_tick_writes_last_qty_when_drafted(db_session, project, monkeypatch):
+    """Товар появился → watch → drafted, last_qty = остаток из fetcher."""
+    await _add_question(db_session, project.id, "q1")
+    watch = await _add_watch(db_session, project.id, "q1")
+    monkeypatch.setattr(stock_watch_service.settings, "COMPLAINT_LLM_API_KEY", "")
+
+    async def fake_fetch(nm_ids):
+        return {111: 5}
+
+    res = await stock_watch_service.stock_watch_tick(db_session, project.id, fetcher=fake_fetch)
+    assert res["drafted"] == 1
+
+    from sqlalchemy import select
+
+    w = (
+        await db_session.execute(select(WBStockWatch).where(WBStockWatch.id == watch.id))
+    ).scalar_one()
+    assert w.status == "drafted"
+    assert w.last_qty == 5
+
+
+async def test_tick_writes_last_qty_when_waiting(db_session, project):
+    """Остатка нет → watch остаётся watching, но last_qty фиксируется (0)."""
+    await _add_question(db_session, project.id, "q1")
+    watch = await _add_watch(db_session, project.id, "q1")
+    assert watch.last_qty is None
+
+    async def fake_fetch(nm_ids):
+        return {111: 0}
+
+    res = await stock_watch_service.stock_watch_tick(db_session, project.id, fetcher=fake_fetch)
+    assert res["waiting"] == 1
+
+    from sqlalchemy import select
+
+    w = (
+        await db_session.execute(select(WBStockWatch).where(WBStockWatch.id == watch.id))
+    ).scalar_one()
+    assert w.status == "watching"
+    assert w.last_qty == 0  # проверка была — остаток 0 записан
+
+
+# ─── dismiss_stock_watch ──────────────────────────────────────────────────────
+
+
+async def test_dismiss_watching_watch(db_session, project):
+    """watching → dismissed (resolved_at выставляется, в списке виден last_qty=None)."""
+    await _add_question(db_session, project.id, "q1")
+    watch = await _add_watch(db_session, project.id, "q1")
+
+    res = await stock_watch_service.dismiss_stock_watch(db_session, project.id, watch.id)
+    assert res is not None
+    assert res["status"] == "dismissed"
+    assert res["resolved_at"] is not None
+    assert res["question_text"] == "Когда появится в наличии?"
+
+    lst = await stock_watch_service.list_stock_watches(db_session, project.id)
+    assert lst["counts"]["dismissed"] == 1
+    assert lst["counts"]["watching"] == 0
+
+
+async def test_dismiss_drafted_watch_conflict(db_session, project):
+    """drafted → ValueError (роутер маппит в 409)."""
+    watch = await _add_watch(db_session, project.id, "q1", status="drafted")
+    with pytest.raises(ValueError, match="drafted"):
+        await stock_watch_service.dismiss_stock_watch(db_session, project.id, watch.id)
+
+
+async def test_dismiss_dismissed_watch_conflict(db_session, project):
+    """dismissed → ValueError (повторное снятие запрещено)."""
+    watch = await _add_watch(db_session, project.id, "q1", status="dismissed")
+    with pytest.raises(ValueError):
+        await stock_watch_service.dismiss_stock_watch(db_session, project.id, watch.id)
+
+
+async def test_dismiss_unknown_watch_returns_none(db_session, project):
+    """Чужой/несуществующий watch → None (роутер маппит в 404)."""
+    res = await stock_watch_service.dismiss_stock_watch(db_session, project.id, 999999)
+    assert res is None
+
+
+# ─── эндпоинт POST /stock-watches/tick ────────────────────────────────────────
+
+
+async def test_tick_endpoint_manual_run(client, auth_headers, monkeypatch):
+    """Ручной тик через API: checked/drafted/waiting/errors в ответе (fetcher замокан)."""
+    resp = await client.post("/api/v1/projects", json={"name": "Stock Tick Test"}, headers=auth_headers)
+    project_id = resp.json()["id"]
+    headers = {**auth_headers, "X-Project-Id": str(project_id)}
+
+    # вопрос о наличии + watch напрямую в БД (та же БД, что и у API через dependency override)
+    from tests.conftest_api import TestSessionLocal
+
+    async with TestSessionLocal() as db:
+        db.add(
+            WBQuestion(
+                project_id=project_id, wb_id="q-tick", nm_id=111,
+                text="Когда появится в наличии?", is_answered=False,
+                created_date=utcnow(), product_name="Товар",
+            )
+        )
+        db.add(WBStockWatch(project_id=project_id, nm_id=111, question_wb_id="q-tick", status="watching"))
+        await db.commit()
+
+    # сеть до WB в тестах недоступна — мокаем синхронный fetcher остатков
+    monkeypatch.setattr(
+        stock_watch_service, "fetch_total_quantities", lambda ids: {i: 0 for i in ids}
+    )
+
+    resp = await client.post("/api/v1/reviews/stock-watches/tick", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"checked": 1, "drafted": 0, "waiting": 1, "errors": 0}
+
+    # last_qty записался — виден в списке
+    resp = await client.get("/api/v1/reviews/stock-watches", headers=headers)
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["last_qty"] == 0
+    assert item["status"] == "watching"
+
+
+async def test_dismiss_endpoint_flow(client, auth_headers):
+    """API: dismiss watching → 200 dismissed; повторный dismiss → 409; чужой id → 404."""
+    resp = await client.post("/api/v1/projects", json={"name": "Stock Dismiss Test"}, headers=auth_headers)
+    project_id = resp.json()["id"]
+    headers = {**auth_headers, "X-Project-Id": str(project_id)}
+
+    from tests.conftest_api import TestSessionLocal
+
+    async with TestSessionLocal() as db:
+        w = WBStockWatch(project_id=project_id, nm_id=111, question_wb_id="q-dis", status="watching")
+        db.add(w)
+        await db.commit()
+        await db.refresh(w)
+        watch_id = w.id
+
+    resp = await client.post(f"/api/v1/reviews/stock-watches/{watch_id}/dismiss", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "dismissed"
+
+    resp = await client.post(f"/api/v1/reviews/stock-watches/{watch_id}/dismiss", headers=headers)
+    assert resp.status_code == 409
+
+    resp = await client.post("/api/v1/reviews/stock-watches/999999/dismiss", headers=headers)
+    assert resp.status_code == 404
+
+
 # ─── сериализация схем ───────────────────────────────────────────────────────
 
 
@@ -307,6 +458,7 @@ def test_stock_watch_schemas_serialization():
         StockWatchItem,
         StockWatchListResponse,
         StockWatchScanResult,
+        StockWatchTickResult,
     )
 
     q = QuestionItem(id="q1", text="Когда появится?", has_stock_watch=True)
@@ -314,12 +466,16 @@ def test_stock_watch_schemas_serialization():
 
     item = StockWatchItem(id=1, nm_id=111, question_wb_id="q1", status="watching")
     assert item.model_dump()["reply_id"] is None
+    assert item.model_dump()["last_qty"] is None
 
     resp = StockWatchListResponse(items=[item], total=1, counts={"watching": 1})
     assert resp.model_dump()["total"] == 1
 
     scan = StockWatchScanResult(scanned=5, created=5, dismissed=1)
     assert scan.model_dump()["created"] == 5
+
+    tick = StockWatchTickResult(checked=3, drafted=1, waiting=2, errors=0)
+    assert tick.model_dump()["waiting"] == 2
 
     r = ReplyItem(
         id=1, target_type="question", target_wb_id="q1", draft_text="d", text="d",

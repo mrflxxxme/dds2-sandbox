@@ -56,6 +56,7 @@ from backend.schemas.reviews import (
     StockWatchItem,
     StockWatchListResponse,
     StockWatchScanResult,
+    StockWatchTickResult,
 )
 from backend.services import complaint_agents_service, complaints_service, reply_service, reviews_service, stock_watch_service
 from backend.services import wb_cards_service
@@ -608,19 +609,54 @@ async def scan_stock_watches(
     return StockWatchScanResult(**await stock_watch_service.scan_stock_questions(db, project.id))
 
 
+@router.post("/stock-watches/tick", response_model=StockWatchTickResult)
+async def run_stock_watch_tick(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+) -> StockWatchTickResult:
+    """Ручной прогон проверки остатков по watching-watches проекта (пишет last_qty)."""
+    return StockWatchTickResult(**await stock_watch_service.stock_watch_tick(db, project.id))
+
+
+@router.post("/stock-watches/{watch_id}/dismiss", response_model=StockWatchItem)
+async def dismiss_stock_watch(
+    watch_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+) -> StockWatchItem:
+    """Снять слежение вручную (watching → dismissed)."""
+    try:
+        res = await stock_watch_service.dismiss_stock_watch(db, project.id, watch_id)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from None
+    if res is None:
+        raise HTTPException(404, "Слежение не найдено")
+    return StockWatchItem(**res)
+
+
 # ─── Ответы на отзывы/вопросы (черновики → отправка) ─────────────────────────
 
 
 @router.get("/replies", response_model=RepliesListResponse)
 async def list_replies(
     status: str | None = Query(None, description="Фильтр: draft|approved|sent|error|rejected"),
+    target_type: str | None = Query(None, description="Фильтр по типу цели: feedback|question"),
     take: int = Query(100, ge=1, le=500),
     skip: int = Query(0, ge=0),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ) -> RepliesListResponse:
-    """Список ответов/черновиков проекта с данными цели (текст отзыва/вопроса, рейтинг, товар)."""
-    data = await reply_service.list_replies(db, project.id, status=status, take=take, skip=skip)
+    """Список ответов/черновиков проекта с данными цели (текст отзыва/вопроса, рейтинг, товар).
+
+    counts по статусам возвращаются с учётом фильтра target_type (раздельные очереди UI).
+    """
+    if target_type is not None and target_type not in ("feedback", "question"):
+        raise HTTPException(400, "target_type должен быть feedback|question")
+    data = await reply_service.list_replies(
+        db, project.id, status=status, target_type=target_type, take=take, skip=skip
+    )
     return RepliesListResponse(**data)
 
 

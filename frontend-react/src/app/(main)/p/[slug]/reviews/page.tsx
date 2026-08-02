@@ -11,8 +11,9 @@ import ReviewsComplaintsTab from './components/ReviewsComplaintsTab';
 import KnowledgeBaseTab from './components/KnowledgeBaseTab';
 import QuestionsTab from './components/QuestionsTab';
 import AutoRepliesTab from './components/AutoRepliesTab';
+import StockWatchTab from './components/StockWatchTab';
 
-type Tab = 'summary' | 'dynamics' | 'list' | 'newcomers' | 'complaints' | 'kb' | 'questions' | 'autoreplies';
+type Tab = 'summary' | 'dynamics' | 'list' | 'newcomers' | 'complaints' | 'kb' | 'questions' | 'replies_feedback' | 'replies_questions' | 'stock';
 
 export default function ReviewsPage() {
     const [tab, setTab] = useState<Tab>('summary');
@@ -34,7 +35,9 @@ export default function ReviewsPage() {
                     { key: 'complaints', label: '🚩 Жалобы' },
                     { key: 'kb', label: '📚 База знаний' },
                     { key: 'questions', label: '❓ Вопросы' },
-                    { key: 'autoreplies', label: '🤖 Автоответы' },
+                    { key: 'replies_feedback', label: '🤖 Отзывы' },
+                    { key: 'replies_questions', label: '💬 Вопросы-автоответы' },
+                    { key: 'stock', label: '📦 Поступления' },
                 ]}
                 active={tab}
                 onChange={(k) => setTab(k as Tab)}
@@ -47,7 +50,9 @@ export default function ReviewsPage() {
             {tab === 'complaints' && <ReviewsComplaintsTab />}
             {tab === 'kb' && <KnowledgeBaseTab />}
             {tab === 'questions' && <QuestionsTab />}
-            {tab === 'autoreplies' && <AutoRepliesTab />}
+            {tab === 'replies_feedback' && <AutoRepliesTab targetType="feedback" />}
+            {tab === 'replies_questions' && <AutoRepliesTab targetType="question" />}
+            {tab === 'stock' && <StockWatchTab onGoToDrafts={() => setTab('replies_questions')} />}
         </div>
     );
 }

@@ -1,6 +1,6 @@
 /** Отзывы покупателей WB (feedbacks) API methods */
 import { ApiClient } from './client';
-import type { ComplaintBulkResult, ComplaintCandidatesResponse, ComplaintItem, ComplaintReason, ComplaintStatus, ComplaintsResponse, KbCreate, KbImportResult, KbItem, KbListResponse, KbProductsResponse, KbUpdate, NewcomersResponse, QuestionsListResponse, QuestionsSyncResult, RepliesListResponse, Reply, ReplyAction, ReplyAgent, ReplyAgentRunResult, ReplyAgentSave, ReplySendResult, ReplyStatus, ReplyTargetType, ReviewBreakdownGroup, ReviewBreakdownResponse, ReviewsListResponse, ReviewsPeriod, ReviewsSummaryResponse } from '@/types/api';
+import type { ComplaintBulkResult, ComplaintCandidatesResponse, ComplaintItem, ComplaintReason, ComplaintStatus, ComplaintsResponse, KbCreate, KbImportResult, KbItem, KbListResponse, KbProductsResponse, KbUpdate, NewcomersResponse, QuestionsListResponse, QuestionsSyncResult, RepliesListResponse, Reply, ReplyAction, ReplyAgent, ReplyAgentRunResult, ReplyAgentSave, ReplySendResult, ReplyStatus, ReplyTargetType, ReviewBreakdownGroup, ReviewBreakdownResponse, ReviewsListResponse, ReviewsPeriod, ReviewsSummaryResponse, StockWatchItem, StockWatchListResponse, StockWatchScanResult, StockWatchStatus, StockWatchTickResult } from '@/types/api';
 
 export interface GetReviewsParams {
     isAnswered?: boolean;
@@ -122,9 +122,10 @@ export function addReviewMethods(api: ApiClient) {
             return api.request<ReplyAgentRunResult>('POST', `/api/v1/reviews/reply-agents/${id}/run`);
         },
         // ─── Ответы на отзывы/вопросы (черновики → отправка) ───
-        getReplies(params: { status?: ReplyStatus; take?: number; skip?: number } = {}) {
+        getReplies(params: { status?: ReplyStatus; targetType?: ReplyTargetType; take?: number; skip?: number } = {}) {
             const q = new URLSearchParams();
             if (params.status) q.set('status', params.status);
+            if (params.targetType) q.set('target_type', params.targetType);
             if (params.take != null) q.set('take', String(params.take));
             if (params.skip != null) q.set('skip', String(params.skip));
             const qs = q.toString();
@@ -167,6 +168,27 @@ export function addReviewMethods(api: ApiClient) {
         // Импорт КБ из архива отвеченных вопросов (идемпотентно)
         importKb() {
             return api.request<KbImportResult>('POST', '/api/v1/reviews/kb/import');
+        },
+        // ─── Слежение за поступлением товара (wb_stock_watches) ───
+        getStockWatches(params: { status?: StockWatchStatus; take?: number; skip?: number } = {}) {
+            const q = new URLSearchParams();
+            if (params.status) q.set('status', params.status);
+            if (params.take != null) q.set('take', String(params.take));
+            if (params.skip != null) q.set('skip', String(params.skip));
+            const qs = q.toString();
+            return api.request<StockWatchListResponse>('GET', `/api/v1/reviews/stock-watches${qs ? `?${qs}` : ''}`);
+        },
+        // Снять слежение вручную (watching → dismissed)
+        dismissStockWatch(id: number) {
+            return api.request<StockWatchItem>('POST', `/api/v1/reviews/stock-watches/${id}/dismiss`);
+        },
+        // Ручной прогон проверки остатков (пишет last_qty)
+        runStockWatchTick() {
+            return api.request<StockWatchTickResult>('POST', '/api/v1/reviews/stock-watches/tick');
+        },
+        // Перескан неотвеченных вопросов о наличии → watches
+        scanStockWatches() {
+            return api.request<StockWatchScanResult>('POST', '/api/v1/reviews/stock-watches/scan');
         },
     };
 }

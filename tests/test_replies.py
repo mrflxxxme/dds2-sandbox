@@ -218,6 +218,52 @@ async def test_run_reply_agent_requires_rules(db_session, project):
 # ─── ручные черновики и модерация ────────────────────────────────────────────
 
 
+async def test_list_replies_target_type_filter(db_session, project):
+    """GET /replies?target_type= — фильтр по типу цели; counts учитывают фильтр."""
+    await _add_question(db_session, project.id, "q1")
+    await _add_feedback(db_session, project.id, "fb1")
+    db_session.add(
+        WBFeedbackReply(
+            project_id=project.id, target_type="question", target_wb_id="q1",
+            draft_text="на вопрос", status="draft", source="manual",
+        )
+    )
+    db_session.add(
+        WBFeedbackReply(
+            project_id=project.id, target_type="feedback", target_wb_id="fb1",
+            draft_text="на отзыв 1", status="draft", source="manual",
+        )
+    )
+    db_session.add(
+        WBFeedbackReply(
+            project_id=project.id, target_type="feedback", target_wb_id="fb1",
+            draft_text="на отзыв 2", status="approved", source="manual",
+        )
+    )
+    await db_session.commit()
+
+    q = await reply_service.list_replies(db_session, project.id, target_type="question")
+    assert q["total"] == 1
+    assert {i["target_type"] for i in q["items"]} == {"question"}
+    assert q["counts"]["draft"] == 1  # counts — только по вопросам
+    assert q["counts"]["approved"] == 0
+
+    f = await reply_service.list_replies(db_session, project.id, target_type="feedback")
+    assert f["total"] == 2
+    assert {i["target_type"] for i in f["items"]} == {"feedback"}
+    assert f["counts"]["draft"] == 1
+    assert f["counts"]["approved"] == 1
+
+    all_rows = await reply_service.list_replies(db_session, project.id)
+    assert all_rows["total"] == 3
+    assert all_rows["counts"]["draft"] == 2  # без фильтра — все типы
+
+    # фильтр + статус комбинируются
+    fd = await reply_service.list_replies(db_session, project.id, status="approved", target_type="feedback")
+    assert fd["total"] == 1
+    assert fd["items"][0]["status"] == "approved"
+
+
 async def test_create_draft_validations(db_session, project):
     with pytest.raises(ValueError, match="target_type"):
         await reply_service.create_draft(db_session, project.id, {"target_type": "x", "target_wb_id": "1", "text": "t"})
