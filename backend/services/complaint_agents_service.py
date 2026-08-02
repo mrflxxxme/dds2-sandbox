@@ -117,7 +117,7 @@ async def delete_agent(db: AsyncSession, project_id: int, agent_id: int) -> bool
     a = await _get(db, project_id, agent_id)
     if a is None:
         return False
-    await db.delete(a)  # no-soft-delete-check: WBComplaintAgent без SoftDeleteMixin
+    await db.delete(a)  # no-soft-delete-check: WBComplaintAgent без SoftDeleteMixin — hard delete осознанный
     await db.commit()
     return True
 

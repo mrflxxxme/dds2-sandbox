@@ -26,11 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
-from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from collections.abc import Awaitable, Callable
 
 from backend.config import settings
 from backend.models import WBFeedbackReply, WBQuestion, WBStockWatch
@@ -199,8 +199,9 @@ async def _draft_restock_reply(
     if (settings.COMPLAINT_LLM_API_KEY or "").strip():
         try:
             kb_map = await reply_service.load_kb_map(db, project_id, [int(watch.nm_id)])
+            question_text = (question.text or "") if question is not None else ""
             kb_entries = reply_service.rank_kb_entries(
-                kb_map.get(int(watch.nm_id)) or [], (question.text if question else "") or ""
+                kb_map.get(int(watch.nm_id)) or [], question_text
             )
             parsed = await reply_llm.draft_reply(
                 "openai_compatible", "deepseek-chat", None,
@@ -221,11 +222,20 @@ async def _draft_restock_reply(
     return RESTOCK_TEMPLATE, "template"
 
 
+# Тип fetcher'а остатков: nm_ids → {nm: totalQuantity} (тесты/dev подменяют сеть)
+StockFetcher = Callable[[list[int]], Awaitable[dict[int, int]]]
+
+
+async def _default_stock_fetcher(ids: list[int]) -> dict[int, int]:
+    """Штатный fetcher: fetch_total_quantities в отдельном потоке (sync raw-сокет)."""
+    return await asyncio.to_thread(fetch_total_quantities, ids)
+
+
 async def stock_watch_tick(
     db: AsyncSession,
     project_id: int,
     *,
-    fetcher: Callable[..., Any] | None = None,
+    fetcher: StockFetcher | None = None,
 ) -> dict:
     """
     Проверить остатки по watching-watches проекта; появившиеся → черновики draft.
@@ -246,13 +256,10 @@ async def stock_watch_tick(
         return {"checked": 0, "drafted": 0, "waiting": 0, "errors": 0}
 
     nm_ids = sorted({int(w.nm_id) for w in watches})
-    if fetcher is None:
-
-        async def fetcher(ids: list[int]) -> dict[int, int]:  # type: ignore[no-redef]
-            return await asyncio.to_thread(fetch_total_quantities, ids)
+    stock_fetcher: StockFetcher = fetcher or _default_stock_fetcher
 
     try:
-        quantities = await fetcher(nm_ids)
+        quantities = await stock_fetcher(nm_ids)
     except Exception as e:  # noqa: BLE001 — сбой сети/WAF: ждём следующий тик
         logger.warning("stock watch tick: project %d — stock fetch failed: %s", project_id, e)
         await db.rollback()
