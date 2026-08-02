@@ -291,6 +291,8 @@ class DesignMaterial(Base):
         ),
         Index("ix_design_materials_project_task", "project_id", "task_id"),
         Index("ix_design_materials_task_id", "task_id"),
+        # FK ⇒ индекс (миграция dsn03; дублируется здесь — иначе autogenerate-дрейф).
+        Index("ix_design_materials_created_by_user_id", "created_by_user_id"),
     )
 
 
@@ -335,6 +337,9 @@ class DesignSubmission(Base):
         ),
         Index("ix_design_submissions_project_task", "project_id", "task_id"),
         Index("ix_design_submissions_task_id", "task_id"),
+        # FK ⇒ индекс (миграция dsn03; дублируется здесь — иначе autogenerate-дрейф).
+        Index("ix_design_submissions_submitted_by_user_id", "submitted_by_user_id"),
+        Index("ix_design_submissions_verdict_by_user_id", "verdict_by_user_id"),
     )
 
 
@@ -393,6 +398,8 @@ class DesignTaskComment(Base, SoftDeleteMixin):
         ),
         Index("ix_design_task_comments_project_task", "project_id", "task_id"),
         Index("ix_design_task_comments_task_id", "task_id"),
+        # FK ⇒ индекс (миграция dsn03; дублируется здесь — иначе autogenerate-дрейф).
+        Index("ix_design_task_comments_author_user_id", "author_user_id"),
     )
 
 

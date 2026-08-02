@@ -318,7 +318,7 @@ class TestDeleteTask:
 
         items = await design_crud.list_tasks(db_session, project.id)
         assert task.id not in {i.id for i in items}
-        board = await design_board.get_board(db_session, project.id, actor(team.lead), "admin")
+        board = await design_board.get_board(db_session, project.id)
         assert task.id not in {i.id for col in board.columns.values() for i in col}
 
         res = await db_session.execute(
@@ -507,7 +507,7 @@ class TestBoard:
         await make_task(db_session, project.id, team.author.id, status=S.ON_HOLD)
         foreign = await make_task(db_session, other_project.id, other_team.author.id)
 
-        board = await design_board.get_board(db_session, project.id, actor(team.lead), "admin")
+        board = await design_board.get_board(db_session, project.id)
         assert set(board.columns.keys()) == {s.value for s in S if s not in (S.ON_HOLD, S.CANCELLED)}
         new_ids = [i.id for i in board.columns[S.NEW.value]]
         assert new_ids == [b.id, a.id]  # порядок — sort_order
@@ -528,7 +528,7 @@ class TestBoard:
             db_session, project.id, team.author.id,
             status=S.ACCEPTED, accepted_at=now, sort_order=2000,
         )
-        board = await design_board.get_board(db_session, project.id, actor(team.lead), "admin")
+        board = await design_board.get_board(db_session, project.id)
         accepted_ids = [i.id for i in board.columns[S.ACCEPTED.value]]
         assert accepted_ids == [newer.id, older.id]
 
@@ -1134,6 +1134,42 @@ class TestSubmissions:
         task_row = res.scalar_one()
         assert task_row.status == S.ACCEPTED.value
         assert task_row.accepted_at is not None
+
+    async def test_set_verdict_accepted_saves_comment(self, db_session, project, fake_minio):
+        """Аудит Ф7 п.2: комментарий приёмки НЕ теряется — ложится в
+        verdict_comment принятой версии (зеркало REJECTED-ветки)."""
+        team = await make_team(db_session, project)
+        task = await make_task(
+            db_session, project.id, team.author.id,
+            status=S.REVIEW, assignee_id=team.designer.id,
+        )
+        sub = await add_submission(db_session, task, team.designer.id)
+        updated = await design_files.set_verdict(
+            db_session,
+            project_id=project.id,
+            task_id=task.id,
+            submission_id=sub.id,
+            verdict=DesignVerdict.ACCEPTED.value,
+            verdict_comment="Принято, отличная работа",
+            user=actor(team.author),
+            member_role="editor",
+        )
+        assert updated.verdict == DesignVerdict.ACCEPTED.value
+        assert updated.verdict_comment == "Принято, отличная работа"
+
+        # Событие журнала тоже несёт комментарий приёмки.
+        ev_res = await db_session.execute(
+            select(DesignTaskEvent)
+            .where(
+                DesignTaskEvent.project_id == project.id,
+                DesignTaskEvent.task_id == task.id,
+            )
+            .order_by(DesignTaskEvent.id)
+            .limit(10)
+        )
+        last = ev_res.scalars().all()[-1]
+        assert last.new_status == S.ACCEPTED.value
+        assert last.comment == "Принято, отличная работа"
 
     async def test_set_verdict_only_on_pending(self, db_session, project, fake_minio):
         team = await make_team(db_session, project)

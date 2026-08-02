@@ -41,7 +41,7 @@ _S = DesignTaskStatus
 _TERMINAL_VALUES = (_S.ACCEPTED.value, _S.CANCELLED.value)
 _SORT_STEP = 1000
 # Класс advisory-lock нумерации модуля design (int4; ключ 2 — project_id).
-_NUMBER_LOCK_CLASS = 0x00DE516  # 911638
+_NUMBER_LOCK_CLASS = 0x00DE516  # 910614
 
 # NOT NULL колонки DesignTask, для которых явный null в PATCH — ошибка (Р13).
 _NOT_NULL_FIELDS = frozenset(

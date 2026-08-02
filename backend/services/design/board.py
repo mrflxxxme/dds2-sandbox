@@ -31,14 +31,16 @@ _COLUMN_LIMIT = 200
 _RENUMBER_LIMIT = 2000
 _BOARD_VALUES = [s.value for s in DESIGN_BOARD_STATUSES]
 # Класс advisory-lock перетаскиваний доски (int4; ключ 2 — project_id).
-_MOVE_LOCK_CLASS = 0x00DE517  # 911639, класс свободен (нумерация crud — 0xDE516)
+_MOVE_LOCK_CLASS = 0x00DE517  # 910615, класс свободен (нумерация crud — 0xDE516)
 
 
-async def get_board(
-    db: AsyncSession, project_id: int, user: Any, member_role: str
-) -> DesignBoardResponse:
+async def get_board(db: AsyncSession, project_id: int) -> DesignBoardResponse:
     """Одна выборка по 6 колонкам + counts по всем статусам (вкл. ON_HOLD/
     CANCELLED — они вне доски, доступны фильтром).
+
+    Доска одинакова для всех участников проекта: прав-зависимых полей в
+    DesignTaskListItem нет (permissions считаются только в деталке, §6.9), —
+    поэтому user/member_role в сигнатуре не нужны (были не использованы).
 
     Пер-колоночный лимит — в SQL: row_number() OVER (PARTITION BY status) <= 200.
     Порядок внутри партиции: живые колонки — sort_order, id; ACCEPTED —

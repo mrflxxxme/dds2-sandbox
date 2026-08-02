@@ -1,7 +1,8 @@
 # ruff: noqa: RUF002, RUF003
 """Файлы модуля дизайна: материалы, версии сдач, вердикты, скачивание.
 
-MinIO-пути: design/{project_id}/{task_id}/materials/... и .../v{n}/... —
+MinIO-пути: design/{project_id}/{task_id}/materials/..., .../v{n}/... и
+.../comments/... (вложения комментариев) —
 отдача только через бэк с проверкой project_id (§6.7), без presigned-URL
 (донор payment_request_documents). Лимит 20 МБ, allowlist MIME, blocklist
 исполняемых. HTTPException здесь — намеренно (валидация файлов и 503 MinIO,
@@ -27,6 +28,7 @@ from backend.models.design import (
     DesignSubmission,
     DesignSubmissionFile,
     DesignTask,
+    DesignTaskComment,
     DesignTaskStatus,
     DesignVerdict,
 )
@@ -262,7 +264,11 @@ async def upload_comment_attachment(
     filename: str,
     mime_type: str | None = None,
 ) -> tuple[str, str]:
-    """Вложение комментария → (minio_path, filename). Задачу валидирует вызывающий."""
+    """Вложение комментария → (minio_path, filename). Задачу валидирует вызывающий.
+
+    Вызывается из crud.add_comment (ручка `POST /{task_id}/comments/file`, Ф2);
+    скачивание — download_comment_attachment ниже.
+    """
     from backend.utils.file_validation import validate_file_content
 
     name = _sanitize_filename(filename)
@@ -545,6 +551,38 @@ async def download_material(
         material.original_filename or "file",
         material.mime_type or "application/octet-stream",
     )
+
+
+async def download_comment_attachment(
+    db: AsyncSession, *, project_id: int, task_id: int, comment_id: int
+) -> tuple[bytes, str, str]:
+    """Вложение комментария: (bytes, filename, content_type); 404 вне проекта.
+
+    Join на живую DesignTask (как у материалов: вложения удалённой задачи
+    недоступны) + is_deleted самого комментария (iron rule 2: DesignTaskComment —
+    SoftDelete-модель). Своей колонки mime_type у комментария нет — тип угадываем
+    по имени файла; отдача всё равно строго attachment + nosniff (роутер).
+    """
+    res = await db.execute(
+        select(DesignTaskComment)
+        .join(DesignTask, DesignTask.id == DesignTaskComment.task_id)
+        .where(
+            DesignTaskComment.id == comment_id,
+            DesignTaskComment.project_id == project_id,
+            DesignTaskComment.task_id == task_id,
+            DesignTaskComment.is_deleted == False,  # noqa: E712
+            DesignTask.project_id == project_id,
+            DesignTask.is_deleted == False,  # noqa: E712
+        )
+    )
+    comment = res.scalar_one_or_none()
+    if comment is None or not comment.minio_path:
+        raise HTTPException(404, "Файл не найден")
+    data = await download_file(comment.minio_path)
+    if data is None:
+        raise HTTPException(503, "Файл недоступен (MinIO)")
+    name = comment.original_filename or "file"
+    return data, name, mimetypes.guess_type(name)[0] or "application/octet-stream"
 
 
 async def download_submission_file(

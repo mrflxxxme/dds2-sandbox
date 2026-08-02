@@ -1,8 +1,10 @@
 # ruff: noqa: RUF002, RUF003
 """Сервис-ядро модуля «Дизайн карточек» (Ф1).
 
-Модули: state (переходы под FOR UPDATE), permissions (матрица PRD §7),
-crud, board (Р3/Р4), files (MinIO), workload, stats, notify (no-op до Ф4).
+Модули: common (общие хелперы: скоуп задачи, роли, имена), state (переходы под
+FOR UPDATE), permissions (матрица PRD §7), crud, queries (read-side), board
+(Р3/Р4), files (MinIO), workload, stats, notify (личные TG + утренняя сводка,
+Ф4), ab_bridge (мост в АБ-тесты, Ф6).
 HTTP-слой — Ф2; роутер и фронт опираются ТОЛЬКО на permissions (инвариант §6.9).
 
 Соглашение об ошибках (единое для пакета, маппинг в HTTP — Ф2):
@@ -15,6 +17,7 @@ HTTP-слой — Ф2; роутер и фронт опираются ТОЛЬК�
 from backend.services.design import (  # noqa: F401
     ab_bridge,
     board,
+    common,
     crud,
     files,
     notify,

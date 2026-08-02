@@ -162,7 +162,11 @@ class DesignMaterialIn(BaseModel):
 
 
 class DesignCommentIn(BaseModel):
-    """Комментарий к задаче (только текст; вложения — вне контракта Ф2)."""
+    """Комментарий к задаче, JSON-путь (только текст).
+
+    С вложением — multipart-ручка `POST /{task_id}/comments/file` (body как Form
+    + file), схема здесь не участвует: зеркало материалов (`/materials/file`).
+    """
 
     body: str = Field(min_length=1, max_length=2000)
 

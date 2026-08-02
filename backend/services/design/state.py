@@ -4,7 +4,8 @@
 Словарь DESIGN_TASK_TRANSITIONS (модель, Р1) — единственный источник правды;
 здесь только применение. change_status работает под SELECT ... FOR UPDATE:
 перечитать → validate_transition → право на переход → гварды → побочные
-эффекты → DesignTaskEvent → commit → notify-хук (best-effort, no-op до Ф4).
+эффекты → DesignTaskEvent → commit → notify-хук (Ф4: личные TG-уведомления,
+best-effort — сбой отправки логируется и операцию не роняет, §6.8).
 
 Побочный эффект ACCEPTED — закрытие текущей PENDING-версии — живёт ТОЛЬКО
 здесь (см. docstring apply_transition_locked): принятие достижимо и через
@@ -168,7 +169,7 @@ async def apply_transition_locked(
         await _reject_pending_submission(db, task, user, now, comment, submission_id)
     if tgt is _S.ACCEPTED:
         task.accepted_at = now
-        await _close_pending_submission(db, task, user, now, submission_id)
+        await _close_pending_submission(db, task, user, now, comment, submission_id)
 
     task.status = target_s
     db.add(
@@ -202,12 +203,25 @@ async def _pending_submission_row(
 
 
 async def _close_pending_submission(
-    db: AsyncSession, task: DesignTask, user: Any, now: Any, submission_id: int | None = None
+    db: AsyncSession,
+    task: DesignTask,
+    user: Any,
+    now: Any,
+    comment: str | None = None,
+    submission_id: int | None = None,
 ) -> None:
-    """ACCEPTED закрывает PENDING-версию (переданную или последнюю) — единственное место."""
+    """ACCEPTED закрывает PENDING-версию (переданную или последнюю) — единственное место.
+
+    comment перехода = комментарий приёмки: сохраняется в verdict_comment версии
+    (зеркало REJECTED-ветки) — иначе текст, который приёмщик написал в
+    `POST /verdict {verdict_comment}`, терялся бы навсегда. Пустой/None не
+    затирает уже записанное значение.
+    """
     sub = await _pending_submission_row(db, task, submission_id)
     if sub is not None:  # гвард «Нет версии на проверке» уже гарантировал наличие
         sub.verdict = DesignVerdict.ACCEPTED.value
+        if comment and comment.strip():
+            sub.verdict_comment = comment
         sub.verdict_by_user_id = user.id
         sub.verdict_at = now
 

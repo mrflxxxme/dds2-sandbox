@@ -2,6 +2,7 @@
 
 **FROZEN 2026-08-02 — изменение = эскалация архитектору.**
 **amended 2026-08-02: +`DesignTaskDetail.allowed_transitions` (additive, санкция lead).**
+**amended 2026-08-03 (Ф7-подготовка, санкция lead): +`POST /{task_id}/comments/file` (комментарий с вложением, multipart) и +`GET /{task_id}/comments/{comment_id}/file` (скачивание вложения) — аддитивно; `POST /{task_id}/comments` (JSON) не изменён.**
 
 <!-- HEAD-SUMMARY: замороженный HTTP-контракт Ф2 (backend/routers/design_tasks.py). От него параллельно идут Ф3 (фронт) и Ф4 (уведомления). Схемы — backend/schemas/design.py; поведение — сервис Ф1. -->
 
@@ -51,19 +52,21 @@
 | POST | `/{task_id}/submissions` | editor | multipart `files[]` (1..10 — 11-й → 400; каждый ≤20 МБ и суммарно ≤100 МБ → 413) + `comment?` (Form) | **201** `DesignTaskDetail` — версия создана И задача переведена в REVIEW единой сервисной оркестрацией `files.submit_version`; пустая PENDING-версия (след упавшей заливки, 503) переиспользуется тем же `version_no` |
 | GET | `/{task_id}/submissions/{sub_id}/files/{file_id}` | viewer | — | байты файла + заголовки download |
 | POST | `/{task_id}/submissions/{sub_id}/verdict` | editor | `DesignVerdictIn` {verdict: ACCEPTED\|REJECTED, verdict_comment?} | `DesignTaskDetail`; REJECTED без комментария → 400 |
-| POST | `/{task_id}/comments` | editor (viewer → 403) | `DesignCommentIn` {body 1..2000} | **201** `DesignCommentOut` |
+| POST | `/{task_id}/comments` | editor (viewer → 403) | `DesignCommentIn` {body 1..2000} | **201** `DesignCommentOut` (`original_filename = null` — текстовый путь) |
+| POST | `/{task_id}/comments/file` | editor (viewer → 403) | multipart: `body` (Form, 1..2000) + `file` | **201** `DesignCommentOut` с `original_filename`; валидация файла — общий путь материалов (allowlist/blocklist/`validate_file_content`, ≤20 МБ → 413), MinIO `design/{project}/{task}/comments/…` (amended 2026-08-03) |
+| GET | `/{task_id}/comments/{comment_id}/file` | viewer | — | байты вложения + заголовки download (ниже); 404 — вне проекта, по удалённой задаче/комментарию или если вложения нет (amended 2026-08-03) |
 | POST | `/{task_id}/ab-test` | editor | `DesignAbTestIn {campaign_id?: int≥1}` (тело опционально) | 200 `DesignAbTestOut {ab_test_id \| null, prefill \| null}`: без campaign_id → prefill для формы `/ab-tests/create`; с campaign_id → полный мост (amended 2026-08-03, санкция lead, Ф6) |
 
 Порядок объявления в роутере: статические (`board`, `all-projects`, `workload`, `calendar`, `stats`, `product-suggest`) ДО `/{task_id}` — закреплено регресс-тестом openapi.
 
-## Заголовки download-ручек (обе GET-file)
+## Заголовки download-ручек (все три GET-file)
 
 ```
 Content-Disposition: attachment; filename*=UTF-8''{urllib.parse.quote(filename)}
 X-Content-Type-Options: nosniff
 ```
 
-Отдача только через бэк с проверкой `project_id` и живости задачи (`is_deleted=false`); файл версии проверяется на принадлежность именно `{sub_id}`. В openapi обе ручки объявляют бинарный ответ: `responses={200: {"content": {"application/octet-stream": {}}}}`. Out-схемы (`DesignMaterialOut`, `DesignSubmissionFileOut`, `DesignCommentOut`) НЕ содержат `minio_path` (канон counterparty: внутренние пути стора наружу не выходят — скачивание только через эти GET-ручки).
+Отдача только через бэк с проверкой `project_id` и живости задачи (`is_deleted=false`); файл версии проверяется на принадлежность именно `{sub_id}`; вложение комментария — дополнительно на `is_deleted=false` самого комментария (SoftDelete-модель), `Content-Type` угадывается по имени файла (своей колонки `mime_type` у комментария нет). В openapi все три ручки объявляют бинарный ответ: `responses={200: {"content": {"application/octet-stream": {}}}}`. Out-схемы (`DesignMaterialOut`, `DesignSubmissionFileOut`, `DesignCommentOut`) НЕ содержат `minio_path` (канон counterparty: внутренние пути стора наружу не выходят — скачивание только через эти GET-ручки).
 
 ## Загрузка файлов (порядок проверок — донор payment_requests.py:710)
 
@@ -76,7 +79,7 @@ X-Content-Type-Options: nosniff
 
 ## Схемы (backend/schemas/design.py)
 
-Вход: `DesignTaskCreate`, `DesignTaskUpdate`, `DesignStatusChange`, `DesignMoveIn`, `DesignAssign`, `DesignMaterialIn`, `DesignVerdictIn`, `DesignCommentIn`.
+Вход: `DesignTaskCreate`, `DesignTaskUpdate`, `DesignStatusChange`, `DesignMoveIn`, `DesignAssign`, `DesignMaterialIn`, `DesignVerdictIn`, `DesignCommentIn` (JSON-путь комментария; multipart-путь `/comments/file` схемы не использует — `body` приходит как Form, зеркало `/materials/file`).
 Выход: `DesignTaskListItem`, `DesignBoardResponse`, `DesignTaskDetail` (вложенно: `DesignMaterialOut`, `DesignSubmissionOut` + `DesignSubmissionFileOut`, `DesignCommentOut`, `DesignEventOut`, `DesignTaskPermissions`), `DesignCalendarOut`, `DesignWorkloadRow`, `DesignStatsOut`, `DesignProductSuggestion`.
 
 `DesignTaskPermissions` — 15 флагов, зеркало ключей `compute_permissions` (паритет закреплён тестом `test_permissions_schema_matches_service`): `can_edit`, `can_assign`, `can_take`, `can_change_status`, `can_move`, `can_hold`, `can_reorder`, `can_submit`, `can_verdict`, `can_comment`, `can_cancel`, `can_delete`, `can_set_complexity`, `can_set_outsource`, `can_create_ab_test`. Фронт логику прав НЕ дублирует (§6.9). Семантика отдельных флагов: `can_comment` = `member_role != "viewer"` (viewer read-only, зеркало editor-гейта `POST /comments`); `can_delete` = `lead | автор` — HTTP-гейт ручки `DELETE /{task_id}` остаётся `require_role("editor")`, тонкая доводка «автор|lead» — в сервисе (`crud.delete_task`), не-автор editor → 403.

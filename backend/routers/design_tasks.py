@@ -159,8 +159,13 @@ async def get_board(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Доска: 6 колонок одним ответом + counts по всем статусам (Р4)."""
-    return await board.get_board(db, project.id, user, member_role)
+    """Доска: 6 колонок одним ответом + counts по всем статусам (Р4).
+
+    member_role сервису не нужен (доска одинакова для всех участников), но
+    Depends остаётся гейтом: снятый участник (ProjectMember.is_deleted) → 403,
+    как на остальных ручках задачи.
+    """
+    return await board.get_board(db, project.id)
 
 
 @router.get("/all-projects", response_model=list[DesignTaskListItem])
@@ -638,6 +643,21 @@ async def set_verdict(
 # ─── Комментарии / АБ-мост ───────────────────────────────────────────────────
 
 
+def _comment_out(comment, user: User) -> DesignCommentOut:
+    """Ответ обеих ручек комментария (JSON и multipart) — один формат."""
+    author_name = (
+        f"{user.first_name or ''} {user.last_name or ''}".strip() or user.username
+    )
+    return DesignCommentOut(
+        id=comment.id,
+        author_user_id=comment.author_user_id,
+        author_name=author_name,
+        body=comment.body,
+        original_filename=comment.original_filename,
+        created_at=comment.created_at,
+    )
+
+
 @router.post(
     "/{task_id}/comments",
     response_model=DesignCommentOut,
@@ -651,19 +671,70 @@ async def add_comment(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Комментарий к задаче (viewer read-only → 403 page/role-гейтом)."""
+    """Комментарий к задаче, только текст (viewer read-only → 403 page/role-гейтом).
+
+    С вложением — отдельная multipart-ручка `/comments/file` (зеркало материалов:
+    JSON-схема и multipart в одной ручке FastAPI не уживаются).
+    """
     comment = await _svc(crud.add_comment(db, project.id, task_id, payload.body, user))
-    author_name = (
-        f"{user.first_name or ''} {user.last_name or ''}".strip() or user.username
+    return _comment_out(comment, user)
+
+
+@router.post(
+    "/{task_id}/comments/file",
+    response_model=DesignCommentOut,
+    status_code=201,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def add_comment_with_file(
+    task_id: int,
+    body: str = Form(..., min_length=1, max_length=2000),
+    file: UploadFile = File(...),
+    user: User = Depends(require_editor),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Комментарий с вложением (multipart): тот же порядок проверок файла, что у
+    материалов (донор pr:710) — allowlist → blocklist → read → 413 → сервис
+    (`_sanitize_filename` → повторная валидация → validate_file_content → MinIO)."""
+    _precheck_upload_type(file.filename, file.content_type)
+    _check_file_size(file.size)
+    data = await file.read()
+    _check_file_size(len(data))
+    comment = await _svc(
+        crud.add_comment(
+            db,
+            project.id,
+            task_id,
+            body,
+            user,
+            file_data=data,
+            filename=file.filename or "file",
+            mime_type=file.content_type,
+        )
     )
-    return DesignCommentOut(
-        id=comment.id,
-        author_user_id=comment.author_user_id,
-        author_name=author_name,
-        body=comment.body,
-        original_filename=comment.original_filename,
-        created_at=comment.created_at,
+    return _comment_out(comment, user)
+
+
+@router.get(
+    "/{task_id}/comments/{comment_id}/file",
+    responses={200: {"content": {"application/octet-stream": {}}}},
+)
+async def download_comment_file(
+    task_id: int,
+    comment_id: int,
+    user: User = Depends(require_viewer),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Скачать вложение комментария: attachment + nosniff; 404 вне проекта/по
+    удалённой задаче или комментарию, 503 без MinIO."""
+    data, filename, content_type = await _svc(
+        design_files.download_comment_attachment(
+            db, project_id=project.id, task_id=task_id, comment_id=comment_id
+        )
     )
+    return _attachment(data, filename, content_type)
 
 
 @router.post(

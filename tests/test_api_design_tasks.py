@@ -328,6 +328,8 @@ async def test_openapi_contract(client):
         f"{BASE}/{{task_id}}/submissions/{{sub_id}}/files/{{file_id}}": {"get"},
         f"{BASE}/{{task_id}}/submissions/{{sub_id}}/verdict": {"post"},
         f"{BASE}/{{task_id}}/comments": {"post"},
+        f"{BASE}/{{task_id}}/comments/file": {"post"},
+        f"{BASE}/{{task_id}}/comments/{{comment_id}}/file": {"get"},
         f"{BASE}/{{task_id}}/ab-test": {"post"},
     }
     for path, methods in expected.items():
@@ -847,3 +849,142 @@ async def test_allowed_transitions_in_detail(client, env, db_session):
     assert set(resp.json()["allowed_transitions"]) == {
         s.value for s in DESIGN_TASK_TRANSITIONS[DesignTaskStatus.ASSIGNED]
     }
+
+
+# ─── Аудит Ф7 п.1: вложения к комментариям (multipart + download) ────────────
+
+
+async def test_comment_with_file_upload_and_download(client, env, no_minio):
+    """multipart-ручка комментария: 201 + original_filename в ответе и в деталке;
+    скачивание — байты с заголовками attachment + nosniff."""
+    from urllib.parse import quote
+
+    task = await _mk_task(client, env.author.h)
+    tid = task["id"]
+    filename = "правки макета.png"
+
+    resp = await client.post(
+        f"{BASE}/{tid}/comments/file",
+        data={"body": "Приложил скрин с правками"},
+        files={"file": (filename, PNG, "image/png")},
+        headers=env.designer.h,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["body"] == "Приложил скрин с правками"
+    assert body["original_filename"] == filename
+    assert body["author_user_id"] == env.designer.id
+    assert "minio_path" not in body  # внутренний путь стора наружу не выходит
+    comment_id = body["id"]
+
+    # Деталка отдаёт то же имя файла.
+    resp = await client.get(f"{BASE}/{tid}", headers=env.viewer.h)
+    assert [c["original_filename"] for c in resp.json()["comments"]] == [filename]
+
+    # Скачивание: заголовки — как у остальных download-ручек.
+    resp = await client.get(f"{BASE}/{tid}/comments/{comment_id}/file", headers=env.viewer.h)
+    assert resp.status_code == 200, resp.text
+    assert resp.content == PNG
+    assert resp.headers["content-disposition"] == f"attachment; filename*=UTF-8''{quote(filename)}"
+    assert resp.headers["x-content-type-options"] == "nosniff"
+
+    # JSON-ручка без файла по-прежнему работает: original_filename = null.
+    resp = await client.post(
+        f"{BASE}/{tid}/comments", json={"body": "Без вложения"}, headers=env.designer.h
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["original_filename"] is None
+    resp = await client.get(
+        f"{BASE}/{tid}/comments/{resp.json()['id']}/file", headers=env.viewer.h
+    )
+    assert resp.status_code == 404  # у комментария нет вложения
+
+
+async def test_comment_file_isolation_and_viewer_gate(client, env, no_minio):
+    """Изоляция вложения комментария: чужой проект → 404; viewer не пишет (403)."""
+    task = await _mk_task(client, env.author.h)
+    tid = task["id"]
+
+    resp = await client.post(
+        f"{BASE}/{tid}/comments/file",
+        data={"body": "Файл к задаче"},
+        files={"file": ("ref.png", PNG, "image/png")},
+        headers=env.author.h,
+    )
+    assert resp.status_code == 201, resp.text
+    comment_id = resp.json()["id"]
+
+    # Чужой проект (участник — тот же lead, но X-Project-Id другой) → 404.
+    project_b = await _create_project(client, env.lead.raw, "Design F7 B")
+    hb = _h(env.lead.raw, project_b["id"])
+    resp = await client.get(f"{BASE}/{tid}/comments/{comment_id}/file", headers=hb)
+    assert resp.status_code == 404, resp.text
+
+    resp = await client.post(
+        f"{BASE}/{tid}/comments/file",
+        data={"body": "viewer пишет"},
+        files={"file": ("ref.png", PNG, "image/png")},
+        headers=env.viewer.h,
+    )
+    assert resp.status_code == 403  # viewer read-only, зеркало JSON-ручки
+
+    # Удалённая задача — вложение недоступно (как у материалов/версий).
+    resp = await client.delete(f"{BASE}/{tid}", headers=env.author.h)
+    assert resp.status_code == 204
+    resp = await client.get(f"{BASE}/{tid}/comments/{comment_id}/file", headers=env.viewer.h)
+    assert resp.status_code == 404
+
+
+async def test_comment_file_validation(client, env, no_minio):
+    """Файл комментария валидируется тем же путём, что материалы: svg → 400
+    (и по расширению, и по клиентскому MIME), пустой body → 422, >20 МБ → 413."""
+    task = await _mk_task(client, env.author.h)
+    tid = task["id"]
+
+    resp = await client.post(
+        f"{BASE}/{tid}/comments/file",
+        data={"body": "Логотип"},
+        files={"file": ("logo.svg", b"<svg/>", "image/svg+xml")},
+        headers=env.author.h,
+    )
+    assert resp.status_code == 400, resp.text
+
+    resp = await client.post(
+        f"{BASE}/{tid}/comments/file",
+        data={"body": "Логотип"},
+        files={"file": ("logo.img", b"<svg/>", "image/svg+xml")},
+        headers=env.author.h,
+    )
+    assert resp.status_code == 400, resp.text
+
+    resp = await client.post(
+        f"{BASE}/{tid}/comments/file",
+        data={"body": ""},
+        files={"file": ("ref.png", PNG, "image/png")},
+        headers=env.author.h,
+    )
+    assert resp.status_code == 422  # body min 1 (зеркало DesignCommentIn)
+
+    resp = await client.post(
+        f"{BASE}/{tid}/comments/file",
+        data={"body": "x" * 2001},
+        files={"file": ("ref.png", PNG, "image/png")},
+        headers=env.author.h,
+    )
+    assert resp.status_code == 422  # cap 2000
+
+    # Вложения не создалось ни в одном из отказов.
+    resp = await client.get(f"{BASE}/{tid}", headers=env.viewer.h)
+    assert resp.json()["comments"] == []
+
+
+async def test_comment_file_too_large_413(client, env, no_minio, monkeypatch):
+    task = await _mk_task(client, env.author.h)
+    monkeypatch.setattr(design_files, "MAX_FILE_MB", 0)
+    resp = await client.post(
+        f"{BASE}/{task['id']}/comments/file",
+        data={"body": "Большой файл"},
+        files={"file": ("big.png", PNG, "image/png")},
+        headers=env.author.h,
+    )
+    assert resp.status_code == 413, resp.text

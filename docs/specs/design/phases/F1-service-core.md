@@ -81,7 +81,7 @@ def compute_permissions(task, user, member_role) -> dict[str, bool]
 ### `board.py` (Р3, Р4)
 
 ```python
-async def get_board(db, project_id, user, member_role) -> DesignBoardResponse
+async def get_board(db, project_id) -> DesignBoardResponse  # user/member_role убраны в Ф7-подготовке: не использовались
     # одна выборка WHERE status IN DESIGN_BOARD_STATUSES + is_deleted=false, ORDER BY status, sort_order
     # + counts по ON_HOLD/CANCELLED; limit 200/колонку
 async def move_task(db, project_id, task_id, to_status, after_task_id, user, member_role,
