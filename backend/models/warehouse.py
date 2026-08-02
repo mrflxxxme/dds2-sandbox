@@ -364,14 +364,18 @@ class OutboundShipment(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_outbound_shipments_project_id", "project_id"),
         Index("ix_outbound_shipments_warehouse_id", "warehouse_id"),
         Index("ix_outbound_shipments_assembly_request_id", "assembly_request_id"),
-        # Один переезд — РОВНО ОДИН живой забор. Инвариант держался только на
-        # row-lock при DRAFT → IN_TRANSIT; на уровне БД два забора на один
-        # stock_transfer_id ничем не запрещались, а это прямой путь к двойной
-        # заявке на оплату одной перевозки. Переотправки у переезда нет
-        # (в отличие от заявки с её attempt_no), поэтому уникальность честная.
+        # Одна ПОПЫТКА ОТПРАВКИ переезда — ровно один живой забор. На уровне БД
+        # два забора на один stock_transfer_id ничем не запрещались, а это прямой
+        # путь к двойной заявке на оплату одной перевозки.
+        # `attempt_no` в ключе — не формальность: переотправка после возврата
+        # (RETURNED → READY → SHIPPED) у переезда СУЩЕСТВУЕТ, и второй круг обязан
+        # получить СВОЙ документ. Без номера попытки уникальность вынуждала бы
+        # перезаписывать забор первого круга — вместе с его стоимостью, датой
+        # отгрузки и связкой с уже проведённым платежом.
         Index(
             "uq_outbound_shipments_stock_transfer",
             "stock_transfer_id",
+            "attempt_no",
             unique=True,
             postgresql_where=text("stock_transfer_id IS NOT NULL AND is_deleted = false"),
         ),

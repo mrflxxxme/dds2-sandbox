@@ -329,19 +329,36 @@ export default function TransferDetailPage() {
             logistics_by_warehouse: !!transfer.logistics_by_warehouse,
             carrier_inn: null,
             // Имя уже сохранённого перевозчика — чтобы правка соседнего поля не
-            // отвязала его (бэкенд резолвит по паре ИНН/имя).
-            carrier_name: transfer.counterparty_name || null,
-            pickup_date: transfer.pickup_date || '',
+            // отвязала его (бэкенд резолвит по паре ИНН/имя). НО не при правке
+            // самого ИНН: там резолвер делает upsert по ИНН и переименовал бы
+            // нового перевозчика в имя ПРЕЖНЕГО (а если его ещё нет — завёл бы
+            // с чужим именем), и это уехало бы в справочник и в заявки на оплату.
+            carrier_name: field === 'carrier_inn' ? null : (transfer.counterparty_name || null),
+            // 🔴 Пустая дата — null, не ''. Схема ждёт `date | None`, а на «»
+            // Pydantic отвечает 422 ещё до сервиса; до назначения машины обе
+            // даты пусты у ЛЮБОГО переезда, то есть инлайн-правка падала всегда.
+            pickup_date: transfer.pickup_date || null,
             pickup_time_slot: transfer.pickup_time_slot || '',
-            pickup_cost: toMoney(transfer.pickup_cost) ?? 0,
-            delivery_date: transfer.delivery_date || '',
+            // null, а не 0: ноль означает «везли бесплатно» и запирает бэкфилл
+            // тарифа Газелькой (он пишет только поверх пустого).
+            pickup_cost: toMoney(transfer.pickup_cost) ?? null,
+            delivery_date: transfer.delivery_date || null,
             pallets_count: null,
             pallet_weight_kg: null,
             shipped_as_boxes: null,
         };
-        if (field === 'pickup_cost') payload.pickup_cost = val === '' ? 0 : Number(val);
+        if (field === 'pickup_cost') payload.pickup_cost = val === '' ? null : Number(val);
         else if (field === 'carrier_inn') payload.carrier_inn = val || null;
         else (payload as unknown as Record<string, string>)[field] = val;
+
+        // Бэкенд требует хотя бы один опознавательный признак перевозки
+        // (`_require_vehicle_identity`). На переезде без машины и подрядчика
+        // правка стоимости или водителя уходила в 422 с сырым текстом валидатора —
+        // при том что подсказка над сеткой сама зовёт заполнить эти поля.
+        if (!(payload.vehicle_info || payload.carrier_inn || payload.carrier_name || payload.logistics_by_warehouse)) {
+            setError('Сначала укажите госномер машины или ИНН подрядчика — без них перевозку не к чему привязать');
+            return;
+        }
 
         // Оптимистично — форма заявки ведёт себя так же: поле «замирает» на
         // сетевой задержке хуже, чем откатывается на ошибке.

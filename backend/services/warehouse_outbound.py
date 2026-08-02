@@ -484,9 +484,11 @@ async def _attach_transfer_labels(
     # ровно тот N+1, ради отсутствия которого написан весь этот хелпер).
     gazelka_ids = await _gazelka_led_transfer_ids(db, project_id, [t.id for t in transfers])
 
-    # Забор переезда: id + номер. Партиальный уникальный
-    # `uq_outbound_shipments_stock_transfer` гарантирует не больше одного живого
-    # на переезд, поэтому плоский dict без разрешения коллизий честен.
+    # Забор переезда: id + номер. Заборов у переезда столько, сколько было
+    # ПОПЫТОК отправки (переотправка после возврата заводит свой документ),
+    # поэтому сортируем по `attempt_no` и оставляем последний: карточка ведёт на
+    # актуальный рейс, а не на случайный из истории. Порядок задан явно — без
+    # ORDER BY «победитель» плоского dict зависел бы от плана запроса.
     pickups: dict[int, tuple[int, str]] = {
         int(tid): (int(sid), number)
         for sid, number, tid in (
@@ -495,11 +497,13 @@ async def _attach_transfer_labels(
                     OutboundShipment.id,
                     OutboundShipment.number,
                     OutboundShipment.stock_transfer_id,
-                ).where(
+                )
+                .where(
                     OutboundShipment.project_id == project_id,
                     OutboundShipment.stock_transfer_id.in_([t.id for t in transfers]),
                     OutboundShipment.is_deleted == False,  # noqa: E712
                 )
+                .order_by(OutboundShipment.attempt_no.asc(), OutboundShipment.id.asc())
             )
         ).all()
     }
@@ -1006,11 +1010,19 @@ async def send_transfer(
 
     `allow_no_logistics` — явное «везём без оформления» для формы «создать и
     увезти» на карточке склада, где кладовщик задним числом фиксирует уже
-    состоявшуюся внутреннюю переброску. Единственный путь отправить READY без
+    состоявшуюся внутреннюю переброску. ЕДИНСТВЕННЫЙ путь отправить READY без
     логистики; Лист логиста флаг не шлёт — оттуда переезд обязан доехать до
-    оплат. На `allowed_from`-путь (авто-отгрузка ФФ) гейт не распространяется
-    вовсе: там вход и так сужен до VEHICLE_ASSIGNED, где машина есть по
-    определению.
+    оплат.
+
+    🔴 Гейт логистики НЕ зависит от `allowed_from`. Раньше он стоял под
+    `allowed_from is None` — на том основании, что авто-путь и так сужен до
+    VEHICLE_ASSIGNED, где машина есть по определению. Допущение сломала Газелька:
+    её синк зовёт нас с `{READY, VEHICLE_ASSIGNED}`, а реквизиты агрегатора могли
+    и не примениться (у портального маршрута бывает одна марка ТС без госномера и
+    без организации перевозчика — `_transfer_vehicle_payload` штатно возвращает
+    None). Голый READY проезжал мимо гейта: сток списан, а забор — носитель денег —
+    не рождён, то есть ровно инцидент TR-32, только молча и от агрегатора. Теперь
+    такой такт синка отбивается ValueError и переезд ждёт реквизитов следующего.
     """
     transfer = await _get_transfer_locked(db, project_id, transfer_id)
     if not transfer:
@@ -1031,7 +1043,6 @@ async def send_transfer(
     # проводки — иначе сток списан, а забор (носитель денег) не родился.
     if (
         current is TransferStatus.READY
-        and allowed_from is None
         and not allow_no_logistics
         and not _transfer_has_logistics(transfer)
     ):
@@ -1114,13 +1125,16 @@ async def send_transfer(
 
     number = transfer.number  # после rollback атрибуты протухнут (lazy-load в async = взрыв)
     try:
-        await _create_transfer_pickup(db, project_id, transfer)
+        # Отправка — всегда НОВАЯ попытка: сюда с живым забором приходят только
+        # после возврата, и снимок оплаченного первого круга трогать нельзя.
+        await _create_transfer_pickup(db, project_id, transfer, new_attempt=True)
         await db.commit()
     except IntegrityError as e:
-        # Партиальный уникальный uq_outbound_shipments_stock_transfer (trv03)
-        # ловит гонку двойного клика «Отправить»: обе транзакции читают «забора
-        # нет» до коммита друг друга, и SELECT в `_create_transfer_pickup` их не
-        # разводит. Без перехвата логист получал бы голый 500.
+        # Партиальный уникальный uq_outbound_shipments_stock_transfer
+        # (`stock_transfer_id, attempt_no`) ловит гонку двойного клика
+        # «Отправить»: обе транзакции читают одну и ту же последнюю попытку до
+        # коммита друг друга и метят один номер. Без перехвата логист получал бы
+        # голый 500.
         await db.rollback()
         raise ValueError(f"Забор переезда {number} уже создан — обновите страницу") from e
     # Сток уехал со склада-источника и повис транзитом на получателе — отчётные
@@ -1139,7 +1153,7 @@ async def send_transfer(
 
 
 async def _create_transfer_pickup(
-    db: AsyncSession, project_id: int, transfer: StockTransfer
+    db: AsyncSession, project_id: int, transfer: StockTransfer, *, new_attempt: bool = False
 ) -> OutboundShipment | None:
     """Забор переезда: OutboundShipment как НОСИТЕЛЬ ЛОГИСТИКИ И ДЕНЕГ.
 
@@ -1157,13 +1171,23 @@ async def _create_transfer_pickup(
     породила бы пустой забор без перевозчика и без суммы — мусор в листе оплаты
     и в сверке счетов ФФ. Вызывающий коммитит сам.
 
-    🔴 ИДЕМПОТЕНТНО (upsert по `stock_transfer_id`): забор у переезда РОВНО
-    один — это держит партиальный уникальный `uq_outbound_shipments_stock_transfer`,
-    а `return_transfer` его не удаляет (перевозка состоялась и оплачена). Второй
-    INSERT на переотправке после возврата давал бы IntegrityError, то есть 500
-    на кнопке «Отправить». Плюс тем же путём ходит ретро-оформление уехавших
-    переездов (`set_transfer_logistics`), которое зовут повторно и осознанно —
-    каждый раз обновляя снимок логистики и позиции.
+    🔴 ОДИН ЗАБОР НА ПОПЫТКУ ОТПРАВКИ (`attempt_no`), как у заявки на сборку:
+    партиальный уникальный `uq_outbound_shipments_stock_transfer` держит пару
+    `(stock_transfer_id, attempt_no)`.
+
+      * `new_attempt=True` (зовёт `send_transfer`) — ВСЕГДА новый документ.
+        Попасть сюда с уже существующим забором можно ровно одним путём:
+        RETURNED → READY → «Отправить» (переотправка после возврата, таблица
+        переходов её разрешает, а `return_transfer` забор намеренно не удаляет —
+        «перевозка состоялась и оплачена»). Раньше здесь стоял upsert, и второй
+        круг ПЕРЕЗАПИСЫВАЛ снимок первого: 30 000 ₽ июньского рейса вместе с его
+        `shipped_date` исчезали из отчёта «Логистика переездов», две реальные
+        перевозки схлопывались в одну, а оплаченная заявка (`PaymentRequestShipment`)
+        и матч с выпиской оставались висеть на документе с чужой суммой — и
+        второй перевозчик уже не мог попасть в лист оплат (забор помечен занятым).
+      * `new_attempt=False` (ретро-оформление `set_transfer_logistics`) —
+        обновляет снимок и позиции ПОСЛЕДНЕЙ попытки: его зовут повторно и
+        осознанно, дописывая перевозчика и стоимость уже уехавшему переезду.
 
     🔴 ИНВАРИАНТЫ ЗАПИСИ (нарушение = переезд протекает в чужие отчёты):
       - `assembly_request_id` ОСТАЁТСЯ None, даже когда перемещение сделано из
@@ -1226,19 +1250,25 @@ async def _create_transfer_pickup(
         "shipped_as_boxes": transfer.shipped_as_boxes,
     }
 
-    shipment = (
+    # Последняя попытка отправки этого переезда — она же кандидат на обновление
+    # (ретро-путь) и база для номера следующей (переотправка после возврата).
+    last = (
         (
             await db.execute(
-                select(OutboundShipment).where(
+                select(OutboundShipment)
+                .where(
                     OutboundShipment.project_id == project_id,
                     OutboundShipment.stock_transfer_id == transfer.id,
                     OutboundShipment.is_deleted == False,  # noqa: E712
                 )
+                .order_by(OutboundShipment.attempt_no.desc(), OutboundShipment.id.desc())
+                .limit(1)
             )
         )
         .scalars()
         .first()
     )
+    shipment = None if new_attempt else last
     if shipment is not None:
         for field, value in snapshot.items():
             setattr(shipment, field, value)
@@ -1272,6 +1302,7 @@ async def _create_transfer_pickup(
             number=await _next_number(db, project_id, "OUT", OutboundShipment),
             status=OutboundStatus.SHIPPED,
             stock_transfer_id=transfer.id,
+            attempt_no=(last.attempt_no + 1) if last is not None else 1,
             **snapshot,
         )
         db.add(shipment)
@@ -1736,6 +1767,7 @@ async def _write_transfer_logistics(
     payload: TransferAssignVehicle,
     *,
     restamp_assigned_at: bool,
+    partial: bool = False,
 ) -> None:
     """Присвоить переезду блок логистики — ОБЩЕЕ тело назначения машины
     (`_apply_vehicle_to_transfer`) и ретро-оформления уехавшего
@@ -1748,6 +1780,16 @@ async def _write_transfer_logistics(
     только когда он пуст. У уже уехавшего переезда это исторический момент
     посадки на машину, и затирать его сегодняшним временем нельзя — по нему
     считается, сколько документ ждал транспорт.
+
+    `partial=True` (путь СИНКА Газельки) — пустое значение в теле означает «не
+    знаю», а не «сбрось». Ручные формы шлют ПОЛНЫЙ снимок карточки, и для них
+    безусловное присваивание единственно верно. Но тем же телом ходит агрегатор,
+    который отдаёт лишь то, что заполнено в кабинете: тарифа у плана может ещё не
+    быть, интервал забора и «логистику оказывает склад» он не знает вовсе — и
+    безусловная запись стирала бы согласованные логистом 22 000 ₽ и окно погрузки,
+    а следом уносила бы пустой снимок в забор, то есть в «Оплаты». Дословное
+    зеркало `assembly.status.apply_gazelka_logistics`, где каждое поле пишется
+    построчным `if value:`.
     """
     # Резолверы перевозчика переиспользуем из assembly-сервиса (единая логика
     # upsert-а контрагента и bump-а OTHER→CARRIER). Импорт локальный: модуль
@@ -1763,18 +1805,32 @@ async def _write_transfer_logistics(
     else:
         cp_id = await _resolve_carrier(db, project_id, payload.carrier_inn, payload.carrier_name)
 
-    transfer.vehicle_info = payload.vehicle_info
-    transfer.vehicle_brand = payload.vehicle_brand
-    transfer.driver_phone = payload.driver_phone
+    if not partial:
+        transfer.vehicle_info = payload.vehicle_info
+        transfer.vehicle_brand = payload.vehicle_brand
+        transfer.driver_phone = payload.driver_phone
+        transfer.pickup_date = payload.pickup_date
+        transfer.pickup_time_slot = payload.pickup_time_slot
+        transfer.pickup_cost = payload.pickup_cost
+        transfer.delivery_date = payload.delivery_date
+        transfer.logistics_by_warehouse = payload.logistics_by_warehouse
+    else:
+        # Агрегатор — источник истины только по тому, что у него ЗАПОЛНЕНО.
+        # `logistics_by_warehouse` он не присылает никогда, поэтому поднимаем
+        # флаг, но не опускаем: `False` здесь — «не знаю», а не «склад не везёт».
+        for field in (
+            "vehicle_info", "vehicle_brand", "driver_phone",
+            "pickup_date", "pickup_time_slot", "pickup_cost", "delivery_date",
+        ):
+            value = getattr(payload, field)
+            if value is not None and value != "":
+                setattr(transfer, field, value)
+        if payload.logistics_by_warehouse:
+            transfer.logistics_by_warehouse = True
     if payload.driver_first_name is not None:
         transfer.driver_first_name = payload.driver_first_name
     if payload.driver_last_name is not None:
         transfer.driver_last_name = payload.driver_last_name
-    transfer.pickup_date = payload.pickup_date
-    transfer.pickup_time_slot = payload.pickup_time_slot
-    transfer.pickup_cost = payload.pickup_cost
-    transfer.delivery_date = payload.delivery_date
-    transfer.logistics_by_warehouse = payload.logistics_by_warehouse
     if cp_id is not None:
         transfer.counterparty_id = cp_id
     # Транспортная единица трёхзначна: None = «не уточнял» и НЕ затирает уже
@@ -1796,6 +1852,7 @@ async def _apply_vehicle_to_transfer(
     payload: TransferAssignVehicle,
     *,
     check_gazelka: bool = True,
+    partial: bool = False,
 ) -> StockTransfer:
     """Мутация назначения БЕЗ commit — общее тело одиночного и bulk-пути.
 
@@ -1818,7 +1875,7 @@ async def _apply_vehicle_to_transfer(
         _check_transfer_transition(current, TransferStatus.VEHICLE_ASSIGNED)
 
     await _write_transfer_logistics(
-        db, project_id, transfer, payload, restamp_assigned_at=True
+        db, project_id, transfer, payload, restamp_assigned_at=True, partial=partial
     )
     if current is not TransferStatus.VEHICLE_ASSIGNED:
         transfer.status = TransferStatus.VEHICLE_ASSIGNED
@@ -1946,17 +2003,47 @@ async def unassign_vehicle_transfer(
 
 async def apply_gazelka_transfer_logistics(
     db: AsyncSession, project_id: int, transfer_id: int, payload: TransferAssignVehicle
-) -> StockTransfer:
+) -> StockTransfer | None:
     """Машина от агрегатора: обходит гард via_gazelka (его поставил сам агрегатор).
 
     Точка входа для синка Газельки: портал вернул госномер, водителя и цену —
     переезд обязан их принять, хотя РУЧНОЕ назначение на нём уже запрещено
     (`_deny_if_gazelka_leads`). Всё остальное — как у обычного назначения:
     READY → VEHICLE_ASSIGNED со строкой в истории, переназначение внутри
-    VEHICLE_ASSIGNED без перехода, тот же резолв перевозчика.
+    VEHICLE_ASSIGNED без перехода, тот же резолв перевозчика. Реквизиты кладём
+    неразрушающе (`partial=True`): пустое поле кабинета не стирает ручной ввод.
+
+    🔴 Вне READY/VEHICLE_ASSIGNED — NO-OP (`None`), дословно как
+    `assembly.status.apply_gazelka_logistics`. Заказ живёт в кабинете и после
+    отгрузки, синк дёргает его каждые 15 минут, и попытка «назначить машину» на
+    SHIPPED роняла бы ValueError из таблицы переходов. Он не локальный: вылетал
+    из `_reconcile_active_transfer` и уносил с собой ВСЁ, что стоит ниже, — в
+    первую очередь бэкфилл тарифа. Итог: тариф, появившийся у портала после
+    отгрузки, не доезжал до забора никогда, а лог каждые 15 минут писал
+    `reconcile_failed`.
     """
+    # Статус читаем ОТДЕЛЬНЫМ скаляром, а не через `_get_transfer_locked`:
+    # взятый ради no-op `FOR UPDATE` держал бы строку до чужого коммита, а снять
+    # его rollback'ом нельзя — тот экспайрит ORM-объекты вызывающего. Гонка тут
+    # безобидна: реальную проверку перехода всё равно делает `_apply_vehicle_to_transfer`
+    # уже под локом.
+    status = (
+        await db.execute(
+            select(StockTransfer.status).where(
+                StockTransfer.id == transfer_id,
+                StockTransfer.project_id == project_id,
+                StockTransfer.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+    if status is None or TransferStatus(status) not in (
+        TransferStatus.READY,
+        TransferStatus.VEHICLE_ASSIGNED,
+    ):
+        return None
+
     transfer = await _apply_vehicle_to_transfer(
-        db, project_id, transfer_id, payload, check_gazelka=False
+        db, project_id, transfer_id, payload, check_gazelka=False, partial=True
     )
     await db.commit()
     await db.refresh(transfer, ["items"])

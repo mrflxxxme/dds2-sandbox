@@ -1523,11 +1523,18 @@ async def _reconcile_active_transfer(
                 transfer_id=transfer_id,
             )
         else:
-            await warehouse_outbound.apply_gazelka_transfer_logistics(db, project_id, transfer_id, payload)
-            stats["assigned"] += 1
+            # None = переезд уже уехал (заказ в кабинете живёт и после отгрузки) —
+            # реквизиты применять некуда, но это не отказ и не ошибка.
+            if await warehouse_outbound.apply_gazelka_transfer_logistics(
+                db, project_id, transfer_id, payload
+            ):
+                stats["assigned"] += 1
 
     if code == "31":
         try:
+            # Гейт логистики внутри `send_transfer` работает и на этом пути:
+            # переезд, которому реквизиты применить не удалось, останется READY и
+            # дождётся следующего такта — вместо того чтобы уехать без забора.
             await warehouse_outbound.send_transfer(
                 db,
                 project_id,
@@ -1536,7 +1543,7 @@ async def _reconcile_active_transfer(
             )
             stats["shipped"] += 1
         except ValueError:
-            pass  # уже уехал / состав пуст — идемпотентно, как у сборки
+            pass  # уже уехал / состав пуст / логистики нет — идемпотентно, как у сборки
 
     await _backfill_transfer_cost(db, project_id, transfer_id, info, stats)
 
@@ -1587,15 +1594,21 @@ async def _apply_transfer_cost(
         TransferStatus.SHIPPED, TransferStatus.DELIVERED, TransferStatus.RETURNED, TransferStatus.CLOSED,
     ):
         return False  # не уехал — логистику ведёт штатный путь назначения машины
+    # Забор ПОСЛЕДНЕЙ попытки: у переотправленного после возврата переезда их
+    # несколько, и тариф текущего рейса относится к последнему. `scalar_one_or_none`
+    # на такой выборке бросил бы MultipleResultsFound и утащил бы синк.
     shipment = (
         await db.execute(
-            select(OutboundShipment).where(
+            select(OutboundShipment)
+            .where(
                 OutboundShipment.project_id == project_id,
                 OutboundShipment.stock_transfer_id == transfer_id,
                 OutboundShipment.is_deleted.is_(False),
             )
+            .order_by(OutboundShipment.attempt_no.desc(), OutboundShipment.id.desc())
+            .limit(1)
         )
-    ).scalar_one_or_none()
+    ).scalars().first()
     if shipment is None:
         return False  # забора нет (переезд отправляли до появления носителя денег)
 
@@ -2057,16 +2070,30 @@ async def match_order(
 
 
 async def unmatch_order(db: AsyncSession, project_id: int, plan_id: str) -> GazelkaMatchResult:
-    """Снять ручную связь заявки портала со сборкой (SENT-записи не трогаем)."""
+    """Снять связь заявки портала с нашим документом.
+
+    Ручную связь (MATCHED) удаляем — она наша выдумка, аудировать нечего.
+
+    SENT-связь ПЕРЕЕЗДА переводим в CANCELLED, а не удаляем: строка — аудит
+    реального создания заявки в чужом сервисе. Без этой ветки переезд, чей заказ
+    агрегатор так и не подтвердил, запирался навсегда: `_deny_if_gazelka_leads`
+    отбивает и назначение машины, и снятие, гейт `send_transfer` не пускает READY
+    без логистики, а ретро-ручка требует SHIPPED. У сборки такого тупика нет
+    (её выпускает авто-шип по приёмке WB), поэтому SENT-связи СБОРОК не трогаем —
+    там «Отвязать» по-прежнему только про ручной матч.
+    """
     rows = await db.execute(
         select(GazelkaOrder).where(
             GazelkaOrder.project_id == project_id,
             GazelkaOrder.gazelka_ref == str(plan_id),
-            GazelkaOrder.status == GazelkaOrderStatus.MATCHED,
+            GazelkaOrder.status.in_([GazelkaOrderStatus.MATCHED, GazelkaOrderStatus.SENT]),
         )
     )
     for old in rows.scalars():
-        await db.delete(old)  # no-soft-delete-check: GazelkaOrder — audit/link без SoftDeleteMixin
+        if old.status == GazelkaOrderStatus.MATCHED:
+            await db.delete(old)  # no-soft-delete-check: GazelkaOrder — audit/link без SoftDeleteMixin
+        elif old.stock_transfer_id is not None:
+            old.status = GazelkaOrderStatus.CANCELLED
     await db.commit()
     return GazelkaMatchResult(ok=True)
 

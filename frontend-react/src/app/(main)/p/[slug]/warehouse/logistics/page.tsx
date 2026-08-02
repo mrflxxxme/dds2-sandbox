@@ -895,10 +895,15 @@ export default function LogisticsPage() {
                     ...driverPayload,
                     ...carrierPayload,
                     logistics_by_warehouse: false,
-                    pickup_date: transferParams.pickup_date,
+                    // Даты и стоимость подпись формы разрешает не заполнять —
+                    // значит шлём null, а не «». Пустая строка в `date | None`
+                    // даёт 422 (Pydantic её не коэрсит), и вся пачка отваливалась
+                    // с сырым текстом валидатора; ноль вместо пустой стоимости
+                    // означал бы «везли бесплатно».
+                    pickup_date: transferParams.pickup_date || null,
                     pickup_time_slot: transferParams.pickup_time_slot,
-                    pickup_cost: transferParams.pickup_cost === '' ? 0 : Number(transferParams.pickup_cost),
-                    delivery_date: transferParams.delivery_date,
+                    pickup_cost: transferParams.pickup_cost === '' ? null : Number(transferParams.pickup_cost),
+                    delivery_date: transferParams.delivery_date || null,
                     pallets_count: transferPallets === '' ? null : Number(transferPallets),
                     pallet_weight_kg: transferPalletWeight === '' ? null : Number(transferPalletWeight),
                     shipped_as_boxes: unitModeToFlag(transferUnitMode),

@@ -11,5 +11,6 @@
 - [RBAC-наследование разделов](rbac-page-inheritance-invariants.md) — отзыв доступа держится на одном бампе pages_updated_at; гарды каталога фронт↔бэк всегда skip в контейнере; семантика PAGE_ADDED_AT
 - [Аналитика этапов FBS](fbs-stage-analytics-invariants.md) — после истории кабинета t_closed ≠ «зеркало поставки есть» (ломает _left_us_expr молча); период не действует на matured/refused и на узлы
 - [Зеркало сборки FBS (kind=fbs)](fbs-assembly-mirror-invariants.md) — kind-фильтр решается по SHIPPED (два in_transit + TG-алярм), seller-имя в wb_warehouse_name_manual, contour_condition ≠ prod-only
-- [Статусы переезда: зеркало заявки](transfer-status-mirror-invariants.md) — «принято по журналу» не нетто (ломает переотправку после возврата), авто-шип проверяет VEHICLE_ASSIGNED не там, где списывает
+- [Статусы переезда: зеркало заявки](transfer-status-mirror-invariants.md) — нетто-карта приёма ПОЧИНЕНА 08.02; что осталось: недостижимые строки TRANSFER_TRANSITIONS и окно авто-шипа
+- [Забор переезда: носитель денег](transfer-pickup-money-carrier-invariants.md) — upsert теряет оплаченный круг при переотправке, гейт «Отправить» не действует на allowed_from-пути, тупик READY под Газелькой
 - [Поставка Натали: два источника](migfull-inbound-two-sources-invariants.md) — анти-дубль скоуплен по виду документа (кросс-гарда нет, UNCERTAIN-без-guid слепа); почему тут не нужен invalidate_cache

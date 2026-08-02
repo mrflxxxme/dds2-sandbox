@@ -2418,3 +2418,270 @@ class TestTransferFfLinksOnCard:
         )
         assert updated.from_warehouse_id == third.id
         assert updated.to_warehouse_id == dst_wh.id
+
+
+class TestTransferResendKeepsPaidRound:
+    """Переотправка после возврата — ВТОРОЙ рейс, а не правка первого.
+
+    `return_transfer` забор намеренно не удаляет («перевозка состоялась и
+    оплачена»), а из RETURNED переезд можно вернуть в READY и увезти заново.
+    Пока забор был один на документ, второй круг перезаписывал снимок первого:
+    его стоимость и дата отгрузки исчезали из отчёта «Логистика переездов», две
+    перевозки схлопывались в одну, а связка с уже проведённым платежом
+    оставалась висеть на чужой сумме.
+    """
+
+    @pytest.mark.asyncio
+    async def test_resend_after_return_creates_second_attempt(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        from backend.services.warehouse_outbound import return_transfer
+
+        await _stock(db_session, project, src_wh, barcode, 100)
+        transfer = await _transfer_with_vehicle(db_session, project, src_wh, dst_wh, barcode, 40)
+        await send_transfer(db_session, project.id, transfer.id)
+        await return_transfer(db_session, project.id, transfer.id)
+
+        await mark_transfer_ready(db_session, project.id, transfer.id)
+        await assign_vehicle_transfer(
+            db_session,
+            project.id,
+            transfer.id,
+            TransferAssignVehicle(
+                vehicle_info="Х777ХХ99",
+                carrier_name="ИП Второй",
+                pickup_cost=Decimal("25000.00"),
+            ),
+        )
+        await send_transfer(db_session, project.id, transfer.id)
+
+        pickups = list(
+            (
+                await db_session.execute(
+                    select(OutboundShipment)
+                    .where(
+                        OutboundShipment.project_id == project.id,
+                        OutboundShipment.stock_transfer_id == transfer.id,
+                        OutboundShipment.is_deleted == False,  # noqa: E712
+                    )
+                    .order_by(OutboundShipment.attempt_no)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [p.attempt_no for p in pickups] == [1, 2]
+        # Первый круг не тронут: его деньги и машина — отдельный документ оплаты.
+        assert pickups[0].pickup_cost == Decimal("15000.00")
+        assert pickups[0].vehicle_info == "А123ВС77"
+        assert pickups[1].pickup_cost == Decimal("25000.00")
+        assert pickups[1].vehicle_info == "Х777ХХ99"
+        assert pickups[0].number != pickups[1].number
+
+    @pytest.mark.asyncio
+    async def test_retro_logistics_updates_last_attempt_only(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """Ретро-оформление дописывает ТЕКУЩУЮ попытку, а не заводит третью."""
+        from backend.services.warehouse_outbound import set_transfer_logistics
+
+        await _stock(db_session, project, src_wh, barcode, 100)
+        transfer = await _transfer_with_vehicle(db_session, project, src_wh, dst_wh, barcode, 40)
+        await send_transfer(db_session, project.id, transfer.id)
+
+        await set_transfer_logistics(
+            db_session,
+            project.id,
+            transfer.id,
+            TransferAssignVehicle(vehicle_info="А123ВС77", pickup_cost=Decimal("17500.00")),
+        )
+        pickups = list(
+            (
+                await db_session.execute(
+                    select(OutboundShipment).where(
+                        OutboundShipment.project_id == project.id,
+                        OutboundShipment.stock_transfer_id == transfer.id,
+                        OutboundShipment.is_deleted == False,  # noqa: E712
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(pickups) == 1
+        assert pickups[0].attempt_no == 1
+        assert pickups[0].pickup_cost == Decimal("17500.00")
+
+
+class TestTransferLogisticsGateOnAutoPath:
+    """Гейт «сначала оформи логистику» обязан работать и на авто-путях.
+
+    Раньше он стоял под `allowed_from is None`, и синк Газельки (который зовёт
+    отправку с `{READY, VEHICLE_ASSIGNED}`) увозил голый READY: сток списан,
+    забор — носитель денег — не рождён.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bare_ready_rejected_even_with_allowed_from(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        await _stock(db_session, project, src_wh, barcode, 100)
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": src_wh.id,
+                "to_warehouse_id": dst_wh.id,
+                "items": [{"barcode": barcode, "quantity": 10}],
+            },
+        )
+        await mark_transfer_ready(db_session, project.id, transfer.id)
+        # id снимаем ДО отказа: rollback экспайрит ORM-объект, и ленивая
+        # догрузка атрибута вне greenlet-контекста взрывается сама по себе.
+        transfer_id = transfer.id
+
+        with pytest.raises(ValueError, match="Назначьте машину"):
+            await _send_transfer_raw(
+                db_session,
+                project.id,
+                transfer_id,
+                allowed_from=frozenset({TransferStatus.READY, TransferStatus.VEHICLE_ASSIGNED}),
+            )
+
+        await db_session.rollback()
+        fresh = await db_session.get(StockTransfer, transfer_id)
+        assert TransferStatus(fresh.status) is TransferStatus.READY
+        assert await _movements(db_session, project, "TRANSFER", transfer_id) == []
+
+
+class TestGazelkaTransferLogistics:
+    """Реквизиты агрегатора на переезде — зеркало `apply_gazelka_logistics` заявки."""
+
+    @pytest.mark.asyncio
+    async def test_partial_write_keeps_known_cost_and_slot(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """Портал молчит про тариф и интервал — согласованные логистом не стираем."""
+        from backend.services.warehouse_outbound import apply_gazelka_transfer_logistics
+
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": src_wh.id,
+                "to_warehouse_id": dst_wh.id,
+                "items": [{"barcode": barcode, "quantity": 10}],
+            },
+        )
+        await assign_vehicle_transfer(
+            db_session,
+            project.id,
+            transfer.id,
+            TransferAssignVehicle(
+                vehicle_info="О001ОО37",
+                carrier_name="Автотрейд",
+                pickup_cost=Decimal("22000.00"),
+                pickup_time_slot="08:00-12:00",
+                pickup_date=date(2026, 8, 5),
+            ),
+        )
+
+        # Тело синка: госномер есть, тарифа/интервала нет.
+        await apply_gazelka_transfer_logistics(
+            db_session,
+            project.id,
+            transfer.id,
+            TransferAssignVehicle(vehicle_info="Т555ТТ77", carrier_name="Газелька"),
+        )
+        fresh = await db_session.get(StockTransfer, transfer.id)
+        await db_session.refresh(fresh)
+        assert fresh.vehicle_info == "Т555ТТ77"
+        assert fresh.pickup_cost == Decimal("22000.00")
+        assert fresh.pickup_time_slot == "08:00-12:00"
+        assert fresh.pickup_date == date(2026, 8, 5)
+
+    @pytest.mark.asyncio
+    async def test_noop_after_shipment(self, db_session, project, src_wh, dst_wh, barcode):
+        """Заказ живёт в кабинете и после отгрузки: такт синка обязан быть
+        тихим no-op, а не ValueError, уносящим с собой бэкфилл тарифа."""
+        from backend.services.warehouse_outbound import apply_gazelka_transfer_logistics
+
+        await _stock(db_session, project, src_wh, barcode, 100)
+        transfer = await _transfer_with_vehicle(db_session, project, src_wh, dst_wh, barcode, 40)
+        await send_transfer(db_session, project.id, transfer.id)
+
+        assert (
+            await apply_gazelka_transfer_logistics(
+                db_session,
+                project.id,
+                transfer.id,
+                TransferAssignVehicle(vehicle_info="Н999НН77"),
+            )
+            is None
+        )
+        fresh = await db_session.get(StockTransfer, transfer.id)
+        await db_session.refresh(fresh)
+        assert fresh.vehicle_info == "А123ВС77"
+        assert TransferStatus(fresh.status) is TransferStatus.SHIPPED
+
+
+class TestGazelkaTransferUnmatchReleasesGuard:
+    """Переезд, чей заказ агрегатор не подтвердил, не должен запираться навсегда."""
+
+    @pytest.mark.asyncio
+    async def test_unmatch_cancels_sent_link_and_frees_vehicle(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        from backend.models.gazelka import GazelkaOrder, GazelkaOrderStatus
+        from backend.services.gazelka_service import unmatch_order
+
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": src_wh.id,
+                "to_warehouse_id": dst_wh.id,
+                "items": [{"barcode": barcode, "quantity": 10}],
+            },
+        )
+        await mark_transfer_ready(db_session, project.id, transfer.id)
+        transfer_id = transfer.id  # rollback ниже экспайрит ORM-объект
+        db_session.add(
+            GazelkaOrder(
+                project_id=project.id,
+                stock_transfer_id=transfer_id,
+                status=GazelkaOrderStatus.SENT,
+                gazelka_ref="90210",
+                payload={},
+            )
+        )
+        await db_session.commit()
+
+        with pytest.raises(ValueError, match="Газелька"):
+            await _assign_vehicle_raw(
+                db_session,
+                project.id,
+                transfer_id,
+                TransferAssignVehicle(vehicle_info="К111КК77"),
+            )
+        await db_session.rollback()
+
+        await unmatch_order(db_session, project.id, "90210")
+
+        freed = await _assign_vehicle_raw(
+            db_session,
+            project.id,
+            transfer_id,
+            TransferAssignVehicle(vehicle_info="К111КК77", pickup_cost=Decimal("9000.00")),
+        )
+        assert freed.vehicle_info == "К111КК77"
+        # Аудит попытки отправки в чужой сервис остался — сменился только статус.
+        row = (
+            await db_session.execute(
+                select(GazelkaOrder).where(
+                    GazelkaOrder.project_id == project.id,
+                    GazelkaOrder.gazelka_ref == "90210",
+                )
+            )
+        ).scalar_one()
+        assert row.status == GazelkaOrderStatus.CANCELLED

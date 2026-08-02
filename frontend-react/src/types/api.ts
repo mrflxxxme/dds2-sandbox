@@ -1447,10 +1447,19 @@ export interface TransferAssignVehiclePayload {
   logistics_by_warehouse: boolean;
   carrier_inn: string | null;
   carrier_name: string | null;
-  pickup_date: string;
+  // 🔴 Даты и стоимость — `string | null` / `number | null`, а не просто string.
+  // На бэкенде это `date | None` / `Decimal | None`, и Pydantic v2 пустую строку
+  // в дату НЕ коэрсит: «» даёт `date_from_datetime_parsing` → 422 ещё до сервиса.
+  // Пока тип обещал `string`, пустая строка была легальна для tsc, и любая
+  // отправка снимка переезда без дат (а до назначения машины они пусты у ВСЕХ
+  // переездов) молча падала. «Не знаю» = null.
+  pickup_date: string | null;
   pickup_time_slot: string;
-  pickup_cost: number;
-  delivery_date: string;
+  // null = «стоимость неизвестна». 0 значит «везли бесплатно» и намертво
+  // блокирует бэкфилл тарифа Газелькой (`_apply_transfer_cost` пишет только
+  // поверх NULL) — подставлять его вместо пустого поля нельзя.
+  pickup_cost: number | null;
+  delivery_date: string | null;
   // Транспортная единица. null = «не трогать»: бэкенд игнорирует null и не
   // затирает уже заданное значение (пустое поле формы ≠ обнуление).
   // Важно для bulk: если логист единицу не трогал, шлём null во всех трёх —

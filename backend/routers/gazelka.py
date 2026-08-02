@@ -20,6 +20,7 @@ from backend.schemas.gazelka import (
     GazelkaConfigResponse,
     GazelkaDraftResponse,
     GazelkaEditDraft,
+    GazelkaLinkKind,
     GazelkaMatchCandidate,
     GazelkaMatchRequest,
     GazelkaMatchResult,
@@ -210,6 +211,11 @@ async def gazelka_save_edit(
 @router.get("/match-candidates", response_model=list[GazelkaMatchCandidate])
 async def gazelka_match_candidates(
     search: str | None = None,
+    # 🔴 `GazelkaLinkKind` обязан быть ИМПОРТИРОВАН в модуль: под
+    # `from __future__ import annotations` FastAPI хранит аннотацию как
+    # ForwardRef и разрешает её по глобалям модуля. Без импорта импорт модуля
+    # проходит молча, дефолт отдаётся без валидации, а первый же запрос СО
+    # значением `?kind=` падает PydanticUserError → 500.
     kind: GazelkaLinkKind = "assembly",
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -233,9 +239,11 @@ async def gazelka_match(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> GazelkaMatchResult:
-    """Связать существующую заявку портала с нашей сборкой."""
+    """Связать существующую заявку портала с нашим документом (сборка или переезд)."""
     try:
-        return await gazelka_service.match_order(db, project.id, str(plan_id), payload.assembly_id, actor=_actor(user))
+        # Тело целиком, а не `payload.assembly_id`: сервис сам решает вид документа
+        # по тому, какая из ссылок непуста (`transfer_id` / `assembly_id`).
+        return await gazelka_service.match_order(db, project.id, str(plan_id), payload, actor=_actor(user))
     except GazelkaServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e)) from e
 
