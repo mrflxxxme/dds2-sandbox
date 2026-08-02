@@ -12,7 +12,7 @@
 | Ф1 | Сервис-ядро | 🟢 done-unsigned | 2026-08-02 | (этот коммит) | pytest 124 passed (state/service/permissions/models); mypy clean; conventions PASSED; T3-ревью code/sec/db — WARNING×3→fix-цикл 15 правок→гейты перепройдены | свёрнута в финальную (Р16) |
 | Ф2 | Роутер + фриз контракта | 🟢 done-unsigned | 2026-08-02 | (этот коммит) | целевые 151 passed; полный срез 5357 passed (до fix-цикла) + регресс api 176 passed; mypy дизайн-скоуп чист; conventions PASSED; T3 (api/sec/code) WARNING×3 → fix-цикл 12 правок; CONTRACT.md FROZEN | свёрнута в финальную (Р16) |
 | Ф3 | Фронт-ядро | ⏳ planned | — | — | — | постфактум |
-| Ф4 | Уведомления | ⏳ planned | — | — | — | постфактум |
+| Ф4 | Уведомления | 🟢 done-unsigned | 2026-08-02 | (этот коммит) | pytest 138 passed; mypy 14 файлов чисто; conventions PASSED; T1-ревью BLOCK (CRITICAL is_deleted) → fix-цикл 9 правок → re-review APPROVE | свёрнута в финальную (Р16) |
 | Ф5 | Фронт-2 | ⏳ planned | — | — | — | постфактум |
 | Ф6 | АБ-мост + метрики | ⏳ planned | — | — | — | постфактум |
 | Ф7 | Аудит + ship | ⏳ planned | — | — | — | требуется (финальная) |

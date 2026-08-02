@@ -17,6 +17,7 @@ from backend.schemas.telegram import (
     ToggleNotifyRequest,
 )
 from backend.services import telegram_service
+from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/telegram", tags=["Telegram"])
 
@@ -110,6 +111,21 @@ async def toggle_supply_notify(
         raise HTTPException(status_code=404, detail="Привязка не найдена")
     status = "включены" if body.enabled else "выключены"
     return {"message": f"Алерты расхождений поставок {status}"}
+
+
+@router.patch("/chats/{binding_id}/design-notify", dependencies=[Depends(rate_limit_write)])
+async def toggle_design_notify(
+    binding_id: int,
+    body: ToggleNotifyRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle the design-tasks morning digest (09:00 MSK) for a chat binding."""
+    ok = await telegram_service.toggle_design_notify(db, binding_id, project.id, body.enabled)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Привязка не найдена")
+    status = "включена" if body.enabled else "выключена"
+    return {"message": f"Сводка дизайн-задач {status}"}
 
 
 @router.patch("/chats/{binding_id}/ff-board")
