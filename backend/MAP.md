@@ -51,7 +51,7 @@ from backend.models.mixins import SoftDeleteMixin
 | Мониторинг и health | `services/monitoring_service.py`, `health_check_service.py` |
 | География заказов | `services/order_geography_service.py` |
 | Вайбкодинг (телеметрия репозитория) | `services/vibe_service.py`, `routers/vibe.py`, `models/vibe.py` — БЕЗ `project_id` намеренно; доступ по строке в `vibe_authors`, ингест зовёт CI по SSH (не HTTP) |
-| Дизайн карточек (канбан инфографики) | `models/design.py` (словарь `DESIGN_TASK_TRANSITIONS` — источник правды), `schemas/design.py`, `services/design/` (`state` — переходы под FOR UPDATE, `permissions` — флаги прав, `crud` — write-side + нумерация DES-N, `queries` — список/деталка/автоподсказка, `board` — доска+move, `files` — MinIO-материалы/версии/вердикты, `workload`, `stats`, `notify` — no-op до Ф4); спека — `docs/specs/design/` |
+| Дизайн карточек (канбан инфографики) | `models/design.py` (словарь `DESIGN_TASK_TRANSITIONS` — источник правды), `schemas/design.py`, `services/design/` (`state` — переходы под FOR UPDATE, `permissions` — флаги прав, `crud` — write-side + нумерация DES-N, `queries` — список/деталка/автоподсказка, `board` — доска+move, `files` — MinIO-материалы/версии/вердикты, `workload`, `stats`, `notify` — 4 личных TG-события, `ab_bridge` — мост в АБ-тесты фото), `routers/design_tasks.py`, `scheduler/jobs/design_notify.py` (утренняя сводка 09:00 МСК + «срок завтра»); детали — [DOMAIN_DESIGN.md](DOMAIN_DESIGN.md), спека — `docs/specs/design/` |
 
 ## Ключевые модели
 | Модель | Файл | Назначение |
@@ -66,6 +66,7 @@ from backend.models.mixins import SoftDeleteMixin
 | `Account`, `CategoryRef` | `models/refs.py` | справочники |
 | `WarehouseTariff`, `FfStorageDaily`, `FfInvoice`, `FfInvoiceLine` | `models/ff_billing.py` | тарифы услуг ФФ, хранение, счета |
 | `WbFbsWarehouse`, `WbFbsWarehouseLink`, `WbFbsStockOverride`, `WbFbsOrder`, `WbFbsSupply` | `models/wb_fbs.py` | склады продавца WB, привязка к нашим, ручное количество по товару, сборочные задания и поставки FBS |
+| `DesignTask`, `DesignMaterial`, `DesignSubmission`, `DesignSubmissionFile`, `DesignTaskComment`, `DesignTaskEvent` | `models/design.py` | задачи на дизайн карточек: заявка, исходные материалы, версии сдач с вердиктом, комментарии, append-only журнал переходов |
 
 ## Тесты
 `make test` · `test-fast` · `test-changed` · `test-unit` · `lint`. Прямо: `docker compose exec backend pytest tests/ -x --tb=short`.

@@ -4,4 +4,5 @@
 - [Distribute-all-leftovers invariants](distribute-all-leftovers-invariants.md) — where the real over-commit/idempotency guards live for "Распределить все остатки" (buildPinnedRows cap / applyDraftCellEdit availForBox / idempotent-by-replacement)
 - [Design transitions canon](design-transitions-canon.md) — «Дизайн карточек»: словарь переходов = код+golden-snapshot+спек в трёх местах; дыра ON_HOLD→REVISION закрыта на Ф1
 - [Design /all-projects RBAC tension](design-allprojects-rbac-tension.md) — сквозная ручка без page-гейта vs Р11 «все ручки под require_role»; поднято на Ф2, ждёт архитектора
+- [AB-photo-tests donor traps](ab-photo-tests-donor-traps.md) — мост поверх funnel/ab_photo_tests: WbContentError мимо ValueError-маппинга, откат через контроль-вариант, txn через WB-HTTP, /ab-tests без require_role
 - [Sweep-job donor trap](sweep-job-donor-trap.md) — draft_staleness_watch как донор: его безопасность держится на get_sync_project_ids (is_deleted) и коротком gather; копии ловят оба бага

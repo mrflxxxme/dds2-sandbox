@@ -20,5 +20,6 @@
 | Telegram | бот + Telegram Mini App, авторизация, дайджест | [DOMAIN_TELEGRAM.md](DOMAIN_TELEGRAM.md) |
 | Фулфилмент | интеграция skladbot/wmscelicom (позже migfull): остатки-зеркало, заявки, связь с документами; **FF billing** — тарифы услуг ФФ, посуточное хранение, счета ФФ | [DOMAIN_FULFILLMENT.md](DOMAIN_FULFILLMENT.md) |
 | WB FBS | продажи со склада продавца: склады WB ↔ наши, трансляция остатков по `chrtId`, сборочные задания, поставки; обратный гейт «продано по FBS → нельзя в сборку» | [DOMAIN_WB_FBS.md](DOMAIN_WB_FBS.md) |
+| Дизайн карточек | канбан задач на инфографику: 8 статусов + словарь переходов, версии сдач с вердиктом, материалы в MinIO, TG-уведомления и утренняя сводка, мост в АБ-тесты фото | [DOMAIN_DESIGN.md](DOMAIN_DESIGN.md) |
 
 Новый домен: скопировать `.claude/templates/DOMAIN_template.md` → `backend/DOMAIN_<NAME>.md`, добавить строку сюда.
