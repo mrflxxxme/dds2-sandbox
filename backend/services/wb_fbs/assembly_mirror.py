@@ -67,6 +67,9 @@ from backend.services.wb_fbs.locks import (
     acquire_lock,
     release_lock,
 )
+# Единая точка чтения маркера «сколько заданий у поставки по данным WB».
+# Цикла нет: supplies_service о зеркале не знает, зовёт его джоб.
+from backend.services.wb_fbs.supplies_service import _wb_orders_count
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.wb_fbs.assembly_mirror")
@@ -119,9 +122,28 @@ def _order_cancelled(supplier_status: str | None, wb_status: str | None) -> bool
     return wb_status in FBS_WB_CANCELLED_STATUSES and supplier_status not in FBS_TERMINAL_STATUSES
 
 
+def _wb_confirmed_empty(supply: WbFbsSupply) -> bool:
+    """WB САМ сказал, что в поставке ноль заданий.
+
+    Отличается от «у нас пусто» принципиально: пустой список приходит и у
+    свежей поставки, чьи задания ещё не синкнулись, — гасить такую значит
+    убивать живое зеркало по таймингу синка. Опереться на маркер можно только
+    с фикса 02.08.2026: до него он замерзал в начале жизни поставки
+    (см. DOMAIN_WB_FBS «Привязка задания к поставке»), теперь у активной
+    поставки он переспрашивается каждый прогон.
+    """
+    return _wb_orders_count(supply.raw) == 0
+
+
 def _target_status(supply: WbFbsSupply, orders: list[Any]) -> str:
     """Фаза поставки → целевой статус зеркала (без учёта «только вперёд»)."""
     alive = [o for o in orders if not _order_cancelled(o.supplier_status, o.wb_status)]
+    # Поставку ОПУСТОШИЛИ: задания не отменены, а перенесены в соседнюю — из
+    # этой они просто исчезли. Ветка ниже ловит только «все отменены» и пустой
+    # список пропускала, оставляя зеркало висеть в IN_PROGRESS с нулём заданий
+    # навсегда (прод 02.08.2026: ASM-1158 и ASM-1172 после переноса 32 заданий).
+    if not supply.done and not alive and _wb_confirmed_empty(supply):
+        return AssemblyStatus.CANCELLED.value
     if supply.reject_dt is not None or (orders and not alive):
         return AssemblyStatus.CANCELLED.value
     # DELIVERED требует и done: задания не могут пройти СЦ до передачи поставки,
