@@ -16,7 +16,11 @@ pytest_plugins = ["tests.conftest_api"]
 # id=4 — Default seed; id=15 — main user project (вяткин).
 # 991/992 — изолированные проекты test_wb_returns: держим, чтобы cleanup не
 # удалял их между параллельными воркерами (иначе FK на wb_goods_returns.project_id).
-_KEEP_PROJECT_IDS = (4, 15, 991, 992)
+# 1010888 — demo-проект (slug 'demo', WB-зеркала/база знаний): его удаление
+# каскадом сносит integration_keys с WB-ключом (инцидент 2026-07-23 — cleanup
+# после pytest уничтожил demo-проект и ключ, восстановление из бэкапа невозможно,
+# т.к. дамп старше проекта).
+_KEEP_PROJECT_IDS = (4, 15, 991, 992, 1010888)
 
 
 def pytest_sessionstart(session):
