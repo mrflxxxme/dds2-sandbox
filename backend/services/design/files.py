@@ -31,7 +31,11 @@ from backend.models.design import (
     DesignVerdict,
 )
 from backend.services.design.common import get_task_row, is_lead
-from backend.services.design.state import _commit_and_notify, apply_transition_locked
+from backend.services.design.state import (
+    _commit_and_notify,
+    apply_transition_locked,
+    change_status,
+)
 from backend.storage import download_file, get_minio
 from backend.utils.time import utcnow
 
@@ -43,18 +47,28 @@ MAX_FILE_MB = min(20, settings.MAX_UPLOAD_SIZE_MB)
 MAX_FILES_PER_SUBMISSION = 10
 MAX_SUBMISSION_TOTAL_MB = 100
 
-_ALLOWED_MIME_EXACT = {
+ALLOWED_MIME_EXACT = {
     "application/pdf",
     "application/zip",
     "application/x-zip-compressed",
     "application/x-rar-compressed",
     "application/vnd.rar",
 }
-_EXEC_BLOCKLIST = {
+EXEC_BLOCKLIST = {
     ".exe", ".dll", ".bat", ".cmd", ".com", ".scr", ".msi", ".ps1",
     ".sh", ".js", ".vbs", ".jar", ".apk", ".app", ".py",
     # Активное содержимое при отдаче в браузер (XSS/XXE): svg/html/xml-семейство.
     ".svg", ".svgz", ".html", ".htm", ".xhtml", ".xml", ".mjs", ".php",
+}
+# Явный блок активных MIME ДОПОЛНИТЕЛЬНО к блоклисту расширений: image/svg+xml
+# проходит allowlist image/*, а клиентский Content-Type может назвать активный
+# тип при «нейтральном» расширении (решение fix-цикла Ф2, п.6).
+BLOCKED_MIME_EXACT = {
+    "image/svg+xml",
+    "text/html",
+    "application/xhtml+xml",
+    "text/xml",
+    "application/xml",
 }
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -77,12 +91,14 @@ def _validate_upload(file_data: bytes, filename: str, mime_type: str | None) -> 
     клиентскому заголовку нельзя доверять (решение lead, вариант Б — только design).
     """
     if len(file_data) > MAX_FILE_MB * 1024 * 1024:
-        raise HTTPException(400, f"Файл слишком большой (максимум {MAX_FILE_MB} МБ)")
+        raise HTTPException(413, f"Файл слишком большой (максимум {MAX_FILE_MB} МБ)")
     ext = os.path.splitext(filename)[1].lower()
-    if ext in _EXEC_BLOCKLIST:
+    if ext in EXEC_BLOCKLIST:
         raise HTTPException(400, "Исполняемые файлы запрещены")
     mime = mimetypes.guess_type(filename)[0] or mime_type
-    if mime is None or not (mime.startswith("image/") or mime in _ALLOWED_MIME_EXACT):
+    if mime is None or mime.lower() in BLOCKED_MIME_EXACT or not (
+        mime.startswith("image/") or mime in ALLOWED_MIME_EXACT
+    ):
         raise HTTPException(
             400, "Недопустимый тип файла. Разрешены: изображения, PDF, ZIP, RAR"
         )
@@ -197,6 +213,47 @@ async def add_material_nm(
     return material
 
 
+async def delete_material(
+    db: AsyncSession,
+    *,
+    project_id: int,
+    task_id: int,
+    material_id: int,
+    user: Any,
+    member_role: str,
+) -> None:
+    """Удалить материал заявки. Право: lead, автор задачи или добавивший материал.
+
+    DesignMaterial — не SoftDelete-модель (iron rule 3 не про неё): жёсткий DELETE
+    строки; объект MinIO остаётся сиротой сознательно (нет delete-хелпера в
+    storage.py, объём мал) — warning в лог для будущей уборки.
+    """
+    task = await get_task_row(db, project_id, task_id)
+    res = await db.execute(
+        select(DesignMaterial).where(
+            DesignMaterial.id == material_id,
+            DesignMaterial.project_id == project_id,
+            DesignMaterial.task_id == task_id,
+        )
+    )
+    material = res.scalar_one_or_none()
+    if material is None:
+        raise HTTPException(404, "Материал не найден")
+    if not (
+        is_lead(member_role)
+        or task.author_user_id == user.id
+        or material.created_by_user_id == user.id
+    ):
+        raise PermissionError("Материал удаляет его автор, автор заявки или ведущий")
+    if material.minio_path:
+        logger.warning(
+            "design delete_material: сирота MinIO после удаления материала %d: %s",
+            material_id, material.minio_path,
+        )
+    await db.delete(material)  # no-soft-delete-check: DesignMaterial без SoftDeleteMixin
+    await db.commit()
+
+
 async def upload_comment_attachment(
     *,
     project_id: int,
@@ -238,9 +295,10 @@ async def create_submission(
     короткой транзакцией. Провал заливки оставляет строку версии без файлов
     (гвард →REVIEW такую не пропустит), сироты MinIO — warning в лог.
 
-    Вторая PENDING-версия запрещена — вердикт всегда однозначен.
-    Файлы → design/{project}/{task}/v{n}/. Переход в REVIEW делает вызывающий
-    отдельным change_status (гвард увидит созданную PENDING-версию с файлами).
+    Вторая PENDING-версия С ФАЙЛАМИ запрещена — вердикт всегда однозначен.
+    Пустая PENDING (след упавшей заливки) переиспользуется тем же version_no.
+    Файлы → design/{project}/{task}/v{n}/. Переход в REVIEW — submit_version
+    (гвард увидит PENDING-версию с файлами).
     """
     from backend.utils.file_validation import validate_file_content
 
@@ -255,7 +313,7 @@ async def create_submission(
         raise HTTPException(400, f"Не больше {MAX_FILES_PER_SUBMISSION} файлов в одной версии")
     if sum(len(data) for data, _, _ in files) > MAX_SUBMISSION_TOTAL_MB * 1024 * 1024:
         raise HTTPException(
-            400, f"Суммарный размер файлов превышает {MAX_SUBMISSION_TOTAL_MB} МБ"
+            413, f"Суммарный размер файлов превышает {MAX_SUBMISSION_TOTAL_MB} МБ"
         )
 
     prepared: list[tuple[bytes, str, str]] = []
@@ -266,7 +324,7 @@ async def create_submission(
         prepared.append((data, name, mime))
 
     pending_res = await db.execute(
-        select(DesignSubmission.version_no)
+        select(DesignSubmission)
         .where(
             DesignSubmission.project_id == project_id,
             DesignSubmission.task_id == task_id,
@@ -275,29 +333,45 @@ async def create_submission(
         .order_by(DesignSubmission.version_no.desc())
         .limit(1)
     )
-    pending_version = pending_res.scalar_one_or_none()
-    if pending_version is not None:
-        raise ValueError(
-            f"По задаче уже есть несданная версия {pending_version} — дождитесь вердикта"
+    pending = pending_res.scalar_one_or_none()
+    if pending is not None:
+        files_cnt_res = await db.execute(
+            select(func.count())
+            .select_from(DesignSubmissionFile)
+            .where(
+                DesignSubmissionFile.project_id == project_id,
+                DesignSubmissionFile.submission_id == pending.id,
+            )
         )
-
-    version_res = await db.execute(
-        select(func.coalesce(func.max(DesignSubmission.version_no), 0)).where(
-            DesignSubmission.project_id == project_id,
-            DesignSubmission.task_id == task_id,
+        if int(files_cnt_res.scalar() or 0) > 0:
+            raise ValueError(
+                f"По задаче уже есть несданная версия {pending.version_no} — дождитесь вердикта"
+            )
+        # PENDING без файлов — след упавшей заливки (короткие транзакции):
+        # переиспользуем её (тот же version_no), обновив авторство/комментарий,
+        # а не отбиваем «уже есть несданная» и не плодим новую версию.
+        pending.submitted_by_user_id = user.id
+        pending.submitted_at = utcnow()
+        pending.comment = comment
+        submission = pending
+        version_no = int(pending.version_no)
+    else:
+        version_res = await db.execute(
+            select(func.coalesce(func.max(DesignSubmission.version_no), 0)).where(
+                DesignSubmission.project_id == project_id,
+                DesignSubmission.task_id == task_id,
+            )
         )
-    )
-    version_no = int(version_res.scalar() or 0) + 1
-
-    submission = DesignSubmission(
-        project_id=project_id,
-        task_id=task_id,
-        version_no=version_no,
-        submitted_by_user_id=user.id,
-        comment=comment,
-        verdict=DesignVerdict.PENDING.value,
-    )
-    db.add(submission)
+        version_no = int(version_res.scalar() or 0) + 1
+        submission = DesignSubmission(
+            project_id=project_id,
+            task_id=task_id,
+            version_no=version_no,
+            submitted_by_user_id=user.id,
+            comment=comment,
+            verdict=DesignVerdict.PENDING.value,
+        )
+        db.add(submission)
     await db.flush()
     submission_id = submission.id
     await db.commit()  # транзакция №1: строка версии; row-lock задачи отпущен
@@ -310,6 +384,16 @@ async def create_submission(
             object_name = f"design/{project_id}/{task_id}/v{version_no}/{ts}_{idx}_{name}"
             await _put_object(object_name, data, mime)
             uploaded.append((object_name, name, mime, len(data)))
+    except HTTPException:
+        # 503 MinIO (и любой другой HTTP-статус) — сквозной, НЕ глотать в 400:
+        # канон ретраев фронта различает 5xx (повторить) и 4xx (проблема файла).
+        logger.warning(
+            "design create_submission: заливка версии %d задачи %d сорвалась "
+            "(%d/%d файлов), сироты MinIO: %s",
+            version_no, task_id, len(uploaded), len(prepared),
+            [u[0] for u in uploaded],
+        )
+        raise
     except Exception as e:
         logger.warning(
             "design create_submission: заливка версии %d задачи %d сорвалась "
@@ -340,6 +424,35 @@ async def create_submission(
         )
     )
     return res.scalar_one()
+
+
+async def submit_version(
+    db: AsyncSession,
+    *,
+    project_id: int,
+    task_id: int,
+    files: list[tuple[bytes, str, str | None]],
+    comment: str | None = None,
+    user: Any,
+    member_role: str,
+) -> DesignSubmission:
+    """Сдача версии одной оркестрацией сервиса (iron rule 8): создание/дозаливка
+    PENDING-версии + перевод задачи в REVIEW той же матрицей переходов — роутер
+    делает один вызов. Гвард →REVIEW видит только что созданную PENDING с файлами.
+    """
+    submission = await create_submission(
+        db,
+        project_id=project_id,
+        task_id=task_id,
+        files=files,
+        comment=comment,
+        user=user,
+        member_role=member_role,
+    )
+    await change_status(
+        db, project_id, task_id, DesignTaskStatus.REVIEW, user, member_role
+    )
+    return submission
 
 
 async def set_verdict(
@@ -435,24 +548,33 @@ async def download_material(
 
 
 async def download_submission_file(
-    db: AsyncSession, *, project_id: int, task_id: int, file_id: int
+    db: AsyncSession,
+    *,
+    project_id: int,
+    task_id: int,
+    file_id: int,
+    submission_id: int | None = None,
 ) -> tuple[bytes, str, str]:
     """Файл версии сдачи — с проверкой принадлежности задаче и проекту.
 
     Join на живую DesignTask: вложения удалённой задачи недоступны (решение lead).
+    submission_id (URL Ф2) — честная принадлежность файла именно этой версии.
     """
+    conds = [
+        DesignSubmissionFile.id == file_id,
+        DesignSubmissionFile.project_id == project_id,
+        DesignSubmission.project_id == project_id,
+        DesignSubmission.task_id == task_id,
+        DesignTask.project_id == project_id,
+        DesignTask.is_deleted == False,  # noqa: E712
+    ]
+    if submission_id is not None:
+        conds.append(DesignSubmission.id == submission_id)
     res = await db.execute(
         select(DesignSubmissionFile)
         .join(DesignSubmission, DesignSubmission.id == DesignSubmissionFile.submission_id)
         .join(DesignTask, DesignTask.id == DesignSubmission.task_id)
-        .where(
-            DesignSubmissionFile.id == file_id,
-            DesignSubmissionFile.project_id == project_id,
-            DesignSubmission.project_id == project_id,
-            DesignSubmission.task_id == task_id,
-            DesignTask.project_id == project_id,
-            DesignTask.is_deleted == False,  # noqa: E712
-        )
+        .where(*conds)
     )
     file_row = res.scalar_one_or_none()
     if file_row is None:

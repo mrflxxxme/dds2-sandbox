@@ -5,14 +5,16 @@
 crud (реэкспорт) — состав модулей спека F1 не меняется. Кэша нет (Р10).
 """
 
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy import String, cast, or_, select
 from sqlalchemy import func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models.auth import User
+from backend.models.auth import Project, ProjectMember, User
 from backend.models.cost import Nomenclature
+from backend.rbac import get_effective_pages
 from backend.models.design import (
     DESIGN_ACTIVE_STATUSES,
     DesignMaterial,
@@ -173,6 +175,112 @@ async def list_tasks(
     return await to_list_items(db, project_id, list(res.scalars().all()))
 
 
+async def list_tasks_all_projects(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    status: list[str] | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[DesignTaskListItem]:
+    """Сквозной список по брендам: ТОЛЬКО проекты членства ProjectMember (§6.1)
+    И только те, где участнику доступна страница design-tasks (page-гейт Р11:
+    owner/admin — всегда, editor/viewer — по ключу в pages; решение fix-цикла Ф2).
+
+    Единственный read-путь без project_id снаружи — скоуп задают членства
+    (is_deleted = false у членства И проекта). project_name заполняется.
+    """
+    limit = min(limit, 200)
+    member_res = await db.execute(
+        select(ProjectMember.project_id, ProjectMember.role, ProjectMember.pages)
+        .where(
+            ProjectMember.user_id == user_id,
+            ProjectMember.is_deleted == False,  # noqa: E712
+        )
+        .limit(1000)
+    )
+    allowed_ids = [
+        row.project_id
+        for row in member_res.all()
+        if "design-tasks" in get_effective_pages(row.role, row.pages)
+    ]
+    if not allowed_ids:
+        return []
+    conds: list[Any] = [
+        DesignTask.is_deleted == False,  # noqa: E712
+        DesignTask.project_id.in_(allowed_ids),
+        Project.is_deleted == False,  # noqa: E712
+    ]
+    if status:
+        conds.append(DesignTask.status.in_(status))
+
+    res = await db.execute(
+        select(DesignTask, Project.name)
+        .join(Project, Project.id == DesignTask.project_id)
+        .where(*conds)
+        .order_by(
+            DesignTask.due_date.asc().nulls_last(),
+            DesignTask.is_urgent.desc(),
+            DesignTask.id.desc(),
+        )
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = res.all()
+
+    # to_list_items скоупится project_id → обогащаем по-проектно, порядок выдачи сохраняем.
+    project_names: dict[int, str] = {}
+    by_project: dict[int, list[DesignTask]] = {}
+    order: dict[int, int] = {}
+    for idx, (task, project_name) in enumerate(rows):
+        project_names[task.project_id] = project_name
+        by_project.setdefault(task.project_id, []).append(task)
+        order[task.id] = idx
+
+    items: list[DesignTaskListItem] = []
+    for pid, tasks in by_project.items():
+        enriched = await to_list_items(db, pid, tasks)
+        for item in enriched:
+            item.project_name = project_names[pid]
+        items.extend(enriched)
+    items.sort(key=lambda i: order[i.id])
+    return items
+
+
+# Видимая сетка месяца (Р7): CSS grid 7×6 захватывает хвосты соседних месяцев.
+_CALENDAR_PAD_DAYS = 6
+_CALENDAR_LIMIT = 500
+
+
+async def list_calendar(
+    db: AsyncSession, project_id: int, month_first: date
+) -> tuple[date, date, list[DesignTaskListItem]]:
+    """Задачи месяца по due_date, границы видимой сетки ±6 дней (спек F2).
+
+    Возвращает (date_from, date_to, items) — роутер собирает DesignCalendarOut.
+    """
+    if month_first.month == 12:
+        next_month = date(month_first.year + 1, 1, 1)
+    else:
+        next_month = date(month_first.year, month_first.month + 1, 1)
+    date_from = month_first - timedelta(days=_CALENDAR_PAD_DAYS)
+    date_to = next_month + timedelta(days=_CALENDAR_PAD_DAYS - 1)
+
+    res = await db.execute(
+        select(DesignTask)
+        .where(
+            DesignTask.project_id == project_id,
+            DesignTask.is_deleted == False,  # noqa: E712
+            DesignTask.due_date >= date_from,
+            DesignTask.due_date <= date_to,
+        )
+        .order_by(DesignTask.due_date, DesignTask.id)
+        .limit(_CALENDAR_LIMIT)
+    )
+    items = await to_list_items(db, project_id, list(res.scalars().all()))
+    return date_from, date_to, items
+
+
 async def get_task(
     db: AsyncSession, project_id: int, task_id: int, user: Any, member_role: str
 ) -> DesignTaskDetail:
@@ -243,9 +351,9 @@ async def get_task(
         user_ids.add(task.assignee_user_id)
     names = await _user_names(db, user_ids)
 
-    perms = compute_permissions(task, user, member_role)
-    known = set(DesignTaskPermissions.model_fields)
-    permissions = DesignTaskPermissions(**{k: v for k, v in perms.items() if k in known})
+    # Полный набор флагов без фильтрации-пересечения (инвариант §6.9): схема
+    # DesignTaskPermissions зеркалит ключи compute_permissions один-в-один.
+    permissions = DesignTaskPermissions(**compute_permissions(task, user, member_role))
 
     return DesignTaskDetail(
         id=task.id,
@@ -295,7 +403,6 @@ async def get_task(
                 author_user_id=c.author_user_id,
                 author_name=names.get(c.author_user_id),
                 body=c.body,
-                minio_path=c.minio_path,
                 original_filename=c.original_filename,
                 created_at=c.created_at,
             )

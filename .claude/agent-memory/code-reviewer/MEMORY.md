@@ -3,3 +3,4 @@
 - [Warehouse-need invariants](warehouse-need-invariants.md) — get_warehouse_need: total_need mode-invariance (HIGH-2), eff-maps vs raw-maps rule, three demand horizons + gross_wh comment/code drift
 - [Distribute-all-leftovers invariants](distribute-all-leftovers-invariants.md) — where the real over-commit/idempotency guards live for "Распределить все остатки" (buildPinnedRows cap / applyDraftCellEdit availForBox / idempotent-by-replacement)
 - [Design transitions canon](design-transitions-canon.md) — «Дизайн карточек»: словарь переходов = код+golden-snapshot+спек в трёх местах; дыра ON_HOLD→REVISION закрыта на Ф1
+- [Design /all-projects RBAC tension](design-allprojects-rbac-tension.md) — сквозная ручка без page-гейта vs Р11 «все ручки под require_role»; поднято на Ф2, ждёт архитектора

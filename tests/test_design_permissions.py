@@ -158,6 +158,14 @@ class TestComputePermissions:
         # разрешает — флаг честный).
         assert p["can_take"]
 
+    def test_viewer_cannot_comment(self):
+        """Fix-цикл Ф2 п.5: can_comment = member_role != 'viewer' — зеркало
+        editor-гейта POST /comments (viewer read-only)."""
+        p = compute_permissions(_task(S.NEW), actor_id=OTHER_ID, member_role="viewer")
+        assert not p["can_comment"]
+        p_editor = compute_permissions(_task(S.NEW), actor_id=OTHER_ID, member_role="editor")
+        assert p_editor["can_comment"]
+
     def test_can_take_lead_only_in_assigned(self):
         """can_take для lead — только в ASSIGNED; в остальных статусах False."""
         for status in (S.NEW, S.IN_PROGRESS, S.REVIEW, S.REVISION, S.ON_HOLD, S.ACCEPTED):

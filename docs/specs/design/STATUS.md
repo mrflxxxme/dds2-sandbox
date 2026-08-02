@@ -10,7 +10,7 @@
 |---|---|---|---|---|---|---|
 | Ф0 | Хребет | 🟢 done-unsigned | 2026-08-02 | (этот коммит) | alembic up/down/up чист; pytest 17 passed (test_design_models + conventions); mypy 85 файлов чисто; T3-ревью db/sec/code — WARNING→fix-цикл→все 15 правок внесены, гейты перепройдены в dds2-sandbox | свёрнута в финальную (Р16) |
 | Ф1 | Сервис-ядро | 🟢 done-unsigned | 2026-08-02 | (этот коммит) | pytest 124 passed (state/service/permissions/models); mypy clean; conventions PASSED; T3-ревью code/sec/db — WARNING×3→fix-цикл 15 правок→гейты перепройдены | свёрнута в финальную (Р16) |
-| Ф2 | Роутер + фриз контракта | ⏳ planned | — | — | — | требуется ДО мержа |
+| Ф2 | Роутер + фриз контракта | 🟢 done-unsigned | 2026-08-02 | (этот коммит) | целевые 151 passed; полный срез 5357 passed (до fix-цикла) + регресс api 176 passed; mypy дизайн-скоуп чист; conventions PASSED; T3 (api/sec/code) WARNING×3 → fix-цикл 12 правок; CONTRACT.md FROZEN | свёрнута в финальную (Р16) |
 | Ф3 | Фронт-ядро | ⏳ planned | — | — | — | постфактум |
 | Ф4 | Уведомления | ⏳ planned | — | — | — | постфактум |
 | Ф5 | Фронт-2 | ⏳ planned | — | — | — | постфактум |

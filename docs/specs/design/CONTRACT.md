@@ -1,0 +1,83 @@
+# CONTRACT — API модуля «Дизайн карточек»
+
+**FROZEN 2026-08-02 — изменение = эскалация архитектору.**
+
+<!-- HEAD-SUMMARY: замороженный HTTP-контракт Ф2 (backend/routers/design_tasks.py). От него параллельно идут Ф3 (фронт) и Ф4 (уведомления). Схемы — backend/schemas/design.py; поведение — сервис Ф1. -->
+
+Базовый префикс: `/api/v1/design-tasks`. Все ручки под JWT (`get_current_user` на роутере в `main.py`). Скоуп проекта задаёт клиент заголовком `X-Project-Id` (или `?project_id=` — заголовок приоритетнее, `backend/project_context.py`); без него project-scoped ручки → 400. RBAC на бэке (Р11): `require_role(min_role, page="design-tasks")`; исключение — `GET /all-projects` (только `get_current_user`, без `X-Project-Id`; скоуп = членство `ProjectMember` × page-гейт `design-tasks`, см. строку таблицы). Все write-ручки — `Depends(rate_limit_write)`. Кэша нет (Р10).
+
+## Соглашение об ошибках
+
+Тело ошибки — единый конверт приложения (`backend/exceptions.py`):
+`{"error": {"code": "...", "message": "<текст ниже>", "details": null, "payload": null}}`.
+Исключение — 422 pydantic-валидации FastAPI: стандартный `{"detail": [...]}`.
+
+| Код | Когда | Источник |
+|---|---|---|
+| 400 | невалидная операция: запрещённый переход, гвард, неверный вход; **> 10 файлов в одной версии сдачи** | `ValueError` сервиса → текст в `detail` (тексты гвардов — спек F1); кап файлов — роутер И сервис |
+| 401 | нет / просрочен / невалиден JWT | `get_current_user` |
+| 403 | роль/страница/матрица прав | `require_role`, `get_current_project` (не член), `PermissionError` сервиса |
+| 404 | нет записи в скоупе проекта | `ValueError` с текстом «Задача не найдена» / «Версия сдачи не найдена»; `HTTPException(404)` files.py («Материал не найден», «Файл не найден») |
+| 413 | файл > 20 МБ или суммарно > 100 МБ | единый источник — роутер И сервисные проверки размеров (files.py) поднимают 413 |
+| 422 | pydantic/Query-валидация (limit/offset/month/body-капы, **невалидный enum в `status[]`/`work_type`**) | FastAPI |
+| 429 | превышение rate_limit_write; ответ несёт заголовок `Retry-After: <сек>` | `RateLimiter` (`backend/utils/rate_limit.py`) |
+| 501 | `POST /{task_id}/ab-test` до Ф6 | заглушка, `detail = "Появится после Ф6"` |
+| 503 | MinIO недоступен (в т.ч. обрыв заливки при сдаче версии — сквозной, не глотается в 400) | files.py |
+
+## Ручки
+
+| Метод | Путь | min_role | Запрос | Ответ (2xx) |
+|---|---|---|---|---|
+| GET | `/board` | viewer | — | `DesignBoardResponse` {columns: {status: [DesignTaskListItem]}, counts: {status: int}} — 6 колонок доски, counts по всем 8 статусам |
+| GET | `` | viewer | query: `status[]`, `work_type` (enum'ы, невалидный → 422), `assignee_user_id`, `author_user_id`, `is_urgent`, `overdue`, `q` (≤100), `limit` 1..200 (def 100), `offset` ≥0 | `list[DesignTaskListItem]` |
+| POST | `` | editor | `DesignTaskCreate` | **201** `DesignTaskDetail` |
+| GET | `/all-projects` | — (только JWT, без `X-Project-Id`) | query: `status[]` (enum, невалидный → 422), `limit` 1..200, `offset` ≥0 | `list[DesignTaskListItem]` c `project_name`; только проекты членства, где участнику доступна страница `design-tasks` (owner/admin — всегда; editor/viewer — по ключу в `pages`, `get_effective_pages`) |
+| GET | `/workload` | viewer | — | `list[DesignWorkloadRow]` |
+| GET | `/calendar` | viewer | `month=YYYY-MM` (pattern, 422; несуществующий месяц → 400) | `DesignCalendarOut` {month, date_from, date_to, tasks} — окно `1-е − 6 дн … последний день + 6 дн` |
+| GET | `/stats` | viewer | `date_from?`, `date_to?` (ISO-даты) | `DesignStatsOut` |
+| GET | `/product-suggest` | editor | `q` (1..100) | `list[DesignProductSuggestion]` (≤10) |
+| GET | `/{task_id}` | viewer | — | `DesignTaskDetail` (permissions — ПОЛНЫЙ набор флагов `compute_permissions`, §6.9) |
+| PUT | `/{task_id}` | editor | `DesignTaskUpdate` (PATCH-семантика) | `DesignTaskDetail` |
+| DELETE | `/{task_id}` | editor | — | **204**; soft_delete, право автор\|lead (иначе 403) |
+| POST | `/{task_id}/status` | editor | `DesignStatusChange` {to_status, comment?} | `DesignTaskDetail` |
+| POST | `/{task_id}/move` | editor | `DesignMoveIn` {to_status ∈ 6 board-статусов, after_task_id?, comment?} | `DesignTaskDetail`; reorder в своей колонке — только lead (403); dnd в REVISION без comment → 400 |
+| POST | `/{task_id}/assign` | editor | `DesignAssign` {assignee_user_id \| null} | `DesignTaskDetail`; lead-only (403) |
+| POST | `/{task_id}/viewed` | editor | — | `DesignTaskDetail`; lead-only (403), идемпотентно (Р5) |
+| POST | `/{task_id}/materials` | editor | `DesignMaterialIn` {kind: LINK\|NM, url?, ref_nm_id?, caption?}; kind=FILE → 422 | **201** `DesignMaterialOut` |
+| POST | `/{task_id}/materials/file` | editor | multipart `file` | **201** `DesignMaterialOut` |
+| GET | `/{task_id}/materials/{mat_id}/file` | viewer | — | байты файла + заголовки download (ниже) |
+| DELETE | `/{task_id}/materials/{mat_id}` | editor | — | **204**; право: автор материала \| автор заявки \| lead |
+| POST | `/{task_id}/submissions` | editor | multipart `files[]` (1..10 — 11-й → 400; каждый ≤20 МБ и суммарно ≤100 МБ → 413) + `comment?` (Form) | **201** `DesignTaskDetail` — версия создана И задача переведена в REVIEW единой сервисной оркестрацией `files.submit_version`; пустая PENDING-версия (след упавшей заливки, 503) переиспользуется тем же `version_no` |
+| GET | `/{task_id}/submissions/{sub_id}/files/{file_id}` | viewer | — | байты файла + заголовки download |
+| POST | `/{task_id}/submissions/{sub_id}/verdict` | editor | `DesignVerdictIn` {verdict: ACCEPTED\|REJECTED, verdict_comment?} | `DesignTaskDetail`; REJECTED без комментария → 400 |
+| POST | `/{task_id}/comments` | editor (viewer → 403) | `DesignCommentIn` {body 1..2000} | **201** `DesignCommentOut` |
+| POST | `/{task_id}/ab-test` | editor | — | **501** до Ф6 (реализация — Ф6, контракт зарезервирован) |
+
+Порядок объявления в роутере: статические (`board`, `all-projects`, `workload`, `calendar`, `stats`, `product-suggest`) ДО `/{task_id}` — закреплено регресс-тестом openapi.
+
+## Заголовки download-ручек (обе GET-file)
+
+```
+Content-Disposition: attachment; filename*=UTF-8''{urllib.parse.quote(filename)}
+X-Content-Type-Options: nosniff
+```
+
+Отдача только через бэк с проверкой `project_id` и живости задачи (`is_deleted=false`); файл версии проверяется на принадлежность именно `{sub_id}`. В openapi обе ручки объявляют бинарный ответ: `responses={200: {"content": {"application/octet-stream": {}}}}`. Out-схемы (`DesignMaterialOut`, `DesignSubmissionFileOut`, `DesignCommentOut`) НЕ содержат `minio_path` (канон counterparty: внутренние пути стора наружу не выходят — скачивание только через эти GET-ручки).
+
+## Загрузка файлов (порядок проверок — донор payment_requests.py:710)
+
+1. allowlist типа (mime по расширению, фолбэк клиентский): `image/*`, PDF, ZIP, RAR → иначе 400; ДОПОЛНИТЕЛЬНО явный блок активных MIME `BLOCKED_MIME_EXACT` = {`image/svg+xml`, `text/html`, `application/xhtml+xml`, `text/xml`, `application/xml`} → 400 (svg проходит `image/*`, клиентский Content-Type может назвать активный тип при нейтральном расширении);
+2. blocklist исполняемых/активных расширений `EXEC_BLOCKLIST` (вкл. svg/html/xml — решение F1) → 400;
+3. чтение тела; pre-check `file.size` и post-check фактического размера → 413 (>20 МБ) — и в роутере, и в сервисе;
+4. в сервисе: `_sanitize_filename` → повторная валидация → `validate_file_content` (magic bytes) → MinIO `design/{project_id}/{task_id}/...`.
+
+Константы — публичные в `backend/services/design/files.py`: `ALLOWED_MIME_EXACT`, `EXEC_BLOCKLIST`, `BLOCKED_MIME_EXACT` (роутер импортирует их же — один источник).
+
+## Схемы (backend/schemas/design.py)
+
+Вход: `DesignTaskCreate`, `DesignTaskUpdate`, `DesignStatusChange`, `DesignMoveIn`, `DesignAssign`, `DesignMaterialIn`, `DesignVerdictIn`, `DesignCommentIn`.
+Выход: `DesignTaskListItem`, `DesignBoardResponse`, `DesignTaskDetail` (вложенно: `DesignMaterialOut`, `DesignSubmissionOut` + `DesignSubmissionFileOut`, `DesignCommentOut`, `DesignEventOut`, `DesignTaskPermissions`), `DesignCalendarOut`, `DesignWorkloadRow`, `DesignStatsOut`, `DesignProductSuggestion`.
+
+`DesignTaskPermissions` — 15 флагов, зеркало ключей `compute_permissions` (паритет закреплён тестом `test_permissions_schema_matches_service`): `can_edit`, `can_assign`, `can_take`, `can_change_status`, `can_move`, `can_hold`, `can_reorder`, `can_submit`, `can_verdict`, `can_comment`, `can_cancel`, `can_delete`, `can_set_complexity`, `can_set_outsource`, `can_create_ab_test`. Фронт логику прав НЕ дублирует (§6.9). Семантика отдельных флагов: `can_comment` = `member_role != "viewer"` (viewer read-only, зеркало editor-гейта `POST /comments`); `can_delete` = `lead | автор` — HTTP-гейт ручки `DELETE /{task_id}` остаётся `require_role("editor")`, тонкая доводка «автор|lead» — в сервисе (`crud.delete_task`), не-автор editor → 403.
+
+Статусы, work_type, complexity, verdict, kind материалов — строковые enum'ы из `backend/models/design.py`; словарь переходов `DESIGN_TASK_TRANSITIONS` — единственный источник правды (Р1).

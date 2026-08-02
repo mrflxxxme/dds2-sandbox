@@ -26,8 +26,9 @@ def compute_permissions(
     """Флаги действий для пользователя. `user` — объект с .id (или actor_id явно).
 
     can_edit: автор — везде, кроме REVIEW и терминалов (правило update_task);
-    lead — везде, кроме терминалов. can_comment: все с page-доступом (сам
-    page-гейт — require_role в роутере, Ф2).
+    lead — везде, кроме терминалов. can_comment: любой не-viewer с page-доступом
+    (viewer read-only, зеркало editor-гейта POST /comments; сам page-гейт —
+    require_role в роутере, Ф2).
     """
     uid = actor_id if actor_id is not None else int(user.id)
     lead = is_lead(member_role)
@@ -54,7 +55,7 @@ def compute_permissions(
         "can_set_complexity": lead,
         "can_set_outsource": lead,
         "can_reorder": lead,
-        "can_comment": True,
+        "can_comment": member_role != "viewer",
         "can_create_ab_test": (lead or is_author)
         and status is _S.ACCEPTED
         and task.nm_id is not None,

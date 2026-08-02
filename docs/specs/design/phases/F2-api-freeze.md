@@ -37,7 +37,7 @@ HTTP-слой поверх сервиса Ф1 без бизнес-логики; 
 | GET | `/board` | viewer | Доска: 6 колонок + counts (Р4) |
 | GET | `` | viewer | Список с фильтрами (limit/offset обязательны) |
 | POST | `` | editor | Создать заявку |
-| GET | `/all-projects` | — (только `get_current_user`) | Сквозной список по членству `ProjectMember`; **единственная ручка без `get_current_project`** — отдельный тест изоляции обязателен |
+| GET | `/all-projects` | — (только `get_current_user`) | Сквозной список по членству `ProjectMember` × page-гейт: включаются только проекты, где `"design-tasks" ∈ get_effective_pages(role, pages)` (owner/admin — всегда); **единственная ручка без `get_current_project`** — отдельные тесты изоляции и page-гейта обязательны |
 | GET | `/workload` | viewer | Загрузка по исполнителям |
 | GET | `/calendar?month=YYYY-MM` | viewer | Задачи месяца по `due_date` (границы видимой сетки ±6 дней) |
 | GET | `/stats?date_from&date_to` | viewer | Метрики PRD §10 |

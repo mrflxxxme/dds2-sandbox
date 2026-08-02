@@ -696,7 +696,8 @@ class TestMaterials:
                 filename="huge.png",
                 user=actor(team.author),
             )
-        assert exc.value.status_code == 400
+        # Fix-цикл Ф2 п.7: единый источник 413 — сервис тоже поднимает 413.
+        assert exc.value.status_code == 413
 
     async def test_upload_503_when_minio_down(self, db_session, project, monkeypatch):
         team = await make_team(db_session, project)
@@ -860,8 +861,11 @@ class TestSubmissions:
             )
 
     async def test_parallel_submissions_no_duplicate_version(self, db_session, project, fake_minio):
-        """AC-4 + fix-цикл п.2: параллельный create_submission не дублирует
-        version_no — при запрете второй PENDING проходит ровно один."""
+        """AC-4 + fix-цикл п.2/Ф2 п.3: параллельный create_submission не дублирует
+        version_no. С переиспользованием пустой PENDING (Ф2 п.3) второй submit
+        либо отбит («уже есть несданная» — файлы первого уже видны), либо
+        переиспользует ТУ ЖЕ строку версии (файлы ещё не долиты) — в обоих
+        исходах строка DesignSubmission ровно одна, version_no = 1."""
         team = await make_team(db_session, project)
         task = await make_task(
             db_session, project.id, team.author.id,
@@ -886,8 +890,19 @@ class TestSubmissions:
                     return ("rejected", None)
 
         results = await asyncio.gather(submit(), submit())
-        assert sorted(r[0] for r in results) == ["ok", "rejected"], results
-        assert {r[1] for r in results if r[0] == "ok"} == {1}
+        oks = [r for r in results if r[0] == "ok"]
+        assert oks, results  # хотя бы один прошёл
+        assert {r[1] for r in oks} == {1}  # version_no не дублируется
+
+        res = await db_session.execute(
+            select(DesignSubmission).where(
+                DesignSubmission.project_id == project.id,
+                DesignSubmission.task_id == task.id,
+            )
+        )
+        rows = res.scalars().all()
+        assert len(rows) == 1  # строка версии ровно одна
+        assert rows[0].version_no == 1
 
     async def test_second_pending_forbidden(self, db_session, project, fake_minio):
         """Fix-цикл п.2: вторая PENDING-версия невозможна."""
@@ -919,8 +934,8 @@ class TestSubmissions:
     async def test_upload_failure_keeps_version_row(
         self, db_session, project, fake_minio, monkeypatch
     ):
-        """Fix-цикл п.1: провал заливки — строка версии остаётся (без файлов),
-        ошибка «Версия создана, повторите загрузку файлов»."""
+        """Fix-цикл Ф2 п.2: MinIO-down при заливке — 503 сквозной (НЕ глотается
+        в 400/ValueError, канон ретраев фронта); строка версии остаётся без файлов."""
         team = await make_team(db_session, project)
         task = await make_task(
             db_session, project.id, team.author.id,
@@ -931,7 +946,7 @@ class TestSubmissions:
             return None
 
         monkeypatch.setattr(design_files, "get_minio", _minio_down)
-        with pytest.raises(ValueError, match="Версия создана, повторите загрузку файлов"):
+        with pytest.raises(HTTPException) as exc:
             await design_files.create_submission(
                 db_session,
                 project_id=project.id,
@@ -941,6 +956,7 @@ class TestSubmissions:
                 user=actor(team.designer),
                 member_role="editor",
             )
+        assert exc.value.status_code == 503
 
         res = await db_session.execute(
             select(DesignSubmission).where(
@@ -955,6 +971,57 @@ class TestSubmissions:
             await design_state.change_status(
                 db_session, project.id, task.id, S.REVIEW, actor(team.designer), "editor"
             )
+
+    async def test_retry_reuses_empty_pending_version(
+        self, db_session, project, fake_minio, monkeypatch
+    ):
+        """Fix-цикл Ф2 п.3: пустая PENDING (след упавшей заливки) не клинит задачу —
+        повторная сдача переиспользует её тем же version_no, файлы дозаливаются."""
+        team = await make_team(db_session, project)
+        task = await make_task(
+            db_session, project.id, team.author.id,
+            status=S.IN_PROGRESS, assignee_id=team.designer.id,
+        )
+
+        async def _minio_down():
+            return None
+
+        fake_get_minio = design_files.get_minio  # подмена fake_minio — вернуть её после «падения»
+        monkeypatch.setattr(design_files, "get_minio", _minio_down)
+        with pytest.raises(HTTPException):
+            await design_files.create_submission(
+                db_session,
+                project_id=project.id,
+                task_id=task.id,
+                files=[(PNG, "v1.png", "image/png")],
+                comment="первая попытка",
+                user=actor(team.designer),
+                member_role="editor",
+            )
+
+        # MinIO «ожил» (возврат к fake_minio) — повторная сдача успешна той же версией.
+        monkeypatch.setattr(design_files, "get_minio", fake_get_minio)
+        sub = await design_files.create_submission(
+            db_session,
+            project_id=project.id,
+            task_id=task.id,
+            files=[(PNG, "v1_retry.png", "image/png")],
+            comment="повторная сдача",
+            user=actor(team.designer),
+            member_role="editor",
+        )
+        assert sub.version_no == 1
+        assert sub.comment == "повторная сдача"
+        assert len(sub.files) == 1
+
+        res = await db_session.execute(
+            select(DesignSubmission).where(
+                DesignSubmission.project_id == project.id,
+                DesignSubmission.task_id == task.id,
+            )
+        )
+        rows = res.scalars().all()
+        assert len(rows) == 1  # версия одна, дублей нет
 
     async def test_verdict_targets_passed_version(self, db_session, project, fake_minio):
         """Fix-цикл п.2: вердикт бьёт точно в указанную версию, не в «последнюю»."""

@@ -114,10 +114,12 @@ class DesignMoveIn(BaseModel):
     """Перетаскивание на доске (Р4): целевая колонка + после какой карточки.
 
     Цель — только 6 колонок доски (ON_HOLD/CANCELLED — не через drag&drop).
+    comment — опционален; dnd в «Правки» требует причину (гвард в сервисе, Ф1).
     """
 
     to_status: str
     after_task_id: int | None = None
+    comment: str | None = Field(None, max_length=2000)
 
     @field_validator("to_status")
     @classmethod
@@ -157,6 +159,12 @@ class DesignMaterialIn(BaseModel):
         if self.kind == DesignMaterialKind.FILE.value:
             raise ValueError("kind=FILE добавляется загрузкой файла, не этим payload'ом")
         return self
+
+
+class DesignCommentIn(BaseModel):
+    """Комментарий к задаче (только текст; вложения — вне контракта Ф2)."""
+
+    body: str = Field(min_length=1, max_length=2000)
 
 
 class DesignVerdictIn(BaseModel):
@@ -208,23 +216,35 @@ class DesignBoardResponse(BaseModel):
 
 
 class DesignTaskPermissions(BaseModel):
-    """Булевы флаги действий — считает бэк (Ф1); фронт логику прав не дублирует."""
+    """Булевы флаги действий — считает бэк (Ф1); фронт логику прав не дублирует.
+
+    ПОЛНЫЙ набор флагов compute_permissions (инвариант §6.9): состав полей
+    зеркалит ключи backend/services/design/permissions.py — паритет закреплён
+    тестом test_permissions_schema_matches_service (Ф2).
+    """
 
     can_edit: bool = False
     can_assign: bool = False
+    can_take: bool = False
     can_change_status: bool = False
     can_move: bool = False
+    can_hold: bool = False
+    can_reorder: bool = False
     can_submit: bool = False
     can_verdict: bool = False
     can_comment: bool = False
     can_cancel: bool = False
     can_delete: bool = False
+    can_set_complexity: bool = False
+    can_set_outsource: bool = False
+    can_create_ab_test: bool = False
 
 
 class DesignMaterialOut(BaseModel):
+    """Без minio_path (канон counterparty): скачивание — только через GET-ручки."""
+
     id: int
     kind: str
-    minio_path: str | None = None
     original_filename: str | None = None
     mime_type: str | None = None
     file_size: int | None = None
@@ -238,8 +258,9 @@ class DesignMaterialOut(BaseModel):
 
 
 class DesignSubmissionFileOut(BaseModel):
+    """Без minio_path: скачивание — GET /{task_id}/submissions/{sub_id}/files/{file_id}."""
+
     id: int
-    minio_path: str
     original_filename: str | None = None
     mime_type: str | None = None
     file_size: int | None = None
@@ -263,11 +284,12 @@ class DesignSubmissionOut(BaseModel):
 
 
 class DesignCommentOut(BaseModel):
+    """Без minio_path (внутренний путь стора не выходит наружу, канон counterparty)."""
+
     id: int
     author_user_id: int
     author_name: str | None = None
     body: str
-    minio_path: str | None = None
     original_filename: str | None = None
     created_at: datetime
 
@@ -328,6 +350,15 @@ class DesignProductSuggestion(BaseModel):
     article_seller: str | None = None
     brand: str | None = None
     subject: str | None = None
+
+
+class DesignCalendarOut(BaseModel):
+    """Календарь месяца (Р7): задачи по due_date в границах видимой сетки ±6 дней."""
+
+    month: str  # YYYY-MM
+    date_from: date
+    date_to: date
+    tasks: list[DesignTaskListItem] = []
 
 
 class DesignWorkloadRow(BaseModel):
