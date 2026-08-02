@@ -9,13 +9,13 @@ import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchBlock } from '@/components/FfMismatchModal';
 import MigfullModal from './MigfullModal';
 import ConvertToTransferModal, { convertSuccessMessage } from './ConvertToTransferModal';
-import { Toast } from '@/components';
+import { Toast, TransferFfLinkModal } from '@/components';
 import PalletLayoutTab from './PalletLayoutTab';
 import WbSupplyPanel from './WbSupplyPanel';
 import FfExpectedCostCard from './FfExpectedCostCard';
 import FbsOrdersCard from './FbsOrdersCard';
 import type { Column } from '@/components/DataTable';
-import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyPickupCostHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply, WbSupplyState, WbSupplySyncStatus } from '@/types/api';
+import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyPickupCostHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfLinkInfo, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply, WbSupplyState, WbSupplySyncStatus } from '@/types/api';
 import { assemblyKindOf } from '@/lib/assembly-kind';
 import { supplyStatusInfo } from '../../fbs/fbsShared';
 
@@ -125,6 +125,12 @@ export default function AssemblyDetailPage() {
     // Согласование предложенной ФФ правки состава (approve = применить, reject = отклонить).
     const [ffReviewLoading, setFfReviewLoading] = useState<'approve' | 'reject' | null>(null);
 
+    // Блок «Фулфилмент»: связка сборки с заявкой ФФ (слот assembly_request_id).
+    // Для учётного зеркала FBS это ЕДИНСТВЕННОЕ место связи — поле «FBO
+    // поставка» у него занято поставкой WB-GI из синка.
+    const [showFfLinkModal, setShowFfLinkModal] = useState(false);
+    const [unlinkingFfId, setUnlinkingFfId] = useState<number | null>(null);
+
     // History
     const [history, setHistory] = useState<AssemblyHistoryEntry[]>([]);
     // История правок стоимости перевозки (старая→новая + кто поменял, ASM-785).
@@ -167,6 +173,20 @@ export default function AssemblyDetailPage() {
     }, [id]);
 
     useEffect(() => { load(); }, [load]);
+
+    /**
+     * Тихо перечитать саму заявку — без спиннера на всю страницу и без
+     * перезапроса истории/попыток. Нужен связке ФФ: ff_links приезжают в схеме
+     * сборки, а полный `load()` на каждую связку/отвязку мигал бы «Загрузка...»
+     * поверх открытой карточки.
+     */
+    const reloadAssembly = useCallback(async () => {
+        try {
+            setAssembly(await api.getAssemblyRequest(id));
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Не удалось обновить связки', type: 'error' });
+        }
+    }, [id]);
 
     // Статус ФФ-подключения склада — нужен для кнопки «Создать заявку на ФФ».
     const warehouseId = assembly?.warehouse_id;
@@ -540,21 +560,67 @@ export default function AssemblyDetailPage() {
     const canEditFields = assembly && assembly.status !== 'CANCELLED' && !isFbs;
     const canEditAlways = assembly && assembly.status !== 'CANCELLED' && !isFbs;
     /**
-     * Привязка FBO-поставки. Зеркалит серверный гейт `update_assembly_request`:
-     * до отгрузки поставку можно менять свободно, на закрытых статусах —
-     * ТОЛЬКО проставить недостающую (перепривязать отгруженное нельзя, товар
-     * уехал в прежнюю поставку). CANCELLED не правится вовсе.
+     * Привязка FBO-поставки — только у FBO-заявок и только до отгрузки.
      *
-     * 🔴 Учётные заявки ФФ (kind=fbs) больше не исключены. Раньше стоял глухой
-     * `!isFbs`, и связать их с поставкой было нельзя в принципе: они приезжают
-     * из синка сразу в DELIVERED, то есть ни одного «редактируемого» статуса у
-     * них не бывает. Канон юзера 01.08.2026 — связывать FBO-поставки с заявкой
-     * на сборку от ФФ (ASM-1063).
+     * 🔴 `!isFbs` здесь обязателен: у учётной заявки FBS поле «FBO поставка»
+     * занято НЕ поставкой FBO, а поставкой FBS из WB (WB-GI-…), которая
+     * приезжает синком и правке не подлежит. Привязывать к ней FBO-поставку
+     * бессмысленно — это разные сущности. Связь FBS-заявки с документом ФФ
+     * живёт в блоке «Фулфилмент» ниже, а не здесь.
      */
-    const canEditFbo = !!assembly
-        && assembly.status !== 'CANCELLED'
-        && (['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED'].includes(assembly.status)
-            || !assembly.wb_fbo_supply_id);
+    const canEditFbo = assembly && !isFbs && ['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED'].includes(assembly.status);
+
+    /**
+     * Связки с заявками ФФ ОДНИМ списком: новая схема отдаёт `ff_links` (у
+     * migfull/«Натали» на одну сборку приходится 2+ заявки), у старых строк
+     * заполнены только плоские `ff_request_*`. Считаем один раз здесь, чтобы
+     * инфо-строка «Заявка ФФ» и блок «Фулфилмент» не разъехались источниками.
+     */
+    const ffLinks = useMemo<FfLinkInfo[]>(() => {
+        if (assembly?.ff_links?.length) return assembly.ff_links;
+        if (assembly?.ff_request_id) {
+            return [{
+                ff_request_id: assembly.ff_request_id,
+                ff_request_number: assembly.ff_request_number,
+                ff_stage_title: assembly.ff_stage_title,
+                ff_warehouse_id: assembly.ff_warehouse_id,
+            }];
+        }
+        return [];
+    }, [assembly]);
+
+    /**
+     * Связывать и отвязывать заявку ФФ можно в ЛЮБОМ живом статусе, включая
+     * SHIPPED/DELIVERED/CLOSED: это учётная связка документов, стока и денег
+     * она не двигает (тем же гейтом живёт связка на карточке заявки ФФ).
+     *
+     * 🔴 Гейт по статусу здесь был бы вреден: зеркало FBS приезжает синком
+     * сразу в DELIVERED, и кнопка спряталась бы ровно в главном кейсе. Закрыто
+     * только на CANCELLED — у отменённой заявки связывать нечего.
+     */
+    const canLinkFf = !!assembly && assembly.status !== 'CANCELLED';
+
+    /** Отвязать заявку ФФ от сборки. Саму заявку у ФФ не трогаем — только связь. */
+    const handleUnlinkFf = async (link: FfLinkInfo) => {
+        if (!assembly) return;
+        // Номер заявки — идентификатор, а не количество: formatNumber разбил бы
+        // его пробелом («#1 246»), поэтому здесь String, а не форматтер чисел.
+        const label = link.ff_request_number || `#${link.ff_request_id}`;
+        if (!confirm(`Отвязать заявку ФФ ${label} от сборки? Сама заявка у ФФ останется — исчезнет только связь.`)) return;
+        setUnlinkingFfId(link.ff_request_id);
+        try {
+            // Склад заявки ФФ может отличаться от склада сборки (переезд между
+            // ФФ) — берём её собственный, склад сборки только фолбэком.
+            await api.unlinkFulfillmentRequest(link.ff_warehouse_id ?? assembly.warehouse_id, link.ff_request_id);
+            await reloadAssembly();
+            setToast({ message: 'Заявка ФФ отвязана', type: 'success' });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка отвязки', type: 'error' });
+        } finally {
+            setUnlinkingFfId(null);
+        }
+    };
+
     // Единица поставки — паллета/короб (отдельное поле shipped_as_boxes, НЕ package_type).
     const unitCountLabel = assembly?.shipped_as_boxes ? 'Короба' : 'Палеты';
     const unitWeightLabel = assembly?.shipped_as_boxes ? 'Вес 1 короба' : 'Вес 1 палеты';
@@ -1231,11 +1297,7 @@ export default function AssemblyDetailPage() {
                     )}
     {(() => {
                         // migfull/«Натали»: на одну сборку может быть 2+ ФФ-заявки → показываем все.
-                        const ffLinks = assembly.ff_links?.length
-                            ? assembly.ff_links
-                            : (assembly.ff_request_id
-                                ? [{ ff_request_id: assembly.ff_request_id, ff_request_number: assembly.ff_request_number, ff_stage_title: assembly.ff_stage_title, ff_warehouse_id: assembly.ff_warehouse_id }]
-                                : []);
+                        // Список общий с блоком «Фулфилмент» (мемо `ffLinks` выше).
                         if (!ffLinks.length) return null;
                         return (
                             <InfoField
@@ -1296,6 +1358,80 @@ export default function AssemblyDetailPage() {
                 У зеркала FBS не показываем: сборку ведёт сам ФФ, тарификация
                 FBS-работ — отдельная фича (пока не в биллинге). */}
             {!isFbs && <FfExpectedCostCard assemblyId={id} warehouseId={assembly.warehouse_id} slug={slug} />}
+
+            {/* ─── Фулфилмент ─────────────────────────────────────────────
+                Связка сборки с документом ФФ — тот же слот
+                `fulfillment_requests.assembly_request_id`, что у переезда, и
+                тот же UX: список связанных + «Связать» / «Отвязать».
+
+                🔴 Блок НАМЕРЕННО вне `!isFbs`: у учётной заявки FBS поле «FBO
+                поставка» занято поставкой WB-GI из синка, и это ЕДИНСТВЕННОЕ
+                место, где её можно связать с заявкой ФФ. Спрятав блок под
+                isFbs-гейт (как соседние блоки логистики и тарифов), мы бы
+                выключили главный кейс. */}
+            <div className="glass-card" style={{ padding: 20, marginTop: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+                    <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>
+                        Фулфилмент
+                        {ffLinks.length > 1 && ` (${formatNumber(ffLinks.length, 0)})`}
+                    </h2>
+                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                        {assembly.warehouse_name || '—'}
+                    </span>
+                    <span style={{ flex: 1 }} />
+                    {canLinkFf && (
+                        <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => setShowFfLinkModal(true)}
+                            title="Показать свободные заявки ФФ склада и связать с этой сборкой"
+                        >
+                            Связать
+                        </button>
+                    )}
+                </div>
+                {ffLinks.length === 0 ? (
+                    <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+                        {isFbs
+                            ? 'Заявок ФФ не связано. Зеркало FBS приезжает из WB само — учётную заявку ФФ к нему привязывают руками: нажмите «Связать».'
+                            : 'Заявок ФФ не связано. Нажмите «Связать» — покажем свободные заявки этого склада.'}
+                    </div>
+                ) : (
+                    <div className="ff-link-list" style={{ maxHeight: 'none' }}>
+                        {ffLinks.map(link => (
+                            <div key={link.ff_request_id} className="ff-link-row">
+                                <div className="ff-link-row-main">
+                                    <div className="ff-link-row-head">
+                                        <Link
+                                            href={`/p/${slug}/warehouse/${link.ff_warehouse_id ?? assembly.warehouse_id}/ff-request/${link.ff_request_id}`}
+                                            className="ff-link-row-number"
+                                            style={{ color: 'var(--color-accent)' }}
+                                            title="Открыть заявку ФФ и сверку состава"
+                                        >
+                                            {link.ff_request_number || `#${link.ff_request_id}`} →
+                                        </Link>
+                                        {link.ff_stage_title && (
+                                            <span className="badge badge-info" style={{ fontSize: 11, padding: '2px 8px' }}>
+                                                {link.ff_stage_title}
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+                                {canLinkFf && (
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        style={{ color: 'var(--color-danger)' }}
+                                        disabled={unlinkingFfId === link.ff_request_id}
+                                        onClick={() => handleUnlinkFf(link)}
+                                        title="Убрать связь со сборкой; сама заявка у ФФ останется"
+                                    >
+                                        {unlinkingFfId === link.ff_request_id ? '...' : 'Отвязать'}
+                                    </button>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
 
             {/* Наполнение зеркала FBS — задания поставки, как на экране поставки
                 в разделе FBS: когда поступил заказ (+«N ч назад»), товар, цена,
@@ -1834,6 +1970,25 @@ export default function AssemblyDetailPage() {
                         )}
                     </div>
                 </div>
+            )}
+
+            {/* «Связать» из блока «Фулфилмент» — та же модалка, что у переезда,
+                в режиме сборки (слот assembly_request_id). Живёт ВНЕ ветки
+                `tab === 'request'`: переключение вкладки не должно ронять
+                открытый выбор. */}
+            {showFfLinkModal && assembly && (
+                <TransferFfLinkModal
+                    kind="assembly"
+                    assemblyId={assembly.id}
+                    assemblyNumber={assembly.number}
+                    warehouseId={assembly.warehouse_id}
+                    warehouseName={assembly.warehouse_name ?? null}
+                    onClose={() => setShowFfLinkModal(false)}
+                    onLinked={async () => {
+                        await reloadAssembly();
+                        setToast({ message: 'Заявка ФФ связана со сборкой', type: 'success' });
+                    }}
+                />
             )}
 
             {/* Migfull-портал («Натали») — заявка на отгрузку из сборки */}

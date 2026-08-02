@@ -4569,7 +4569,14 @@ async def _load_match_suggestions(
             AssemblyRequest.warehouse_id.in_({r.warehouse_id for r in targets}),
             AssemblyRequest.is_deleted == False,
             AssemblyRequest.status.in_(_SUGGEST_CANDIDATE_STATUSES),
-            # kind=fbs не связывается с заявками ФФ (учётное зеркало без ФФ-цикла).
+            # 🔴 kind=fbs остаётся ОТФИЛЬТРОВАННЫМ, хотя запрет на саму связь снят
+            # 2026-08-02 (см. `_assembly_candidates`). Здесь не «нельзя связать», а
+            # «не подсказываем»: это АВТО-подсказка, и при недоступном составе
+            # ФФ-заявки скоринг падает на фолбэк по дате (70 баллов за тот же день).
+            # Открытое FBS-зеркало живёт в IN_PROGRESS сутками → оно всплывало бы
+            # подсказкой у КАЖДОЙ дневной FBO-заявки склада, где связь-то нужна
+            # редко и штучно. Ручной путь открыт: модалка «Связать» (кандидаты) и
+            # обратная ручка со сборки — там зеркало видно.
             AssemblyRequest.kind != AssemblyKind.FBS.value,
             AssemblyRequest.id.not_in(linked_subq),
         )
@@ -4812,6 +4819,11 @@ async def list_unlinked_assemblies(
     коррелированный ~exists). total_qty/brands — двумя batch-агрегатами по
     выбранным id (без N+1); brand берётся из Nomenclature позиций, как в
     assembly._build_items_with_stock. Сортировка created_at desc, limit.
+
+    🔴 Зеркала FBS (kind=fbs) с 2026-08-02 тоже предлагаются (канон-запрет снят,
+    см. `_assembly_candidates`). Практически сюда попадают только зеркала в
+    IN_PROGRESS: дальше по цепочке у них SHIPPED/DELIVERED/CANCELLED, а
+    _UNLINKED_ASSEMBLY_STATUSES ограничен IN_PROGRESS/READY/VEHICLE_ASSIGNED.
     """
     linked = exists().where(
         FulfillmentRequest.project_id == project_id,
@@ -4840,8 +4852,6 @@ async def list_unlinked_assemblies(
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted == False,
             AssemblyRequest.status.in_(_UNLINKED_ASSEMBLY_STATUSES),
-            # kind=fbs не предлагаем к связыванию с заявками ФФ.
-            AssemblyRequest.kind != AssemblyKind.FBS.value,
             ~linked,
         )
         .order_by(AssemblyRequest.created_at.desc(), AssemblyRequest.id.desc())
@@ -7000,8 +7010,18 @@ async def link_request(
         # Авто-READY при привязке: стадия ФФ уже «готов», наша заявка ещё
         # IN_PROGRESS → переводим сразу (та же логика, что при синке). Для migfull
         # (N:1) — только если ВСЕ остальные привязанные заявки сборки тоже готовы.
+        #
+        # 🔴 kind=fbs исключён: с 2026-08-02 зеркало FBS МОЖНО связать с заявкой
+        # ФФ (связь учётная), но статусы зеркала ведёт ТОЛЬКО джоб
+        # `wb_fbs/assembly_mirror` по фазе поставки, и READY в его цепочке
+        # (IN_PROGRESS→SHIPPED→DELIVERED) вообще нет: _STATUS_RANK["ready"]=0 →
+        # зеркало выпало бы из фазовых вкладок до следующего тика, а
+        # actual_ready_date получило бы выдуманную дату. Тот же гейт стоит в
+        # `_apply_ready_transitions` (авто-READY синка) — здесь его не было
+        # только потому, что связи fbs↔ФФ раньше не существовало.
         if (
-            not req.archived
+            doc.kind != AssemblyKind.FBS.value
+            and not req.archived
             # expired (просрочена) — активна, авто-READY как при синке
             and doc.status == AssemblyStatus.IN_PROGRESS.value
             and _assembly_ready_signal(req.provider, req.stage_code, req.stage_title, req.is_completed)
@@ -7357,6 +7377,12 @@ async def _assembly_candidates(
     уже связанные сборки: их можно привязать к ещё одной ФФ-заявке (linked_ff_count
     показывает, со сколькими другими ФФ-заявками сборка уже связана). Для прочих
     провайдеров сборки, связанные с другой ФФ-заявкой, из кандидатов исключаются.
+
+    🔴 Зеркала FBS (kind=fbs) с 2026-08-02 КАНДИДАТЫ НАРАВНЕ с обычными сборками
+    (прежний канон «fbs с ФФ не связывается» отменён): FBS-сборку физически ведёт
+    тот же ФФ-склад, и его заявка — тот же документ, что у FBO. Связь остаётся
+    ЧИСТО УЧЁТНОЙ: она не двигает статус зеркала (гейт в `link_request`), не
+    резервирует и не списывает сток — все эти читатели фильтруют kind=fbs у себя.
     """
     allow_multi = provider == "migfull"
     q = (
@@ -7367,9 +7393,6 @@ async def _assembly_candidates(
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted == False,
             AssemblyRequest.status != AssemblyStatus.CANCELLED.value,
-            # Зеркала FBS с заявками ФФ не связываются (канон kind=fbs) —
-            # братья _load_match_suggestions/list_unlinked_assemblies уже фильтруют.
-            AssemblyRequest.kind != AssemblyKind.FBS.value,
         )
         .order_by(AssemblyRequest.created_at.desc(), AssemblyRequest.id.desc())
         .limit(_LINK_CANDIDATES_LIMIT)
@@ -7608,12 +7631,16 @@ def _transfer_ff_side(transfer: StockTransfer, req: FulfillmentRequest) -> str:
     return "source" if req.kind == FfRequestKind.ASSEMBLY.value else "dest"
 
 
-def _transfer_ff_link_row(req: FulfillmentRequest, side: str) -> dict:
-    """FulfillmentRequest → TransferFfLink-shaped dict (общий для связок и кандидатов)."""
+def _ff_link_row(req: FulfillmentRequest) -> dict:
+    """FulfillmentRequest → строка связки/кандидата БЕЗ привязки к типу документа.
+
+    Общая часть `TransferFfLink` (переезд) и `AssemblyFfCandidate` (сборка): и
+    там, и там карточке нужен один набор — показать заявку и собрать вызов
+    link/unlink (ручки ФФ скоуплены складом, поэтому `warehouse_id` обязателен).
+    """
     return {
         "id": req.id,
         "warehouse_id": req.warehouse_id,
-        "side": side,
         "number": req.number,
         "external_id": req.external_id,
         "kind": req.kind,
@@ -7622,6 +7649,15 @@ def _transfer_ff_link_row(req: FulfillmentRequest, side: str) -> dict:
         "total_qty": req.total_qty,
         "external_created_at": req.external_created_at,
     }
+
+
+def _transfer_ff_link_row(req: FulfillmentRequest, side: str) -> dict:
+    """FulfillmentRequest → TransferFfLink-shaped dict (общий для связок и кандидатов).
+
+    У переезда две стороны и два склада, поэтому к общей строке добавляется
+    `side` — без него UI не разложит связки по подсекциям карточки.
+    """
+    return {**_ff_link_row(req), "side": side}
 
 
 async def list_transfer_ff_links(
@@ -7696,31 +7732,28 @@ async def list_transfer_ff_links_batch(
     return out
 
 
-async def list_transfer_ff_candidates(
-    db: AsyncSession, project_id: int, transfer: StockTransfer, side: str
-) -> list[dict]:
-    """Заявки ФФ, которые МОЖНО привязать к переезду с запрошенной стороны.
+async def _free_ff_requests(
+    db: AsyncSession, project_id: int, warehouse_id: int, kind: str
+) -> list[FulfillmentRequest]:
+    """СВОБОДНЫЕ заявки ФФ склада заданного kind — общая выборка кандидатов.
 
-    Отдаём только заявки БЕЗ нашего документа (`assembly_request_id` /
+    «Свободна» = ни один слот нашего документа не занят (`assembly_request_id` /
     `inbound_receipt_id` / `stock_transfer_id` пусты): занятая заявка уже
     описывает другой документ, привязка второго её бы переписала. Пары
     «вскрытия коробов» (`repack_return_id`) исключены — `link_request` их всё
-    равно отбивает, показывать их в списке значит звать на 400.
+    равно отбивает, показывать их в списке значит звать на 400. `local_archived`
+    отфильтрован: убранное из рабочего списка склада не предлагаем связывать.
 
-    ValueError — неизвестная сторона (роутер валидирует раньше, гард на случай
-    вызова из другого места).
+    Один источник для обеих карточек-инициаторов (переезд и сборка): расходись
+    они предикатами — один экран показывал бы кандидата, которого второй прячет.
     """
-    kind = _TRANSFER_SIDE_KIND.get(side)
-    if kind is None:
-        raise ValueError("Сторона переезда должна быть source или dest")
-    warehouse_id = transfer.from_warehouse_id if side == "source" else transfer.to_warehouse_id
     result = await db.execute(
         select(FulfillmentRequest)
         .where(
             FulfillmentRequest.project_id == project_id,
             FulfillmentRequest.warehouse_id == warehouse_id,
             FulfillmentRequest.kind == kind,
-            FulfillmentRequest.local_archived == False,
+            FulfillmentRequest.local_archived == False,  # noqa: E712 — SQLAlchemy expression
             FulfillmentRequest.assembly_request_id.is_(None),
             FulfillmentRequest.inbound_receipt_id.is_(None),
             FulfillmentRequest.stock_transfer_id.is_(None),
@@ -7732,7 +7765,60 @@ async def list_transfer_ff_candidates(
         )
         .limit(_LINK_CANDIDATES_LIMIT)
     )
-    return [_transfer_ff_link_row(r, side) for r in result.scalars().all()]
+    return list(result.scalars().all())
+
+
+async def list_transfer_ff_candidates(
+    db: AsyncSession, project_id: int, transfer: StockTransfer, side: str
+) -> list[dict]:
+    """Заявки ФФ, которые МОЖНО привязать к переезду с запрошенной стороны.
+
+    Предикат «свободна» — в `_free_ff_requests`; здесь только выбор склада и
+    kind по стороне переезда.
+
+    ValueError — неизвестная сторона (роутер валидирует раньше, гард на случай
+    вызова из другого места).
+    """
+    kind = _TRANSFER_SIDE_KIND.get(side)
+    if kind is None:
+        raise ValueError("Сторона переезда должна быть source или dest")
+    warehouse_id = transfer.from_warehouse_id if side == "source" else transfer.to_warehouse_id
+    rows = await _free_ff_requests(db, project_id, warehouse_id, kind)
+    return [_transfer_ff_link_row(r, side) for r in rows]
+
+
+async def get_assembly_ff_candidates(
+    db: AsyncSession, project_id: int, assembly_request_id: int
+) -> list[dict]:
+    """Заявки ФФ, которые можно привязать к нашей заявке на сборку.
+
+    Зеркало `list_transfer_ff_candidates` для второго нашего исходящего
+    документа. У сборки сторона одна (склад-источник собирает и отдаёт машине),
+    поэтому kind кандидата всегда `assembly`, склад — склад самой сборки, и
+    поля `side` в строке нет.
+
+    Обратное направление к модалке «Связать» со стороны ФФ-заявки
+    (`get_link_candidates`): там ищут НАШ документ под заявку ФФ, здесь — заявку
+    ФФ под наш документ. Скоринга нет намеренно: инициатор уже знает, ЧТО
+    связывает, ему нужен список свободных заявок склада, а не догадки.
+
+    Работает и для зеркал FBS (`kind=fbs`) — с 2026-08-02 они связываются с
+    заявками ФФ наравне с обычными сборками (см. `_assembly_candidates`).
+
+    ValueError — сборки нет в проекте (роутер → 404).
+    """
+    result = await db.execute(
+        select(AssemblyRequest.warehouse_id).where(
+            AssemblyRequest.id == assembly_request_id,
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted == False,  # noqa: E712 — SQLAlchemy expression
+        )
+    )
+    warehouse_id = result.scalar_one_or_none()
+    if warehouse_id is None:
+        raise ValueError("Заявка на сборку не найдена")
+    rows = await _free_ff_requests(db, project_id, warehouse_id, FfRequestKind.ASSEMBLY.value)
+    return [_ff_link_row(r) for r in rows]
 
 
 async def get_link_candidates(

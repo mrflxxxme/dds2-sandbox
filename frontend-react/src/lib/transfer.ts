@@ -499,8 +499,17 @@ export function splitTransferFfLinks(links: TransferFfLink[] | null | undefined)
     return out;
 }
 
-/** Клиентский поиск по кандидатам: номер, внешний id, стадия, статус. */
-export function filterTransferFfLinks(links: TransferFfLink[], query: string): TransferFfLink[] {
+/**
+ * Клиентский поиск по кандидатам: номер, внешний id, стадия, статус.
+ *
+ * Дженерик, а не `TransferFfLink[]`: та же модалка ищет и по кандидатам СБОРКИ
+ * (`AssemblyFfCandidate` — тот же тип без `side`). Ограничение по Pick честно
+ * говорит, что читаем ровно четыре поля, а возврат `T[]` сохраняет исходный тип
+ * у всех вызывающих.
+ */
+export function filterTransferFfLinks<
+    T extends Pick<TransferFfLink, 'number' | 'external_id' | 'stage_title' | 'status'>,
+>(links: T[], query: string): T[] {
     const q = query.trim().toLowerCase();
     if (!q) return links;
     return links.filter(l =>

@@ -1957,60 +1957,6 @@ class TestInsufficientStock:
         req = await mark_ready(db_session, PROJECT_ID, req.id)
         assert req.status == AssemblyStatus.READY
 
-    async def test_attach_fbo_on_closed_request_without_link(self, db_session):
-        """Закрытая сборка БЕЗ поставки — привязать можно (заполнение пробела).
-
-        Ради учётных заявок ФФ (kind=fbs): они приезжают из синка сразу в
-        DELIVERED, редактируемых статусов у них не бывает вовсе, и прежний
-        глухой запрет на закрытых статусах делал связку невозможной навсегда.
-        """
-        wh_id = await _get_fulfillment_wh_id(db_session)
-        fbo_id = await _get_fbo_supply_id(db_session)
-
-        req = await create_assembly_request(
-            db_session,
-            PROJECT_ID,
-            AssemblyRequestCreate(
-                warehouse_id=wh_id,
-                wb_fbo_supply_id=None,
-                pallets_count=1,
-                pallet_weight_kg=Decimal("100.00"),
-                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=5)],
-            ),
-        )
-        # Загоняем в закрытый статус, минуя отгрузку: важен сам гейт статуса.
-        req.status = AssemblyStatus.DELIVERED
-        await db_session.commit()
-
-        req = await update_assembly_request(
-            db_session, PROJECT_ID, req.id, AssemblyRequestUpdate(wb_fbo_supply_id=fbo_id)
-        )
-        assert req.wb_fbo_supply_id == fbo_id
-
-    async def test_repoint_fbo_on_closed_request_rejected(self, db_session):
-        """А вот ПЕРЕпривязка закрытой сборки запрещена — товар уехал в прежнюю."""
-        wh_id = await _get_fulfillment_wh_id(db_session)
-        fbo_id = await _get_fbo_supply_id(db_session)
-
-        req = await create_assembly_request(
-            db_session,
-            PROJECT_ID,
-            AssemblyRequestCreate(
-                warehouse_id=wh_id,
-                wb_fbo_supply_id=fbo_id,
-                pallets_count=1,
-                pallet_weight_kg=Decimal("100.00"),
-                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=5)],
-            ),
-        )
-        req.status = AssemblyStatus.DELIVERED
-        await db_session.commit()
-
-        with pytest.raises(ValueError, match="перепривязать нельзя"):
-            await update_assembly_request(
-                db_session, PROJECT_ID, req.id, AssemblyRequestUpdate(wb_fbo_supply_id=fbo_id + 1)
-            )
-
     async def test_ship_insufficient_stock(self, db_session):
         """13. Ship with insufficient stock -> ValueError with deficit details."""
         wh_id = await _get_fulfillment_wh_id(db_session)

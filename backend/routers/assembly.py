@@ -25,6 +25,7 @@ from backend.project_context import get_current_project
 from backend.schemas.assembly import (
     ALLOWED_ASSEMBLY_KINDS,
     AssemblyAttempt,
+    AssemblyFfCandidate,
     InTransitItem,
     InTransitResponse,
     AssemblyFlowAnalyticsResponse,
@@ -942,6 +943,32 @@ async def assembly_ff_mismatch(
     if data is None:
         raise HTTPException(404, "Assembly request not found")
     return data
+
+
+@router.get("/{request_id}/ff-candidates", response_model=list[AssemblyFfCandidate])
+async def assembly_ff_candidates(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Заявки ФФ, которые можно привязать к этой сборке, — связка ОТ карточки сборки.
+
+    Зеркало `GET /warehouse/transfers/{id}/ff-candidates`: свободные (без нашего
+    документа) заявки `kind=assembly` склада-источника сборки, свежие сверху.
+    Работает и для учётных зеркал FBS (`kind=fbs`) — запрет на их связь с ФФ снят
+    2026-08-02, связь остаётся чисто учётной (статус зеркала не двигает).
+
+    Сама привязка — существующей ручкой ФФ
+    `POST /warehouse/{warehouse_id}/fulfillment/requests/{ff_id}/link` с
+    `{"assembly_request_id": ...}`; `warehouse_id` бери из строки кандидата.
+
+    Путь двухсегментный (`{id}/ff-candidates`), поэтому объявленный выше
+    `GET /{request_id}` его не съедает — совпадает и число сегментов, и суффикс.
+    """
+    try:
+        return await fulfillment_service.get_assembly_ff_candidates(db, project.id, request_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from None
 
 
 @router.post(

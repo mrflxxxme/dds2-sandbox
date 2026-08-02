@@ -1388,9 +1388,13 @@ export interface StockTransfer {
 export type TransferFfSide = 'source' | 'dest';
 
 /**
- * Заявка ФФ на стороне переезда — ОДИН тип на два места:
+ * Заявка ФФ на стороне переезда — ОДИН тип на три места:
  *  • `StockTransfer.ff_links` — уже связанные;
- *  • `GET /warehouse/transfers/{id}/ff-candidates?side=…` — свободные кандидаты.
+ *  • `GET /warehouse/transfers/{id}/ff-candidates?side=…` — свободные кандидаты;
+ *  • `AssemblyFfCandidate` (см. ниже) — то же для заявки на сборку, без `side`.
+ *    Форма ответа общая намеренно: кандидатов показывает одна модалка на оба
+ *    документа, и разъехавшиеся формы заставили бы её ветвиться на разборе
+ *    данных, а не только на подписях.
  *
  * Имя `FfLinkCandidate` занято кандидатом ОБРАТНОГО направления (наш документ
  * как кандидат для заявки ФФ, `{doc_id, doc_kind, score…}`) — не путать.
@@ -1415,6 +1419,18 @@ export interface TransferFfLink {
   /** Дата (YYYY-MM-DD), не datetime. */
   external_created_at: string | null;
 }
+
+/**
+ * Кандидат на связь с ЗАЯВКОЙ НА СБОРКУ —
+ * `GET /warehouse/assembly/{id}/ff-candidates` (в т.ч. учётное зеркало FBS,
+ * kind=fbs: запрет на его связь с ФФ снят 02.08.2026).
+ *
+ * Это `TransferFfLink` БЕЗ `side`: у сборки сторона одна — склад-источник,
+ * который её собирает, и бэкенд поля не шлёт. Объявляем `Omit`, а не
+ * переиспользуем тип целиком, чтобы «поле есть, а в рантайме всегда undefined»
+ * не жило в типах.
+ */
+export type AssemblyFfCandidate = Omit<TransferFfLink, 'side'>;
 
 /**
  * Тело PUT /warehouse/transfers/{id} — правка ЧЕРНОВИКА.

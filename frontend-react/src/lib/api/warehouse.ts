@@ -37,6 +37,7 @@ import type {
     AssemblyHistoryEntry,
     AssemblyPickupCostHistoryEntry,
     AssemblyListResponse,
+    AssemblyFfCandidate,
     AssemblyRequest,
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
@@ -632,6 +633,24 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         getAssemblyFfMismatch(id: number) {
             return api.request<FfMismatchDetail>('GET', `/api/v1/warehouse/assembly/${id}/ff-mismatch`);
+        },
+        /**
+         * GET /warehouse/assembly/{id}/ff-candidates — свободные заявки ФФ склада
+         * ЭТОЙ сборки для связки (слот `fulfillment_requests.assembly_request_id`).
+         * Занятые другими документами не приходят.
+         *
+         * Ответ намеренно той же формы, что у переезда (`AssemblyFfCandidate` —
+         * это `TransferFfLink` без `side`: сторон маршрута у сборки нет).
+         * Связывает их одна и та же модалка, и разъехавшиеся формы ответа
+         * заставили бы её ветвиться на разборе данных, а не только на подписях.
+         *
+         * Работает и для учётного зеркала FBS (kind=fbs): его поле «FBO поставка»
+         * занято поставкой WB-GI из синка, и связь с документом ФФ у неё живёт
+         * ТОЛЬКО здесь. Пустой ответ — норма: у склада без ФФ-интеграции (или
+         * когда всё уже связано) связывать нечего.
+         */
+        getAssemblyFfCandidates(assemblyId: number) {
+            return api.request<AssemblyFfCandidate[]>('GET', `/api/v1/warehouse/assembly/${assemblyId}/ff-candidates`);
         },
         updateAssemblyRequest(id: number, data: AssemblyRequestUpdate) {
             return api.request<AssemblyRequest>('PUT', `/api/v1/warehouse/assembly/${id}`, data);
