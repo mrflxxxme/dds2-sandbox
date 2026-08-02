@@ -47,12 +47,17 @@ _REDIRECT_CODES = {301, 302, 303, 307, 308}
 _LOGIN_COMPONENT = "Filament\\Auth\\Pages\\Login"
 _CREATE_COMPONENT = "CreateShipment"
 _EDIT_COMPONENT = "EditShipment"
+# Поставка/приёмка НА склад ФФ (read-API называет их submissions) — зеркальный
+# Filament-ресурс /app/submissions с теми же Livewire-паттернами, что и shipments.
+_SUBMISSION_CREATE_COMPONENT = "CreateSubmission"
+_SUBMISSION_EDIT_COMPONENT = "EditSubmission"
 _FILES_RM_COMPONENT = "FilesRelationManager"
 
 # Путь поля загрузки файла в смонтированном action-модале
 _UPLOAD_STATE_PATH = "mountedActions.0.data.file_uploads"
 
 _GUID_RE = re.compile(r"/app/shipments/([0-9a-fA-F-]{36})")
+_SUBMISSION_GUID_RE = re.compile(r"/app/submissions/([0-9a-fA-F-]{36})")
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 
 
@@ -286,24 +291,25 @@ class MigfullPortalClient:
             return False
         return True
 
-    # ─── Создание шапки заявки ───────────────────────────────────────────────
+    # ─── Создание шапки документа (заявка на отгрузку / поставка) ────────────
 
-    async def create_shipment(self, header: dict[str, object]) -> MigfullCreateResult:
-        """Создать шапку заявки (Livewire `create`). БЕЗ retry — создание необратимо.
+    async def _create_document(
+        self, create_path: str, component: str, guid_re: re.Pattern[str], header: dict[str, object], what: str
+    ) -> MigfullCreateResult:
+        """Создать шапку документа (Livewire `create`). БЕЗ retry — создание необратимо.
 
-        ``header`` — пары data-полей (marketplace_id, shipment_type, number, shipment_date,
-        notes, filter_delivery_type, destination_marketplace_id). .live-поля сетятся
-        последовательно: filter_delivery_type (фильтрует склады) → destination_marketplace_id
+        ``header`` — пары data-полей формы. .live-поля сетятся последовательно:
+        filter_delivery_type (фильтрует склады) → destination_marketplace_id
         последним (иначе reactive-перерисовка их затрёт).
         """
         async with self._circuit:
-            page = await self._get("/app/shipments/create")
+            page = await self._get(create_path)
             if page.status_code in _REDIRECT_CODES:
                 raise MigfullPortalAuthError()  # ничего не создано — безопасно перелогиниться и повторить
             if page.status_code != 200:
                 raise MigfullPortalError("migfull-портал: форма создания недоступна", status_code=page.status_code)
             self._csrf = _meta_csrf(page.text) or self._csrf
-            snap = _find_snapshot(page.text, _CREATE_COMPONENT)
+            snap = _find_snapshot(page.text, component)
             if not snap:
                 raise MigfullPortalError("migfull-портал: форма создания не распознана", status_code=502)
 
@@ -315,31 +321,60 @@ class MigfullPortalClient:
             for field, value in ordered:
                 if value is None:
                     continue
-                comp = await self._livewire(snap, updates={f"data.{field}": value}, referer="/app/shipments/create")
+                comp = await self._livewire(snap, updates={f"data.{field}": value}, referer=create_path)
                 snap = comp.get("snapshot") or snap
 
-            comp = await self._livewire(snap, calls=[{"path": "", "method": "create", "params": []}], referer="/app/shipments/create")
+            comp = await self._livewire(snap, calls=[{"path": "", "method": "create", "params": []}], referer=create_path)
             redirect = comp.get("effects", {}).get("redirect") or ""
-            m = _GUID_RE.search(redirect)
+            m = guid_re.search(redirect)
             if not m:
                 errors = json.loads(comp["snapshot"])["memo"].get("errors") if comp.get("snapshot") else None
                 msg = "; ".join(str(v) for vs in (errors or {}).values() for v in (vs if isinstance(vs, list) else [vs]))
                 raise MigfullPortalError(
-                    self._redact(f"migfull-портал: заявка не создана — {msg or 'нет редиректа'}"), status_code=422
+                    self._redact(f"migfull-портал: {what} не создана — {msg or 'нет редиректа'}"), status_code=422
                 )
             return MigfullCreateResult(guid=m.group(1))
+
+    async def create_shipment(self, header: dict[str, object]) -> MigfullCreateResult:
+        """Создать шапку заявки на отгрузку (marketplace_id, shipment_type, number,
+        shipment_date, notes, filter_delivery_type, destination_marketplace_id)."""
+        return await self._create_document("/app/shipments/create", _CREATE_COMPONENT, _GUID_RE, header, "заявка")
+
+    async def create_submission(self, header: dict[str, object]) -> MigfullCreateResult:
+        """Создать шапку ПОСТАВКИ на склад ФФ (приёмки, read-API: submission).
+
+        ``header`` — пары data-полей формы (number, submission_date, notes).
+        Успех = redirect /app/submissions/{guid}.
+        """
+        return await self._create_document(
+            "/app/submissions/create", _SUBMISSION_CREATE_COMPONENT, _SUBMISSION_GUID_RE, header, "поставка"
+        )
 
     # ─── Загрузка описи (.xlsx) ──────────────────────────────────────────────
 
     async def upload_opis(self, guid: str, filename: str, content: bytes, content_type: str) -> MigfullUploadResult:
-        """Загрузить опись на заявку: Livewire file-upload + submit action. БЕЗ retry.
+        """Загрузить опись на заявку на отгрузку. См. _upload_opis_document."""
+        return await self._upload_opis_document("shipments", _EDIT_COMPONENT, guid, filename, content, content_type)
+
+    async def upload_submission_opis(
+        self, guid: str, filename: str, content: bytes, content_type: str
+    ) -> MigfullUploadResult:
+        """Загрузить опись на поставку (приёмку) — зеркальный ресурс /app/submissions."""
+        return await self._upload_opis_document(
+            "submissions", _SUBMISSION_EDIT_COMPONENT, guid, filename, content, content_type
+        )
+
+    async def _upload_opis_document(
+        self, resource: str, edit_component: str, guid: str, filename: str, content: bytes, content_type: str
+    ) -> MigfullUploadResult:
+        """Загрузить опись на документ: Livewire file-upload + submit action. БЕЗ retry.
 
         Возвращает MigfullUploadResult(ok, reference). reference (PVB-…) читается с
         edit-страницы заодно (там же снапшот FilesRelationManager).
         """
         if not re.fullmatch(r"[0-9a-fA-F-]{36}", guid):
             raise MigfullPortalError("migfull-портал: некорректный guid заявки", status_code=400)
-        ref = f"/app/shipments/{guid}/edit"
+        ref = f"/app/{resource}/{guid}/edit"
         async with self._circuit:
             page = await self._get(ref)
             if page.status_code in _REDIRECT_CODES:
@@ -347,7 +382,7 @@ class MigfullPortalClient:
             if page.status_code != 200:
                 raise MigfullPortalError(f"migfull-портал: заявка {guid} недоступна", status_code=page.status_code)
             self._csrf = _meta_csrf(page.text) or self._csrf
-            reference = _snapshot_data(_find_snapshot(page.text, _EDIT_COMPONENT) or "{}").get("reference")
+            reference = _snapshot_data(_find_snapshot(page.text, edit_component) or "{}").get("reference")
             files_snap = _find_snapshot(page.text, _FILES_RM_COMPONENT)
             if not files_snap:
                 raise MigfullPortalError("migfull-портал: блок файлов заявки не распознан", status_code=502)

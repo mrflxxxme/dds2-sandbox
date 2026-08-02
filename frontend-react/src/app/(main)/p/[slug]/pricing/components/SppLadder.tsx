@@ -75,6 +75,7 @@ export default function SppLadder({ dateFrom, dateTo }: { dateFrom: string; date
     const [to, setTo] = useState(isoToday);
     const [step, setStep] = useState('100');
     const [observing, setObserving] = useState(false);
+    const [snapMsg, setSnapMsg] = useState('');  // итог последнего среза — иначе кнопка молчит
     const [openCat, setOpenCat] = useState<string | null>(null);
     const [pickedTh, setPickedTh] = useState<SppThreshold | null>(null);  // выбранный порог — подсветка категорий
 
@@ -106,8 +107,16 @@ export default function SppLadder({ dateFrom, dateTo }: { dateFrom: string; date
 
     const doObserve = async () => {
         setObserving(true);
+        setSnapMsg('');
         try {
-            await api.observeSpp(0);
+            // срез идёт в два шага (цены → витрина), и его итог надо ПОКАЗАТЬ:
+            // молчаливая кнопка не отличается от кнопки, которая ничего не сделала
+            const res = await api.observeSpp(0);
+            setSnapMsg(
+                `цены обновлены: ${formatNumber(res.prices.rows, 0)} · записано точек: `
+                + `${formatNumber(res.snapshot.written, 0)} из ${formatNumber(res.snapshot.requested, 0)}`
+                + (res.snapshot.stale ? ` · пропущено ${formatNumber(res.snapshot.stale, 0)} (витрина ушла вперёд)` : ''),
+            );
             await load();
         } catch (e) {
             setError(e instanceof Error ? e.message : 'Ошибка');
@@ -189,11 +198,18 @@ export default function SppLadder({ dateFrom, dateTo }: { dateFrom: string; date
 
                     <div style={{ flex: 1 }} />
                     <button className="btn btn-sm btn-secondary" onClick={doExport} disabled={!cats.length}>Excel</button>
-                    <button className="btn btn-sm btn-primary" onClick={doObserve} disabled={observing}>
+                    <button className="btn btn-sm btn-primary" onClick={doObserve} disabled={observing}
+                        title="Обновляет цены ВБ и снимает витрину: без свежих цен точки товаров, которым цену меняли, не записываются">
                         {observing ? 'Снимаю…' : 'Снять срез'}
                     </button>
                 </div>
             </div>
+
+            {snapMsg && (
+                <div style={{ fontSize: 11.5, color: '#6b7280', fontFamily: MONO, margin: '-4px 2px 6px' }}>
+                    срез: {snapMsg}
+                </div>
+            )}
 
             <ThresholdsBar rows={resp?.thresholds ?? []} active={pickedTh} onPick={setPickedTh} />
 

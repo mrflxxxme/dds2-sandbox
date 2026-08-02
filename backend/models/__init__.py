@@ -139,6 +139,23 @@ from backend.models.order_city import (
     OrderCityMap,
 )
 
+# Payroll (зарплата: сотрудники, команды, тарифная лестница)
+from backend.models.payroll import (
+    PayrollClientBillingMode,
+    PayrollClientBillingPeriod,
+    PayrollClientEntry,
+    PayrollClientEntryKind,
+    PayrollClientProject,
+    PayrollEmployee,
+    PayrollPayoutMark,
+    PayrollSalaryPeriod,
+    PayrollScopeKind,
+    PayrollTariffStep,
+    PayrollTeam,
+    PayrollTeamMember,
+    PayrollTeamScope,
+)
+
 # Payment Requests (заявки на оплату перевозчику)
 from backend.models.payment_request import (
     PAYMENT_REQUEST_TRANSITIONS,
@@ -344,6 +361,27 @@ from backend.models.wb_reviews import (
 from backend.models.wb_feedback_complaints import (
     WBFeedbackComplaint,
 )
+from backend.models.wb_complaint_agents import (
+    WBComplaintAgent,
+)
+from backend.models.wb_questions import (
+    WBQuestion,
+)
+from backend.models.wb_reply_agents import (
+    WBReplyAgent,
+)
+from backend.models.wb_feedback_replies import (
+    WBFeedbackReply,
+)
+from backend.models.wb_product_kb import (
+    WBProductKB,
+)
+from backend.models.wb_stock_watches import (
+    WBStockWatch,
+)
+from backend.models.wb_product_cards import (
+    WBProductCard,
+)
 
 # Alias for backward compatibility
 WbApiKey = IntegrationKey
@@ -367,6 +405,20 @@ __all__ = [
     "LoanDirection",
     "LoanStatus",
     "LoanPaymentType",
+    # Payroll
+    "PayrollClientBillingMode",
+    "PayrollClientBillingPeriod",
+    "PayrollClientEntry",
+    "PayrollClientEntryKind",
+    "PayrollClientProject",
+    "PayrollEmployee",
+    "PayrollPayoutMark",
+    "PayrollSalaryPeriod",
+    "PayrollScopeKind",
+    "PayrollTariffStep",
+    "PayrollTeam",
+    "PayrollTeamMember",
+    "PayrollTeamScope",
     # Enums
     "EventType2",
     "TransactionStatus",
@@ -495,6 +547,13 @@ __all__ = [
     # WB Customer Feedbacks
     "WBFeedback",
     "WBFeedbackComplaint",
+    "WBComplaintAgent",
+    "WBQuestion",
+    "WBReplyAgent",
+    "WBFeedbackReply",
+    "WBProductKB",
+    "WBStockWatch",
+    "WBProductCard",
     # Telegram bot
     "TelegramBotUser",
     "TelegramChatBinding",

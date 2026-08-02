@@ -126,6 +126,39 @@ def build_opex_by_type_sql() -> str:
           AND c.is_deleted = false
           AND c.project_id = :project_id
           AND c.primary_type NOT IN ({excluded})
+          AND NOT EXISTS (
+              -- ФОТ идёт в ОПиУ отдельной строкой НАЧИСЛЕНИЕМ (payroll_service.
+              -- get_monthly_accruals); фактические выплаты сотрудникам из выписки
+              -- исключаем из opex, иначе зарплата задваивается. Зеркально стороне
+              -- начисления, ИНАЧЕ деньги исчезают из ОПиУ вовсе (кейс Ирины-логиста):
+              --   * НЕАКТИВНЫЙ сотрудник: начисление 0 → выплаты ОСТАЮТСЯ в opex;
+              --   * процентщик (состоит в живой команде): исключаем ВСЮ историю;
+              --   * оклад-периоды: исключаем ТОЛЬКО с min(valid_from) — «доплатёжная»
+              --     история (выплаты до первого периода) остаётся в opex;
+              --   * привязан, но без команд и без периодов: не исключаем ничего.
+              -- Известное ограничение (принято, не чинить без запроса юзера):
+              -- деактивация сотрудника (is_active=false) ретроактивна — прошлые
+              -- начисления уходят из ФОТ и выплаты возвращаются в opex за ВСЮ
+              -- историю: журнала активности по датам нет, юзер пока не просил.
+              SELECT 1 FROM payroll_employee pe
+              WHERE pe.project_id = :project_id
+                AND pe.counterparty_id = t.counterparty_id
+                AND pe.is_deleted = false
+                AND pe.is_active = true
+                AND (
+                    EXISTS (
+                        SELECT 1 FROM payroll_team_member ptm
+                        JOIN payroll_team pt ON pt.id = ptm.team_id
+                        WHERE ptm.employee_id = pe.id
+                          AND pt.is_deleted = false
+                    )
+                    -- NULL (нет периодов) → сравнение не истинно → не исключаем
+                    OR t.date >= (
+                        SELECT MIN(psp.valid_from) FROM payroll_salary_period psp
+                        WHERE psp.employee_id = pe.id
+                    )
+                )
+          )
         GROUP BY month_key, c.primary_type
         HAVING COALESCE(SUM(t.expense), 0) > 0
     """  # noqa: S608

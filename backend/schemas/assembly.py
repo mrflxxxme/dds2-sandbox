@@ -34,6 +34,36 @@ class FfLinkInfo(BaseModel):
     ff_warehouse_id: int | None = None
 
 
+class AssemblyFfCandidate(BaseModel):
+    """Свободная заявка ФФ — кандидат на привязку К СБОРКЕ (`GET .../ff-candidates`).
+
+    Направление: от карточки сборки к заявке ФФ. Близнец `TransferFfLink`
+    (`backend/schemas/warehouse.py`) без поля `side`: у сборки сторона одна —
+    склад-источник, который её собирает, поэтому kind кандидата всегда
+    `assembly`.
+
+    🔴 НЕ ПУТАТЬ с `FfLinkCandidate` (`backend/schemas/fulfillment.py`) — та про
+    ОБРАТНОЕ направление (наш документ как кандидат для ФФ-заявки) и несёт
+    скоринг совпадения. Здесь скоринга нет: инициатор уже знает, что связывает.
+
+    `warehouse_id` обязателен: ручки link/unlink скоуплены складом
+    (`/warehouse/{warehouse_id}/fulfillment/requests/{id}/link`), без него фронт
+    не соберёт ни вызов, ни ссылку на заявку.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int  # fulfillment_requests.id
+    warehouse_id: int  # наш склад ФФ-заявки — для link/unlink и ссылки
+    number: str | None = None
+    external_id: str
+    kind: str  # всегда assembly (фильтр выборки) — поле для единообразия строки
+    status: str | None = None
+    stage_title: str | None = None
+    total_qty: int | None = None  # заявлено всего, шт
+    external_created_at: date | None = None
+
+
 class JointSibling(BaseModel):
     """Соседняя сборка той же совместной WB-поставки («Совместного номера»).
 

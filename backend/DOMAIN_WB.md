@@ -16,6 +16,12 @@
 | `WbOrderCancelDaily` (`wb_order_cancel_daily`) | Ежедневная статистика отмен | |
 | `WBFeedback` (`wb_feedbacks`) | Зеркало отзывов покупателей WB | uniq `(project_id, wb_id)`; `has_text` derived; sync_type=`feedbacks` |
 | `WBFeedbackComplaint` (`wb_feedback_complaints`) | Учёт жалоб на отзывы (для удаления) | uniq `(project_id, wb_feedback_id)`; status pending/removed/rejected; НЕ авто-отправка в WB |
+| `WBQuestion` (`wb_questions`) | Зеркало вопросов покупателей WB | uniq `(project_id, wb_id)`; sync_type=`questions`; миграция `wq01` |
+| `WBReplyAgent` (`wb_reply_agents`) | ИИ-агенты автоответов на отзывы/вопросы | target feedback/question/both; `auto_send` хранится, но **игнорируется** (только ручное одобрение); миграция `wr01` |
+| `WBFeedbackReply` (`wb_feedback_replies`) | Ответы продавца: черновик → отправка | status draft/approved/sent/error/rejected; source agent/manual; `needs_info`/`generation` — защита от выдумок (миграция `kb01`) |
+| `WBProductKB` (`wb_product_kb`) | База знаний товаров для автоответов | эталонные пары вопрос/ответ по nm_id; source manual/import/card; дедуп `(project_id, nm_id, question_hash)`; миграция `kb01` |
+| `WBProductCard` (`wb_product_cards`) | Зеркало публичных карточек WB | uniq `(project_id, nm_id)`; название/бренд/описание/характеристики (JSONB)/URL фото; миграция `pc01` |
+| `WBStockWatch` (`wb_stock_watches`) | Слежение за поступлением товара | uniq `(project_id, question_wb_id)`; status watching/drafted/dismissed; миграция `sw01` |
 | `WbTariff` (`wb_tariffs`) | Коэффициенты WB | SoftDeleteMixin |
 
 ## Бизнес-правила
@@ -84,6 +90,44 @@ WB возвращает строки удержаний за отзывы с п�
 - **Почему подача ручная:** метод `POST /api/v1/feedbacks/actions` в WB API существует, но WB **временно отключил** его — жалобы подаются только через ЛК продавца (тем, у кого было автоматизировано, предписан ручной режим). Клиент `WBApiClient.submit_feedback_complaint` написан и **дремлет за флагом** `settings.WB_FEEDBACK_COMPLAINTS_API` (default False) — включить, когда WB вернёт метод. ⚠️ Лимит методов отзывов **1 rps** (до 3 rps → блок 60 сек): массовую подачу гнать только фоновой очередью с троттлингом, не в HTTP-запросе (6.7k жалоб ≈ 2 часа).
 - **Автодетект исхода** (`resolve_after_sync`): вызывается из `sync_project_feedbacks` ТОЛЬКО при `full_backfill=True` (актив+архив = полная выдача WB). Жалоба `pending`, а отзыва в выдаче нет → `removed`; отзыв на месте и жалобе >14 дней (`_REJECT_AFTER_DAYS`) → `rejected`. **Грабля:** на инкрементальном синке (без архива) отзыв мог просто уехать в архив — детект там дал бы ложное «удалён», поэтому гейт по `full_backfill` обязателен. Эндпоинты: `GET /reviews/complaints/candidates` (низкооценённые отзывы + статус), `GET /reviews/complaints` (поданные + KPI подано/удалено/не удалено/в ожидании), `POST /reviews/complaints` (зафиксировать, idempotent по отзыву), `PATCH /reviews/complaints/{id}` (исход). Фронт — вкладка «🚩 Жалобы».
 
+### Автоответы на отзывы и вопросы (ИИ, MVP)
+Единый журнал ответов `wb_feedback_replies`: черновик (LLM-агент или ручной) → одобрение → отправка в WB. Зеркало вопросов — `wb_questions` (WB отдаёт questions без `isAnswered`-поля: отвечен = `answer != null`; `subjectName` в productDetails НЕ приходит — `subject` остаётся NULL, резолв по nm_id через Nomenclature на фронте/в аналитике).
+- **WB-клиент** (`integrations/wb_api.py`): `answer_feedback` (PATCH `/api/v1/feedbacks`, body `{id, text}`), `get_questions` (GET `/api/v1/questions`, take ≤ 10000, order dateAsc/dateDesc, dateFrom/dateTo unix), `answer_question` (PATCH `/api/v1/questions`, body `{id, answer: {text}}`). Те же retry/circuit breaker, что у отзывов.
+- **Синк вопросов**: `reply_service.sync_project_questions` — isAnswered false+true, пауза 1.1 сек между вызовами (лимит WB **1 rps** на методы отзывов/вопросов!), upsert `on_conflict (project_id, wb_id)`. Job `wb_questions_sync` — 03:25 MSK (сразу после отзывов); on-demand — `POST /reviews/questions/sync`.
+- **Агенты** (`wb_reply_agents`, CRUD `/reviews/reply-agents` + `POST .../run`): фильтры target/star_levels/nm_ids, `rules` (тон/ограничения) + `examples` (few-shot), сменный LLM-провайдер (`services/ai/reply_llm.py`, транспорт переиспользует `complaint_llm` — ключ `COMPLAINT_LLM_API_KEY`). Прогон: неотвеченные цели БЕЗ открытого ответа (draft/approved/sent — «занято»), кап `_RUN_LIMIT=25`; read-транзакция закрывается ДО походов в LLM; **ВСЕГДА status=draft** — `auto_send` осознанно игнорируется (только ручное одобрение, см. ниже «защита от выдумок»).
+
+### База знаний товаров и защита от выдумок
+Автоответы строятся СТРОГО из базы знаний `wb_product_kb` (эталонные пары «типичный вопрос → правильный ответ» по nm_id) — модель не придумывает характеристики/сроки/состав.
+- **Импорт из архива**: `reply_service.import_kb_from_answered_questions` — отвеченные вопросы зеркала (`is_answered=true`, `answer_text` непуст) → записи КБ (`topic` — эвристика по ключевым словам: Размер/Доставка/Качество/Состав/Цвет/Комплект/Гарантия/Прочее, `source='import'`, `question_example`=текст вопроса). Дедуп по `(project_id, nm_id, md5(нормализованный вопрос))` — частичный unique-индекс `uq_wb_product_kb_project_nm_qhash`, повторный импорт идемпотентен. On-demand — `POST /reviews/kb/import`.
+- **Подбор для генерации**: enabled-записи по nm_id цели, скоринг — пересечение слов вопроса с `topic` (×2) и `question_example` (×1), кап `_KB_LIMIT=30`. Промпт содержит записи с id (модель возвращает `used_kb_ids`).
+- **Контракт LLM** (`reply_llm.draft_reply` → `{reply_text, needs_info, used_kb_ids}`): системный промпт требует отвечать только из приведённых фактов КБ; информации не хватает — `needs_info=true` → черновик `status=draft, needs_info=true` с пустым `draft_text` (UI подсвечивает, одобрить пустой нельзя — `update_draft` валидирует).
+- **Нет записей КБ по nm_id** → LLM не вызывается вовсе: сразу draft-заглушка `needs_info=true`.
+- **Нет LLM-ключа** (`COMPLAINT_LLM_API_KEY` пуст) → fallback `kb_direct`: точное/почти точное совпадение вопроса с записью КБ (нормализованный текст или тема + Jaccard ≥ 0.6) → `draft_text` = эталонный ответ КБ как есть, `generation='kb_direct'`; иначе `needs_info=true`. Поле `generation`: `llm` | `kb_direct` | `None` (ручной/заглушка).
+- **Только ручное одобрение**: автоотправка захардкожена выключенной — `run_reply_agent` игнорирует `agent.auto_send`, каждый черновик `draft` (поле оставлено в модели для совместимости API/фронта).
+- **API**: `GET /reviews/kb/products` (nm_id + число записей + имя/артикул из зеркала вопросов, фолбэк — зеркало отзывов), `GET /reviews/kb?nm_id=&enabled=`, `POST /reviews/kb`, `PATCH /reviews/kb/{id}` (`enabled=false` — мягкое отключение), `DELETE /reviews/kb/{id}` (реальный delete), `POST /reviews/kb/import`.
+- **Архивный досинк вопросов** (dev, TLS-фильтр локальной сети): `scripts/dev_wb_questions_archive_sync.py` — все страницы `isAnswered=true` через SOCKS5 хоста (take ≤ 10000, пауза 1.1 сек — лимит 1 rps), ключ из `integration_keys` по id (расшифровка в памяти, не печатается), upsert тем же сервисным кодом, коммит постранично.
+
+### Зеркало карточек WB (wb_product_cards)
+Публичные API WB **без ключа продавца** (`services/wb_cards_service.py`):
+- **card.json**: `https://basket-XX.wbbasket.ru/vol{vol}/part{part}/{nm}/info/ru/card.json` (`vol=nm//100000`, `part=nm//1000`). Поля: `imt_name`, `subj_name`, `description`, `contents` (комплектация), `options[] {name, value, charc_type, is_variable, variable_values[]}`, `media.photo_count` (число фото — перебор по 404 НЕ нужен).
+- **Basket-таблица** (`_BASKET_BOUNDS`): vol ≤ 143→1, 287→2, 431→3, 719→4, 1007→5, 1061→6, 1115→7, 1169→8, 1313→9, 1601→10, 1655→11, 1919→12, 2045→13, 2189→14, 2405→15, 2621→16, 2837→17, 3053→18, 3269→19, 3485→20, 3701→21, 3917→22, 4133→23, 4349→24, 4565→25, 4877→26, 5189→27, 5501→28, 5813→29. Дальше — экстраполяция +312/basket, но она **неточна** (замерено живьём: vol 8638→38, 8962–9104→39, 9529→40, 10139→41, 11276→43): при не-200 в зоне vol>5813 fetcher сканирует соседние basket (−1,−2,+1,−3,+2,−4) и запоминает реальный (`fetch_nm_card → basket`) — URL фото строятся по нему.
+- **detail**: `https://card.wb.ru/cards/v4/detail?appType=1&curr=rub&dest=-1257786&spp=0&nm={nm}` → `products[0].brand` (в card.json бренда НЕТ), `pics` (запасной счётчик фото). Сбой detail не фатален (brand=NULL). **Грабля**: WAF card.wb.ru (`Status-NO-Id: PG-43-EL`) с dev-egress через SOCKS5 отдаёт 403 на raw-сокет клиент (JA3-фингерпринт linux-OpenSSL; с Windows-хоста тот же прокси — 200), поэтому в dev brand не заполняется; card.json/basket-хосты WAF не режет.
+- **Фото**: `/vol{vol}/part{part}/{nm}/images/big/{i}.webp`, i=1..photo_count (кап 10). Байты НЕ скачиваем — в зеркале только URL. **TODO**: извлечение фактов с фото (размерные сетки, состав на этикетке) отложено — нужен vision LLM.
+- **Синк** (`sync_project_cards`): nm_id из КБ + зеркал вопросов/отзывов (или переданный список), upsert по `(project_id, nm_id)`, троттлинг 0.5 сек, 404/ошибки пропускаются с подсчётом (прогон не валится), промежуточный коммит каждые 25 карточек. On-demand — `POST /reviews/cards/sync` (+опц. `nm_ids`), чтение — `GET /reviews/cards/{nm_id}` (карточка с фото для UI). В dev сеть идёт через SOCKS5 (`WB_CARDS_SOCKS_PROXY="host:port"`, raw-сокет — httpx без socksio); скрипт прогона — `scripts/dev_wb_cards_sync.py`.
+- **Ночной job «новые товары → КБ»** (`wb_cards_kb_refresh`, 03:45 MSK, после синков зеркал): `collect_stale_card_nm_ids` — nm_id из зеркал/КБ без карточки или с `synced_at` старше 7 дней (`_CARD_STALE_DAYS`) → `sync_project_cards` → `import_kb_from_cards`. Новые nm_id из ночных синков автоматически получают карточку и записи КБ до утреннего прогона автоответов. Итоги в SyncLog (`sync_type='product_cards_kb'`, FK — любой активный ключ проекта; без ключей проект пропускается).
+
+### Слежение за поступлением товара (wb_stock_watches)
+Вопросы «когда появится в наличии?» база знаний не покрывает (ответ зависит от будущих остатков) — они уходят в слежение, а не в needs_info. `services/stock_watch_service.py`, миграция `sw01`.
+- **Классификатор** (`is_stock_question`): подстроки нормализованного текста — «появ», «наличи», «поступлен/поступит», «завез», «привез», «ожидается», «restock», «скоро будет»; «когда будет …» — только БЕЗ слов доставки (доставк/отправк/придёт/пвз/почт/курьер — это про доставку, не про наличие).
+- **Скан** (`scan_stock_questions`): неотвеченные вопросы о наличии с nm_id → watch `watching` (идемпотентно — uniq `(project_id, question_wb_id)`); watch по уже отвеченному вопросу → `dismissed`. Вызывается автоматически в конце `sync_project_questions`, в начале тика и on-demand `POST /reviews/stock-watches/scan`.
+- **Остатки** (`fetch_total_quantities`): публичный `card.wb.ru/cards/v4/detail?...&nm={n1};{n2};…` — батчи по 50 (разделитель `;` = `%3B` в URL), `products[].totalQuantity` (0 = нет в наличии) + `sizes[].stocks[].qty` по складам. Транспорт общий с карточками (`_http_get_json` + `WB_CARDS_SOCKS_PROXY`). **Грабля dev**: WAF card.wb.ru режет TLS-фингерпринт python-клиента (403 и напрямую, и через хостовый SOCKS5 — egress-IP прокси тоже в бане); basket-хосты при этом доступны напрямую. В проде прямой доступ работает; сетевой сбой → тик завершается мягко, watches не трогаются.
+- **Тик** (`wb_stock_watch_tick`, каждые 30 мин): qty > 0 → черновик ответа: LLM (`draft_reply` с КБ товара + правила «товар СНОВА В НАЛИЧИИ, сообщи что можно заказать», `generation='llm'`) или шаблон «Здравствуйте! Товар снова в наличии — успейте заказать.» (нет ключа/сбой LLM, `generation='template'`). Черновик `WBFeedbackReply(target_type='question', status='draft', source='agent', is_stock_reply=True)` — отправка ТОЛЬКО вручную после одобрения (политика проекта). Watch → `drafted` + `reply_id` + `resolved_at`. На вопрос уже есть открытый ответ → `dismissed` (дубль не нужен). SyncLog не пишем (тик частый, к ключу не привязан) — итоги в logger.
+- **API/UI**: `GET /reviews/stock-watches?status=` (+ текст вопроса, счётчики), `POST /reviews/stock-watches/scan`. Бейджи: `has_stock_watch` в `QuestionItem` → «⏳ следим за наличием» (вкладка вопросов); `is_stock_reply` в `ReplyItem` → «📦 поступление» (очередь автоответов).
+- **Импорт в КБ** (`import_kb_from_cards`, `source='card'`): description → 1 запись `topic='Описание'` (>3000 симв. — резка по границе предложения; в зеркале — целиком), contents → `topic='Комплект'` («Комплектация: …»), каждая характеристика → answer «{name}: {value}», topic — `map_characteristic_topic` (Цвет/Состав/Комплект/Гарантия/Размер по ключевым словам имени, иначе Прочее). Внутри карточки — дедуп по нормализованному answer (contents и характеристика «Комплектация» у WB обычно дублируют один факт). Между прогонами — дедуп `md5("card:{nm}:{ключ}")`; повторный импорт ОБНОВЛЯЕТ изменившиеся answer/topic (upsert по hash), дублей нет; `enabled` (мягкое отключение продавцом) ресинк не трогает; записи `manual`/`import` не затрагиваются.
+- **Отправка**: `send_pending_replies` — approved-очередь, троттлинг 1.1 сек, кап 50/прогон; успех → sent + `sent_at` + `is_answered`/`answer_text` в зеркале; ошибка WB → error + текст (429 → остановка прогона). Job `wb_replies_sender` — каждые 2 мин; кнопка — `POST /reviews/replies/send` (202 + pending, отправка фоном через `asyncio.create_task` в своей сессии).
+- **Ручные черновики** (UI): `POST /reviews/replies` (manual, цель обязана быть в зеркале), `PATCH /reviews/replies/{id}` (`text` → final_text; `action` approve/reject/reopen; sent не редактируется), `GET /reviews/replies?status=` (с данными цели из зеркала + counts по статусам), `GET /reviews/questions` (зеркало вопросов).
+- **Маппинг ошибок**: 429 → 429 + Retry-After; CircuitOpen → 503; `httpx.HTTPError` (сеть) → 503; ValueError WB → 502.
+
 ### Cache invalidation
 После WB sync инвалидировать **точечно**: `reports:opiu`, `reports:wb_bdr`, `reports:dashboard`. Никогда не сбрасывать все ключи разом — worker starvation.
 Отзывы: после `POST /reviews/sync` — `invalidate_cache("reviews:summary:project_id={id}")`.
@@ -101,7 +145,17 @@ WB возвращает строки удержаний за отзывы с п�
 - **Float в `cost_price`** — `funnel/sync.py` использует float division вместо `Decimal`.
 
 ## Файлы
-- `integrations/wb_api.py` — WB Statistics/Content API клиент.
+- `integrations/wb_api.py` — WB Statistics/Content/Feedbacks API клиент (отзывы, вопросы, ответы).
+- `services/reply_service.py` — автоответы: синк вопросов, агенты, черновики, отправка.
+- `services/ai/reply_llm.py` — LLM-генерация черновиков ответов (транспорт из `complaint_llm`).
+- `scheduler/jobs/wb_questions_sync.py`, `scheduler/jobs/wb_replies_sender.py` — синк вопросов (03:25 MSK) и отправка ответов (2 мин).
+- `scheduler/jobs/wb_cards_kb_refresh.py` — ночное обновление карточек/КБ (03:45 MSK); `scheduler/jobs/wb_stock_watch.py` — тик слежения за поступлением (30 мин).
+- `services/stock_watch_service.py` — слежение за поступлением: классификатор, скан, тик остатков, черновики «появился в наличии».
+- `scripts/register_wb_key.py` — одноразовая регистрация WB-ключа (ключ из env, не из файла).
+- `scripts/dev_wb_socks_sync.py` — DEV-обход TLS-фильтрации локальной сети (синк через SOCKS5 хоста).
+- `scripts/dev_wb_questions_archive_sync.py` — DEV-досинк архивных (отвеченных) вопросов через SOCKS5 (для базы знаний).
+- `scripts/dev_wb_cards_sync.py` — DEV-синк зеркала карточек WB через SOCKS5 + импорт КБ из карточек (source='card').
+- `services/wb_cards_service.py` — зеркало карточек: basket-API, fetch (raw-сокет/SOCKS5), upsert, импорт КБ из карточек.
 - `integrations/resilience.py` — `CircuitBreakerRegistry` (per-project) + `retry_with_backoff`.
 - `services/funnel/` — обёртки WB API, оркестратор синхронизации, анализ, backfill, capital, аномалии, рекламные кампании.
 - `services/wb_finance_sync.py` (+ `wb_finance_helpers.py`) — синхронизация WB Finance Report.
@@ -111,5 +165,5 @@ WB возвращает строки удержаний за отзывы с п�
 - `services/warehouse_stock_service.py`, `services/stock_forecast_service.py` — остатки и прогноз.
 - `scheduler/jobs/` — фоновая синхронизация (`funnel.py`, `wb_finance.py`, `wb_stocks.py`).
 - `routers/integrations.py`, `routers/funnel.py`, `routers/reports_stock.py` — HTTP endpoints.
-- `models/integrations.py`, `models/wb_finance.py`, `models/wb_order_cancel.py`, `models/wb_tariff.py` — ORM.
+- `models/integrations.py`, `models/wb_finance.py`, `models/wb_order_cancel.py`, `models/wb_tariff.py`, `models/wb_product_kb.py`, `models/wb_product_cards.py` — ORM.
 - `utils/crypto.py` — шифрование API-ключей.

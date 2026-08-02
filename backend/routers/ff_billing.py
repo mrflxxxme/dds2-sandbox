@@ -1,7 +1,7 @@
 # ruff: noqa: RUF002, RUF003
 """
 Router: FF billing — тарифы услуг ФФ, посуточное хранение, ожидаемая стоимость
-услуг по заявке сборки, счета ФФ (upload/reconcile/платежи).
+услуг по заявке сборки и по переезду, счета ФФ (upload/reconcile/платежи).
 
 Пути и схемы — строго из контракта backend/schemas/ff_billing.py (докстринг).
 """
@@ -38,6 +38,7 @@ from backend.schemas.ff_billing import (
     FfTariffPayload,
     FfTariffRow,
     FfTariffUpdatePayload,
+    FfTransferExpectedCost,
 )
 from backend.services import ff_billing
 from backend.utils.file_validation import validate_file_content
@@ -153,6 +154,35 @@ async def set_assembly_ff_custom_cost(
     db: AsyncSession = Depends(get_db),
 ):
     return await ff_billing.set_assembly_custom_cost(db, project.id, request_id, payload)
+
+
+# ─── Ожидаемая стоимость услуг ФФ по переезду ───────────────────────────────
+# Тариф склада-ИСТОЧНИКА: сборку переезда делает он. Зеркало ручек заявки.
+
+
+@router.get(
+    "/warehouse/transfers/{transfer_id}/ff-expected-cost", response_model=FfTransferExpectedCost
+)
+async def get_transfer_ff_expected_cost(
+    transfer_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ff_billing.compute_transfer_expected_cost(db, project.id, transfer_id)
+
+
+@router.patch(
+    "/warehouse/transfers/{transfer_id}/ff-custom-cost",
+    response_model=FfTransferExpectedCost,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def set_transfer_ff_custom_cost(
+    transfer_id: int,
+    payload: FfCustomCostPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await ff_billing.set_transfer_custom_cost(db, project.id, transfer_id, payload)
 
 
 # ─── Счета ───────────────────────────────────────────────────────────────────

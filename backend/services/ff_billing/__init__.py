@@ -8,7 +8,9 @@ FF billing — тарифы услуг ФФ, посуточное хранени
 
 from backend.services.ff_billing.expected import (
     compute_assembly_expected_cost,
+    compute_transfer_expected_cost,
     set_assembly_custom_cost,
+    set_transfer_custom_cost,
 )
 from backend.services.ff_billing.invoices import (
     create_invoice,
@@ -41,6 +43,7 @@ from backend.services.ff_billing.tariffs import (
 __all__ = [
     "compute_assembly_expected_cost",
     "compute_storage_snapshot",
+    "compute_transfer_expected_cost",
     "create_invoice",
     "create_payment_request_for_invoice",
     "create_tariff",
@@ -58,6 +61,7 @@ __all__ = [
     "resolve_rates",
     "resolve_warehouse_by_inn",
     "set_assembly_custom_cost",
+    "set_transfer_custom_cost",
     "unlink_invoice_payments",
     "update_invoice",
     "update_tariff",

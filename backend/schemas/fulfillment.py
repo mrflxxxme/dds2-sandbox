@@ -151,7 +151,7 @@ class FfRequestRow(BaseModel):
     id: int
     external_id: str
     number: str | None = None
-    kind: str  # assembly | inbound | other
+    kind: str  # assembly | inbound | return | other
     type_name: str | None = None
     status: str | None = None
     stage_code: str | None = None
@@ -165,6 +165,15 @@ class FfRequestRow(BaseModel):
     local_archived: bool = False  # локальный архив DDS (синк не трогает)
     local_archived_at: datetime | None = None
     total_qty: int | None = None  # заявлено всего, шт (skladbot — из деталки)
+    #: Кол-во в штуках россыпи (пересчёт коробов ×units_per_box; migfull
+    #: сборка/возврат). None — коробов нет или состав не разрезолвлен.
+    total_qty_units: int | None = None
+    #: Сколько КОРОБОВ в составе (Σ qty строк с кратностью >1; migfull) — UI
+    #: разделяет «что в штуках, что в коробах». None — коробов нет.
+    total_boxes: int | None = None
+    #: Принято фактически (живые received-строки приёмки migfull, Σ шт) —
+    #: прогресс «принято X из Y» у приёмок в обработке. None — нет данных.
+    accepted_qty: int | None = None
     dest_warehouse: str | None = None  # склад отгрузки МП («Склад МП» / shipped_target)
     external_created_at: date | None = None
     synced_at: datetime
@@ -180,6 +189,17 @@ class FfRequestRow(BaseModel):
     # (True — расхождение, False — совпадает, None — определить нельзя). См.
     # compute_doc_ff_mismatch: сверка по ШК (wmscelicom/migfull) либо по кол-ву (skladbot).
     linked_mismatch: bool | None = None
+    # ВСКРЫТИЕ КОРОБОВ (пара «возврат коробов ↔ поступление россыпью», Натали).
+    # У ПОСТУПЛЕНИЯ — id/номер возврата-пары; у ВОЗВРАТА — id/номер поступления
+    # (заполняет сервис зеркально). Помеченная пара — внутренняя переупаковка ФФ:
+    # сток не двигается, из резерва «в приёмке» поступление исключено.
+    #: Номер машины (V-…), породившей нашу приёмку — тип строки «Приход машины»
+    #: (`InboundReceipt.cost_order_id`). None — приёмка не от машины.
+    vehicle_order_no: str | None = None
+    repack_return_id: int | None = None
+    repack_pair_number: str | None = None
+    # kind=return без пары: возможно, РЕАЛЬНЫЙ возврат товара — подсветка в UI.
+    repack_unpaired: bool = False
 
 
 class FfRequestDetailProduct(BaseModel):
@@ -213,6 +233,44 @@ class FfMatchRow(BaseModel):
     ff_qty: int = 0
     our_qty: int = 0
     diff: int = 0  # ff_qty - our_qty
+
+
+class FfRepackCandidate(BaseModel):
+    """Кандидат-поступление для РУЧНОЙ связки пары «вскрытие коробов».
+
+    Авто-матчер помечает пару только при ТОЧНОМ равенстве состава; на живых
+    вскрытиях ФФ часто пересчитывает фактически (кейс PVB-0000068↔124:
+    пересечение 98.4%, 10 позиций из 90 разошлись) — тогда решает человек,
+    а цифры ниже дают ему основание.
+    """
+
+    id: int
+    number: str | None = None
+    external_created_at: date | None = None
+    status: str | None = None
+    #: Σ штук россыпи по составу поступления (для сравнения с возвратом).
+    units_sum: int = 0
+    #: Пересечение состава с возвратом, % от большей стороны (0–100).
+    overlap_pct: float = 0
+    #: Состав совпал точно — такой кандидат авто-матчер пометил бы сам.
+    exact: bool = False
+
+
+class FfRepackCandidatesOut(BaseModel):
+    """GET /requests/{id}/repack-candidates — кандидаты пары для возврата."""
+
+    return_id: int
+    return_number: str | None = None
+    #: Σ штук россыпи возврата (короба × кратность + россыпь); None — состав
+    #: не разрешился в ШК (нет карты кратности).
+    return_units: int | None = None
+    candidates: list[FfRepackCandidate] = Field(default_factory=list)
+
+
+class FfRepackLinkIn(BaseModel):
+    """POST /requests/{id}/repack-link — связать возврат с поступлением-парой."""
+
+    submission_id: int
 
 
 class FfRequestMatch(BaseModel):
@@ -253,6 +311,20 @@ class FfMismatchDetail(BaseModel):
     extra_rows: list[FfMismatchDetailRow] = Field(default_factory=list)
 
 
+class FfSiblingRequest(BaseModel):
+    """«Сестра» заявки ФФ по мульти-связке (N заявок → один наш документ).
+
+    migfull раскладывает одну машину на несколько PVB (штучная + коробовая),
+    привязанных к одному InboundReceipt. Деталка показывает группу бейджами и
+    строит сверку по СУММЕ составов группы.
+    """
+
+    id: int
+    number: str | None = None
+    kind: str  # assembly | inbound | return | other
+    total_qty: int | None = None  # заявлено всего, шт (зеркало БД)
+
+
 class FfRequestStageLog(BaseModel):
     stage: str | None = None
     executor: str | None = None
@@ -283,6 +355,12 @@ class FfRequestDetail(FfRequestRow):
     fields: list[FfRequestFieldValue] = Field(default_factory=list)
     # Сверка состава со связанным нашим документом (None — связи нет)
     match: FfRequestMatch | None = None
+    # Мульти-связка: другие активные заявки ФФ, привязанные к тому же документу
+    # (без текущей). Пусто — заявка одиночная.
+    sibling_requests: list[FfSiblingRequest] = Field(default_factory=list)
+    # Сверка `match` построена по СУММЕ составов всей группы: номера всех заявок
+    # группы (включая текущую). None — сверка обычная (одна заявка vs документ).
+    mismatch_group_numbers: list[str] | None = None
 
 
 class FfLinkPayload(BaseModel):

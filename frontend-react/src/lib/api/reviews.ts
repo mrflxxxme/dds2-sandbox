@@ -1,6 +1,6 @@
 /** Отзывы покупателей WB (feedbacks) API methods */
 import { ApiClient } from './client';
-import type { ComplaintBulkResult, ComplaintCandidatesResponse, ComplaintItem, ComplaintReason, ComplaintStatus, ComplaintsResponse, NewcomersResponse, ReviewBreakdownGroup, ReviewBreakdownResponse, ReviewsListResponse, ReviewsPeriod, ReviewsSummaryResponse } from '@/types/api';
+import type { ComplaintBulkResult, ComplaintCandidatesResponse, ComplaintItem, ComplaintReason, ComplaintStatus, ComplaintsResponse, KbCreate, KbImportResult, KbItem, KbListResponse, KbProductsResponse, KbUpdate, NewcomersResponse, QuestionsListResponse, QuestionsSyncResult, RepliesListResponse, Reply, ReplyAction, ReplyAgent, ReplyAgentRunResult, ReplyAgentSave, ReplySendResult, ReplyStatus, ReplyTargetType, ReviewBreakdownGroup, ReviewBreakdownResponse, ReviewsListResponse, ReviewsPeriod, ReviewsSummaryResponse, StockWatchItem, StockWatchListResponse, StockWatchScanResult, StockWatchStatus, StockWatchTickResult } from '@/types/api';
 
 export interface GetReviewsParams {
     isAnswered?: boolean;
@@ -90,6 +90,105 @@ export function addReviewMethods(api: ApiClient) {
             if (period) q.set('period', period);
             const qs = q.toString();
             return api.request<ReviewsSummaryResponse>('POST', `/api/v1/reviews/sync${qs ? `?${qs}` : ''}`);
+        },
+        // ─── Вопросы покупателей (зеркало wb_questions) ───
+        getQuestions(params: { isAnswered?: boolean; take?: number; skip?: number } = {}) {
+            const q = new URLSearchParams();
+            if (params.isAnswered != null) q.set('is_answered', String(params.isAnswered));
+            if (params.take != null) q.set('take', String(params.take));
+            if (params.skip != null) q.set('skip', String(params.skip));
+            const qs = q.toString();
+            return api.request<QuestionsListResponse>('GET', `/api/v1/reviews/questions${qs ? `?${qs}` : ''}`);
+        },
+        // On-demand синк вопросов из WB в зеркало
+        syncQuestions() {
+            return api.request<QuestionsSyncResult>('POST', '/api/v1/reviews/questions/sync');
+        },
+        // ─── ИИ-агенты автоответов ───
+        getReplyAgents() {
+            return api.request<ReplyAgent[]>('GET', '/api/v1/reviews/reply-agents');
+        },
+        createReplyAgent(body: ReplyAgentSave) {
+            return api.request<ReplyAgent>('POST', '/api/v1/reviews/reply-agents', body);
+        },
+        updateReplyAgent(id: number, body: ReplyAgentSave) {
+            return api.request<ReplyAgent>('PATCH', `/api/v1/reviews/reply-agents/${id}`, body);
+        },
+        deleteReplyAgent(id: number) {
+            return api.request<{ deleted: boolean; id: number }>('DELETE', `/api/v1/reviews/reply-agents/${id}`);
+        },
+        // Прогон агента: LLM генерирует черновики ответов
+        runReplyAgent(id: number) {
+            return api.request<ReplyAgentRunResult>('POST', `/api/v1/reviews/reply-agents/${id}/run`);
+        },
+        // ─── Ответы на отзывы/вопросы (черновики → отправка) ───
+        getReplies(params: { status?: ReplyStatus; targetType?: ReplyTargetType; take?: number; skip?: number } = {}) {
+            const q = new URLSearchParams();
+            if (params.status) q.set('status', params.status);
+            if (params.targetType) q.set('target_type', params.targetType);
+            if (params.take != null) q.set('take', String(params.take));
+            if (params.skip != null) q.set('skip', String(params.skip));
+            const qs = q.toString();
+            return api.request<RepliesListResponse>('GET', `/api/v1/reviews/replies${qs ? `?${qs}` : ''}`);
+        },
+        // Ручной черновик ответа (source=manual)
+        createReply(body: { target_type: ReplyTargetType; target_wb_id: string; text: string }) {
+            return api.request<Reply>('POST', '/api/v1/reviews/replies', body);
+        },
+        // Правка текста и/или модерация (approve|reject|reopen)
+        updateReply(id: number, body: { text?: string; action?: ReplyAction }) {
+            return api.request<Reply>('PATCH', `/api/v1/reviews/replies/${id}`, body);
+        },
+        // Отправить все approved (202, отправка фоном)
+        sendReplies() {
+            return api.request<ReplySendResult>('POST', '/api/v1/reviews/replies/send');
+        },
+        // ─── База знаний товаров (wb_product_kb) ───
+        getKbProducts() {
+            return api.request<KbProductsResponse>('GET', '/api/v1/reviews/kb/products');
+        },
+        getKbList(params: { nmId?: number; enabled?: boolean; take?: number; skip?: number } = {}) {
+            const q = new URLSearchParams();
+            if (params.nmId != null) q.set('nm_id', String(params.nmId));
+            if (params.enabled != null) q.set('enabled', String(params.enabled));
+            if (params.take != null) q.set('take', String(params.take));
+            if (params.skip != null) q.set('skip', String(params.skip));
+            const qs = q.toString();
+            return api.request<KbListResponse>('GET', `/api/v1/reviews/kb${qs ? `?${qs}` : ''}`);
+        },
+        createKb(body: KbCreate) {
+            return api.request<KbItem>('POST', '/api/v1/reviews/kb', body);
+        },
+        updateKb(id: number, body: KbUpdate) {
+            return api.request<KbItem>('PATCH', `/api/v1/reviews/kb/${id}`, body);
+        },
+        deleteKb(id: number) {
+            return api.request<{ deleted: boolean; id: number }>('DELETE', `/api/v1/reviews/kb/${id}`);
+        },
+        // Импорт КБ из архива отвеченных вопросов (идемпотентно)
+        importKb() {
+            return api.request<KbImportResult>('POST', '/api/v1/reviews/kb/import');
+        },
+        // ─── Слежение за поступлением товара (wb_stock_watches) ───
+        getStockWatches(params: { status?: StockWatchStatus; take?: number; skip?: number } = {}) {
+            const q = new URLSearchParams();
+            if (params.status) q.set('status', params.status);
+            if (params.take != null) q.set('take', String(params.take));
+            if (params.skip != null) q.set('skip', String(params.skip));
+            const qs = q.toString();
+            return api.request<StockWatchListResponse>('GET', `/api/v1/reviews/stock-watches${qs ? `?${qs}` : ''}`);
+        },
+        // Снять слежение вручную (watching → dismissed)
+        dismissStockWatch(id: number) {
+            return api.request<StockWatchItem>('POST', `/api/v1/reviews/stock-watches/${id}/dismiss`);
+        },
+        // Ручной прогон проверки остатков (пишет last_qty)
+        runStockWatchTick() {
+            return api.request<StockWatchTickResult>('POST', '/api/v1/reviews/stock-watches/tick');
+        },
+        // Перескан неотвеченных вопросов о наличии → watches
+        scanStockWatches() {
+            return api.request<StockWatchScanResult>('POST', '/api/v1/reviews/stock-watches/scan');
         },
     };
 }

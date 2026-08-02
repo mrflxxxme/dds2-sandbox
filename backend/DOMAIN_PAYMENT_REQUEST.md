@@ -66,6 +66,16 @@
   **purpose**, allowlist `_EDITABLE_FIELDS`) до DRAFT_CREATED. **cancel** (`cancel_request`):
   PENDING_REVIEW/DRAFT → CANCELLED (НЕ из DRAFT_CREATED — там платёжка уже в банке); отменённая
   заявка освобождает свои заборы (CANCELLED исключён из `_assert_shipments_free`/`already_requested`).
+  **list_shippable** — рабочий список логиста: `SHIPPED`/`DELIVERED` заборы, не занятые активной
+  заявкой. Отбор — `or_(assembly_request_id IS NOT NULL, stock_transfer_id IS NOT NULL)`: помимо
+  отгрузок заявок сюда ОБЯЗАНЫ попадать заборы ПЕРЕЕЗДОВ между нашими складами (перевозка едет той
+  же наёмной машиной и оплачивается так же); `ShippableShipmentRow.stock_transfer_id` ведёт строку
+  на деталку перемещения. **Инвариант — почему без этого нельзя:** `etl/sync_shipment_payments`
+  фильтра по заявке не имеет и заматчит забор переезда с дебетом выписки, проставив
+  `matched_transaction_id`; транзакция уйдёт в consumed-сеты матчеров и исчезнет из кандидатов, а
+  владельца платежа в рабочем списке логиста не будет — деньги списаны, документ невидим. Тем же
+  фильтром лечится `get_counterparty_reconciliation`: без переездов привязанный забор давал ложную
+  недостачу по платежу ровно на свою стоимость.
 - `payment_request_documents.py` — upload/download(стрим через бэк, project-scoped)/delete (MinIO).
   Счёт/акт: **PDF, Word, Excel или фото** (MIME- **или** ext-allowlist + magic-bytes; исполняемые
   отсекаются). Ext-фолбэк обязателен: браузер шлёт `.heic`/`.xls` с пустым/`octet-stream` типом.

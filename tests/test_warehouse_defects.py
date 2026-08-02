@@ -32,7 +32,8 @@ from backend.services.warehouse_inbound import accept_receipt, create_receipt
 from backend.services.warehouse_outbound import (
     complete_transfer,
     create_transfer,
-    send_transfer,
+    mark_transfer_ready,
+    send_transfer as _send_transfer_raw,
 )
 from backend.services.warehouse_stock_engine import (
     get_stock_movements,
@@ -43,6 +44,17 @@ from backend.services.warehouse_stock_engine import (
 
 def _uid() -> str:
     return uuid.uuid4().hex[:8]
+
+
+async def send_transfer(db_session, project_id, transfer_id, **kwargs):
+    """Отправка бракованного переезда с явным «везём без оформления».
+
+    Файл про БРАК, а не про логистику: с 01.08.2026 голый READY (ни машины, ни
+    перевозчика, ни стоимости) отправить нельзя (TR-32 — сток списывался, а
+    забор не рождался). Гейт проверяется в tests/test_transfer_status.py.
+    """
+    kwargs.setdefault("allow_no_logistics", True)
+    return await _send_transfer_raw(db_session, project_id, transfer_id, **kwargs)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -368,9 +380,11 @@ class TestDefectTransfer:
         assert transfer.is_defect is True
         assert transfer.defect_reason == "sending to repair center"
 
-        # Step 2: Send transfer
+        # Step 2: Send transfer. Переезд рождается в PENDING, отгрузка идёт из
+        # READY — ступень «собран» проставляем явно (статусная модель заявки).
+        await mark_transfer_ready(db_session, project.id, transfer.id)
         sent = await send_transfer(db_session, project.id, transfer.id)
-        assert sent.status.value == "IN_TRANSIT"
+        assert sent.status.value == "SHIPPED"
 
         # Source: defect_qty should be 40 - 25 = 15
         src_stock = await get_warehouse_stock(db_session, project.id, wh.id)
@@ -396,7 +410,7 @@ class TestDefectTransfer:
 
         # Step 3: Complete transfer
         completed = await complete_transfer(db_session, project.id, transfer.id)
-        assert completed.status.value == "COMPLETED"
+        assert completed.status.value == "DELIVERED"
 
         # Destination: defect_qty should be 25, defect_in_transit should be 0
         dst_stock_after = await get_warehouse_stock(db_session, project.id, wh2.id)

@@ -1,33 +1,13 @@
 'use client';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import { mergeRowsByBarcode } from '@/lib/utils/transferRows';
+import { unitCountLabel, unitWeightLabel } from '@/lib/transfer';
+import TransferItemsEditor, { emptyTransferItemRow } from '@/components/TransferItemsEditor';
+import type { TransferItemRow } from '@/components/TransferItemsEditor';
 import type { Nomenclature, Warehouse } from '@/types/api';
-
-/* ─── Nomenclature lookup helper ──────────────────────────────────────────── */
-
-function useNomLookup(nomenclature: Nomenclature[]) {
-    return useMemo(() => {
-        const byBarcode = new Map<string, Nomenclature>();
-        nomenclature.forEach(n => {
-            if (n.barcode) byBarcode.set(n.barcode, n);
-        });
-        const resolve = (barcode: string): Nomenclature | undefined => byBarcode.get(barcode);
-        const label = (n: Nomenclature): string => n.article_seller || n.subject || n.name || `nmId: ${n.article_wb}`;
-        return { resolve, label };
-    }, [nomenclature]);
-}
-
-/* ─── Types ───────────────────────────────────────────────────────────────── */
-
-interface ItemRow {
-    barcode: string;
-    quantity: string;
-}
-
-const emptyItemRow = (): ItemRow => ({ barcode: '', quantity: '' });
 
 /* ─── Page ────────────────────────────────────────────────────────────────── */
 
@@ -46,14 +26,23 @@ export default function NewTransferPage() {
     const [formComment, setFormComment] = useState('');
     const [isDefect, setIsDefect] = useState(false);
     const [defectReason, setDefectReason] = useState('');
-    const [rows, setRows] = useState<ItemRow[]>(() => Array.from({ length: 8 }, emptyItemRow));
-    const [search, setSearch] = useState('');
+    // Транспортная единица переезда — та же, что у заявки на сборку: флаг меняет
+    // только ЕДИНИЦУ измерения двух полей ниже и подписи (см. lib/transfer.ts).
+    //
+    // 🔴 Семантика пустого значения здесь НЕ такая, как в «Назначить машину».
+    // На создании (StockTransferCreate) shipped_as_boxes — обычный bool с
+    // дефолтом false: пустое = «паллеты». Трёхзначность («null = не трогай»)
+    // живёт только в TransferAssignVehicle, где есть что не трогать. Поэтому
+    // компонент формы назначения машины здесь намеренно НЕ переиспользован:
+    // он протащил бы сюда чужой контракт.
+    const [shippedAsBoxes, setShippedAsBoxes] = useState(false);
+    const [palletsCount, setPalletsCount] = useState<number | ''>('');
+    const [palletWeight, setPalletWeight] = useState<number | ''>('');
+    const [rows, setRows] = useState<TransferItemRow[]>(() => Array.from({ length: 8 }, emptyTransferItemRow));
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
     const [stockMap, setStockMap] = useState<Record<string, number>>({});
     const [defectMap, setDefectMap] = useState<Record<string, number>>({});
-
-    const nom = useNomLookup(nomenclature);
 
     const loadData = useCallback(async () => {
         setLoading(true);
@@ -80,73 +69,10 @@ export default function NewTransferPage() {
 
     useEffect(() => { loadData(); }, [loadData]);
 
-    /* ─── Row operations ─────────────────────────────────────────────────── */
-
-    const updateRow = (idx: number, field: keyof ItemRow, value: string) => {
-        setRows(prev => {
-            const next = [...prev];
-            next[idx] = { ...next[idx], [field]: value };
-            return next;
-        });
-        if (idx === rows.length - 1 && value.trim()) {
-            setRows(prev => [...prev, emptyItemRow()]);
-        }
-    };
-
-    const removeRow = (idx: number) => {
-        setRows(prev => prev.filter((_, i) => i !== idx));
-    };
-
-    const handlePaste = (e: React.ClipboardEvent) => {
-        const text = e.clipboardData.getData('text/plain');
-        if (!text.includes('\t') && !text.includes('\n')) return;
-        e.preventDefault();
-        const lines = text.trim().split('\n').map(l => l.split('\t'));
-        const parsed: ItemRow[] = [];
-        for (const cols of lines) {
-            if (cols.length < 2) continue;
-            const barcode = cols[0].trim();
-            const qty = cols[1].trim().replace(',', '.').replace(/[^\d]/g, '');
-            if (barcode && qty) parsed.push({ barcode, quantity: qty });
-        }
-        // Схлопываем дубли ШК из склейки нескольких источников: одна строка на ШК
-        // с суммарным количеством — иначе остаток списывается многократно и send падает.
-        const newRows = mergeRowsByBarcode(parsed).map(m => ({ barcode: m.barcode, quantity: String(m.quantity) }));
-        if (newRows.length > 0) setRows([...newRows, emptyItemRow(), emptyItemRow()]);
-    };
-
-    const addFromSearch = (n: Nomenclature) => {
-        if (!n.barcode) return;
-        const existing = rows.findIndex(r => r.barcode === n.barcode);
-        if (existing >= 0) return;
-        const firstEmpty = rows.findIndex(r => !r.barcode.trim());
-        if (firstEmpty >= 0) {
-            setRows(prev => {
-                const next = [...prev];
-                next[firstEmpty] = { barcode: n.barcode!, quantity: '' };
-                return next;
-            });
-        } else {
-            setRows(prev => [...prev, { barcode: n.barcode!, quantity: '' }]);
-        }
-        setSearch('');
-    };
-
     /* ─── Computed ────────────────────────────────────────────────────────── */
 
     const filledRows = rows.filter(r => r.barcode.trim() && r.quantity.trim());
-    const totalQty = filledRows.reduce((s, r) => s + (parseInt(r.quantity) || 0), 0);
     const otherWarehouses = warehouses.filter(w => w.id !== fromWarehouseId && w.is_active);
-
-    const filteredNom = search.trim()
-        ? nomenclature.filter(n => {
-            const q = search.toLowerCase();
-            return (n.barcode && n.barcode.includes(q)) ||
-                (n.article_seller && n.article_seller.toLowerCase().includes(q)) ||
-                (n.name && n.name.toLowerCase().includes(q)) ||
-                (n.subject && n.subject.toLowerCase().includes(q));
-        }).slice(0, 10)
-        : [];
 
     /* ─── Submit ──────────────────────────────────────────────────────────── */
 
@@ -178,19 +104,41 @@ export default function NewTransferPage() {
                 is_defect: isDefect || undefined,
                 defect_reason: isDefect && defectReason.trim() ? defectReason.trim() : undefined,
                 items,
+                // Оценка необязательна: пустые поля уходят как null («не задано»),
+                // а флаг единицы — всегда, у него на этом пути обычный дефолт.
+                pallets_count: palletsCount === '' ? null : Number(palletsCount),
+                pallet_weight_kg: palletWeight === '' ? null : Number(palletWeight),
+                shipped_as_boxes: shippedAsBoxes,
             });
             if (transfer?.id) {
-                // Auto-send (source deducted immediately, destination gets in_transit).
-                // Destination must accept via "Принять": брак — вкладка «Брак»,
-                // обычные — вкладка «Перемещения»
+                // Экран «создать и увезти»: кладовщик физически отдаёт груз
+                // здесь и сейчас, промежуточных ступеней у него нет.
+                //
+                // 🔴 Поэтому ДВА вызова, а не один: переезд создаётся в PENDING,
+                // а «Отправить» бэкенд принимает только из READY /
+                // VEHICLE_ASSIGNED. Один send отсюда вернул бы 400 — и форма
+                // создания перестала бы работать вовсе.
+                // Сток спишется со склада-источника и повиснет транзитом на
+                // получателе; принять надо на его стороне («Принять»): брак —
+                // вкладка «Брак», обычные — вкладка «Перемещения».
+                //
+                // 🔴 allowNoLogistics — ЕДИНСТВЕННОЕ место, где флаг законен.
+                // Отправка READY-переезда без машины/перевозчика/стоимости
+                // теперь запрещена бэкендом (иначе сток списывался бы, а забор
+                // не создавался — переезд уезжал мимо оплат). Здесь оформления
+                // и не бывает: кладовщик отдаёт груз своими силами и заводит
+                // документ по факту. Без флага 400 прилетал бы КАЖДОМУ
+                // кладовщику, а catch ниже отменял бы свежесозданный переезд —
+                // то есть форма молча превратилась бы в генератор отмен.
                 try {
-                    await api.sendTransfer(transfer.id);
+                    await api.markTransferReady(transfer.id);
+                    await api.sendTransfer(transfer.id, { allowNoLogistics: true });
                 } catch (sendErr: unknown) {
-                    // Откат черновика, чтобы не оставлять сироту (ретрай создал бы дубль)
+                    // Откат, чтобы не оставлять сироту (ретрай создал бы дубль)
                     try {
                         await api.cancelTransfer(transfer.id);
                     } catch {
-                        setError(`Отправка не удалась, черновик ${transfer.number} остался — управляйте им на вкладке «Перемещения». ` +
+                        setError(`Отправка не удалась, переезд ${transfer.number} остался — управляйте им на вкладке «Перемещения». ` +
                             (sendErr instanceof Error ? sendErr.message : ''));
                         setSaving(false);
                         return;
@@ -274,6 +222,56 @@ export default function NewTransferPage() {
                         <input className="form-input" value={formComment} onChange={e => setFormComment(e.target.value)} placeholder="Примечание..." />
                     </div>
                 </div>
+                {/* Транспортная единица — как у заявки на сборку: переключатель
+                    меняет только подписи и смысл двух соседних полей. Оценка
+                    необязательна — переезд можно завести и без неё, уточнив при
+                    назначении машины. */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginTop: 16 }}>
+                    <div className="form-group" style={{ margin: 0 }}>
+                        <label className="form-label">Транспортная единица</label>
+                        <div style={{ display: 'flex', gap: 0 }}>
+                            <button
+                                type="button"
+                                className={`btn btn-sm ${!shippedAsBoxes ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setShippedAsBoxes(false)}
+                                style={{ borderRadius: '8px 0 0 8px' }}
+                            >
+                                Паллеты
+                            </button>
+                            <button
+                                type="button"
+                                className={`btn btn-sm ${shippedAsBoxes ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setShippedAsBoxes(true)}
+                                style={{ borderRadius: '0 8px 8px 0' }}
+                            >
+                                Короба
+                            </button>
+                        </div>
+                    </div>
+                    <div className="form-group" style={{ margin: 0 }}>
+                        <label className="form-label">{unitCountLabel(shippedAsBoxes)}</label>
+                        <input
+                            className="form-input"
+                            type="number"
+                            min={0}
+                            value={palletsCount}
+                            onChange={e => setPalletsCount(e.target.value ? Number(e.target.value) : '')}
+                            placeholder={shippedAsBoxes ? '12' : '5'}
+                        />
+                    </div>
+                    <div className="form-group" style={{ margin: 0 }}>
+                        <label className="form-label">{unitWeightLabel(shippedAsBoxes)}, кг</label>
+                        <input
+                            className="form-input"
+                            type="number"
+                            min={0}
+                            step="0.1"
+                            value={palletWeight}
+                            onChange={e => setPalletWeight(e.target.value ? Number(e.target.value) : '')}
+                            placeholder={shippedAsBoxes ? '18' : '300'}
+                        />
+                    </div>
+                </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 16 }}>
                     <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14 }}>
                         <input
@@ -297,129 +295,14 @@ export default function NewTransferPage() {
                 </div>
             </div>
 
-            {/* Toolbar: search + counter */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
-                <div style={{ flex: 1, position: 'relative', minWidth: 200 }}>
-                    <input
-                        className="form-input"
-                        placeholder="Поиск по товарам... (артикул, баркод, название)"
-                        value={search}
-                        onChange={e => setSearch(e.target.value)}
-                        style={{ width: '100%' }}
-                    />
-                    {filteredNom.length > 0 && (
-                        <div style={{
-                            position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100,
-                            background: 'var(--color-bg)', border: '1px solid var(--color-border)',
-                            borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.1)', maxHeight: 300, overflow: 'auto',
-                        }}>
-                            {filteredNom.map(n => (
-                                <div
-                                    key={n.id}
-                                    onClick={() => addFromSearch(n)}
-                                    style={{
-                                        padding: '10px 14px', cursor: 'pointer', fontSize: 13,
-                                        borderBottom: '1px solid var(--color-border)',
-                                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                                    }}
-                                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-hover)')}
-                                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                                >
-                                    <span style={{ fontWeight: 500 }}>{nom.label(n)}</span>
-                                    <span style={{ color: 'var(--color-text-muted)', fontSize: 12, marginLeft: 12 }}>{n.barcode}</span>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </div>
-
-                <span style={{ fontSize: 13, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
-                    {filledRows.length} позиций, {formatNumber(totalQty)} шт.
-                </span>
-            </div>
-
-            {/* Items table */}
-            <div
-                className="glass-card"
-                style={{ overflow: 'auto', padding: 0 }}
-                onPaste={handlePaste}
-            >
-                {/* TODO: migrate to TanStackDataTable — has inline form inputs (barcode input, quantity input, paste handler) */}
-                <table className="data-table" style={{ marginBottom: 0 }}>
-                    <thead>
-                        <tr>
-                            <th style={{ width: 40, textAlign: 'center' }}>#</th>
-                            <th style={{ minWidth: 220 }}>ТОВАР</th>
-                            <th style={{ minWidth: 160 }}>ШК (БАРКОД)</th>
-                            <th style={{ width: 100, textAlign: 'right' }}>{isDefect ? 'В БРАКЕ' : 'НА СКЛАДЕ'}</th>
-                            <th style={{ width: 120, textAlign: 'right' }}>КОЛИЧЕСТВО</th>
-                            <th style={{ width: 50 }}></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {rows.map((row, i) => {
-                            const n = row.barcode.trim() ? nom.resolve(row.barcode.trim()) : undefined;
-                            const unknown = row.barcode.trim() && !n;
-                            return (
-                                <tr key={i} style={{ background: unknown ? 'rgba(239,68,68,0.04)' : undefined }}>
-                                    <td style={{ textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 12 }}>
-                                        {row.barcode.trim() ? i + 1 : ''}
-                                    </td>
-                                    <td style={{ fontSize: 13, color: n ? 'var(--color-text)' : unknown ? '#ef4444' : 'var(--color-text-muted)' }}>
-                                        {n ? nom.label(n) : (unknown ? '(не найден)' : '\u2014')}
-                                    </td>
-                                    <td>
-                                        <input
-                                            value={row.barcode}
-                                            onChange={e => updateRow(i, 'barcode', e.target.value)}
-                                            placeholder="Введите баркод..."
-                                            style={{
-                                                width: '100%', background: 'transparent',
-                                                border: 'none', padding: '8px 4px', fontSize: 13,
-                                                color: unknown ? '#ef4444' : 'var(--color-text)',
-                                                outline: 'none',
-                                            }}
-                                        />
-                                    </td>
-                                    <td style={{ textAlign: 'right', fontSize: 13, fontWeight: 600, color: isDefect ? 'var(--color-warning)' : 'var(--color-text)' }}>
-                                        {row.barcode.trim() ? formatNumber((isDefect ? defectMap : stockMap)[row.barcode.trim()] || 0) : ''}
-                                    </td>
-                                    <td>
-                                        <input
-                                            type="number"
-                                            value={row.quantity}
-                                            onChange={e => updateRow(i, 'quantity', e.target.value)}
-                                            placeholder="0"
-                                            style={{
-                                                width: '100%', background: 'transparent',
-                                                border: 'none', padding: '8px 4px', fontSize: 13,
-                                                textAlign: 'right', color: 'var(--color-text)',
-                                                outline: 'none',
-                                            }}
-                                        />
-                                    </td>
-                                    <td>
-                                        {row.barcode.trim() && (
-                                            <button
-                                                onClick={() => removeRow(i)}
-                                                style={{
-                                                    background: 'none', border: 'none', cursor: 'pointer',
-                                                    color: 'var(--color-text-muted)', fontSize: 16, padding: '4px 6px',
-                                                }}
-                                                title="Удалить строку"
-                                            >{'\u00D7'}</button>
-                                        )}
-                                    </td>
-                                </tr>
-                            );
-                        })}
-                    </tbody>
-                </table>
-            </div>
-
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 8 }}>
-                Вставьте данные из Excel/Google Sheets (Ctrl+V): Баркод &#x21B9; Кол-во
-            </div>
+            <TransferItemsEditor
+                rows={rows}
+                onChange={setRows}
+                nomenclature={nomenclature}
+                stockMap={isDefect ? defectMap : stockMap}
+                stockLabel={isDefect ? 'В браке' : 'На складе'}
+                stockAccent={isDefect}
+            />
 
             {/* Bottom action bar */}
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 20, paddingBottom: 20 }}>

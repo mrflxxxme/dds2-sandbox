@@ -2,29 +2,41 @@
 """
 Service: migfull-портал (plusvb.migfull.app) — создание заявки на отгрузку у ФФ «Натали».
 
-Источник — ``AssemblyRequest`` (готовая сборка, склад «Натали»). Креды интеграции —
-``IntegrationKey(service="migfull_portal")``: ``encrypted_key`` = Fernet-пароль,
-``config={"login", "host"?}``, ``warehouse_id`` = склад (гейт: кнопку показываем
-только для сборок с него). НЕ путать с read-only API (service="migfull").
+У заявки ДВА источника состава (``ShipmentSource.kind``):
 
-build_draft   — локально (без портала): шапка-prefill + превью описи (короб/россыпь) +
-                флаг «уже отправлена».
-send_shipment — РЕАЛЬНОЕ создание заявки (шапка + загрузка описи). НЕОБРАТИМО (портал
-                не даёт удалить/отменить). Анти-дубль гейт + audit ``MigfullShipmentOrder``
-                + связь ``FulfillmentRequest(provider="migfull")`` со сборкой.
+* ``assembly`` — наша сборка (``AssemblyRequest`` склада «Натали», товар едет на WB);
+* ``transfer`` — наше ПЕРЕМЕЩЕНИЕ (``StockTransfer``, Натали → наш склад, кейс
+  TR-33 «натали → фф питер Газпром»). Своей сборки у переезда нет: отгрузку у ФФ
+  заводит ровно эта заявка, поэтому источником документа выступает сам переезд.
+
+Зеркало ``migfull_portal_inbound`` (там те же два источника, но для ПРИЁМКИ, и
+Натали — склад-ПОЛУЧАТЕЛЬ; здесь Натали — склад-ОТПРАВИТЕЛЬ).
+
+Креды интеграции — ``IntegrationKey(service="migfull_portal")``: ``encrypted_key`` =
+Fernet-пароль, ``config={"login", "host"?}``, ``warehouse_id`` = склад (гейт: кнопку
+показываем только для документов с него). НЕ путать с read-only API (service="migfull").
+
+build_draft / build_transfer_shipment_draft — локально (без портала): шапка-prefill +
+                превью описи (короб/россыпь) + флаг «уже отправлена».
+send_shipment / send_transfer_shipment — РЕАЛЬНОЕ создание заявки (шапка + загрузка
+                описи). НЕОБРАТИМО (портал не даёт удалить/отменить). Анти-дубль гейт +
+                audit ``MigfullShipmentOrder`` + связь ``FulfillmentRequest(provider=
+                "migfull", kind=assembly)`` со сборкой либо с переездом.
 """
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from collections.abc import Awaitable, Callable, Iterable
+from datetime import date
+from typing import Literal, NamedTuple, TypeVar
 
 import httpx
 import structlog
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.sql.elements import ColumnElement
 
 from backend.integrations.migfull_client import MigfullApiError, MigfullClient
 from backend.integrations.migfull_portal_client import (
@@ -41,10 +53,12 @@ from backend.models import (
     MigfullShipmentOrder,
     MigfullShipmentStatus,
     Nomenclature,
+    StockTransfer,
     Warehouse,
 )
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
 from backend.models.fulfillment import FfRequestKind
+from backend.models.warehouse import TransferStatus
 from backend.schemas.migfull_portal import (
     DELIVERY_TYPE_LABELS,
     MigfullDeliveryTypeOption,
@@ -353,7 +367,7 @@ async def get_config(db: AsyncSession, project_id: int) -> MigfullPortalConfigRe
     return MigfullPortalConfigResponse(configured=True, warehouse_id=key.warehouse_id, warehouse_name=wh_name)
 
 
-# ─── Загрузка сборки ─────────────────────────────────────────────────────────
+# ─── Загрузка сборки / перемещения ───────────────────────────────────────────
 
 
 async def _load_assembly(db: AsyncSession, project_id: int, assembly_id: int) -> AssemblyRequest | None:
@@ -367,6 +381,175 @@ async def _load_assembly(db: AsyncSession, project_id: int, assembly_id: int) ->
         .options(selectinload(AssemblyRequest.items), selectinload(AssemblyRequest.wb_fbo_supply))
     )
     return result.scalar_one_or_none()
+
+
+async def _load_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> StockTransfer | None:
+    """Перемещение со строками состава. Общий загрузчик обоих направлений
+    (отгрузка здесь, приёмка в ``migfull_portal_inbound``)."""
+    result = await db.execute(
+        select(StockTransfer)
+        .where(
+            StockTransfer.id == transfer_id,
+            StockTransfer.project_id == project_id,
+            StockTransfer.is_deleted.is_(False),
+        )
+        .options(selectinload(StockTransfer.items))
+    )
+    return result.scalar_one_or_none()
+
+
+async def _warehouse_names(db: AsyncSession, project_id: int, ids: set[int]) -> dict[int, str]:
+    """Имена складов маршрута одним запросом (для примечания «источник → получатель»)."""
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(Warehouse.id, Warehouse.name).where(
+                Warehouse.project_id == project_id,
+                Warehouse.id.in_(ids),
+                Warehouse.is_deleted.is_(False),
+            )
+        )
+    ).all()
+    return {wid: name for wid, name in rows}
+
+
+# ─── Источник состава заявки: сборка ИЛИ перемещение ─────────────────────────
+
+
+ShipmentSourceKind = Literal["assembly", "transfer"]
+
+
+class ShipmentSource(NamedTuple):
+    """Нормализованный источник заявки на отгрузку — всё, что нужно draft/send.
+
+    Абстракция ровно над двумя загрузчиками (``_source_from_assembly`` /
+    ``_source_from_transfer``): дальше опись, резолв склада назначения,
+    анти-дубль, audit и автосвязь работают ОДИНАКОВО и про ORM-объект источника
+    не знают. Зеркало ``InboundSource`` из ``migfull_portal_inbound``.
+
+    ``warehouse_id`` — склад-ОТПРАВИТЕЛЬ (должен быть складом migfull-портала):
+    у сборки это её склад, у переезда — склад-ИСТОЧНИК (у приёмки сверяется
+    получатель — здесь зеркально).
+    ``dest_name`` — куда едет груз НАШИМ именем (WB-склад сборки / наш
+    склад-получатель переезда); по нему резолвится направление у Натали.
+    ``send_block`` — причина, по которой отправка запрещена (статус документа);
+    draft её не смотрит (превью доступно всегда), send превращает в 400.
+    """
+
+    kind: ShipmentSourceKind
+    id: int
+    warehouse_id: int
+    qty_by_bc: dict[str, int]
+    nom_by_bc: dict[str, int]
+    dest_name: str | None
+    prefill_number: str | None
+    prefill_date: date | None
+    notes: str
+    opis_number: str | None  # «входящий номер» в шапке .xlsx-описи
+    filename_base: str
+    assembly_number: str | None = None
+    transfer_number: str | None = None
+    send_block: str | None = None
+
+    @property
+    def doc_label(self) -> str:
+        """Родительный падеж для текстов («нет позиций …»)."""
+        return "сборки" if self.kind == "assembly" else "перемещения"
+
+
+def _qty_maps(
+    rows: Iterable[tuple[str | None, int | None, int | None]],
+) -> tuple[dict[str, int], dict[str, int]]:
+    """(ШК, кол-во, nomenclature_id) строк документа → {ШК: штук}, {ШК: nomenclature_id}.
+
+    Общая для сборки и переезда: у обеих строк количество — ОДНО число
+    (``quantity``), плана/факта нет.
+    """
+    qty_by_bc: dict[str, int] = {}
+    nom_by_bc: dict[str, int] = {}
+    for barcode, qty, nom_id in rows:
+        bc = (barcode or "").strip()
+        if not bc:
+            continue
+        qty_by_bc[bc] = qty_by_bc.get(bc, 0) + int(qty or 0)
+        if nom_id:
+            nom_by_bc.setdefault(bc, nom_id)
+    return qty_by_bc, nom_by_bc
+
+
+async def _source_from_assembly(db: AsyncSession, project_id: int, assembly_id: int) -> ShipmentSource:
+    """Сборка (ASM-…) → источник заявки на отгрузку. Нет/удалена → 404."""
+    ar = await _load_assembly(db, project_id, assembly_id)
+    if ar is None:
+        raise MigfullPortalServiceError("Сборка не найдена", status_code=404)
+    supply = ar.wb_fbo_supply
+    wb_name = (supply.warehouse_name if supply else None) or ar.wb_warehouse_name_manual
+    qty_by_bc, nom_by_bc = _qty_maps((it.barcode, it.quantity, it.nomenclature_id) for it in ar.items)
+    return ShipmentSource(
+        kind="assembly",
+        id=ar.id,
+        warehouse_id=ar.warehouse_id,
+        qty_by_bc=qty_by_bc,
+        nom_by_bc=nom_by_bc,
+        dest_name=wb_name,
+        prefill_number=(supply.wb_supply_id if supply else None),
+        prefill_date=ar.delivery_date or ar.pickup_date,
+        notes=_default_notes(ar, supply),
+        opis_number=(supply.wb_supply_id if supply else ar.number),
+        filename_base=ar.number or "opis",
+        assembly_number=ar.number,
+        send_block=(
+            "Нельзя отправить отменённую сборку" if ar.status == AssemblyStatus.CANCELLED.value else None
+        ),
+    )
+
+
+#: Статусы переезда, при которых заявку на отгрузку у Натали создавать НЕЛЬЗЯ.
+#: Отгрузку заводят ДО того, как машина забрала товар: у уехавшего переезда
+#: (SHIPPED и дальше) сток уже списан со склада-источника, и новая заявка у ФФ
+#: означала бы «соберите и отдайте ещё раз» — Натали отгрузила бы товар дважды.
+_TRANSFER_SHIPMENT_BLOCKS: dict[str, str] = {
+    TransferStatus.SHIPPED.value: (
+        "Перемещение уже отгружено со склада-источника — заявка на отгрузку у ФФ опоздала"
+    ),
+    TransferStatus.DELIVERED.value: "Перемещение уже принято получателем — отгрузка у ФФ не нужна",
+    TransferStatus.RETURNED.value: "Перемещение вернулось на склад-источник — отгрузка у ФФ не нужна",
+    TransferStatus.CLOSED.value: "Перемещение закрыто — отгрузка у ФФ не нужна",
+    TransferStatus.CANCELLED.value: "Нельзя создать отгрузку по отменённому перемещению",
+}
+
+
+async def _source_from_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> ShipmentSource:
+    """Перемещение (TR-…, Натали → наш склад) → источник заявки. Нет/удалено → 404.
+
+    Зеркало ``migfull_portal_inbound._source_from_transfer``: там склад Натали —
+    ПОЛУЧАТЕЛЬ переезда, здесь — ИСТОЧНИК (``warehouse_id = from_warehouse_id``).
+    Дата шапки: дата забора → дата доставки → сегодня (шапку правит пользователь);
+    у приёмки порядок обратный — там важна дата приезда, здесь дата вывоза.
+    """
+    transfer = await _load_transfer(db, project_id, transfer_id)
+    if transfer is None:
+        raise MigfullPortalServiceError("Перемещение не найдено", status_code=404)
+    qty_by_bc, nom_by_bc = _qty_maps((it.barcode, it.quantity, it.nomenclature_id) for it in transfer.items)
+    names = await _warehouse_names(db, project_id, {transfer.from_warehouse_id, transfer.to_warehouse_id})
+    from_name = names.get(transfer.from_warehouse_id) or f"склад {transfer.from_warehouse_id}"
+    to_name = names.get(transfer.to_warehouse_id) or f"склад {transfer.to_warehouse_id}"
+    return ShipmentSource(
+        kind="transfer",
+        id=transfer.id,
+        warehouse_id=transfer.from_warehouse_id,
+        qty_by_bc=qty_by_bc,
+        nom_by_bc=nom_by_bc,
+        dest_name=to_name,
+        prefill_number=transfer.number,
+        prefill_date=transfer.pickup_date or transfer.delivery_date or utcnow().date(),
+        notes=f"DDS · перемещение {transfer.number} · {from_name} → {to_name}",
+        opis_number=transfer.number,
+        filename_base=transfer.number or "opis",
+        transfer_number=transfer.number,
+        send_block=_TRANSFER_SHIPMENT_BLOCKS.get(transfer.status),
+    )
 
 
 # ─── Опись: состав сборки → строки (короб/россыпь) ───────────────────────────
@@ -412,24 +595,18 @@ def classify_opis_lines(
     return lines, warnings
 
 
-async def _compute_opis_lines(
-    db: AsyncSession, project_id: int, warehouse_id: int, assembly: AssemblyRequest
-) -> tuple[list[MigfullOpisLine], list[str]]:
-    """Загрузка состава сборки + сопоставления короб→россыпь из БД → classify_opis_lines."""
-    qty_by_bc: dict[str, int] = {}
-    nom_by_bc: dict[str, int] = {}
-    for it in assembly.items:
-        bc = (it.barcode or "").strip()
-        if not bc:
-            continue
-        qty_by_bc[bc] = qty_by_bc.get(bc, 0) + int(it.quantity or 0)
-        if it.nomenclature_id:
-            nom_by_bc.setdefault(bc, it.nomenclature_id)
-    qty_by_bc = {bc: q for bc, q in qty_by_bc.items() if q > 0}
-    if not qty_by_bc:
-        return [], []
+async def load_opis_context(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    nom_by_bc: dict[str, int],
+) -> tuple[dict[str, tuple[str, int, str | None]], dict[str, str | None]]:
+    """Контекст описи из зеркала остатков ФФ: (box_for_piece, name_for_barcode).
 
-    # Зеркало остатков ФФ склада: имя товара + сопоставление короб→россыпь
+    box_for_piece: EAN13 россыпи → (ШК короба ITF14, шт/короб, имя короба) — карта
+    кратности Натали. name_for_barcode: ШК → имя товара, с фолбэком из номенклатуры
+    (артикул) для ШК без строки в зеркале ФФ.
+    """
     stock_rows = (
         await db.execute(
             select(FulfillmentStock).where(
@@ -461,20 +638,70 @@ async def _compute_opis_lines(
             if not name_for_barcode.get(bc):
                 name_for_barcode[bc] = nom_name.get(nid)
 
+    return box_for_piece, name_for_barcode
+
+
+async def compute_opis_lines_from_qty(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    qty_by_bc: dict[str, int],
+    nom_by_bc: dict[str, int],
+) -> tuple[list[MigfullOpisLine], list[str]]:
+    """Штуки по ШК → строки описи (короб/россыпь) через зеркало остатков ФФ.
+
+    Общее ядро для обоих направлений: заявка на отгрузку (состав сборки) и
+    поставка/приёмка (состав нашей InboundReceipt) — источник qty разный,
+    сопоставление короб→россыпь и фолбэк имени из номенклатуры одинаковые.
+    """
+    qty_by_bc = {bc: q for bc, q in qty_by_bc.items() if q > 0}
+    if not qty_by_bc:
+        return [], []
+    box_for_piece, name_for_barcode = await load_opis_context(db, project_id, warehouse_id, nom_by_bc)
     return classify_opis_lines(qty_by_bc, box_for_piece=box_for_piece, name_for_barcode=name_for_barcode)
 
 
 # ─── Анти-дубль ──────────────────────────────────────────────────────────────
 
 
-async def _already_sent(db: AsyncSession, project_id: int, assembly_id: int) -> tuple[bool, str | None, str | None]:
-    """Уже создавали заявку для этой сборки? (audit SENT либо связанная FulfillmentRequest)."""
+def _order_source_filter(source: ShipmentSource) -> ColumnElement[bool]:
+    """Скоуп audit-строк по КОЛОНКЕ источника.
+
+    ⚠️ ``stock_transfer_id`` audit-таблицы делят оба направления (приёмку пишет
+    ``migfull_portal_inbound``). Пересечься они не могут: приёмка требует, чтобы
+    складом портала был ПОЛУЧАТЕЛЬ переезда, отгрузка — чтобы ИСТОЧНИК, а
+    портальный ключ у проекта один.
+    """
+    if source.kind == "assembly":
+        return MigfullShipmentOrder.assembly_request_id == source.id
+    return MigfullShipmentOrder.stock_transfer_id == source.id
+
+
+def _ff_source_filter(source: ShipmentSource) -> ColumnElement[bool]:
+    """Скоуп ФФ-заявок по колонке источника.
+
+    У переезда фильтруем ЕЩЁ и по ``kind=assembly``: с тем же переездом штатно
+    связана приёмка на стороне склада-получателя (``kind=inbound``), и без
+    фильтра она читалась бы как «отгрузка уже создана» → ложный 409.
+    """
+    if source.kind == "assembly":
+        return FulfillmentRequest.assembly_request_id == source.id
+    return and_(
+        FulfillmentRequest.stock_transfer_id == source.id,
+        FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
+    )
+
+
+async def _already_sent(db: AsyncSession, project_id: int, source: ShipmentSource) -> tuple[bool, str | None, str | None]:
+    """Уже создавали заявку для этого документа? (audit SENT либо связанная
+    FulfillmentRequest — в т.ч. заведённая самой Натали и привязанная вручную:
+    вторая заявка на тот же состав — дубль)."""
     order = (
         await db.execute(
             select(MigfullShipmentOrder)
             .where(
                 MigfullShipmentOrder.project_id == project_id,
-                MigfullShipmentOrder.assembly_request_id == assembly_id,
+                _order_source_filter(source),
                 MigfullShipmentOrder.status == MigfullShipmentStatus.SENT,
             )
             .order_by(MigfullShipmentOrder.created_at.desc())
@@ -488,7 +715,7 @@ async def _already_sent(db: AsyncSession, project_id: int, assembly_id: int) -> 
             select(FulfillmentRequest.external_id, FulfillmentRequest.number).where(
                 FulfillmentRequest.project_id == project_id,
                 FulfillmentRequest.provider == MIGFULL_PROVIDER,
-                FulfillmentRequest.assembly_request_id == assembly_id,
+                _ff_source_filter(source),
             ).limit(1)
         )
     ).first()
@@ -516,34 +743,48 @@ def _default_notes(ar: AssemblyRequest, supply: object | None) -> str:
 # ─── Draft (модалка) ─────────────────────────────────────────────────────────
 
 
-async def build_draft(db: AsyncSession, project_id: int, assembly_id: int) -> MigfullDraftResponse:
-    key = await _get_key(db, project_id)
-    ar = await _load_assembly(db, project_id, assembly_id)
-    if ar is None:
-        raise MigfullPortalServiceError("Сборка не найдена", status_code=404)
+#: Текст предупреждения «направление не распозналось» — разный по источнику.
+#: У сборки это нештатица (WB-склад у Натали в справочнике быть обязан), у
+#: переезда — НОРМА: портал выставляет только направления, куда уже были
+#: отгрузки (склады маркетплейсов), нашего транзита там нет и не будет.
+_DEST_UNMATCHED: dict[ShipmentSourceKind, str] = {
+    "assembly": "Склад назначения «{name}» не распознан в ФФ — заполните вручную в кабинете после создания",
+    "transfer": (
+        "Склад назначения «{name}» не значится в справочнике Натали (там только направления "
+        "маркетплейсов) — заявка уйдёт БЕЗ направления, как их заводят у Натали вручную"
+    ),
+}
 
-    eligible = key.warehouse_id is not None and ar.warehouse_id == key.warehouse_id
-    lines, warnings = await _compute_opis_lines(db, project_id, ar.warehouse_id, ar)
-    already, guid, number = await _already_sent(db, project_id, assembly_id)
-    supply = ar.wb_fbo_supply
 
-    wb_name = (supply.warehouse_name if supply else None) or ar.wb_warehouse_name_manual
-    dest = await _resolve_destination_id(db, project_id, ar.warehouse_id, wb_name)
+async def _build_draft(
+    db: AsyncSession, project_id: int, key: IntegrationKey, source: ShipmentSource
+) -> MigfullDraftResponse:
+    """Превью заявки для модалки — общее для обоих источников.
+
+    ``key`` резолвит вызывающий ДО загрузки источника: ненастроенная интеграция —
+    это 400 «не настроена», а не 404 по несуществующему документу.
+    """
+    eligible = key.warehouse_id is not None and source.warehouse_id == key.warehouse_id
+    lines, warnings = await compute_opis_lines_from_qty(
+        db, project_id, source.warehouse_id, source.qty_by_bc, source.nom_by_bc
+    )
+    already, guid, number = await _already_sent(db, project_id, source)
+
+    dest = await _resolve_destination_id(db, project_id, source.warehouse_id, source.dest_name)
     prefill = MigfullShipmentPrefill(
-        number=(supply.wb_supply_id if supply else None),
-        shipment_date=ar.delivery_date or ar.pickup_date,
+        number=source.prefill_number,
+        shipment_date=source.prefill_date,
         filter_delivery_type="pickup",  # склад назначения персистит только при Самовывозе
-        notes=_default_notes(ar, supply),
-        wb_warehouse_name=wb_name,
+        notes=source.notes,
+        wb_warehouse_name=source.dest_name,
         destination_name=(dest.get("name") if dest else None),
         destination_matched=dest is not None,
-        assembly_number=ar.number,
+        assembly_number=source.assembly_number,
+        transfer_number=source.transfer_number,
     )
     warnings = list(warnings)
-    if eligible and wb_name and dest is None:
-        warnings.append(
-            f"Склад назначения «{wb_name}» не распознан в ФФ — заполните вручную в кабинете после создания"
-        )
+    if eligible and source.dest_name and dest is None:
+        warnings.append(_DEST_UNMATCHED[source.kind].format(name=source.dest_name))
     return MigfullDraftResponse(
         eligible=eligible,
         already_sent=already,
@@ -561,18 +802,34 @@ async def build_draft(db: AsyncSession, project_id: int, assembly_id: int) -> Mi
 # ─── Send (реальное создание заявки) ─────────────────────────────────────────
 
 
-def _opis_filename(ar: AssemblyRequest) -> str:
-    safe = "".join(ch for ch in (ar.number or "opis") if ch.isalnum() or ch in "-_") or "opis"
+def _opis_filename(base: str) -> str:
+    safe = "".join(ch for ch in (base or "opis") if ch.isalnum() or ch in "-_") or "opis"
     return f"opis_{safe}.xlsx"
 
 
+def _apply_ff_source(req: FulfillmentRequest, source: ShipmentSource) -> None:
+    """Проставить ФФ-заявке ссылку на наш документ-источник — РОВНО одну.
+
+    Соседние слоты обнуляем ЯВНО: на уже найденной строке (гонка с read-sync по
+    свежему guid) они могли оказаться заполнены другим источником, а инвариант
+    «максимум одна ссылка» load-bearing — на нём стоят и подбор кандидатов
+    связки (`list_transfer_ff_candidates`), и сверка состава
+    (`_load_linked_doc_items` читает `stock_transfer_id` первым).
+    """
+    req.assembly_request_id = source.id if source.kind == "assembly" else None
+    req.stock_transfer_id = source.id if source.kind == "transfer" else None
+    req.inbound_receipt_id = None
+
+
 async def _upsert_ff_link(
-    db: AsyncSession, project_id: int, warehouse_id: int, assembly_id: int,
+    db: AsyncSession, project_id: int, source: ShipmentSource,
     guid: str, number: str | None, total_qty: int, dest: str | None,
 ) -> None:
-    """Связать созданную заявку (provider=migfull, external_id=guid) со сборкой.
+    """Связать созданную заявку (provider=migfull, external_id=guid) с источником.
 
-    Read-sync НЕ трогает assembly_request_id на upsert → связь переживает синки.
+    Read-sync НЕ трогает assembly_request_id/stock_transfer_id на upsert → связь
+    переживает синки: прилетевшая синком заявка сольётся в эту же строку по
+    (project, provider, guid).
     """
     existing = (
         await db.execute(
@@ -584,39 +841,40 @@ async def _upsert_ff_link(
         )
     ).scalar_one_or_none()
     if existing is not None:
-        existing.assembly_request_id = assembly_id
+        _apply_ff_source(existing, source)
         if number:
             existing.number = number
         return
-    db.add(
-        FulfillmentRequest(
-            project_id=project_id,
-            warehouse_id=warehouse_id,
-            provider=MIGFULL_PROVIDER,
-            external_id=guid,
-            number=number,
-            kind=FfRequestKind.ASSEMBLY.value,
-            status="new",
-            assembly_request_id=assembly_id,
-            total_qty=total_qty or None,
-            dest_warehouse=dest,
-            synced_at=utcnow(),
-        )
+    req = FulfillmentRequest(
+        project_id=project_id,
+        warehouse_id=source.warehouse_id,
+        provider=MIGFULL_PROVIDER,
+        external_id=guid,
+        number=number,
+        kind=FfRequestKind.ASSEMBLY.value,
+        status="new",
+        total_qty=total_qty or None,
+        dest_warehouse=dest,
+        synced_at=utcnow(),
     )
+    _apply_ff_source(req, source)
+    db.add(req)
 
 
 async def _record_outcome(
-    db: AsyncSession, *, project_id: int, assembly_id: int, warehouse_id: int,
+    db: AsyncSession, *, project_id: int, source: ShipmentSource,
     status: str, guid: str | None, reference: str | None, payload: dict,
     filename: str, excerpt: str | None, error: str | None, actor: str | None,
     total_qty: int, dest: str | None,
 ) -> MigfullShipmentOrder:
     """Зафиксировать исход. Audit-строку коммитим ПЕРВОЙ (необратимый факт отправки не
-    должен зависеть от FF-link). Затем — best-effort связь со сборкой, терпящая гонку с
+    должен зависеть от FF-link). Затем — best-effort связь с источником, терпящая гонку с
     read-sync по тому же guid (audit уже сохранён → анти-дубль цел в любом случае).
     """
     order = MigfullShipmentOrder(
-        project_id=project_id, assembly_request_id=assembly_id, status=status,
+        project_id=project_id, status=status,
+        assembly_request_id=source.id if source.kind == "assembly" else None,
+        stock_transfer_id=source.id if source.kind == "transfer" else None,
         shipment_guid=guid, shipment_number=reference, payload=payload,
         opis_filename=filename, response_excerpt=excerpt, error=error, created_by=actor,
     )
@@ -626,7 +884,7 @@ async def _record_outcome(
 
     if guid and status in (MigfullShipmentStatus.SENT, MigfullShipmentStatus.UNCERTAIN):
         try:
-            await _upsert_ff_link(db, project_id, warehouse_id, assembly_id, guid, reference, total_qty, dest)
+            await _upsert_ff_link(db, project_id, source, guid, reference, total_qty, dest)
             await db.commit()
         except IntegrityError:
             # Гонка: read-sync создал FulfillmentRequest с тем же guid между нашим SELECT и INSERT.
@@ -641,7 +899,7 @@ async def _record_outcome(
                 )
             ).scalar_one_or_none()
             if existing is not None:
-                existing.assembly_request_id = assembly_id
+                _apply_ff_source(existing, source)
                 if reference:
                     existing.number = reference
                 await db.commit()
@@ -650,57 +908,80 @@ async def _record_outcome(
     return order
 
 
-async def send_shipment(
-    db: AsyncSession, project_id: int, assembly_id: int, req: MigfullSendRequest, actor: str | None = None
+_NOT_NATALI: dict[ShipmentSourceKind, str] = {
+    "assembly": "Эта сборка не со склада ФФ «Натали» — отправка недоступна",
+    "transfer": "Это перемещение не со склада ФФ «Натали» — отправка недоступна",
+}
+_EMPTY_COMPOSITION: dict[ShipmentSourceKind, str] = {
+    "assembly": "В сборке нет позиций для описи",
+    "transfer": "В перемещении нет позиций для описи",
+}
+_ALREADY_SENT: dict[ShipmentSourceKind, str] = {
+    "assembly": "Заявка для этой сборки уже создана в ФФ",
+    "transfer": "Заявка на отгрузку для этого перемещения уже создана в ФФ",
+}
+
+
+async def _send(
+    db: AsyncSession, project_id: int, key: IntegrationKey, source: ShipmentSource,
+    req: MigfullSendRequest, actor: str | None = None,
 ) -> MigfullSendResult:
-    key = await _get_key(db, project_id)
-    ar = await _load_assembly(db, project_id, assembly_id)
-    if ar is None:
-        raise MigfullPortalServiceError("Сборка не найдена", status_code=404)
-    if key.warehouse_id is None or ar.warehouse_id != key.warehouse_id:
-        raise MigfullPortalServiceError("Эта сборка не со склада ФФ «Натали» — отправка недоступна", status_code=400)
-    if ar.status == AssemblyStatus.CANCELLED.value:
-        raise MigfullPortalServiceError("Нельзя отправить отменённую сборку", status_code=400)
+    """РЕАЛЬНОЕ создание заявки на отгрузку — общее для обоих источников (``key`` — см. _build_draft)."""
+    if key.warehouse_id is None or source.warehouse_id != key.warehouse_id:
+        raise MigfullPortalServiceError(_NOT_NATALI[source.kind], status_code=400)
+    if source.send_block:
+        raise MigfullPortalServiceError(source.send_block, status_code=400)
 
     # Анти-дубль: создание НЕОБРАТИМО (нет delete/cancel у клиента).
     if not req.force_resend:
-        already, _, num = await _already_sent(db, project_id, assembly_id)
+        already, _, num = await _already_sent(db, project_id, source)
         if already:
             raise MigfullPortalServiceError(
-                f"Заявка для этой сборки уже создана в ФФ ({num or '—'}). Подтвердите повторную отправку.",
+                f"{_ALREADY_SENT[source.kind]} ({num or '—'}). Подтвердите повторную отправку.",
                 status_code=409,
             )
 
-    lines, warnings = await _compute_opis_lines(db, project_id, ar.warehouse_id, ar)
+    lines, warnings = await compute_opis_lines_from_qty(
+        db, project_id, source.warehouse_id, source.qty_by_bc, source.nom_by_bc
+    )
     if not lines:
-        raise MigfullPortalServiceError("В сборке нет позиций для описи", status_code=400)
+        raise MigfullPortalServiceError(_EMPTY_COMPOSITION[source.kind], status_code=400)
 
-    supply = ar.wb_fbo_supply
-    dest = (supply.warehouse_name if supply else None) or ar.wb_warehouse_name_manual
-    matched = await _resolve_destination_id(db, project_id, ar.warehouse_id, dest)
-    shipment_date = req.shipment_date or ar.delivery_date or ar.pickup_date
+    dest = source.dest_name
+    matched = await _resolve_destination_id(db, project_id, source.warehouse_id, dest)
+    shipment_date = req.shipment_date or source.prefill_date
     # Склад назначения (destination_marketplace_id) = numeric id из резолвера (тот же id,
     # что ждёт форма портала). ⚠️ Портал migfull ПЕРСИСТИТ склад ТОЛЬКО при
     # filter_delivery_type="pickup" (Самовывоз) — при direct/transit значение молча роняется
     # (реактивный хук гидрирует реляцию только для pickup; проверено живьём). client сетит
     # filter ПЕРЕД destination_marketplace_id (см. create_shipment). filter не персистится
     # (транзитный UI-фильтр), но обязателен в момент create.
+    #
+    # ⚠️ Не разрезолвилось → шлём БЕЗ направления (None). `_create_document`
+    # пропускает None-поля, а в зеркале Натали 54 отгрузки лежат вовсе без
+    # направления — их WMS это допускает. Компромисс осознанный: портал
+    # выставляет только направления, куда УЖЕ были отгрузки (17 складов ВБ),
+    # и наш транзит («фф питер Газпром», «Транзит ФФ Екатеринбург») там не
+    # появится никогда — иначе отгрузку из переезда нельзя было бы создать в
+    # принципе. Если форма всё-таки потребует направление, портал вернёт свою
+    # ошибку из errors-memo, и она долетит до пользователя ТЕКСТОМ КАК ЕСТЬ
+    # (MigfullPortalError → message ответа), а не подменится общей фразой.
     header: dict[str, object] = {
         "marketplace_id": _WB_MARKETPLACE_ID,
         "shipment_type": "fbo",
-        "number": req.number or (supply.wb_supply_id if supply else None),
+        "number": req.number or source.prefill_number,
         "shipment_date": shipment_date.isoformat() if shipment_date else None,
-        "notes": req.notes or _default_notes(ar, supply),
+        "notes": req.notes or source.notes,
         "filter_delivery_type": req.filter_delivery_type,
         # str — форма портала ждёт строковый numeric id (живьём персистит именно строку).
         "destination_marketplace_id": str(matched["id"]) if matched else None,
     }
     xlsx = build_opis_xlsx(
         lines,
-        incoming_number=(supply.wb_supply_id if supply else ar.number),
+        incoming_number=source.opis_number,
         incoming_date=shipment_date.isoformat() if shipment_date else None,
     )
-    filename = _opis_filename(ar)
+    filename = _opis_filename(source.filename_base)
     payload = {"header": {k: v for k, v in header.items() if v is not None},
                "opis_lines": [line.model_dump() for line in lines], "warnings": warnings}
 
@@ -739,7 +1020,7 @@ async def send_shipment(
         error = message = "Запрос отменён во время отправки — проверьте заявку в кабинете ФФ."
         await asyncio.shield(
             _record_outcome(
-                db, project_id=project_id, assembly_id=ar.id, warehouse_id=ar.warehouse_id,
+                db, project_id=project_id, source=source,
                 status=status, guid=guid, reference=reference, payload=payload,
                 filename=filename, excerpt=None, error=error, actor=actor,
                 total_qty=total_pieces, dest=dest,
@@ -757,13 +1038,19 @@ async def send_shipment(
         status = _uncertain_if_guid()
 
     order = await _record_outcome(
-        db, project_id=project_id, assembly_id=ar.id, warehouse_id=ar.warehouse_id,
+        db, project_id=project_id, source=source,
         status=status, guid=guid, reference=reference, payload=payload,
         filename=filename, excerpt=excerpt, error=error, actor=actor,
         total_qty=total_pieces, dest=dest,
     )
 
-    logger.info("migfull_portal.send", project_id=project_id, assembly_id=assembly_id, status=status, guid=guid)
+    logger.info(
+        "migfull_portal.send",
+        project_id=project_id, source_kind=source.kind, source_id=source.id,
+        # assembly_id сохранён (None у переезда) — по нему уже сделаны выборки в логах.
+        assembly_id=source.id if source.kind == "assembly" else None,
+        status=status, guid=guid,
+    )
     return MigfullSendResult(
         ok=(status == MigfullShipmentStatus.SENT),
         shipment_guid=guid,
@@ -771,3 +1058,41 @@ async def send_shipment(
         message=message,
         order_id=order.id,
     )
+
+
+# ─── Публичный API: сборка / перемещение ─────────────────────────────────────
+
+
+async def build_draft(db: AsyncSession, project_id: int, assembly_id: int) -> MigfullDraftResponse:
+    """Превью заявки на отгрузку из нашей сборки (ASM-…)."""
+    key = await _get_key(db, project_id)
+    return await _build_draft(db, project_id, key, await _source_from_assembly(db, project_id, assembly_id))
+
+
+async def send_shipment(
+    db: AsyncSession, project_id: int, assembly_id: int, req: MigfullSendRequest, actor: str | None = None
+) -> MigfullSendResult:
+    """РЕАЛЬНОЕ создание заявки на отгрузку из нашей сборки (НЕОБРАТИМО)."""
+    key = await _get_key(db, project_id)
+    return await _send(db, project_id, key, await _source_from_assembly(db, project_id, assembly_id), req, actor)
+
+
+async def build_transfer_shipment_draft(
+    db: AsyncSession, project_id: int, transfer_id: int
+) -> MigfullDraftResponse:
+    """Превью заявки на отгрузку из нашего перемещения со склада Натали (TR-…)."""
+    key = await _get_key(db, project_id)
+    return await _build_draft(db, project_id, key, await _source_from_transfer(db, project_id, transfer_id))
+
+
+async def send_transfer_shipment(
+    db: AsyncSession, project_id: int, transfer_id: int, req: MigfullSendRequest, actor: str | None = None
+) -> MigfullSendResult:
+    """РЕАЛЬНОЕ создание заявки на отгрузку из нашего перемещения (НЕОБРАТИМО).
+
+    Направление (склад назначения) резолвится по имени НАШЕГО склада-получателя
+    и почти всегда не находится — тогда заявка уходит БЕЗ направления, см.
+    развёрнутый комментарий в ``_send``.
+    """
+    key = await _get_key(db, project_id)
+    return await _send(db, project_id, key, await _source_from_transfer(db, project_id, transfer_id), req, actor)

@@ -2,14 +2,24 @@
 """
 Service: Gazelka (gazelka.space) — передача заявки логиста перевозчику.
 
-Источник — ``AssemblyRequest`` (готовая сборка, склад «Натали»). Креды интеграции
-лежат в ``IntegrationKey`` (service="gazelka"): ``encrypted_key`` = Fernet-пароль,
-``config={"login", "customer_id", "host"?}``, ``warehouse_id`` = склад Газельки
-(гейт: кнопку показываем только для отгрузок с него).
+Источников ДВА, и они равноправны:
+  • ``AssemblyRequest`` — сборка на маркетплейс (``is_marketplace='yes'``,
+    дискриминатор заказа в портале = № поставки WB);
+  • ``StockTransfer`` — ПЕРЕЕЗД между нашими складами (``is_marketplace='no'``,
+    № поставки нет вовсе → дискриминатор = маркер «TR-№» в notes, см.
+    ``_transfer_marker``).
 
-build_draft  — логин + снятие справочников ИХ формы + предзаполнение из сборки.
-send_order   — РЕАЛЬНОЕ создание заявки во внешнем сервисе (необратимо), пишет
-               audit-строку ``GazelkaOrder`` с исходом и выдержкой ответа.
+Креды интеграции лежат в ``IntegrationKey`` (service="gazelka"):
+``encrypted_key`` = Fernet-пароль, ``config={"login", "customer_id", "host"?}``,
+``warehouse_id`` = склад Газельки. Гейт допуска: у сборки — склад отгрузки
+(``warehouse_id``), у переезда — склад-ИСТОЧНИК (``from_warehouse_id``): груз
+Газелька забирает именно оттуда.
+
+build_draft / build_transfer_draft — логин + снятие справочников ИХ формы +
+               предзаполнение из документа.
+send_order / send_transfer_order   — РЕАЛЬНОЕ создание заявки во внешнем сервисе
+               (необратимо), пишет audit-строку ``GazelkaOrder`` с исходом и
+               выдержкой ответа.
 """
 
 import asyncio
@@ -21,9 +31,9 @@ from decimal import Decimal, InvalidOperation
 
 import httpx
 import structlog
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from backend.integrations.gazelka_client import (
     BASE_URL,
@@ -38,13 +48,16 @@ from backend.cache import invalidate_cache
 from backend.integrations.resilience import CircuitOpenError
 from backend.models import GazelkaOrder, GazelkaOrderStatus, IntegrationKey, Warehouse
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
+from backend.models.warehouse import OutboundShipment, StockTransfer, TransferStatus
 from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.gazelka import (
     GazelkaConfigResponse,
     GazelkaDraftResponse,
     GazelkaEditDraft,
     GazelkaFormOptions,
+    GazelkaLinkKind,
     GazelkaMatchCandidate,
+    GazelkaMatchRequest,
     GazelkaMatchResult,
     GazelkaOrderList,
     GazelkaOrderRow,
@@ -54,6 +67,7 @@ from backend.schemas.gazelka import (
     GazelkaSendRequest,
     GazelkaSendResult,
 )
+from backend.schemas.warehouse import TransferAssignVehicle
 from backend.utils.time import utcnow
 from backend.utils.crypto import decrypt as _decrypt
 
@@ -125,10 +139,19 @@ async def get_config(db: AsyncSession, project_id: int) -> GazelkaConfigResponse
     wh_name: str | None = None
     if key.warehouse_id is not None:
         wh_name = await db.scalar(select(Warehouse.name).where(Warehouse.id == key.warehouse_id))
-    return GazelkaConfigResponse(configured=True, warehouse_id=key.warehouse_id, warehouse_name=wh_name)
+    return GazelkaConfigResponse(
+        configured=True,
+        warehouse_id=key.warehouse_id,
+        warehouse_name=wh_name,
+        # Список, а не одно поле: гейт переезда идёт по складу-ИСТОЧНИКУ, и когда
+        # ключей интеграции станет два, фронт не придётся переучивать. Сегодня
+        # ключ ровно один → ровно один склад (или пусто, если склад не задан —
+        # тогда отправлять некуда и кнопку показывать нельзя).
+        warehouse_ids=[key.warehouse_id] if key.warehouse_id is not None else [],
+    )
 
 
-# ─── Загрузка сборки ─────────────────────────────────────────────────────────
+# ─── Загрузка документа (сборка / переезд) ───────────────────────────────────
 
 
 async def _load_assembly(db: AsyncSession, project_id: int, assembly_id: int) -> AssemblyRequest | None:
@@ -142,6 +165,40 @@ async def _load_assembly(db: AsyncSession, project_id: int, assembly_id: int) ->
         .options(selectinload(AssemblyRequest.wb_fbo_supply))
     )
     return result.scalar_one_or_none()
+
+
+async def _load_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> StockTransfer | None:
+    """Переезд для газельного диалога. Позиции НЕ подгружаем: форме портала нужны
+    только паллеты/короба/вес, а состав переезда бывает на тысячи строк."""
+    result = await db.execute(
+        select(StockTransfer).where(
+            StockTransfer.id == transfer_id,
+            StockTransfer.project_id == project_id,
+            StockTransfer.is_deleted.is_(False),
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def _warehouse_label(db: AsyncSession, project_id: int, warehouse_id: int) -> str | None:
+    """«Имя склада, адрес» — свободный текст получателя для формы портала.
+
+    Адрес обязателен по смыслу: в dropdown портала наших складов нет вовсе, и
+    водитель едет ровно по тому, что написано в `delivery_address_x2`.
+    """
+    row = (
+        await db.execute(
+            select(Warehouse.name, Warehouse.address).where(
+                Warehouse.id == warehouse_id,
+                Warehouse.project_id == project_id,
+                Warehouse.is_deleted.is_(False),
+            )
+        )
+    ).first()
+    if row is None:
+        return None
+    name, address = row
+    return ", ".join(p for p in (name, address) if p) or None
 
 
 # ─── Справочники / предзаполнение ────────────────────────────────────────────
@@ -469,13 +526,110 @@ def _prefill_from_assembly(
     )
 
 
-async def _last_sent(db: AsyncSession, project_id: int, assembly_id: int) -> tuple[bool, str | None]:
-    """Была ли отправка по сборке: SENT или UNCERTAIN (могла создаться — тоже блокирует повтор)."""
+# ─── Маркер переезда в notes: дискриминатор заказа вместо № поставки ─────────
+#
+# У сборки заказ портала опознаётся по `supply_id` (№ поставки WB). У переезда
+# поставки НЕТ ВООБЩЕ, а `_plan_matches_payload` без неё сверяет только даты и
+# паллеты — то есть чужой заказ на 3 паллеты в те же дни считался бы нашим.
+# Цена ошибки несимметрична: ложный «не нашли» → FAILED и повторная отправка, а
+# каждая отправка это РЕАЛЬНЫЙ заказ у перевозчика без отката. Поэтому в notes
+# уходит номер переезда («TR-32 …»), и он же служит ключом сверки.
+_TRANSFER_MARKER_RE = re.compile(r"\bTR-(\d+)\b", re.IGNORECASE)
+
+
+def _transfer_marker(notes: object) -> str | None:
+    """Номер переезда из notes заявки портала: «TR-32 Переезд …» → «TR-32».
+
+    Сравниваем ЦЕЛИКОМ извлечённый номер, а не вхождением подстроки: «TR-3» иначе
+    матчился бы внутрь «TR-32». Регистр портал местами меняет (оператор правит
+    заявку руками), поэтому IGNORECASE, а результат нормализуем в верхний регистр.
+    """
+    s = _html.unescape(notes) if isinstance(notes, str) else ""
+    m = _TRANSFER_MARKER_RE.search(s)
+    return f"TR-{m.group(1)}" if m else None
+
+
+def _transfer_notes(tr: StockTransfer, dest_label: str | None) -> str:
+    """Notes заявки портала: маркер «TR-№» ПЕРВЫМ, дальше человеческая расшифровка.
+
+    Первым — чтобы логист видел принадлежность заказа сразу в списке кабинета, а
+    не искал её в хвосте комментария.
+    """
+    tail = f"Переезд на склад {dest_label}" if dest_label else "Переезд между складами"
+    return f"{tr.number} {tail}"
+
+
+def _prefill_from_transfer(
+    tr: StockTransfer, form: ApplyForm, options: GazelkaFormOptions, dest_label: str | None
+) -> GazelkaPrefill:
+    """Предзаполнение формы портала из переезда «наш склад → наш склад».
+
+    🔴 `price_id` отдаём ДЕФОЛТНЫМ (`PRICE_LIST_HOME` = Иваново, см.
+    `_default_price_id`). Маппинга «наш склад-источник → прайс-лист портала» в
+    системе НЕТ — прайс это ГОРОД ОТПРАВЛЕНИЯ у перевозчика, а у нас на складе
+    хранится только адрес строкой, и угадывание города по ней молча увезло бы
+    заказ из чужого города по чужому тарифу. Поэтому: **если склад-источник не в
+    домашнем городе, логист ОБЯЗАН выбрать прайс-лист руками** — подсказка в
+    диалоге, гарда на бэке нет и быть не может.
+
+    Остальное:
+    • `is_marketplace='no'` — маршрут маркетплейса не касается, поэтому
+      `marketplace_id`/`supply_id` пусты, а `_validate_schedule` для такой заявки
+      возвращается сразу (графики сдачи на маркетплейс к нам не относятся);
+    • `delivery_address` — ЯВНАЯ ПУСТАЯ СТРОКА, не None: `_merge_payload`
+      трактует None как «оставить дефолт формы», а дефолт их select'а — ПЕРВАЯ
+      опция, то есть чужой склад маркетплейса. Груз уехал бы не туда;
+    • адрес получателя идёт свободным текстом в `delivery_address_x2`;
+    • единица (паллеты/короба) берётся из `shipped_as_boxes`: `pallets_count`
+      хранит количество ИМЕННО в этой единице.
+    """
+    unit_count = tr.pallets_count or 0
+    total_weight: Decimal | None = None
+    if unit_count and tr.pallet_weight_kg is not None:
+        total_weight = Decimal(unit_count) * tr.pallet_weight_kg
+    # Дата забора у переезда часто уже в прошлом (машину назначали заранее) —
+    # портал такие не принимает, поэтому подтягиваем к нижней границе их формы.
+    # График дней недели тут не применяется: он есть только у маркетплейсных
+    # направлений, а мы едем на свой склад.
+    min_departure = form.min_departure or utcnow().date()
+    departure = max(tr.pickup_date, min_departure) if tr.pickup_date else min_departure
+    delivery = tr.delivery_date if (tr.delivery_date and tr.delivery_date >= departure) else None
+    return GazelkaPrefill(
+        is_marketplace="no",
+        price_id=options.default_price_id,
+        customer_phone=form.inputs.get("customer_phone") or None,
+        delivery_address="",
+        delivery_address_x2=dest_label,
+        departure_date=departure,
+        delivery_date=delivery,
+        delivery_contact=None,
+        daily_delivery_timeslot=None,
+        supply_id=None,
+        marketplace_id=None,
+        pallets=0 if tr.shipped_as_boxes else unit_count,
+        boxes=unit_count if tr.shipped_as_boxes else 0,
+        weight=total_weight,
+        notes=_transfer_notes(tr, dest_label),
+    )
+
+
+async def _last_sent(
+    db: AsyncSession, project_id: int, doc_id: int, kind: GazelkaLinkKind = "assembly"
+) -> tuple[bool, str | None]:
+    """Была ли отправка по документу: SENT или UNCERTAIN (могла создаться — тоже блокирует повтор).
+
+    Ключ — ПАРА (тип, id): id сборки и id переезда живут в разных счётчиках, и
+    ключ по одному лишь `assembly_request_id` означал бы, что переезд №55 обходит
+    защиту, зато чужая сборка №55 её ложно включает.
+    """
+    link_column = (
+        GazelkaOrder.stock_transfer_id if kind == "transfer" else GazelkaOrder.assembly_request_id
+    )
     row = await db.execute(
         select(GazelkaOrder)
         .where(
             GazelkaOrder.project_id == project_id,
-            GazelkaOrder.assembly_request_id == assembly_id,
+            link_column == doc_id,
             GazelkaOrder.status.in_([GazelkaOrderStatus.SENT, GazelkaOrderStatus.UNCERTAIN]),
         )
         .order_by(GazelkaOrder.created_at.desc())
@@ -490,6 +644,18 @@ async def _last_sent(db: AsyncSession, project_id: int, assembly_id: int) -> tup
 # ─── Draft (диалог) ──────────────────────────────────────────────────────────
 
 
+async def _fetch_apply_form(key: IntegrationKey) -> ApplyForm:
+    """Логин + снятие ИХ формы. Общее тело обоих драфтов (сборка/переезд)."""
+    try:
+        async with _client_from_key(key) as client:
+            await client.authenticate()
+            return await client.fetch_apply_form()
+    except GazelkaApiError as e:
+        raise GazelkaServiceError(str(e), status_code=e.status_code) from e
+    except (httpx.HTTPError, CircuitOpenError, ValueError) as e:
+        raise GazelkaServiceError(f"Газелька недоступна: {e}", status_code=502) from e
+
+
 async def build_draft(db: AsyncSession, project_id: int, assembly_id: int) -> GazelkaDraftResponse:
     key = await _get_key(db, project_id)
     ar = await _load_assembly(db, project_id, assembly_id)
@@ -498,18 +664,38 @@ async def build_draft(db: AsyncSession, project_id: int, assembly_id: int) -> Ga
 
     eligible = key.warehouse_id is not None and ar.warehouse_id == key.warehouse_id
 
-    try:
-        async with _client_from_key(key) as client:
-            await client.authenticate()
-            form = await client.fetch_apply_form()
-    except GazelkaApiError as e:
-        raise GazelkaServiceError(str(e), status_code=e.status_code) from e
-    except (httpx.HTTPError, CircuitOpenError, ValueError) as e:
-        raise GazelkaServiceError(f"Газелька недоступна: {e}", status_code=502) from e
-
+    form = await _fetch_apply_form(key)
     options = _options_from_form(form)
     prefill = _prefill_from_assembly(ar, form, options)
     already_sent, sent_ref = await _last_sent(db, project_id, assembly_id)
+    return GazelkaDraftResponse(
+        eligible=eligible,
+        already_sent=already_sent,
+        sent_ref=sent_ref,
+        options=options,
+        prefill=prefill,
+    )
+
+
+async def build_transfer_draft(db: AsyncSession, project_id: int, transfer_id: int) -> GazelkaDraftResponse:
+    """Диалог отправки ПЕРЕЕЗДА — зеркало `build_draft`.
+
+    Гейт (`eligible`) — по складу-ИСТОЧНИКУ: Газелька забирает груз оттуда, куда
+    привязан ключ, а куда груз едет, ей всё равно (это наш второй склад, его в
+    их справочнике нет).
+    """
+    key = await _get_key(db, project_id)
+    tr = await _load_transfer(db, project_id, transfer_id)
+    if tr is None:
+        raise GazelkaServiceError("Переезд не найден", status_code=404)
+
+    eligible = key.warehouse_id is not None and tr.from_warehouse_id == key.warehouse_id
+
+    form = await _fetch_apply_form(key)
+    options = _options_from_form(form)
+    dest_label = await _warehouse_label(db, project_id, tr.to_warehouse_id)
+    prefill = _prefill_from_transfer(tr, form, options, dest_label)
+    already_sent, sent_ref = await _last_sent(db, project_id, transfer_id, kind="transfer")
     return GazelkaDraftResponse(
         eligible=eligible,
         already_sent=already_sent,
@@ -580,10 +766,21 @@ def _plan_matches_payload(plan: dict, payload: dict[str, object]) -> bool:
 
     Сравниваем только заполненные нами поля (None = дефолт формы, не проверяем).
     supply_id — по вхождению (портал/операторы дописывают текст вокруг номера).
+
+    Когда supply_id пуст (это ПЕРЕЕЗД — поставки у него нет), дискриминатором
+    становится маркер «TR-№» из notes. Без него от заказа осталась бы пара
+    «даты + паллеты», под которую попадает любая чужая заявка того же дня.
+    Если маркера нет и в нашем payload (старая сборка без поставки) — ведём себя
+    как раньше и сверяем только даты с паллетами.
     """
     supply = str(payload.get("supply_id") or "")
-    if supply and supply not in str(_u(plan.get("supply_id")) or ""):
-        return False
+    if supply:
+        if supply not in str(_u(plan.get("supply_id")) or ""):
+            return False
+    else:
+        marker = _transfer_marker(payload.get("notes"))
+        if marker and _transfer_marker(plan.get("notes")) != marker:
+            return False
     for key in ("departure_date", "delivery_date"):
         want = payload.get(key)
         if want and _clean_date(plan.get(key)) != str(want):
@@ -597,7 +794,8 @@ def _plan_matches_payload(plan: dict, payload: dict[str, object]) -> bool:
 def _find_created_plan(before_ids: set[str], after: dict, payload: dict[str, object]) -> str | None:
     """id новой (не было в before_ids) заявки, похожей на нашу; None = не найдена.
 
-    Чужая одновременная заявка отсеется несовпадением payload; из нескольких
+    Чужая одновременная заявка отсеется несовпадением payload (для переезда —
+    маркером «TR-№» в notes, см. `_plan_matches_payload`); из нескольких
     совпавших (дубли) берём самую свежую.
     """
     new = [p for p in after.get("plans") or [] if p.get("id") is not None and str(p.get("id")) not in before_ids]
@@ -628,37 +826,25 @@ async def _confirm_created(
     return True, _find_created_plan(before_ids, after, payload)
 
 
-async def send_order(
-    db: AsyncSession,
-    project_id: int,
-    assembly_id: int,
-    req: GazelkaSendRequest,
-    actor: str | None = None,
-) -> GazelkaSendResult:
-    key = await _get_key(db, project_id)
-    ar = await _load_assembly(db, project_id, assembly_id)
-    if ar is None:
-        raise GazelkaServiceError("Сборка не найдена", status_code=404)
-    if key.warehouse_id is None or ar.warehouse_id != key.warehouse_id:
-        raise GazelkaServiceError("Эта сборка не со склада Газельки — отправка недоступна", status_code=400)
+@dataclass
+class _SendOutcome:
+    """Исход РЕАЛЬНОГО POST в портал — один на оба типа документа."""
 
-    # Идемпотентность: повторная отправка той же сборки = вторая реальная заявка.
-    # Без явного force_resend отказываем (защита от дабл-клика/stale-вкладки/retry).
-    if not req.force_resend:
-        already_sent, _ = await _last_sent(db, project_id, assembly_id)
-        if already_sent:
-            raise GazelkaServiceError(
-                "Заявка для этой сборки уже отправлялась в Газельку. "
-                "Сверьте вкладку «Запланированные» и подтвердите повторную отправку.",
-                status_code=409,
-            )
+    status: str
+    ref: str | None
+    message: str
+    excerpt: str | None
+    error: str | None
 
+
+async def _post_order(key: IntegrationKey, req: GazelkaSendRequest, payload: dict[str, object]) -> _SendOutcome:
+    """Отправить форму в портал и определить исход. `GazelkaServiceError` (недопустимые
+    даты) пробрасывается: заявку не создавали, audit-строка не нужна."""
     login = (key.config or {}).get("login") or ""
 
     def _scrub(text: str) -> str:
         return text.replace(login, "[login]") if login else text
 
-    payload = _payload_from_request(req)
     status = GazelkaOrderStatus.FAILED
     ref: str | None = None
     message = ""
@@ -725,14 +911,32 @@ async def send_order(
         message = _scrub(f"Ошибка связи с Газелькой: {e}. Сверьте в кабинете перед повтором.")
         error = message
 
+    return _SendOutcome(status=status, ref=ref, message=message, excerpt=excerpt, error=error)
+
+
+async def _persist_send(
+    db: AsyncSession,
+    project_id: int,
+    kind: GazelkaLinkKind,
+    doc_id: int,
+    payload: dict[str, object],
+    outcome: _SendOutcome,
+    actor: str | None,
+) -> GazelkaSendResult:
+    """Записать попытку отправки в audit и вернуть результат для UI.
+
+    Заполняем РОВНО ОДНУ ссылку: CHECK `ck_gazelka_orders_single_link` запрещает
+    пару, иначе один заказ портала закрывал бы и сборку, и переезд.
+    """
     order = GazelkaOrder(
         project_id=project_id,
-        assembly_request_id=ar.id,
-        status=status,
-        gazelka_ref=ref,
+        assembly_request_id=doc_id if kind == "assembly" else None,
+        stock_transfer_id=doc_id if kind == "transfer" else None,
+        status=outcome.status,
+        gazelka_ref=outcome.ref,
         payload=payload,
-        response_excerpt=excerpt,
-        error=error,
+        response_excerpt=outcome.excerpt,
+        error=outcome.error,
         created_by=actor,
     )
     db.add(order)
@@ -742,16 +946,88 @@ async def send_order(
     logger.info(
         "gazelka.send",
         project_id=project_id,
-        assembly_id=assembly_id,
-        status=status,
-        gazelka_ref=ref,
+        kind=kind,
+        doc_id=doc_id,
+        status=outcome.status,
+        gazelka_ref=outcome.ref,
     )
     return GazelkaSendResult(
-        ok=(status == GazelkaOrderStatus.SENT),
-        ref=ref,
-        message=message,
+        ok=(outcome.status == GazelkaOrderStatus.SENT),
+        ref=outcome.ref,
+        message=outcome.message,
         gazelka_order_id=order.id,
     )
+
+
+async def send_order(
+    db: AsyncSession,
+    project_id: int,
+    assembly_id: int,
+    req: GazelkaSendRequest,
+    actor: str | None = None,
+) -> GazelkaSendResult:
+    key = await _get_key(db, project_id)
+    ar = await _load_assembly(db, project_id, assembly_id)
+    if ar is None:
+        raise GazelkaServiceError("Сборка не найдена", status_code=404)
+    if key.warehouse_id is None or ar.warehouse_id != key.warehouse_id:
+        raise GazelkaServiceError("Эта сборка не со склада Газельки — отправка недоступна", status_code=400)
+
+    # Идемпотентность: повторная отправка той же сборки = вторая реальная заявка.
+    # Без явного force_resend отказываем (защита от дабл-клика/stale-вкладки/retry).
+    if not req.force_resend:
+        already_sent, _ = await _last_sent(db, project_id, assembly_id)
+        if already_sent:
+            raise GazelkaServiceError(
+                "Заявка для этой сборки уже отправлялась в Газельку. "
+                "Сверьте вкладку «Запланированные» и подтвердите повторную отправку.",
+                status_code=409,
+            )
+
+    payload = _payload_from_request(req)
+    outcome = await _post_order(key, req, payload)
+    return await _persist_send(db, project_id, "assembly", ar.id, payload, outcome, actor)
+
+
+async def send_transfer_order(
+    db: AsyncSession,
+    project_id: int,
+    transfer_id: int,
+    req: GazelkaSendRequest,
+    actor: str | None = None,
+) -> GazelkaSendResult:
+    """РЕАЛЬНАЯ отправка ПЕРЕЕЗДА перевозчику — зеркало `send_order`.
+
+    Гейт по складу-ИСТОЧНИКУ: Газелька приезжает туда, куда привязан ключ.
+
+    🔴 Маркер «TR-№» в notes приклеиваем ПРИНУДИТЕЛЬНО, даже если логист стёр его
+    в диалоге: без маркера у переезда не остаётся ни одного дискриминатора
+    (поставки нет), подтверждение исхода упало бы на «даты + паллеты», а из
+    ложного FAILED растёт повторная отправка — то есть второй РЕАЛЬНЫЙ заказ у
+    перевозчика, отменять который нечем.
+    """
+    key = await _get_key(db, project_id)
+    tr = await _load_transfer(db, project_id, transfer_id)
+    if tr is None:
+        raise GazelkaServiceError("Переезд не найден", status_code=404)
+    if key.warehouse_id is None or tr.from_warehouse_id != key.warehouse_id:
+        raise GazelkaServiceError("Этот переезд не со склада Газельки", status_code=400)
+
+    if not req.force_resend:
+        already_sent, _ = await _last_sent(db, project_id, transfer_id, kind="transfer")
+        if already_sent:
+            raise GazelkaServiceError(
+                "Заявка для этого переезда уже отправлялась в Газельку. "
+                "Сверьте вкладку «Запланированные» и подтвердите повторную отправку.",
+                status_code=409,
+            )
+
+    payload = _payload_from_request(req)
+    if _transfer_marker(payload.get("notes")) != tr.number:
+        notes = str(payload.get("notes") or "").strip()
+        payload["notes"] = f"{tr.number} {notes}".strip()
+    outcome = await _post_order(key, req, payload)
+    return await _persist_send(db, project_id, "transfer", tr.id, payload, outcome, actor)
 
 
 # ─── Списки заявок из портала (read) ─────────────────────────────────────────
@@ -784,6 +1060,29 @@ def _assembly_status_label(code: object) -> str | None:
     if not code:
         return None
     return _ASSEMBLY_STATUS_LABELS.get(str(code), str(code))
+
+
+# Статусы ПЕРЕЕЗДА (StockTransfer). Шкала — зеркало сборочной, но подписи свои:
+# «Отгружена» у переезда читается как «уехал», «Доставлена» — «принят получателем».
+_TRANSFER_STATUS_LABELS = {
+    "PENDING": "Ожидает",
+    "IN_PROGRESS": "В сборке",
+    "READY": "Готов",
+    "VEHICLE_ASSIGNED": "Машина назначена",
+    "SHIPPED": "Уехал",
+    "DELIVERED": "Принят",
+    "RETURNED": "Возвращён",
+    "CANCELLED": "Отменён",
+    "CLOSED": "Закрыт",
+}
+
+
+def _doc_status_label(kind: GazelkaLinkKind, code: object) -> str | None:
+    """Подпись статуса нашего документа — по его типу, а не по угадыванию."""
+    if not code:
+        return None
+    table = _TRANSFER_STATUS_LABELS if kind == "transfer" else _ASSEMBLY_STATUS_LABELS
+    return table.get(str(code), str(code))
 
 
 def _u(v: object) -> str | None:
@@ -834,10 +1133,19 @@ def _marketplace_name(mid: object, marketplaces: list[dict]) -> str | None:
     return None
 
 
-async def _linked_map(db: AsyncSession, project_id: int) -> dict[str, tuple[int, str | None, str | None]]:
-    """gazelka_ref → (assembly_id, assembly_number, assembly_status): SENT + MATCHED.
+#: gazelka_ref → (тип документа, id, номер, статус). Тип обязан ехать вместе с
+#: id: счётчики сборок и переездов независимы, и id 55 существует в обоих.
+_LinkedDoc = tuple[GazelkaLinkKind, int, str | None, str | None]
+
+
+async def _linked_map(db: AsyncSession, project_id: int) -> dict[str, _LinkedDoc]:
+    """gazelka_ref → (kind, id, number, status) нашего документа: SENT + MATCHED.
 
     Сортировка по id → последняя запись побеждает (ручной матч поверх старой отправки).
+
+    Мягко удалённый ПЕРЕЕЗД связь теряет (фильтр в ON-условии + требование, чтобы
+    строка джойна материализовалась): иначе синк применил бы машину и авто-шип к
+    удалённому документу, то есть списал бы сток по тому, чего уже нет.
     """
     rows = await db.execute(
         select(
@@ -845,8 +1153,20 @@ async def _linked_map(db: AsyncSession, project_id: int) -> dict[str, tuple[int,
             GazelkaOrder.assembly_request_id,
             AssemblyRequest.number,
             AssemblyRequest.status,
+            GazelkaOrder.stock_transfer_id,
+            StockTransfer.number,
+            StockTransfer.status,
         )
         .join(AssemblyRequest, AssemblyRequest.id == GazelkaOrder.assembly_request_id, isouter=True)
+        .join(
+            StockTransfer,
+            and_(
+                StockTransfer.id == GazelkaOrder.stock_transfer_id,
+                StockTransfer.project_id == project_id,
+                StockTransfer.is_deleted.is_(False),
+            ),
+            isouter=True,
+        )
         .where(
             GazelkaOrder.project_id == project_id,
             GazelkaOrder.status.in_([GazelkaOrderStatus.SENT, GazelkaOrderStatus.MATCHED]),
@@ -854,17 +1174,21 @@ async def _linked_map(db: AsyncSession, project_id: int) -> dict[str, tuple[int,
         )
         .order_by(GazelkaOrder.id)
     )
-    out: dict[str, tuple[int, str | None, str | None]] = {}
-    for ref, aid, number, status in rows.all():
-        if ref and aid is not None:
-            out[str(ref)] = (aid, number, status)
+    out: dict[str, _LinkedDoc] = {}
+    for ref, aid, anum, astatus, tid, tnum, tstatus in rows.all():
+        if not ref:
+            continue
+        if aid is not None:
+            out[str(ref)] = ("assembly", aid, anum, astatus)
+        elif tid is not None and tnum is not None:
+            out[str(ref)] = ("transfer", tid, tnum, tstatus)
     return out
 
 
 def _row_from_plan(
     plan: dict,
     marketplaces: list[dict],
-    linked: dict[str, tuple[int, str | None, str | None]],
+    linked: dict[str, _LinkedDoc],
     *,
     editable: bool,
     joins: dict[str, dict[str, dict]] | None = None,
@@ -892,9 +1216,20 @@ def _row_from_plan(
         entity=_u(plan.get("entity")),
         notes=_u(plan.get("notes")),
         editable=editable,
-        linked_assembly_id=link[0] if link else None,
-        linked_assembly_number=link[1] if link else None,
-        linked_assembly_status=_assembly_status_label(link[2]) if link else None,
+        # Обобщённая связь (kind/id/number/status) — новый контракт, заполняется
+        # для обоих типов документа.
+        linked_kind=link[0] if link else None,
+        linked_id=link[1] if link else None,
+        linked_number=link[2] if link else None,
+        linked_status=_doc_status_label(link[0], link[3]) if link else None,
+        # Старые linked_assembly_* оставлены ТОЛЬКО для сборки: их читает готовый
+        # UI, и положить в них id переезда значило бы дать ему открыть чужую
+        # карточку по чужому id.
+        linked_assembly_id=link[1] if link and link[0] == "assembly" else None,
+        linked_assembly_number=link[2] if link and link[0] == "assembly" else None,
+        linked_assembly_status=(
+            _assembly_status_label(link[3]) if link and link[0] == "assembly" else None
+        ),
     )
     if joins:
         route = joins["routes"].get(str(plan.get("route_id") or ""))
@@ -1135,6 +1470,171 @@ async def _reconcile_active_order(
     await _backfill_cost(db, project_id, assembly_id, info, stats)
 
 
+def _transfer_vehicle_payload(info: _GazelkaLogistics) -> TransferAssignVehicle | None:
+    """Реквизиты агрегатора → тело назначения машины на переезд; None = назначать нечем.
+
+    `TransferAssignVehicle` требует хотя бы один опознавательный признак
+    (госномер / перевозчик / «логистику оказывает склад забора»). У портала
+    бывает маршрут, где из ТС известна только марка или одно ФИО водителя, — с
+    таким телом схема бросит ValidationError и утащит с собой авто-шип. Поэтому
+    отсутствие признака — штатный отказ от назначения, а не ошибка синка.
+    """
+    if not (info.car_number or info.carrier):
+        return None
+    return TransferAssignVehicle(
+        vehicle_info=info.car_number,
+        vehicle_brand=info.car_model,
+        driver_first_name=info.driver_first,
+        driver_last_name=info.driver_last,
+        driver_phone=info.driver_phone,
+        carrier_name=info.carrier,
+        pickup_cost=info.pickup_cost,
+        pickup_date=info.pickup_date,
+        delivery_date=info.delivery_date,
+    )
+
+
+async def _reconcile_active_transfer(
+    db: AsyncSession,
+    project_id: int,
+    transfer_id: int,
+    code: str,
+    info: _GazelkaLogistics,
+    stats: dict[str, int],
+) -> None:
+    """Синхронизировать ОДИН связанный переезд: машина от агрегатора → авто-шип.
+
+    🔴 Ветки WB-пропуска здесь НЕТ и быть не может: переезд едет между НАШИМИ
+    складами, на маркетплейс он не заезжает — пропускать его некуда.
+
+    Авто-шип сужен до READY | VEHICLE_ASSIGNED: между отбором кандидата и этим
+    вызовом лежат десятки секунд HTTP к порталу, и за это окно логист успевает
+    снять машину или отправить переезд руками. Без сужения общий карв-аут
+    списал бы сток второй раз.
+    """
+    from backend.services import warehouse_outbound
+
+    if info.has_vehicle and code in ("3", "31"):
+        payload = _transfer_vehicle_payload(info)
+        if payload is None:
+            logger.warning(
+                "gazelka.sync_states.transfer_vehicle_unidentified",
+                project_id=project_id,
+                transfer_id=transfer_id,
+            )
+        else:
+            # None = переезд уже уехал (заказ в кабинете живёт и после отгрузки) —
+            # реквизиты применять некуда, но это не отказ и не ошибка.
+            if await warehouse_outbound.apply_gazelka_transfer_logistics(
+                db, project_id, transfer_id, payload
+            ):
+                stats["assigned"] += 1
+
+    if code == "31":
+        try:
+            # Гейт логистики внутри `send_transfer` работает и на этом пути:
+            # переезд, которому реквизиты применить не удалось, останется READY и
+            # дождётся следующего такта — вместо того чтобы уехать без забора.
+            await warehouse_outbound.send_transfer(
+                db,
+                project_id,
+                transfer_id,
+                allowed_from=frozenset({TransferStatus.READY, TransferStatus.VEHICLE_ASSIGNED}),
+            )
+            stats["shipped"] += 1
+        except ValueError:
+            pass  # уже уехал / состав пуст / логистики нет — идемпотентно, как у сборки
+
+    await _backfill_transfer_cost(db, project_id, transfer_id, info, stats)
+
+
+async def _backfill_transfer_cost(
+    db: AsyncSession,
+    project_id: int,
+    transfer_id: int,
+    info: _GazelkaLogistics,
+    stats: dict[str, int],
+) -> None:
+    """Близнец `assembly.status.backfill_gazelka_shipment_cost` — по забору ПЕРЕЕЗДА.
+
+    Переезды, уехавшие до этой фичи (машину им назначали руками или не назначали
+    вовсе), ушли в `OutboundShipment` без тарифа и перевозчика: в «Оплатах» и в
+    отчёте логистики переездов такая строка — сплошное «—», а добрать её задним
+    числом нечем. Пока заявка видна в кабинете Газельки, берём её ставку.
+
+    Идемпотентно: заполненное НЕ перетираем (там может лежать ручной ввод
+    логиста, который агрегатор знать не обязан). Забор — носитель денег, поэтому
+    ставку зеркалим и в сам переезд, если там пусто.
+    """
+    if info.pickup_cost is None:
+        return
+    try:
+        if await _apply_transfer_cost(db, project_id, transfer_id, info.pickup_cost, info.carrier):
+            stats["cost_backfilled"] += 1
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "gazelka.sync_states.transfer_backfill_failed", project_id=project_id, transfer_id=transfer_id
+        )
+
+
+async def _apply_transfer_cost(
+    db: AsyncSession,
+    project_id: int,
+    transfer_id: int,
+    pickup_cost: Decimal,
+    carrier_name: str | None,
+) -> bool:
+    """Дозаполнить ПУСТОЙ снимок забора переезда тарифом/перевозчиком. True = изменили."""
+    from backend.services.assembly.status import _resolve_carrier_by_name
+
+    transfer = await _load_transfer(db, project_id, transfer_id)
+    if transfer is None or TransferStatus(transfer.status) not in (
+        TransferStatus.SHIPPED, TransferStatus.DELIVERED, TransferStatus.RETURNED, TransferStatus.CLOSED,
+    ):
+        return False  # не уехал — логистику ведёт штатный путь назначения машины
+    # Забор ПОСЛЕДНЕЙ попытки: у переотправленного после возврата переезда их
+    # несколько, и тариф текущего рейса относится к последнему. `scalar_one_or_none`
+    # на такой выборке бросил бы MultipleResultsFound и утащил бы синк.
+    shipment = (
+        await db.execute(
+            select(OutboundShipment)
+            .where(
+                OutboundShipment.project_id == project_id,
+                OutboundShipment.stock_transfer_id == transfer_id,
+                OutboundShipment.is_deleted.is_(False),
+            )
+            .order_by(OutboundShipment.attempt_no.desc(), OutboundShipment.id.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+    if shipment is None:
+        return False  # забора нет (переезд отправляли до появления носителя денег)
+
+    changed = False
+    if shipment.pickup_cost is None:
+        shipment.pickup_cost = pickup_cost
+        if transfer.pickup_cost is None:
+            transfer.pickup_cost = pickup_cost
+        changed = True
+    if shipment.counterparty_id is None and carrier_name:
+        cp_id = await _resolve_carrier_by_name(db, project_id, carrier_name)
+        if cp_id is not None:
+            shipment.counterparty_id = cp_id
+            if transfer.counterparty_id is None:
+                transfer.counterparty_id = cp_id
+            changed = True
+
+    if changed:
+        await db.commit()
+        # Забор переезда — строка «Оплат» и слагаемое сверки счетов ФФ; тариф,
+        # доехавший до него, обязан появиться в отчётах сразу (iron rule 7).
+        await invalidate_cache("reports:balance")
+        await invalidate_cache("ff_billing:invoices")
+    return changed
+
+
 async def _backfill_cost(
     db: AsyncSession,
     project_id: int,
@@ -1163,7 +1663,7 @@ async def _auto_link_unmatched(
     project_id: int,
     plans: list[dict],
     supply_idx: dict[str, tuple[int, str]],
-    linked: dict[str, tuple[int, str | None, str | None]],
+    linked: dict[str, _LinkedDoc],
 ) -> int:
     """Авто-связать заявки портала со сборкой по № поставки WB — без клика «Сопоставить».
 
@@ -1172,10 +1672,15 @@ async def _auto_link_unmatched(
     указывает ровно на одну нашу сборку, и та ещё не связана с другой заявкой (не переклеиваем).
     Пишем MATCHED (как ручной матч) → дальше синк подхватит машину/пропуск/отгрузку.
     Мутирует ``linked`` на месте (добавляет новые связи для последующего reconcile).
+
+    Переездов это не касается: их дискриминатор — маркер «TR-№» в notes, и он
+    попадает туда ТОЛЬКО нашей отправкой (`send_transfer_order`), то есть связь
+    уже есть. Автосвязывать переезд по маркеру, введённому человеком в кабинете,
+    значило бы доверить чужому тексту право двигать наш сток авто-шипом.
     """
     if not supply_idx:
         return 0
-    linked_assemblies = {aid for aid, _num, _st in linked.values()}
+    linked_assemblies = {lid for kind, lid, _num, _st in linked.values() if kind == "assembly"}
     created = 0
     for plan in plans:
         gid = str(plan.get("id") or "")
@@ -1202,7 +1707,7 @@ async def _auto_link_unmatched(
                 created_by="gazelka",
             )
         )
-        linked[gid] = (aid, number, None)
+        linked[gid] = ("assembly", aid, number, None)
         linked_assemblies.add(aid)
         created += 1
     if created:
@@ -1219,6 +1724,7 @@ async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, in
       – назначена машина/водитель → сборка READY→VEHICLE_ASSIGNED + реквизиты + WB-пропуск
         (авто-занос в кабинет, как при ручном назначении машины);
       – статус «В маршруте» (код 31) → авто-шип сборки (тариф → стоимость забора).
+    • То же для ПЕРЕЕЗДА, но БЕЗ WB-пропуска (см. `_reconcile_active_transfer`).
     Сбой одной заявки не роняет синк остальных.
     """
     stats = {"autolinked": 0, "assigned": 0, "passed": 0, "shipped": 0, "cost_backfilled": 0}
@@ -1249,18 +1755,22 @@ async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, in
         lk = linked.get(str(plan.get("id") or ""))
         if not lk:
             continue
-        assembly_id = lk[0]
+        kind, doc_id = lk[0], lk[1]
         code = str(plan.get("status") or "")
         info = _extract_logistics(plan, joins)
         try:
-            await _reconcile_active_order(db, project_id, assembly_id, code, info, stats)
+            if kind == "transfer":
+                await _reconcile_active_transfer(db, project_id, doc_id, code, info, stats)
+            else:
+                await _reconcile_active_order(db, project_id, doc_id, code, info, stats)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             logger.warning(
                 "gazelka.sync_states.reconcile_failed",
                 project_id=project_id,
-                assembly_id=assembly_id,
+                kind=kind,
+                doc_id=doc_id,
                 gazelka_id=str(plan.get("id") or ""),
             )
 
@@ -1276,7 +1786,10 @@ async def sync_gazelka_states(db: AsyncSession, project_id: int) -> dict[str, in
             continue
         info = _extract_logistics(plan, completed_joins)
         try:
-            await _backfill_cost(db, project_id, lk[0], info, stats)
+            if lk[0] == "transfer":
+                await _backfill_transfer_cost(db, project_id, lk[1], info, stats)
+            else:
+                await _backfill_cost(db, project_id, lk[1], info, stats)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
@@ -1427,11 +1940,13 @@ async def save_edit(
         message = _scrub(f"Ошибка связи с Газелькой: {e}. Сверьте в кабинете.")
         error = message
 
-    linked = await _linked_map(db, project_id)
-    aid = (linked.get(str(plan_id)) or (None, None))[0]
+    # Audit-строку правки вешаем на ТОТ ЖЕ документ, что и связь заказа: иначе
+    # правка заявки переезда легла бы в лог со ссылкой в никуда.
+    link = (await _linked_map(db, project_id)).get(str(plan_id))
     order = GazelkaOrder(
         project_id=project_id,
-        assembly_request_id=aid,
+        assembly_request_id=link[1] if link and link[0] == "assembly" else None,
+        stock_transfer_id=link[1] if link and link[0] == "transfer" else None,
         status=status,
         gazelka_ref=str(plan_id),
         payload={**payload, "_edit": True},
@@ -1481,24 +1996,42 @@ async def _assembly_supply_index(db: AsyncSession, project_id: int) -> dict[str,
 
 
 def _attach_suggestion(row: GazelkaOrderRow, plan: dict, supply_idx: dict[str, tuple[int, str]]) -> None:
-    """Если строка не связана — подсказать сборку по № поставки WB из supply_id."""
-    if row.linked_assembly_id is not None:
+    """Если строка не связана — подсказать сборку по № поставки WB из supply_id.
+
+    Подсказка всегда сборочная: № поставки бывает только у неё. Переезд узнаётся
+    маркером «TR-№», но маркер в кабинете может набрать и человек, а подсказка —
+    это заготовка для клика «Сопоставить», за который отвечает логист.
+    """
+    if row.linked_id is not None:
         return
     for num in _extract_wb_numbers(plan.get("supply_id")):
         hit = supply_idx.get(num)
         if hit:
             row.suggested_assembly_id, row.suggested_assembly_number = hit
+            row.suggested_kind, row.suggested_id, row.suggested_number = "assembly", hit[0], hit[1]
             return
 
 
 async def match_order(
-    db: AsyncSession, project_id: int, plan_id: str, assembly_id: int, actor: str | None = None
+    db: AsyncSession, project_id: int, plan_id: str, req: GazelkaMatchRequest, actor: str | None = None
 ) -> GazelkaMatchResult:
-    """Связать существующую заявку портала с нашей сборкой (ручной матч)."""
+    """Связать существующую заявку портала с нашим документом (ручной матч).
+
+    Ровно одна из ссылок непуста — это гарантирует валидатор `GazelkaMatchRequest`
+    (и дублирует CHECK в БД).
+    """
     await _get_key(db, project_id)  # интеграция должна быть настроена
-    ar = await _load_assembly(db, project_id, assembly_id)
-    if ar is None:
-        raise GazelkaServiceError("Сборка не найдена", status_code=404)
+    kind: GazelkaLinkKind = "transfer" if req.transfer_id is not None else "assembly"
+    if kind == "transfer":
+        tr = await _load_transfer(db, project_id, req.transfer_id or 0)
+        if tr is None:
+            raise GazelkaServiceError("Переезд не найден", status_code=404)
+        doc_id, doc_number = tr.id, tr.number
+    else:
+        ar = await _load_assembly(db, project_id, req.assembly_id or 0)
+        if ar is None:
+            raise GazelkaServiceError("Сборка не найдена", status_code=404)
+        doc_id, doc_number = ar.id, ar.number
 
     # Одна ручная связь на заявку портала — убираем прежние MATCHED для этого gazelka_ref
     existing = await db.execute(
@@ -1514,7 +2047,8 @@ async def match_order(
     db.add(
         GazelkaOrder(
             project_id=project_id,
-            assembly_request_id=ar.id,
+            assembly_request_id=doc_id if kind == "assembly" else None,
+            stock_transfer_id=doc_id if kind == "transfer" else None,
             status=GazelkaOrderStatus.MATCHED,
             gazelka_ref=str(plan_id),
             payload={"_match": True},
@@ -1522,34 +2056,66 @@ async def match_order(
         )
     )
     await db.commit()
-    logger.info("gazelka.match", project_id=project_id, gazelka_id=plan_id, assembly_id=ar.id)
-    return GazelkaMatchResult(ok=True, linked_assembly_id=ar.id, linked_assembly_number=ar.number)
+    logger.info("gazelka.match", project_id=project_id, gazelka_id=plan_id, kind=kind, doc_id=doc_id)
+    return GazelkaMatchResult(
+        ok=True,
+        # Старую пару отдаём ТОЛЬКО для сборки — её читает готовый UI и ведёт по
+        # ней на карточку заявки; id переезда там открыл бы чужой документ.
+        linked_assembly_id=doc_id if kind == "assembly" else None,
+        linked_assembly_number=doc_number if kind == "assembly" else None,
+        linked_kind=kind,
+        linked_id=doc_id,
+        linked_number=doc_number,
+    )
 
 
 async def unmatch_order(db: AsyncSession, project_id: int, plan_id: str) -> GazelkaMatchResult:
-    """Снять ручную связь заявки портала со сборкой (SENT-записи не трогаем)."""
+    """Снять связь заявки портала с нашим документом.
+
+    Ручную связь (MATCHED) удаляем — она наша выдумка, аудировать нечего.
+
+    SENT-связь ПЕРЕЕЗДА переводим в CANCELLED, а не удаляем: строка — аудит
+    реального создания заявки в чужом сервисе. Без этой ветки переезд, чей заказ
+    агрегатор так и не подтвердил, запирался навсегда: `_deny_if_gazelka_leads`
+    отбивает и назначение машины, и снятие, гейт `send_transfer` не пускает READY
+    без логистики, а ретро-ручка требует SHIPPED. У сборки такого тупика нет
+    (её выпускает авто-шип по приёмке WB), поэтому SENT-связи СБОРОК не трогаем —
+    там «Отвязать» по-прежнему только про ручной матч.
+    """
     rows = await db.execute(
         select(GazelkaOrder).where(
             GazelkaOrder.project_id == project_id,
             GazelkaOrder.gazelka_ref == str(plan_id),
-            GazelkaOrder.status == GazelkaOrderStatus.MATCHED,
+            GazelkaOrder.status.in_([GazelkaOrderStatus.MATCHED, GazelkaOrderStatus.SENT]),
         )
     )
     for old in rows.scalars():
-        await db.delete(old)  # no-soft-delete-check: GazelkaOrder — audit/link без SoftDeleteMixin
+        if old.status == GazelkaOrderStatus.MATCHED:
+            await db.delete(old)  # no-soft-delete-check: GazelkaOrder — audit/link без SoftDeleteMixin
+        elif old.stock_transfer_id is not None:
+            old.status = GazelkaOrderStatus.CANCELLED
     await db.commit()
     return GazelkaMatchResult(ok=True)
 
 
 async def list_match_candidates(
-    db: AsyncSession, project_id: int, search: str | None = None, limit: int = 50
+    db: AsyncSession,
+    project_id: int,
+    search: str | None = None,
+    limit: int = 50,
+    kind: GazelkaLinkKind = "assembly",
 ) -> list[GazelkaMatchCandidate]:
-    """Наши сборки — кандидаты на ручное сопоставление (поиск по номеру/№ поставки)."""
+    """Наши документы — кандидаты на ручное сопоставление с заявкой портала.
+
+    `kind` выбирает список: сборки (поиск по номеру / № поставки) либо переезды
+    (поиск по номеру). Дефолт — сборки: старые клиенты параметра не знают.
+    """
     linked = await _linked_map(db, project_id)
-    assembly_to_gazelka: dict[int, str] = {}
-    for gref, (aid, _num, _status) in linked.items():
-        if aid is not None:
-            assembly_to_gazelka[aid] = gref
+    # Ключ занятости — ПАРА (тип, id): без типа переезд №55 «занимал» бы сборку №55.
+    linked_to_gazelka = {(lkind, lid): gref for gref, (lkind, lid, _n, _s) in linked.items()}
+
+    if kind == "transfer":
+        return await _transfer_match_candidates(db, project_id, search, limit, linked_to_gazelka)
 
     query = (
         select(
@@ -1575,6 +2141,7 @@ async def list_match_candidates(
     rows = await db.execute(query)
     return [
         GazelkaMatchCandidate(
+            kind="assembly",
             assembly_id=aid,
             number=number,
             warehouse_name=wh,
@@ -1582,7 +2149,61 @@ async def list_match_candidates(
             delivery_date=ddate,
             pallets_count=pallets,
             status=status,
-            already_linked_to=assembly_to_gazelka.get(aid),
+            already_linked_to=linked_to_gazelka.get(("assembly", aid)),
         )
         for aid, number, wh, sup, ddate, pallets, status in rows.all()
+    ]
+
+
+async def _transfer_match_candidates(
+    db: AsyncSession,
+    project_id: int,
+    search: str | None,
+    limit: int,
+    linked_to_gazelka: dict[tuple[GazelkaLinkKind, int], str],
+) -> list[GazelkaMatchCandidate]:
+    """Переезды-кандидаты. `assembly_id` несёт id ПЕРЕЕЗДА — так задан контракт схемы.
+
+    Складом показываем МАРШРУТ «источник → получатель»: у переезда одного склада
+    мало, а логист сопоставляет заказ портала именно по направлению.
+    Гейта по складу Газельки тут намеренно нет: заказ в кабинете уже существует,
+    и отфильтровать половину списка значит спрятать от логиста ровно тот переезд,
+    который он ищет.
+    """
+    src = aliased(Warehouse)
+    dst = aliased(Warehouse)
+    query = (
+        select(
+            StockTransfer.id,
+            StockTransfer.number,
+            src.name,
+            dst.name,
+            StockTransfer.delivery_date,
+            StockTransfer.pallets_count,
+            StockTransfer.status,
+        )
+        .join(src, src.id == StockTransfer.from_warehouse_id, isouter=True)
+        .join(dst, dst.id == StockTransfer.to_warehouse_id, isouter=True)
+        .where(StockTransfer.project_id == project_id, StockTransfer.is_deleted.is_(False))
+        .order_by(StockTransfer.id.desc())
+        .limit(limit)
+    )
+    if search:
+        esc = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        query = query.where(StockTransfer.number.ilike(f"%{esc}%"))
+
+    rows = await db.execute(query)
+    return [
+        GazelkaMatchCandidate(
+            kind="transfer",
+            assembly_id=tid,
+            number=number,
+            warehouse_name=" → ".join(p for p in (from_name, to_name) if p) or None,
+            wb_supply_id=None,  # поставки у переезда нет и быть не может
+            delivery_date=ddate,
+            pallets_count=pallets,
+            status=status,
+            already_linked_to=linked_to_gazelka.get(("transfer", tid)),
+        )
+        for tid, number, from_name, to_name, ddate, pallets, status in rows.all()
     ]

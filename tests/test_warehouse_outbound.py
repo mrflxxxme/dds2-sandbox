@@ -9,7 +9,7 @@ import pytest_asyncio
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models.warehouse import OutboundStatus, TransferStatus
+from backend.models.warehouse import OutboundStatus, StockTransfer, TransferStatus
 from backend.services.warehouse_crud import create_warehouse
 from backend.services.warehouse_inbound import accept_receipt, create_receipt
 from backend.services.warehouse_outbound import (
@@ -22,13 +22,36 @@ from backend.services.warehouse_outbound import (
     get_shipment,
     get_transfer,
     list_transfers,
-    send_transfer,
+    mark_transfer_ready,
+    send_transfer as _send_transfer_raw,
     ship_shipment,
 )
 
 
 def _uid() -> str:
     return uuid.uuid4().hex[:8]
+
+
+async def send_transfer(db_session, project_id, transfer_id, **kwargs):
+    """Отправка переезда с доводкой до READY — см. шапку tests/test_transfer_vehicle.py.
+
+    Переезд рождается в PENDING, а `send_transfer` работает из READY /
+    VEHICLE_ASSIGNED. Тесты этого файла проверяют движения стока, а не
+    лестницу, поэтому ступень «собран» проставляем шорткатом. Из отгруженных
+    статусов обёртка ничего не делает — отказ доходит до сервиса как есть.
+
+    `allow_no_logistics` взведён по умолчанию: с 01.08.2026 голый READY без
+    машины/перевозчика/стоимости отправить нельзя (TR-32), а здесь ни один тест
+    логистику не оформляет — она к движениям стока отношения не имеет.
+    """
+    transfer = await db_session.get(StockTransfer, transfer_id)
+    if transfer is not None and TransferStatus(transfer.status) in (
+        TransferStatus.PENDING,
+        TransferStatus.IN_PROGRESS,
+    ):
+        await mark_transfer_ready(db_session, project_id, transfer_id)
+    kwargs.setdefault("allow_no_logistics", True)
+    return await _send_transfer_raw(db_session, project_id, transfer_id, **kwargs)
 
 
 @pytest_asyncio.fixture
@@ -229,7 +252,7 @@ class TestCreateTransfer:
             },
         )
         assert transfer.id is not None
-        assert transfer.status == TransferStatus.DRAFT
+        assert transfer.status == TransferStatus.PENDING
         assert transfer.number.startswith("TR-")
         assert len(transfer.items) == 1
 
@@ -274,7 +297,7 @@ class TestSendTransfer:
             },
         )
         sent = await send_transfer(db_session, project.id, transfer.id)
-        assert sent.status == TransferStatus.IN_TRANSIT
+        assert sent.status == TransferStatus.SHIPPED
 
     @pytest.mark.asyncio
     async def test_send_empty_transfer_fails(self, db_session, project, fulfillment_wh, external_wh):
@@ -287,7 +310,9 @@ class TestSendTransfer:
                 "items": [],
             },
         )
-        with pytest.raises(ValueError, match="no items"):
+        # Пустой состав отбивается уже на ступени «собран»: отмечать готовым
+        # нечего, а до `send_transfer` такой переезд теперь просто не доходит.
+        with pytest.raises(ValueError, match="Состав переезда пуст"):
             await send_transfer(db_session, project.id, transfer.id)
 
 
@@ -427,7 +452,7 @@ class TestReceiveTransferFact:
         )
         assert result["completed"] is True
         await db_session.refresh(transfer)
-        assert transfer.status == TransferStatus.COMPLETED
+        assert transfer.status == TransferStatus.DELIVERED
         stock = await self._dest_stock(db_session, project, external_wh, barcode)
         assert stock.quantity == 40
         assert stock.in_transit == 0
@@ -596,7 +621,7 @@ class TestCompleteTransfer:
         )
         await send_transfer(db_session, project.id, transfer.id)
         completed = await complete_transfer(db_session, project.id, transfer.id)
-        assert completed.status == TransferStatus.COMPLETED
+        assert completed.status == TransferStatus.DELIVERED
 
     @pytest.mark.asyncio
     async def test_complete_transfer_inherits_box_qty(self, db_session, project, fulfillment_wh, external_wh, barcode):
@@ -672,7 +697,7 @@ class TestCompleteTransfer:
                 "items": [{"barcode": barcode, "quantity": 10}],
             },
         )
-        with pytest.raises(ValueError, match="Cannot complete"):
+        with pytest.raises(ValueError, match="PENDING → DELIVERED запрещён"):
             await complete_transfer(db_session, project.id, transfer.id)
 
 
@@ -724,6 +749,12 @@ class TestCancelTransfer:
         await cancel_transfer(db_session, project.id, transfer.id)
         found = await get_transfer(db_session, project.id, transfer.id)
         assert found is None
+        # Статус проставлен ЯВНО: «отменён» обязан быть отличим от «удалён по
+        # ошибке» в истории и в отчётах, которые читают статус, а не is_deleted.
+        raw = await db_session.get(StockTransfer, transfer.id)
+        await db_session.refresh(raw)
+        assert raw.status == TransferStatus.CANCELLED
+        assert raw.is_deleted is True
 
     @pytest.mark.asyncio
     async def test_cancel_in_transit_fails(self, db_session, project, fulfillment_wh, external_wh, barcode):
@@ -738,7 +769,7 @@ class TestCancelTransfer:
             },
         )
         await send_transfer(db_session, project.id, transfer.id)
-        with pytest.raises(ValueError, match="Cannot cancel"):
+        with pytest.raises(ValueError, match="не отменить"):
             await cancel_transfer(db_session, project.id, transfer.id)
 
     @pytest.mark.asyncio
@@ -754,7 +785,9 @@ class TestCancelTransfer:
                 "items": [{"barcode": barcode, "quantity": 5}],
             },
         )
-        with pytest.raises(ValueError, match="not found"):
+        # Сообщение русское: логист не должен видеть «Transfer not found» среди
+        # русских ошибок, а роутер отличает по нему 404 от 400.
+        with pytest.raises(ValueError, match="не найдено"):
             await cancel_transfer(db_session, other_project.id, transfer.id)
         # И не удалён: в своём проекте всё ещё виден
         found = await get_transfer(db_session, project.id, transfer.id)

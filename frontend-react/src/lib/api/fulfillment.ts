@@ -16,6 +16,7 @@ import type {
     FfNomenclatureOption,
     FfOverviewResponse,
     FfPushAssemblyResult,
+    FfRepackCandidatesOut,
     FfRequestDetail,
     FfRequestKind,
     FfRequestRow,
@@ -26,7 +27,14 @@ import type {
     FfUnlinkedAssembly,
     FulfillmentConnectPayload,
     FulfillmentStatus,
+    MigfullInboundDraft,
+    MigfullInboundSendRequest,
+    MigfullInboundSource,
+    MigfullSendResult,
 } from '@/types/api';
+
+/** Сегмент пути поставки у Натали по источнику состава (`/inbound` | `/transfer`). */
+const inboundSeg = (source: MigfullInboundSource) => (source.kind === 'transfer' ? 'transfer' : 'inbound');
 
 export function addFulfillmentMethods(api: ApiClient) {
     return {
@@ -123,6 +131,16 @@ export function addFulfillmentMethods(api: ApiClient) {
         unlinkFulfillmentRequest(warehouseId: number, ffRequestId: number) {
             return api.request<FfRequestRow>('DELETE', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/link`);
         },
+        // ─── Ручная пара «вскрытие коробов» (migfull: возврат ↔ поступление) ──
+        getFfRepackCandidates(warehouseId: number, ffRequestId: number) {
+            return api.request<FfRepackCandidatesOut>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/repack-candidates`);
+        },
+        linkFfRepackPair(warehouseId: number, ffRequestId: number, submissionId: number) {
+            return api.request<FfRequestRow>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/repack-link`, { submission_id: submissionId });
+        },
+        unlinkFfRepackPair(warehouseId: number, ffRequestId: number) {
+            return api.request<FfRequestRow>('DELETE', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/repack-link`);
+        },
         archiveFulfillmentRequest(warehouseId: number, ffRequestId: number) {
             return api.request<FfRequestRow>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/archive`);
         },
@@ -146,6 +164,32 @@ export function addFulfillmentMethods(api: ApiClient) {
         /** Массово убрать/вернуть заявки ФФ в локальный архив. */
         bulkArchiveFulfillmentRequests(warehouseId: number, payload: FfBulkArchivePayload) {
             return api.request<FfBulkArchiveResult>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/bulk-archive`, payload);
+        },
+
+        // ─── Поставка (приёмка) у Натали (migfull-портал) ──────────────────────
+        // Два источника состава: наша приёмка машины (`receipt`) и наше перемещение
+        // на склад Натали (`transfer`). Контракт запроса/ответа общий — различается
+        // только сегмент пути, поэтому методы принимают источник целиком.
+        migfullInboundDraft(source: MigfullInboundSource) {
+            return api.request<MigfullInboundDraft>('GET', `/api/v1/migfull-portal/${inboundSeg(source)}/${source.id}/draft`);
+        },
+        /**
+         * РЕАЛЬНОЕ создание поставки (приёмки) в портале ФФ «Натали» — НЕОБРАТИМО.
+         * Повторная отправка без force_resend → HTTP 409; тегируем `.code='conflict'`
+         * (как migfullPortalSend), чтобы модалка показала подтверждение.
+         */
+        async migfullInboundSend(source: MigfullInboundSource, body: MigfullInboundSendRequest) {
+            try {
+                return await api.request<MigfullSendResult>('POST', `/api/v1/migfull-portal/${inboundSeg(source)}/${source.id}/send`, body);
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : '';
+                if (!body.force_resend && /уже\s+(отправ|созда|есть)|already|409|конфликт/i.test(msg)) {
+                    const err = new Error(msg || 'Поставка уже создавалась') as Error & { code?: string };
+                    err.code = 'conflict';
+                    throw err;
+                }
+                throw e;
+            }
         },
     };
 }

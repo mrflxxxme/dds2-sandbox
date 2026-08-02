@@ -6,11 +6,33 @@ import type {
     MigfullDraftResponse,
     MigfullSendRequest,
     MigfullSendResult,
+    MigfullShipmentSource,
 } from '@/types/api';
 
+/**
+ * Confirm-модалка «Создать заявку в ФФ Натали» — РЕАЛЬНОЕ создание заявки на
+ * отгрузку в портале (НЕОБРАТИМО: портал не даёт удалить/отменить документ,
+ * повтор требует подтверждения).
+ *
+ * Источников состава ДВА (проп `source`) и модалка между ними не различается,
+ * кроме подписей: наша сборка (`assembly`) и перемещение, у которого Натали —
+ * склад-ИСТОЧНИК (`transfer`; сборки у переезда нет, вывоз заводит эта заявка).
+ */
+
+/** Подписи источника в текстах модалки — зеркало бэковых словарей по kind. */
+const SOURCE_WORDS: Record<MigfullShipmentSource['kind'], {
+    dem: string;  // указательный: «Заявка для … уже создавалась»
+    wh: string;   // подпись склада в блоке !eligible
+}> = {
+    assembly: { dem: 'этой сборки', wh: 'Склад сборки' },
+    transfer: { dem: 'этого перемещения', wh: 'Склад-источник перемещения' },
+};
+
 interface Props {
-    assemblyId: number;
-    assemblyNumber: string;
+    /** Документ DDS, дающий состав заявки: сборка либо перемещение. */
+    source: MigfullShipmentSource;
+    /** подпись источника в заголовке («Сборка ASM-…» / «Перемещение TR-…») */
+    sourceLabel: string;
     onClose: () => void;
     onSuccess: () => void;
 }
@@ -23,7 +45,7 @@ const DELIVERY_FALLBACK: { value: DeliveryType; label: string }[] = [
     { value: 'pickup', label: 'Самовывоз' },
 ];
 
-export default function MigfullModal({ assemblyId, assemblyNumber, onClose, onSuccess }: Props) {
+export default function MigfullModal({ source, sourceLabel, onClose, onSuccess }: Props) {
     const [draft, setDraft] = useState<MigfullDraftResponse | null>(null);
     const [loadingDraft, setLoadingDraft] = useState(true);
     const [draftError, setDraftError] = useState('');
@@ -41,12 +63,18 @@ export default function MigfullModal({ assemblyId, assemblyNumber, onClose, onSu
     const [submitError, setSubmitError] = useState('');
     const [result, setResult] = useState<MigfullSendResult | null>(null);
 
+    // Источник разбираем на примитивы: пропом приходит объектный литерал, и
+    // зависимость от него самого пересоздавала бы loadDraft на каждый рендер
+    // родителя (бесконечная перезагрузка draft'а).
+    const { kind: sourceKind, id: sourceId } = source;
+    const w = SOURCE_WORDS[sourceKind];
+
     // ─── Загрузка draft (маунт + кнопка «Повторить»). StrictMode-safe. ──────────
     const loadDraft = useCallback(() => {
         setLoadingDraft(true);
         setDraftError('');
         const controller = new AbortController();
-        api.migfullPortalDraft(assemblyId).then(d => {
+        api.migfullPortalDraft({ kind: sourceKind, id: sourceId }).then(d => {
             if (controller.signal.aborted) return;
             setDraft(d);
             setDeliveryType(d.prefill.filter_delivery_type);
@@ -61,7 +89,7 @@ export default function MigfullModal({ assemblyId, assemblyNumber, onClose, onSu
             if (!controller.signal.aborted) setLoadingDraft(false);
         });
         return () => controller.abort();
-    }, [assemblyId]);
+    }, [sourceKind, sourceId]);
 
     useEffect(() => loadDraft(), [loadDraft]);
 
@@ -83,7 +111,7 @@ export default function MigfullModal({ assemblyId, assemblyNumber, onClose, onSu
         setSubmitting(true);
         setSubmitError('');
         try {
-            const res = await api.migfullPortalSend(assemblyId, body);
+            const res = await api.migfullPortalSend({ kind: sourceKind, id: sourceId }, body);
             if (res.ok) {
                 setResult(res);
                 onSuccess();
@@ -94,7 +122,10 @@ export default function MigfullModal({ assemblyId, assemblyNumber, onClose, onSu
             // 409 от бэка (повторная отправка без force_resend) → подтверждение и повтор.
             if (e && typeof e === 'object' && (e as { code?: string }).code === 'conflict') {
                 setConfirmResend(true);
-                setSubmitError('Заявка для этой сборки уже создавалась. Подтвердите повторную отправку и нажмите «Создать заявку» ещё раз.');
+                setSubmitError(
+                    `Заявка для ${w.dem} уже создавалась. `
+                    + 'Подтвердите повторную отправку и нажмите «Создать заявку» ещё раз.',
+                );
             } else {
                 setSubmitError(e instanceof Error ? e.message : 'Ошибка отправки');
             }
@@ -133,7 +164,7 @@ export default function MigfullModal({ assemblyId, assemblyNumber, onClose, onSu
                     <div>
                         <h2 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Создать заявку в ФФ Натали</h2>
                         <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 2 }}>
-                            Сборка {assemblyNumber}
+                            {sourceLabel}
                         </div>
                     </div>
                     <button
@@ -172,7 +203,7 @@ export default function MigfullModal({ assemblyId, assemblyNumber, onClose, onSu
                     {/* Not eligible */}
                     {!loadingDraft && !draftError && draft && !draft.eligible && (
                         <div style={{ padding: 16, borderRadius: 8, background: 'rgba(245,158,11,0.1)', color: 'var(--color-warning)' }}>
-                            Склад сборки не совпадает со складом интеграции ФФ Натали — заявку отправить нельзя.
+                            {w.wh} не совпадает со складом интеграции ФФ Натали — заявку отправить нельзя.
                         </div>
                     )}
 
@@ -192,7 +223,7 @@ export default function MigfullModal({ assemblyId, assemblyNumber, onClose, onSu
                             {draft.already_sent && (
                                 <div style={{ padding: '12px 16px', borderRadius: 8, background: 'rgba(245,158,11,0.12)', color: 'var(--color-warning)', marginBottom: 16, fontSize: 14 }}>
                                     <div style={{ fontWeight: 600 }}>
-                                        Заявка уже создавалась{draft.sent_number ? ` (${draft.sent_number})` : ''}.
+                                        Заявка для {w.dem} уже создавалась{draft.sent_number ? ` (${draft.sent_number})` : ''}.
                                     </div>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, cursor: 'pointer' }}>
                                         <input
@@ -222,13 +253,19 @@ export default function MigfullModal({ assemblyId, assemblyNumber, onClose, onSu
                                 </div>
                             )}
 
-                            {/* Склад назначения в ФФ (выставится при создании; персистит только при Самовывозе) */}
+                            {/* Склад назначения в ФФ (выставится при создании; персистит только при Самовывозе).
+                                У переезда направления в справочнике Натали обычно НЕТ — там только склады
+                                маркетплейсов, — и заявка уходит без него (так же лежат 54 отгрузки в их зеркале). */}
                             <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 16 }}>
                                 Склад назначения:{' '}
                                 {draft.prefill.destination_matched && draft.prefill.destination_name ? (
                                     <strong style={{ color: 'var(--color-text)' }}>{draft.prefill.destination_name}</strong>
                                 ) : (
-                                    <span style={{ color: 'var(--color-warning)' }}>не распознан — заполнит оператор</span>
+                                    <span style={{ color: 'var(--color-warning)' }}>
+                                        {sourceKind === 'transfer'
+                                            ? 'нашего склада у Натали в справочнике нет — заявка уйдёт без направления'
+                                            : 'не распознан — заполнит оператор'}
+                                    </span>
                                 )}
                             </div>
 
@@ -251,11 +288,13 @@ export default function MigfullModal({ assemblyId, assemblyNumber, onClose, onSu
                                     </select>
                                 </div>
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                                    <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-muted)' }}>№ поставки</label>
+                                    <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-muted)' }}>
+                                        {sourceKind === 'transfer' ? 'Номер (для оператора)' : '№ поставки'}
+                                    </label>
                                     <input
                                         value={number}
                                         onChange={e => setNumber(e.target.value)}
-                                        placeholder="WB-..."
+                                        placeholder={sourceKind === 'transfer' ? 'TR-…' : 'WB-...'}
                                         style={{
                                             padding: '7px 10px', borderRadius: 8,
                                             border: '1px solid var(--color-border)',

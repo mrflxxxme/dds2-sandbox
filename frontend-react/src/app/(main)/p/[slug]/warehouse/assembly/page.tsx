@@ -15,6 +15,7 @@ import { ASSEMBLY_STATUS_MAP } from '@/lib/assembly-status';
 import { KIND_BADGE_CLASS, KIND_LABEL, assemblyKindOf } from '@/lib/assembly-kind';
 import { supplyStatusInfo } from '../fbs/fbsShared';
 import CreatedRequestsModal, { type CreatedRequestRow } from './distribute/components/CreatedRequestsModal';
+import TransfersTab from './TransfersTab';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -100,6 +101,13 @@ function palletsMismatch(row: AssemblyRequest): boolean {
     if (!PALLET_MISMATCH_STATUSES.has(row.status)) return false;
     return !!wb && wb.pass_pallets != null && wb.pass_pallets !== row.pallets_count;
 }
+
+/**
+ * Вкладка страницы: два вида заявок + переезды между складами.
+ * `transfers` — не kind заявки, поэтому в запрос списка он никогда не уходит
+ * (см. load: на этой вкладке заявки вообще не грузятся).
+ */
+type PageTab = AssemblyKind | 'transfers';
 
 const EDITABLE_STATUSES: AssemblyStatus[] = ['IN_PROGRESS', 'READY'];
 
@@ -520,7 +528,10 @@ export default function AssemblyListPage() {
     // Вкладка страницы: fbo — операционные заявки логиста (дефолт), fbs —
     // учётные зеркала сборки ФФ. Раздельные вкладки (решение владельца 30.07):
     // авто-зеркала не должны разбавлять рабочий список логиста.
-    const [pageTab, setPageTab] = useState<AssemblyKind>('fbo');
+    // transfers — переезды между нашими складами: это НЕ заявки на сборку,
+    // поэтому вкладка грузит свои данные сама (TransfersTab) и фильтры заявок
+    // на неё не распространяются.
+    const [pageTab, setPageTab] = useState<PageTab>('fbo');
     //: Каунты фазовых вкладок FBS (status_counts ответа списка; у fbo пусто).
     const [fbsPhaseCounts, setFbsPhaseCounts] = useState<Record<string, number>>({});
     const [sourceVehicles, setSourceVehicles] = useState<SourceVehicleOption[]>([]);
@@ -533,6 +544,12 @@ export default function AssemblyListPage() {
     const FILTERS_KEY = `assembly_filters_${slug}`;
     const filtersRestored = useRef(false);
     const sourceFromDeeplink = useRef(false);
+    // Персистим ВЫБОР ПОЛЬЗОВАТЕЛЯ, а не текущую вкладку: ?tab= (возврат с
+    // карточки переезда) — разовый переход. Иначе следующий заход на «Заявки на
+    // сборку» без query открывался бы на «Перемещениях». Сюда пишет только
+    // восстановление из хранилища и клик по вкладке.
+    const tabFromDeeplink = useRef(false);
+    const userTab = useRef<PageTab>('fbo');
     const [filtersReady, setFiltersReady] = useState(false);
 
     useEffect(() => {
@@ -555,7 +572,12 @@ export default function AssemblyListPage() {
             setJointOnly(f.jointOnly === true);
             setSourceFilter(typeof f.sourceFilter === 'string' ? f.sourceFilter : '');
             // Миграция со старого фильтра «Тип» (kindFilter): 'fbs' → вкладка FBS.
-            setPageTab(f.pageTab === 'fbs' || f.kindFilter === 'fbs' ? 'fbs' : 'fbo');
+            const savedTab: PageTab = f.pageTab === 'transfers' ? 'transfers'
+                : (f.pageTab === 'fbs' || f.kindFilter === 'fbs') ? 'fbs'
+                    : 'fbo';
+            userTab.current = savedTab;
+            // Диплинк (?tab=) уже мог отработать — не перетираем его сохранённым.
+            if (!tabFromDeeplink.current) setPageTab(savedTab);
         } catch { /* SSR / битый JSON — просто стартуем с дефолтов */ }
         // Диплинк прошлого проекта не должен глушить персист нового.
         sourceFromDeeplink.current = false;
@@ -574,6 +596,20 @@ export default function AssemblyListPage() {
         // иначе следующий заход БЕЗ query покажет заявки того же черновика без
         // видимой причины. Ref снимается, как только юзер сам трогает «Источник».
         if (d > 0 || v > 0) sourceFromDeeplink.current = true;
+    }, [searchParams]);
+
+    // Диплинк на вкладку: ?tab=transfers — возврат с деталки перемещения.
+    // Эффект объявлен ПОСЛЕ восстановления фильтров, поэтому URL выигрывает у
+    // сохранённой вкладки (оба отрабатывают на монтировании, по порядку).
+    useEffect(() => {
+        const t = searchParams.get('tab');
+        if (t === 'transfers' || t === 'fbs' || t === 'fbo') {
+            setPageTab(t);
+            // Диплинк — разовый переход (возврат с карточки переезда), а не
+            // выбор раздела: не персистим его, иначе следующий заход на
+            // «Заявки на сборку» БЕЗ query открывался бы на «Перемещениях».
+            tabFromDeeplink.current = true;
+        }
     }, [searchParams]);
     // Монотонный счётчик запросов списка — отбрасываем устаревшие ответы (см. load)
     const loadSeq = useRef(0);
@@ -614,6 +650,9 @@ export default function AssemblyListPage() {
     // ─── Load data ────────────────────────────────────────────────────────
 
     const load = useCallback(async () => {
+        // Вкладка «Перемещения» — не заявки: свой список грузит TransfersTab.
+        // Выходим ДО setLoading, иначе вкладка осталась бы с чужим спиннером.
+        if (pageTab === 'transfers') return;
         // Гонка: debounce-поиск + смена фильтров могут пускать перекрывающиеся
         // запросы; считаем только последний, иначе устаревший ответ перетрёт свежий.
         const seq = ++loadSeq.current;
@@ -666,7 +705,8 @@ export default function AssemblyListPage() {
         try {
             localStorage.setItem(FILTERS_KEY, JSON.stringify({
                 warehouseId, statusFilter, view, dateFrom, dateTo,
-                search, brandFilter, ffLinkFilter, jointOnly, pageTab,
+                search, brandFilter, ffLinkFilter, jointOnly,
+                pageTab: userTab.current,
                 sourceFilter: sourceFromDeeplink.current ? '' : sourceFilter,
             }));
         } catch { /* приватный режим / переполнение quota — не критично */ }
@@ -1292,7 +1332,11 @@ export default function AssemblyListPage() {
             exportValue: itemsQty,
         },
         {
-            key: 'pallets_count', label: 'Палеты', align: 'right',
+            key: 'pallets_count', label: 'Ед. отгрузки', align: 'right',
+            // Не «Палеты»: заявка бывает коробочной (shipped_as_boxes), и голое
+            // число под паллетной шапкой читалось бы как паллеты. Единицу
+            // подписываем прямо в ячейке — редактируемое поле осталось числом.
+            headerTitle: 'Паллеты или короба — единица задаётся в самой заявке',
             // kind=fbs: паллет/машин/веса у учётного зеркала нет — прочерк.
             render: (_v, row: AssemblyRequest) => assemblyKindOf(row.kind) === 'fbs' ? (
                 <span style={{ color: 'var(--color-text-muted)' }}>—</span>
@@ -1304,6 +1348,9 @@ export default function AssemblyListPage() {
                         highlight={row.status === 'IN_PROGRESS' && (!row.pallets_count || row.pallets_count <= 0)}
                         onSave={(val) => handlePalletsChange(row, val)}
                     />
+                    <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>
+                        {row.shipped_as_boxes ? 'кор' : 'пал'}
+                    </span>
                     {palletsMismatch(row) && (
                         <span
                             className="badge badge-warning"
@@ -1456,10 +1503,14 @@ export default function AssemblyListPage() {
             <div className="page-header">
                 <div>
                     <h1 className="page-title">Заявки на сборку</h1>
-                    <p className="page-subtitle">
-                        Всего: {total}
-                        {items.length < total && ` · показаны первые ${formatNumber(items.length, 0)} — уточните фильтры`}
-                    </p>
+                    {/* Счётчик — про список заявок; на вкладке переезда он врал бы
+                        (у неё свой набор), поэтому её подпись живёт в TransfersTab. */}
+                    {pageTab !== 'transfers' && (
+                        <p className="page-subtitle">
+                            Всего: {total}
+                            {items.length < total && ` · показаны первые ${formatNumber(items.length, 0)} — уточните фильтры`}
+                        </p>
+                    )}
                 </div>
                 {pageTab === 'fbo' && (
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -1480,24 +1531,32 @@ export default function AssemblyListPage() {
                 )}
             </div>
 
-            {/* Вкладки: операционные заявки логиста ‖ учётные зеркала FBS.
+            {/* Вкладки: операционные заявки логиста ‖ учётные зеркала FBS ‖ переезды.
                 Раздельно, чтобы авто-зеркала не разбавляли рабочий список. */}
             <div style={{ display: 'flex', gap: 0, marginBottom: 16, borderBottom: '2px solid var(--color-border)' }}>
                 {([
-                    { key: 'fbo' as AssemblyKind, label: 'Заявки FBO' },
-                    { key: 'fbs' as AssemblyKind, label: 'Заявки FBS (авто)' },
+                    { key: 'fbo' as PageTab, label: 'Заявки FBO' },
+                    { key: 'fbs' as PageTab, label: 'Заявки FBS (авто)' },
+                    { key: 'transfers' as PageTab, label: 'Перемещения' },
                 ]).map(t => (
                     <button
                         key={t.key}
                         onClick={() => {
                             setPageTab(t.key);
-                            // Статусы вкладок не пересекаются (FBO-статусы ≠ фазы FBS):
-                            // унесённый фильтр давал бы пустой список без причины.
+                            // Клик — осознанный выбор раздела, в отличие от ?tab=:
+                            // именно он и запоминается до следующего захода.
+                            userTab.current = t.key;
+                            tabFromDeeplink.current = false;
+                            // Статусы вкладок не пересекаются (FBO-статусы ≠ фазы FBS
+                            // ≠ статусы переезда): унесённый фильтр давал бы пустой
+                            // список без причины.
                             setStatusFilter('');
                         }}
                         title={t.key === 'fbs'
                             ? 'Учётные зеркала сборки фулфилмента: одна заявка = одна поставка FBS, ведутся автоматически'
-                            : 'Операционные заявки логиста (отгрузка на склады WB)'}
+                            : t.key === 'transfers'
+                                ? 'Переезды между нашими складами: машина, логистика и оплата — как у заявки'
+                                : 'Операционные заявки логиста (отгрузка на склады WB)'}
                         style={{
                             padding: '8px 20px',
                             background: 'none',
@@ -1514,6 +1573,10 @@ export default function AssemblyListPage() {
                     </button>
                 ))}
             </div>
+
+            {/* Переезды — отдельный список со своими фильтрами и состояниями:
+                ни фильтры заявок, ни баннеры/полоски FBO ему не нужны. */}
+            {pageTab === 'transfers' ? <TransfersTab slug={slug} /> : (<>
 
             {/* Фазовые вкладки FBS — как в кабинете WB («На сборке» / «В доставке» /
                 «Завершённые»): каунты по фильтрам списка, без статус-среза. */}
@@ -1876,6 +1939,8 @@ export default function AssemblyListPage() {
                     onClose={() => { setCreateExternal(null); load(); }}
                 />
             )}
+
+            </>)}
         </div>
     );
 }
