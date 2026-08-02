@@ -51,6 +51,7 @@ ALL_PAGES: list[str] = [
     "funnel",
     "ads-manager",
     "ab-tests",
+    "design-tasks",
     "trends",
     "opiu",
     "plan-fact",
@@ -77,7 +78,7 @@ SECTION_PAGES: dict[str, list[str]] = {
     ],
     "orders": ["planning", "container"],
     "supply": ["supply-chain"],
-    "sales": ["funnel", "ads-manager", "ab-tests", "trends", "opiu", "plan-fact", "geography"],
+    "sales": ["funnel", "ads-manager", "ab-tests", "design-tasks", "trends", "opiu", "plan-fact", "geography"],
     "ai": ["ai-chat"],
     "settings": ["monitoring", "raw-data", "project-settings", "team"],
 }

@@ -64,6 +64,24 @@ from backend.models.customs import (
     CustomsDT,
     CustomsTopup,
 )
+
+# Design tasks (модуль «Дизайн карточек»)
+from backend.models.design import (
+    DESIGN_ACTIVE_STATUSES,
+    DESIGN_BOARD_STATUSES,
+    DESIGN_TASK_TRANSITIONS,
+    DesignComplexity,
+    DesignMaterial,
+    DesignMaterialKind,
+    DesignSubmission,
+    DesignSubmissionFile,
+    DesignTask,
+    DesignTaskComment,
+    DesignTaskEvent,
+    DesignTaskStatus,
+    DesignVerdict,
+    DesignWorkType,
+)
 from backend.models.enums import (
     DutyBasis,
     EventType2,
@@ -401,6 +419,21 @@ __all__ = [
     "CustomsTopup",
     "CustomsAlloc",
     "CustomsDT",
+    # Design tasks (модуль «Дизайн карточек»)
+    "DESIGN_ACTIVE_STATUSES",
+    "DESIGN_BOARD_STATUSES",
+    "DESIGN_TASK_TRANSITIONS",
+    "DesignComplexity",
+    "DesignMaterial",
+    "DesignMaterialKind",
+    "DesignSubmission",
+    "DesignSubmissionFile",
+    "DesignTask",
+    "DesignTaskComment",
+    "DesignTaskEvent",
+    "DesignTaskStatus",
+    "DesignVerdict",
+    "DesignWorkType",
     # Planning
     "Order",
     "LeadTime",

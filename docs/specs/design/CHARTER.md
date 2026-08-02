@@ -35,7 +35,7 @@
 
 | # | Решение | Выбор | Почему | Статус |
 |---|---|---|---|---|
-| Р1 | Статусная модель | 8 статусов, словарь `DESIGN_TASK_TRANSITIONS` — единственный источник правды (зеркало `PAYMENT_REQUEST_TRANSITIONS`); `ACCEPTED`/`CANCELLED` терминальны; возврат из `ON_HOLD` через `held_from_status` | PRD §4; донор payment_request | ✅ решено |
+| Р1 | Статусная модель | 8 статусов, словарь `DESIGN_TASK_TRANSITIONS` — единственный источник правды (зеркало `PAYMENT_REQUEST_TRANSITIONS`); `ACCEPTED`/`CANCELLED` терминальны; возврат из `ON_HOLD` через `held_from_status`; `ON_HOLD ⇄ NEW/ASSIGNED/IN_PROGRESS/REVISION` симметрично (вкл. ребро `ON_HOLD→REVISION`, решение lead при фиксе Ф0) | PRD §4; донор payment_request | ✅ решено |
 | Р2 | Товарная привязка | Одна опциональная: `title` (текст) + `nm_id BigInteger NULL` (= `Nomenclature.article_wb`, **без FK** — товара может ещё не быть); items-список не строим (→ потом) | PRD v4 говорит об одном товаре; автоподсказка не обязывает | ✅ решено |
 | Р3 | Порядок в столбце | `sort_order Integer`, шаг 1000, вставка в середину зазора, при исчерпании — перенумерация колонки в той же транзакции | Просто, без float-дрейфа; десятки карточек в колонке | ✅ решено |
 | Р4 | Board API | Один `GET /board` (6 колонок одним ответом) + один `POST /{id}/move {to_status, after_task_id}`; оптимистичный UI, на 4xx откат+toast; конфликты — last-write-wins под `FOR UPDATE` | Масштаб 3 дизайнера; версионирование избыточно | ✅ решено |

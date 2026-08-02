@@ -81,7 +81,7 @@ def compute_permissions(task, user, member_role) -> dict[str, bool]
 
 ```python
 async def get_board(db, project_id, user, member_role) -> DesignBoardResponse
-    # одна выборка WHERE status IN BOARD_STATUSES + is_deleted=false, ORDER BY status, sort_order
+    # одна выборка WHERE status IN DESIGN_BOARD_STATUSES + is_deleted=false, ORDER BY status, sort_order
     # + counts по ON_HOLD/CANCELLED; limit 200/колонку
 async def move_task(db, project_id, task_id, to_status, after_task_id, user, member_role)
     # под FOR UPDATE: если to_status != current → change_status (та же матрица/гварды)
@@ -101,7 +101,7 @@ async def move_task(db, project_id, task_id, to_status, after_task_id, user, mem
 
 ### `workload.py` / `stats.py`
 
-`get_workload`: один запрос GROUP BY `assignee_user_id` по `ACTIVE_STATUSES`: активные, просроченные (`due_date < today`), в `REVISION`, ближайший срок.
+`get_workload`: один запрос GROUP BY `assignee_user_id` по `DESIGN_ACTIVE_STATUSES`: активные, просроченные (`due_date < today`), в `REVISION`, ближайший срок.
 `get_stats(from, to)` (PRD §10): доля принятых в срок (`accepted_at::date <= due_date`; задачи без due_date НЕ считаются просроченными — см. STATUS «Открытые вопросы»); среднее `versions_count` у принятых; медиана `accepted_at - created_at` в раб. днях (приближение календарными — допустимо, зафиксировать в docstring); count задач `NEW/ASSIGNED` без исполнителя > 2 дней; `is_outsourced`-доля; доля задач с `nm_id` (tracked_share).
 
 ## AC

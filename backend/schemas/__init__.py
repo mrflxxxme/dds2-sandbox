@@ -33,6 +33,29 @@ from backend.schemas.cost import (
     VatRateUpdate,
 )
 
+# Design tasks (модуль «Дизайн карточек»)
+from backend.schemas.design import (
+    DesignAssign,
+    DesignBoardResponse,
+    DesignCommentOut,
+    DesignEventOut,
+    DesignMaterialIn,
+    DesignMaterialOut,
+    DesignMoveIn,
+    DesignProductSuggestion,
+    DesignStatsOut,
+    DesignStatusChange,
+    DesignSubmissionFileOut,
+    DesignSubmissionOut,
+    DesignTaskCreate,
+    DesignTaskDetail,
+    DesignTaskListItem,
+    DesignTaskPermissions,
+    DesignTaskUpdate,
+    DesignVerdictIn,
+    DesignWorkloadRow,
+)
+
 # Import
 from backend.schemas.imports import (
     ImportLogSchema,
@@ -244,6 +267,26 @@ __all__ = [
     "BulkCategoryAssignment",
     "CategoryAssignByIds",
     "UnassignedGroupRow",
+    # Design tasks (модуль «Дизайн карточек»)
+    "DesignAssign",
+    "DesignBoardResponse",
+    "DesignCommentOut",
+    "DesignEventOut",
+    "DesignMaterialIn",
+    "DesignMaterialOut",
+    "DesignMoveIn",
+    "DesignProductSuggestion",
+    "DesignStatsOut",
+    "DesignStatusChange",
+    "DesignSubmissionFileOut",
+    "DesignSubmissionOut",
+    "DesignTaskCreate",
+    "DesignTaskDetail",
+    "DesignTaskListItem",
+    "DesignTaskPermissions",
+    "DesignTaskUpdate",
+    "DesignVerdictIn",
+    "DesignWorkloadRow",
     # Import
     "ImportLogSchema",
     "ImportResult",

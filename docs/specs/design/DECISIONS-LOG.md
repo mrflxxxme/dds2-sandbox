@@ -43,3 +43,15 @@
 - Decision: Изолированная песочница: полная private-копия репо в GitHub-профиле архитектора (remote `sandbox`), все коммиты фаз — только туда, в `origin` не пушится ничего; деплоя/хостинга нет; итог — локально запускаемый `docker compose` стек с модулем. Промежуточные подписи Ф0/Ф2 свёрнуты в финальную приёмку; исполнение фаз непрерывное по готовности гейтов
 - Rationale: Директива архитектора 2026-08-02: «тестировать новую сборку изолированно, не затрагивая прод, не пушить в основной репозиторий, не размещать на хостингах»
 - Reversibility: reversible
+
+### 2026-08-02T15:30:00Z | F0 | arch · решение lead
+- Fork: Асимметрия ON_HOLD⇄REVISION в ратифицированном словаре Р1 (HIGH code-ревью: REVISION→ON_HOLD есть, обратного ребра нет — «возврат откуда отложили» для Правок невозможен)
+- Decision: Добавлено ребро ON_HOLD→REVISION; словарь, докстринг, спека F0/CHARTER Р1 и golden-snapshot-тест синхронизированы
+- Rationale: Механика held_from_status (Р1) и PRD «отложенные возвращаются к работе» обещают симметрию; ребро — исправление бага спеки, не смена продуктового поведения. Вынесено архитектору в отчёте пост-фактум
+- Reversibility: reversible (убрать ребро — одна строка + тест)
+
+### 2026-08-02T15:30:00Z | F0 | impl · owned-решения фазы
+- Fork: Свод owned-решений Ф0 и fix-цикла T3-ревью
+- Decision: (1) DB-гарантия изоляции детей: uq (id, project_id) на design_tasks/design_submissions + составные FK (task_id, project_id) у 4 детей и (submission_id, project_id) у файлов; (2) отдельные FK-индексы task_id ×4 + ix_design_tasks_author; (3) три индекса доски — partial WHERE is_deleted=false; (4) partial-unique номера продублирован в модель (анти-autogenerate-дрейф); (5) константы переименованы: DESIGN_BOARD_STATUSES/DESIGN_ACTIVE_STATUSES (коллизия с ab_photo_tests); (6) схемы: URL cap 1000, description 5000, комментарии 2000, nm_id ge=1 lt=2^63, move только в 6 board-статусов; (7) comments relationship без delete-orphan (iron rule 3); (8) docker-compose.sandbox.yml закоммичен как часть деливерабла Р16 (секретов нет)
+- Rationale: Findings T3-ревью (db W1–W3, W6; security 1–3; code M1–M3, L2–L3) — все закрыты до заморозки схемы; полный список в отчётах ревьюеров
+- Reversibility: аддитивные constraint'ы/индексы — reversible до данных; после наполнения (1) hard-to-reverse

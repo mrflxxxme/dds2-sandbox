@@ -58,14 +58,16 @@ DESIGN_TASK_TRANSITIONS: dict[DesignTaskStatus, set[DesignTaskStatus]] = {
     DesignTaskStatus.IN_PROGRESS: {REVIEW, ON_HOLD, CANCELLED},
     DesignTaskStatus.REVIEW:      {ACCEPTED, REVISION, CANCELLED},
     DesignTaskStatus.REVISION:    {REVIEW, ON_HOLD, CANCELLED},
-    DesignTaskStatus.ON_HOLD:     {NEW, ASSIGNED, IN_PROGRESS, CANCELLED},
+    DesignTaskStatus.ON_HOLD:     {NEW, ASSIGNED, IN_PROGRESS, REVISION, CANCELLED},  # ⇄ симметрия с REVISION
     DesignTaskStatus.ACCEPTED:    set(),
     DesignTaskStatus.CANCELLED:   set(),
 }
 
-BOARD_STATUSES = [NEW, ASSIGNED, IN_PROGRESS, REVIEW, REVISION, ACCEPTED]  # 6 колонок PRD §4
-ACTIVE_STATUSES = {NEW, ASSIGNED, IN_PROGRESS, REVIEW, REVISION}           # для workload/просрочки
+DESIGN_BOARD_STATUSES = [NEW, ASSIGNED, IN_PROGRESS, REVIEW, REVISION, ACCEPTED]  # 6 колонок PRD §4
+DESIGN_ACTIVE_STATUSES = {NEW, ASSIGNED, IN_PROGRESS, REVIEW, REVISION}           # для workload/просрочки
 ```
+
+Префикс `DESIGN_` у констант обязателен — голые `ACTIVE_STATUSES`/`BOARD_STATUSES` коллидируют с одноимёнными в других доменах (напр. `funnel/ab_photo_tests.py`).
 
 **`design_tasks`** — `Base, TimestampMixin, SoftDeleteMixin`:
 
@@ -92,18 +94,19 @@ ACTIVE_STATUSES = {NEW, ASSIGNED, IN_PROGRESS, REVIEW, REVISION}           # д�
 | `started_at` | DateTime | да | первый вход в IN_PROGRESS |
 | `accepted_at` | DateTime | да | вход в ACCEPTED |
 
-Индексы: `ix_design_tasks_project_status_sort (project_id, status, sort_order)` · `ix_design_tasks_project_assignee (project_id, assignee_user_id, status)` · `ix_design_tasks_project_due (project_id, due_date)`.
-Partial-unique (в миграции, донор pay01:87): `uq_design_tasks_project_number UNIQUE (project_id, number) WHERE is_deleted = false`.
+Индексы (все три — partial `WHERE is_deleted = false`): `ix_design_tasks_project_status_sort (project_id, status, sort_order)` · `ix_design_tasks_project_assignee (project_id, assignee_user_id, status)` · `ix_design_tasks_project_due (project_id, due_date)`; плюс `ix_design_tasks_author (project_id, author_user_id)`.
+Partial-unique (и в миграции, и в `__table_args__` модели — иначе autogenerate-дрейф; донор pay01:87): `uq_design_tasks_project_number UNIQUE (project_id, number) WHERE is_deleted = false`.
+DB-гарантия изоляции детей: `uq_design_tasks_id_project UNIQUE (id, project_id)`; все дети ссылаются составным FK `(task_id, project_id) → design_tasks(id, project_id) ON DELETE CASCADE` (чужой `project_id` падает IntegrityError), у каждого ребёнка отдельный индекс по `task_id` (`ix_design_materials_task_id` и т.п.).
 
-**`design_materials`** («Исходные материалы», Р12): `id`, `project_id` FK, `task_id` FK CASCADE, `kind String(10)`, `minio_path String(500)?`, `original_filename String(500)?`, `mime_type String(100)?`, `file_size Integer?`, `url String(1000)?`, `ref_nm_id BigInteger?`, `caption String(300)?`, `created_by_user_id` FK users?, `created_at DateTime default=utcnow`. CheckConstraint `ck_design_material_payload`: ровно одно из `minio_path`/`url`/`ref_nm_id` соответственно `kind`. Индекс `(project_id, task_id)`.
+**`design_materials`** («Исходные материалы», Р12): `id`, `project_id` FK, `task_id` (составной FK `(task_id, project_id)` CASCADE, см. выше), `kind String(10)`, `minio_path String(500)?`, `original_filename String(500)?`, `mime_type String(100)?`, `file_size Integer?`, `url String(1000)?`, `ref_nm_id BigInteger?`, `caption String(300)?`, `created_by_user_id` FK users?, `created_at DateTime default=utcnow`. CheckConstraint `ck_design_material_payload`: ровно одно из `minio_path`/`url`/`ref_nm_id` соответственно `kind`. Индекс `(project_id, task_id)`.
 
-**`design_submissions`** (версии сдач; без SoftDelete — версии не удаляются): `id`, `project_id`, `task_id` FK CASCADE, `version_no Integer` (max+1 под lock), `submitted_by_user_id` FK users, `submitted_at default=utcnow`, `comment Text?`, `verdict String(10) default PENDING`, `verdict_comment Text?` (обязателен при REJECTED — гвард Ф1), `verdict_by_user_id?`, `verdict_at?`. `UniqueConstraint(task_id, version_no)`. Индекс `(project_id, task_id)`.
+**`design_submissions`** (версии сдач; без SoftDelete — версии не удаляются): `id`, `project_id`, `task_id` (составной FK CASCADE), `version_no Integer` (max+1 под lock), `submitted_by_user_id` FK users, `submitted_at default=utcnow`, `comment Text?`, `verdict String(10) default PENDING`, `verdict_comment Text?` (обязателен при REJECTED — гвард Ф1), `verdict_by_user_id?`, `verdict_at?`. `UniqueConstraint(task_id, version_no)` + `uq_design_submissions_id_project UNIQUE (id, project_id)` (опора для составного FK файлов). Индекс `(project_id, task_id)`.
 
-**`design_submission_files`**: `id`, `project_id`, `submission_id` FK CASCADE, `minio_path String(500)`, `original_filename?`, `mime_type?`, `file_size?`.
+**`design_submission_files`**: `id`, `project_id`, `submission_id` (составной FK `(submission_id, project_id) → design_submissions(id, project_id)` CASCADE), `minio_path String(500)`, `original_filename?`, `mime_type?`, `file_size?`.
 
-**`design_task_comments`** (`SoftDeleteMixin`): `id`, `project_id`, `task_id` FK CASCADE, `author_user_id` FK users, `body Text`, `minio_path String(500)?`, `original_filename?`, `created_at`.
+**`design_task_comments`** (`SoftDeleteMixin`): `id`, `project_id`, `task_id` (составной FK CASCADE), `author_user_id` FK users, `body Text`, `minio_path String(500)?`, `original_filename?`, `created_at`.
 
-**`design_task_events`** (журнал, зеркало `PaymentRequestEvent` :278; append-only): `id`, `project_id`, `task_id` FK CASCADE, `old_status String(20)?`, `new_status String(20)`, `changed_at`, `changed_by String(100)?`, `comment Text?`. Индекс `(project_id, task_id)`.
+**`design_task_events`** (журнал, зеркало `PaymentRequestEvent` :278; append-only): `id`, `project_id`, `task_id` (составной FK CASCADE), `old_status String(20)?`, `new_status String(20)`, `changed_at`, `changed_by String(100)?`, `comment Text?`. Индекс `(project_id, task_id)`.
 
 Регистрация: импорты + все классы в `__all__` `backend/models/__init__.py`.
 
@@ -143,7 +146,7 @@ Partial-unique (в миграции, донор pay01:87): `uq_design_tasks_proj
 
 - **AC-1:** `docker compose exec backend python -c "from backend.models import DesignTask, DESIGN_TASK_TRANSITIONS"` — без ошибок.
 - **AC-2:** `alembic upgrade head && alembic downgrade -1 && alembic downgrade -1 && alembic upgrade head` — чисто (обе миграции туда-обратно).
-- **AC-3:** unit `tests/test_design_models.py`: у `ACCEPTED` и `CANCELLED` пустые исходящие; каждый нетерминальный статус достижим из `NEW` по словарю (обход графа); `BOARD_STATUSES` ровно 6.
+- **AC-3:** unit `tests/test_design_models.py`: golden-snapshot полного словаря; у `ACCEPTED` и `CANCELLED` пустые исходящие; каждый нетерминальный статус достижим из `NEW` по словарю (обход графа); `CANCELLED` в целях каждого нетерминального; `DESIGN_BOARD_STATUSES` ровно 6.
 - **AC-4:** повторное создание `DES-1` в том же проекте после `soft_delete()` первой задачи не нарушает partial-unique (SQL-тест).
 - **AC-5:** `tests/test_conventions_sync.py` зелёный целиком (page-ключи, soft-delete реестр).
 - **AC-6:** `make typecheck` без ошибок по новым файлам.

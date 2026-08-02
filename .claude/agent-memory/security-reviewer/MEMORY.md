@@ -1,0 +1,1 @@
+- [Review tooling env](project_review_tooling_env.md) — Bash-инструмент в worktree без coreutils/python; check_conventions.sh и pytest — только через test-runner
