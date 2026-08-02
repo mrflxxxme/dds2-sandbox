@@ -18,6 +18,7 @@ import pytest_asyncio
 
 from sqlalchemy import func, select
 
+from backend.integrations.wb_content_api import WbContentError
 from backend.models.ab_tests import AbPhotoTest, AbPhotoVariant
 from backend.models.design import (
     DesignSubmission,
@@ -25,16 +26,27 @@ from backend.models.design import (
     DesignTaskStatus,
     DesignVerdict,
 )
+from backend.models.integrations import WbAdCampaign
 from backend.schemas.design import DesignAbTestIn
 from backend.services.design import ab_bridge
 from backend.services.design import files as design_files
 from backend.services.design import stats as design_stats
+from backend.services.funnel import ab_photo_tests
 from backend.utils.time import utcnow
 from tests.design_helpers import actor, add_submission, make_task, make_team
 
 BASE = "/api/v1/design-tasks"
 
 NM_ID = 111
+CAMPAIGN_ID = 222
+
+
+async def _add_campaign(db, project_id: int, campaign_id: int) -> WbAdCampaign:
+    """Кампания проекта — валидатор моста требует принадлежности campaign_id проекту."""
+    camp = WbAdCampaign(project_id=project_id, campaign_id=campaign_id, name=f"camp-{campaign_id}")
+    db.add(camp)
+    await db.commit()
+    return camp
 
 
 def _png_bytes(w: int = 700, h: int = 900) -> bytes:
@@ -155,6 +167,7 @@ async def test_ac1_create_test_from_accepted_task_with_two_png(db_session, proje
         db_session, project.id, team, wb_fakes.storage,
         [("a.png", _png_bytes(), "image/png"), ("b.png", _png_bytes(), "image/png")],
     )
+    await _add_campaign(db_session, project.id, 222)
 
     out = await ab_bridge.create_ab_test_from_task(
         db_session, project.id, task.id, actor(team.author), "editor",
@@ -242,6 +255,7 @@ async def test_ac3_invalid_image_translates_donor_error_and_compensates(
             ("small.png", _png_bytes(300, 300), "image/png"),  # < 700×900 — PIL донора
         ],
     )
+    await _add_campaign(db_session, project.id, 333)
     with pytest.raises(ValueError, match="700×900"):  # текст донора как есть
         await ab_bridge.create_ab_test_from_task(
             db_session, project.id, task.id, actor(team.lead), "admin",
@@ -305,6 +319,59 @@ async def test_permission_only_author_or_lead(db_session, project, wb_fakes):
         )
 
 
+async def test_foreign_campaign_id_rejected(db_session, project, wb_fakes):
+    """campaign_id вне проекта → понятный ValueError (400), НЕ тихое создание/500."""
+    team = await make_team(db_session, project)
+    task = await _accepted_task(
+        db_session, project.id, team, wb_fakes.storage,
+        [("a.png", _png_bytes(), "image/png")],
+    )
+    # кампании 999 в проекте нет (её никто не заводил)
+    with pytest.raises(ValueError) as e:
+        await ab_bridge.create_ab_test_from_task(
+            db_session, project.id, task.id, actor(team.author), "editor",
+            DesignAbTestIn(campaign_id=999),
+        )
+    assert str(e.value) == "Рекламная кампания не найдена в проекте"
+    assert await _alive_tests_count(db_session, project.id) == 0
+
+
+async def test_gif_only_version_rejected_before_donor(db_session, project, wb_fakes):
+    """Версия из одного GIF: донор его не принимает → 400 понятным текстом ДО create_test."""
+    team = await make_team(db_session, project)
+    task = await _accepted_task(
+        db_session, project.id, team, wb_fakes.storage,
+        [("banner.gif", _png_bytes(), "image/gif")],  # mime GIF — не JPEG/PNG/WebP
+    )
+    await _add_campaign(db_session, project.id, 222)
+    with pytest.raises(ValueError) as e:
+        await ab_bridge.create_ab_test_from_task(
+            db_session, project.id, task.id, actor(team.author), "editor",
+            DesignAbTestIn(campaign_id=222),
+        )
+    assert str(e.value) == (
+        "В принятой версии нет подходящих изображений (нужны JPEG, PNG или WebP)"
+    )
+    assert await _alive_tests_count(db_session, project.id) == 0
+
+
+async def test_gif_dropped_but_valid_png_proceeds(db_session, project, wb_fakes):
+    """Смешанная версия: GIF молча отфильтрован, валидный PNG становится вариантом."""
+    team = await make_team(db_session, project)
+    task = await _accepted_task(
+        db_session, project.id, team, wb_fakes.storage,
+        [("banner.gif", _png_bytes(), "image/gif"), ("ok.png", _png_bytes(), "image/png")],
+    )
+    await _add_campaign(db_session, project.id, 222)
+    out = await ab_bridge.create_ab_test_from_task(
+        db_session, project.id, task.id, actor(team.author), "editor",
+        DesignAbTestIn(campaign_id=222),
+    )
+    assert out.ab_test_id is not None
+    variants = await _variants(db_session, project.id, out.ab_test_id)
+    assert len([v for v in variants if not v.is_control]) == 1  # только png, gif выброшен
+
+
 # ─── AC-4: изоляция проектов ─────────────────────────────────────────────────
 
 
@@ -358,6 +425,7 @@ async def api_env(client, auth_headers, db_session, wb_fakes):
         [("a.png", _png_bytes(), "image/png"), ("b.png", _png_bytes(), "image/png")],
         wb_fakes.storage,
     )
+    await _add_campaign(db_session, proj["id"], 777)
     return SimpleNamespace(project=proj, uid=uid, task=task, h=_h(auth_headers, proj["id"]))
 
 
@@ -380,6 +448,22 @@ async def test_api_not_accepted_400_with_text(client, auth_headers, db_session, 
     resp = await client.post(f"{BASE}/{task.id}/ab-test", headers=api_env.h)
     assert resp.status_code == 400, resp.text
     assert _msg(resp) == "Тест создаётся только по принятой задаче"
+
+
+async def test_api_wb_content_error_maps_to_502(
+    client, db_session, api_env, monkeypatch
+):
+    """create_test донора кидает WbContentError (401/429/5xx/сеть WB) → ручка 502, не 500."""
+    async def boom(*args, **kwargs):
+        raise WbContentError("WB Content API: 429 Too Many Requests")
+
+    monkeypatch.setattr(ab_photo_tests, "create_test", boom)
+    resp = await client.post(
+        f"{BASE}/{api_env.task.id}/ab-test", json={"campaign_id": 777}, headers=api_env.h
+    )
+    assert resp.status_code == 502, resp.text
+    assert "429" in _msg(resp)  # текст ошибки донора виден, не проглочен 500
+    assert await _alive_tests_count(db_session, api_env.project["id"]) == 0
 
 
 async def test_api_prefill_without_body_then_create_with_campaign(

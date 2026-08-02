@@ -10,7 +10,8 @@ campaign_id обязателен у донора, а у задачи дизай�
 F6): без campaign_id в payload ручка НЕ создаёт тест, а отдаёт prefill-данные
 для редиректа на предзаполненную форму `/ab-tests/create?nm_id=...&
 from_design_task=...` (вариант «редирект» из Hints F6); с campaign_id — полный
-мост: файлы ПОСЛЕДНЕЙ принятой версии (только image/*) становятся вариантами.
+мост: файлы ПОСЛЕДНЕЙ принятой версии (только JPEG/PNG/WebP — форматы донора)
+становятся вариантами; campaign_id проверяется на принадлежность проекту.
 
 Транзакционность: create_test/add_variant донора коммитят каждый сам — отката
 одной транзакцией нет. Компенсация: сбой любого add_variant → уже созданный
@@ -32,6 +33,7 @@ from backend.models.design import (
     DesignTaskStatus,
     DesignVerdict,
 )
+from backend.models.integrations import WbAdCampaign
 from backend.schemas.design import DesignAbTestIn, DesignAbTestOut, DesignAbTestPrefill
 from backend.services.design import files as design_files
 from backend.services.design.common import get_task_row
@@ -44,6 +46,12 @@ logger = logging.getLogger("dds.design")
 ERR_NOT_ACCEPTED = "Тест создаётся только по принятой задаче"
 ERR_NO_NM_ID = "Привяжите товар к задаче — тест сравнивает карточку конкретного артикула"
 ERR_NO_IMAGES = "В принятой версии нет изображений"
+ERR_NO_SUITABLE_IMAGES = "В принятой версии нет подходящих изображений (нужны JPEG, PNG или WebP)"
+ERR_CAMPAIGN_NOT_FOUND = "Рекламная кампания не найдена в проекте"
+
+# Форматы, которые донор (ab_photo_tests.add_variant) реально принимает: остальные
+# image/* (GIF и пр.) он отверг бы PIL-валидацией уже ПОСЛЕ create_test.
+_WB_IMAGE_MIME = frozenset({"image/jpeg", "image/jpg", "image/png", "image/webp"})
 
 
 async def _last_accepted_submission_images(
@@ -80,7 +88,14 @@ async def _last_accepted_submission_images(
     image_files = list(files_res.scalars().all())
     if not image_files:
         raise ValueError(ERR_NO_IMAGES)
-    return int(sub.id), image_files
+    # Сужаем до форматов, которые донор реально принимает, ДО create_test: иначе
+    # GIF/битый как единственный кандидат провалил бы add_variant уже после
+    # создания теста (лишний тест + компенсация). Часть-невалидные при наличии
+    # валидных — просто отфильтруются (валидные уедут донору как есть).
+    supported = [f for f in image_files if (f.mime_type or "").lower() in _WB_IMAGE_MIME]
+    if not supported:
+        raise ValueError(ERR_NO_SUITABLE_IMAGES)
+    return int(sub.id), supported
 
 
 async def _compensate_half_test(db: AsyncSession, project_id: int, test_id: int) -> None:
@@ -167,6 +182,23 @@ async def create_ab_test_from_task(
             )
         )
 
+    campaign_id = int(payload.campaign_id)
+    # campaign_id принадлежит проекту? У AbPhotoTest.campaign_id нет FK, а донор
+    # (routers/ab_tests.py) его не валидирует — без проверки тест молча привязался
+    # бы к чужой/несуществующей кампании. Явный 400 вместо тихой порчи данных.
+    camp = (
+        await db.execute(
+            select(WbAdCampaign)
+            .where(
+                WbAdCampaign.project_id == project_id,
+                WbAdCampaign.campaign_id == campaign_id,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if camp is None:
+        raise ValueError(ERR_CAMPAIGN_NOT_FOUND)
+
     # Файлы версии — через files-хелпер Ф1 (project-scoped, 503 MinIO сквозной).
     contents: list[bytes] = []
     for file_id in file_ids:
@@ -178,14 +210,17 @@ async def create_ab_test_from_task(
             submission_id=submission_id,
         )
         contents.append(data)
-    # Не держать БД-транзакцию через внешние HTTP донора (канон learnings).
+    # Закрыть НАШУ read-транзакцию (SELECT версии/кампании + чтение файлов) ДО
+    # захода в донора: create_test/add_variant сами ходят в WB (fetch_card, CDN,
+    # MinIO) и коммитят свои транзакции — иначе наш коннект висел бы
+    # idle-in-transaction через их внешние HTTP (канон learnings).
     await db.commit()
 
     test = await ab_photo_tests.create_test(
         db,
         project_id,
         nm_id=nm_id,
-        campaign_id=int(payload.campaign_id),
+        campaign_id=campaign_id,
         name=name,
         comment=comment,
     )

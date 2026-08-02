@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.auth import get_current_user
 from backend.database import get_db
+from backend.integrations.wb_content_api import WbContentError
 from backend.models.auth import Project, ProjectMember, User
 from backend.models.design import DesignTaskStatus, DesignWorkType
 from backend.project_context import get_current_project
@@ -74,6 +75,11 @@ async def _svc(call: Awaitable[_T]) -> _T:
         return await call
     except PermissionError as e:
         raise HTTPException(403, str(e)) from e
+    except WbContentError as e:
+        # АБ-мост: create_test донора зовёт WB Content API (fetch_card) — 401/429/
+        # 5xx/сеть прилетают WbContentError. Транслируем в 502 как донор
+        # (routers/ab_tests.py), а не в общий 500.
+        raise HTTPException(502, str(e)) from e
     except ValueError as e:
         msg = str(e)
         raise HTTPException(404 if msg in _NOT_FOUND_TEXTS else 400, msg) from e
