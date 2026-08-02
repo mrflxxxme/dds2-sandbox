@@ -69,6 +69,10 @@ class WbFinanceRow(Base):
     rebill_logistic_cost: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
     ppvz_vw: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
     ppvz_vw_nds: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+    # Эквайринг: WB отдаёт его в отчёте реализации, но раньше поле не сохранялось —
+    # из-за этого в воронке не было колонки «Эквайринг» (31.07.2026)
+    acquiring_fee: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+    acquiring_percent: Mapped[Decimal] = mapped_column(Numeric(8, 4), default=0)
 
     # Sync metadata
     synced_at: Mapped[datetime] = mapped_column(

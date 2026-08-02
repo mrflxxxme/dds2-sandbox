@@ -2,6 +2,8 @@
 import { Fragment, useEffect, useState, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 import { exportToExcel } from '@/lib/utils';
+import { CARD_TOOLBAR, Segmented, StatCard } from './funnelUi';
+import { IcDownload, IcRefresh } from '../../ads-manager/components/icons';
 import type { AdTabProduct, AdTabGroupRow, UnifiedSyncProgress } from '@/types/api';
 
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
@@ -233,7 +235,8 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
 
     // Shared styles (matching funnel table design)
     const stickyCol: React.CSSProperties = { position: 'sticky', left: 0, zIndex: 2, borderRight: '1px solid #e5e7eb' };
-    const thStyle: React.CSSProperties = { padding: '10px 8px', textAlign: 'right', fontSize: 11, fontWeight: 600, color: '#4b5563', borderBottom: '2px solid #e5e7eb', whiteSpace: 'nowrap', background: '#ffffff' };
+    // Тёмная липкая шапка — как в «Управлении рекламой» и в таблицах воронки
+    const thStyle: React.CSSProperties = { position: 'sticky', top: 0, zIndex: 20, padding: '6px 10px', textAlign: 'right', fontSize: 10.5, fontWeight: 700, color: '#e5e7eb', background: '#374151', borderBottom: '1px solid #4b5563', whiteSpace: 'nowrap' };
     const tdStyle: React.CSSProperties = { padding: '8px 8px', borderBottom: '1px solid #f3f4f6', fontSize: 12 };
     const tdNum: React.CSSProperties = { ...tdStyle, textAlign: 'right', fontVariantNumeric: 'tabular-nums' };
     const campTd: React.CSSProperties = { padding: '6px 8px', borderBottom: '1px solid #e8ecf4', fontSize: 11, color: '#6b7280' };
@@ -241,51 +244,31 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
 
     return (
         <div>
-            {/* Header */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ margin: 0 }}>Реклама</h3>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <button className="btn btn-outline" onClick={handleExport} disabled={!data.length}>
-                        📥 Excel
+            {/* Тулбар вкладки: группировки слева, действия справа (как в разделе рекламы) */}
+            <div className="glass-card static" style={{ ...CARD_TOOLBAR, border: '1px solid var(--color-border)', borderRadius: 12, marginBottom: 12 }}>
+                <Segmented value={groupBy} options={(['sku', 'brand', 'subject', 'tag', 'imt', 'abc'] as const).map(m => ({ key: m, label: GROUP_LABELS[m] }))}
+                    onChange={mode => { setGroupBy(mode); setExpandedGroups(new Set()); setExpandedNm(new Set()); setExpandedCamp(new Set()); loadData(mode); }} />
+                <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+                    {progress && <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>{progress}</span>}
+                    <button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }} onClick={handleExport} disabled={!data.length}>
+                        <IcDownload size={14} />Excel
                     </button>
-                    <button className="btn btn-primary" onClick={handleSync} disabled={syncing || !dateFrom || !dateTo}>
-                        {syncing ? '⏳ Обновление...' : '🔄 Обновить'}
+                    <button className="btn btn-primary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }} onClick={handleSync} disabled={syncing || !dateFrom || !dateTo}>
+                        <IcRefresh size={14} />{syncing ? 'Обновление…' : 'Обновить'}
                     </button>
-                    {progress && (
-                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{progress}</span>
-                    )}
-                </div>
-            </div>
-
-            {/* Group tabs */}
-            <div style={{ display: 'flex', gap: 0, marginBottom: 16, flexWrap: 'wrap' }}>
-                {(['sku', 'brand', 'subject', 'tag', 'imt', 'abc'] as const).map(mode => (
-                    <button
-                        key={mode}
-                        onClick={() => { setGroupBy(mode); setExpandedGroups(new Set()); setExpandedNm(new Set()); setExpandedCamp(new Set()); loadData(mode); }}
-                        style={{
-                            padding: '8px 16px', fontSize: 13, fontWeight: groupBy === mode ? 600 : 400, cursor: 'pointer',
-                            background: groupBy === mode ? 'var(--color-primary, #3b82f6)' : '#f3f4f6',
-                            color: groupBy === mode ? '#fff' : '#374151',
-                            border: 'none', borderRadius: 8, whiteSpace: 'nowrap',
-                        }}
-                    >{GROUP_LABELS[mode]}</button>
-                ))}
+                </span>
             </div>
 
             {/* Summary cards */}
             {hasData && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12, marginBottom: 20 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 12 }}>
                     {[
-                        { label: 'Расход рекл. ₽', value: fmt(totalSpend) },
-                        { label: 'Просмотры', value: fmt(totalViews) },
-                        { label: 'Клики', value: fmt(totalClicks) },
-                        { label: 'ДРР %', value: fmtPct(avgDrr) },
+                        { label: 'Расход рекл. ₽', value: fmt(totalSpend), color: '#ef4444' },
+                        { label: 'Просмотры', value: fmt(totalViews), color: '#6366f1' },
+                        { label: 'Клики', value: fmt(totalClicks), color: '#ec4899' },
+                        { label: 'ДРР %', value: fmtPct(avgDrr), color: '#f97316' },
                     ].map(c => (
-                        <div key={c.label} className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                            <div style={{ fontSize: 22, fontWeight: 700 }}>{c.value}</div>
-                            <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{c.label}</div>
-                        </div>
+                        <StatCard key={c.label} label={c.label} value={c.value} color={c.color} />
                     ))}
                 </div>
             )}
@@ -344,7 +327,7 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                 const ABC_COLORS: Record<string, string> = { A: '#22c55e', B: '#f59e0b', C: '#ef4444' };
                 const ABC_LABELS: Record<string, string> = { A: 'Категория A (80% выручки)', B: 'Категория B (15% выручки)', C: 'Категория C (5% выручки)' };
                 return (
-                    <div style={{ overflowX: 'auto', borderRadius: 12, border: '1px solid #e5e7eb' }}>
+                    <div className="glass-card static" style={{ padding: 0, overflow: 'auto', maxHeight: 'calc(100vh - 330px)' }}>
                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 1200 }}>
                             <thead>
                                 <tr>
@@ -444,11 +427,11 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
 
             {/* Data table — SKU mode */}
             {!loading && data.length > 0 && groupBy === 'sku' && (
-                <div style={{ overflowX: 'auto', borderRadius: 12, border: '1px solid #e5e7eb' }}>
+                <div className="glass-card static" style={{ padding: 0, overflow: 'auto', maxHeight: 'calc(100vh - 330px)' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 1200 }}>
                         <thead>
                             <tr>
-                                <th colSpan={2} style={{ ...stickyCol, minWidth: 230, background: '#ffffff', zIndex: 22, borderBottom: '2px solid #e5e7eb', borderRight: '1px solid #e5e7eb', padding: '10px 12px', textAlign: 'left', color: '#374151', fontWeight: 600, boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.08)' }}>
+                                <th colSpan={2} style={{ ...thStyle, ...stickyCol, minWidth: 230, zIndex: 22, borderRight: '1px solid #4b5563', padding: '6px 12px', textAlign: 'left' }}>
                                     АРТИКУЛ
                                 </th>
                                 <th style={thStyle}>Товар</th>
@@ -585,7 +568,7 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
             )}
             {/* Grouped table — brand/subject/tag/imt mode */}
             {!loading && groupData.length > 0 && groupBy !== 'sku' && groupBy !== 'abc' && (
-                <div style={{ overflowX: 'auto', borderRadius: 12, border: '1px solid #e5e7eb' }}>
+                <div className="glass-card static" style={{ padding: 0, overflow: 'auto', maxHeight: 'calc(100vh - 330px)' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: 1200 }}>
                         <thead>
                             <tr>

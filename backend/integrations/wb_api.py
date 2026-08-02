@@ -716,6 +716,40 @@ class WBApiClient:
         logger.info("wb_api.prices_fetched", total=len(all_goods))
         return all_goods
 
+    async def set_price(self, nm_id: int, price: int, discount: int | None = None) -> dict:
+        """Поставить цену витрины одному товару. Discounts-Prices: POST /api/v2/upload/task.
+
+        `price` — цена ДО скидки продавца (целые рубли), `discount` — скидка %.
+        Цена витрины (то, что видит покупатель до СПП) = price × (1 − discount/100).
+
+        ВБ принимает задание асинхронно: 200 значит «взял в обработку», а не
+        «применил». Фактическое применение проверяем не по ответу, а по витрине
+        (card-API) — для пробы цены это и есть измеряемое событие.
+
+        Единственный write-метод по ценам в проекте: используется пробой уровня
+        СПП, где цена ставится на минуты и возвращается назад.
+        """
+        payload: dict = {"data": [{"nmID": int(nm_id), "price": int(round(price))}]}
+        if discount is not None:
+            payload["data"][0]["discount"] = int(round(discount))
+
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                url = f"{WB_PRICES_API_BASE}/api/v2/upload/task"
+                logger.info("wb_api.request", method="POST", path="prices/upload/task", nm_id=nm_id, price=price)
+                response = await client.post(url, headers=self.headers, json=payload)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Цены и скидки»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Prices API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 400:
+                    raise ValueError(
+                        f"WB Prices API set_price: HTTP {response.status_code} — {response.text[:300]}"
+                    )
+                return response.json() if response.text else {}
+
     # ─── Goods Returns (Seller Analytics API) ───────────────────────────────
     @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
     async def get_goods_returns(self, date_from: date, date_to: date) -> list[dict]:
@@ -893,6 +927,121 @@ class WBApiClient:
                 if response.status_code not in (200, 204):
                     raise ValueError(
                         f"WB feedbacks/actions error: HTTP {response.status_code} — {response.text[:200]}"
+                    )
+                return True
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def answer_feedback(self, feedback_id: str, text: str) -> bool:
+        """
+        Создать ответ на отзыв. WB Feedbacks API: POST /api/v1/feedbacks/answer,
+        body {"id": feedback_id, "text": text} → 204. Формат проверен живьём 2026-07-27
+        (PATCH /api/v1/feedbacks WB больше не принимает — HTTP 405, Allow: GET, HEAD).
+
+        ⚠️ Лимит методов отзывов — 1 rps (до 3 rps → блок на 60 сек): массовую отправку
+        гнать ТОЛЬКО через фоновую очередь с троттлингом, не в HTTP-запросе.
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/feedbacks/answer"
+                payload = {"id": feedback_id, "text": text}
+                logger.info("wb_api.request", method="POST", path="/api/v1/feedbacks/answer")
+                response = await client.post(url, headers=self.headers, json=payload)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Вопросы и отзывы»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Feedbacks API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Feedbacks API server error: HTTP {response.status_code}")
+                if response.status_code not in (200, 204):
+                    raise ValueError(
+                        f"WB feedbacks answer error: HTTP {response.status_code} — {response.text[:200]}"
+                    )
+                return True
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def get_questions(
+        self,
+        is_answered: bool = False,
+        take: int = 100,
+        skip: int = 0,
+        date_from: int | None = None,
+        date_to: int | None = None,
+        order: str = "dateDesc",
+    ) -> dict:
+        """
+        Вопросы покупателей (questions) по товарам продавца.
+        WB Feedbacks API: GET /api/v1/questions?isAnswered=&take=&skip=&order=&dateFrom=&dateTo=
+        take ∈ [1..10000], skip ∈ [0..100000], order = dateAsc|dateDesc,
+        dateFrom/dateTo — unix timestamp (сек). Нужен scope «Вопросы и отзывы».
+
+        Возвращает внутренний data-dict:
+          {countUnanswered, countArchive, questions: [
+             {id, text, answer: {text, editable, createDate} | None, createdDate,
+              userName, isAnswered, productDetails: {nmId, productName, supplierArticle, brandName}}
+          ]}
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                params: dict = {
+                    "isAnswered": str(is_answered).lower(),
+                    "take": take,
+                    "skip": skip,
+                    "order": order,
+                }
+                if date_from is not None:
+                    params["dateFrom"] = date_from
+                if date_to is not None:
+                    params["dateTo"] = date_to
+                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/questions"
+                logger.info("wb_api.request", method="GET", path="/api/v1/questions", params=params)
+                response = await client.get(url, headers=self.headers, params=params)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Вопросы и отзывы»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Feedbacks API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Feedbacks API server error: HTTP {response.status_code}")
+                if response.status_code == 204:
+                    return {"countUnanswered": 0, "countArchive": 0, "questions": []}
+                if response.status_code != 200:
+                    raise ValueError(f"WB questions error: HTTP {response.status_code} — {response.text[:200]}")
+
+                data = response.json()
+                inner = data.get("data") if isinstance(data, dict) else None
+                return inner or {"countUnanswered": 0, "countArchive": 0, "questions": []}
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def answer_question(self, question_id: str, text: str) -> bool:
+        """
+        Ответить на вопрос покупателя. WB Feedbacks API: PATCH /api/v1/questions,
+        body {"id": question_id, "answer": {"text": text}, "state": "wbRu"}.
+        Формат проверен живьём 2026-07-27: без state → 400 «Empty state in request»,
+        с валидным телом и чужим id → 404 «Вопрос не найден».
+
+        ⚠️ Лимит методов отзывов — 1 rps (до 3 rps → блок на 60 сек): массовую отправку
+        гнать ТОЛЬКО через фоновую очередь с троттлингом, не в HTTP-запросе.
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/questions"
+                payload = {"id": question_id, "answer": {"text": text}, "state": "wbRu"}
+                logger.info("wb_api.request", method="PATCH", path="/api/v1/questions")
+                response = await client.patch(url, headers=self.headers, json=payload)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Вопросы и отзывы»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Feedbacks API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Feedbacks API server error: HTTP {response.status_code}")
+                if response.status_code not in (200, 204):
+                    raise ValueError(
+                        f"WB questions answer error: HTTP {response.status_code} — {response.text[:200]}"
                     )
                 return True
 

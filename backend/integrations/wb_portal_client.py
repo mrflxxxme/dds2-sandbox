@@ -49,6 +49,13 @@ logger = structlog.get_logger("dds.wb_portal")
 SUPPLY_BASE = "https://seller-supply.wildberries.ru"
 AUTH_BASE = "https://seller.wildberries.ru"
 CMP_BASE = "https://cmp.wildberries.ru"  # кабинет рекламы (стата кампаний) — GET, authorizev3
+#: Денежный шлюз рекламного кабинета: автопополнение бюджета, счета, бюджеты кампаний.
+#: XHR страницы cmp → origin/referer обязаны остаться cmp (как у MARKETPLACE_BASE ниже).
+ADS_GATE_BASE = "https://ads-gate.wildberries.ru"
+# Биржа карточек товаров (card-exchange showcase) — REST (НЕ JSON-RPC), тот же host,
+# та же авторизация authorizev3+cookie. Проксируем витрину/справочник/корзину в DDS2.
+EXC_PREFIX = "/ns/exc-api/monetization/api/v1"
+
 #: Кабинет маркетплейса (FBS). История статусов задания живёт ЗДЕСЬ, а не в
 #: публичном Marketplace API — тот истории не отдаёт вовсе.
 #: 🔴 Антибот-куки НУЖНЫ, как и supply-manager'у. В HAR-экспорте Chrome их не
@@ -238,12 +245,19 @@ class WbPortalClient:
             raise WbSessionExpired("auth/token не вернул токен сессии")
         self.wb_seller_lk = token
 
-    async def _raw_post(self, url: str, body: dict | list) -> dict | list:
-        """Один POST через shared-клиент с ретраем на 401 (обновление wb-seller-lk)."""
+    async def _raw_post(self, url: str, body: dict | list, *, origin: str | None = None) -> dict | list:
+        """Один POST через shared-клиент с ретраем на 401 (обновление wb-seller-lk).
+
+        origin — подменить origin/referer, когда запрос это XHR другой страницы кабинета
+        (ads-gate принимает только origin cmp, ср. комментарий про MARKETPLACE_BASE).
+        """
         client = self._ensure_client()
+        headers = self._headers()
+        if origin:
+            headers = {**headers, "origin": origin, "referer": origin + "/"}
         try:
             for attempt in range(2):
-                resp = await client.post(url, headers=self._headers(), json=body)
+                resp = await client.post(url, headers=headers, json=body)
                 if resp.status_code == 401 and attempt == 0:
                     # Протух короткий токен — обновляем и повторяем один раз.
                     await self._refresh_lk()
@@ -461,6 +475,128 @@ class WbPortalClient:
                 }
             )
         return out
+
+    # ─── автопополнение бюджета кампании (родная настройка ВБ) ────────────
+    # РЕАЛЬНЫЕ ДЕНЬГИ: это правило, по которому ВБ сам доливает бюджет. Публичный
+    # advert-api настройку не отдаёт вообще — только этот кабинетный хост.
+    # Контракт снят с живого кабинета 2026-08-01 (см. memory wb-autorefill-cabinet-api):
+    #   GET  /proxy/autorefill/v2/{id}        → {"settings": {..., "history": [...]}}
+    #   POST /proxy/autorefill/v2/{id}        ← {"settings": {bet_min, bet_sum, is_daily_limit, limit, is_enable, source}}
+    #   PUT  /proxy/autorefill/v2/{id}/retry  → повтор неудавшегося долива
+    # Одних cookie мало: без authorizev3 хост отвечает 401 «named cookie not present».
+
+    async def fetch_autorefill(self, campaign_id: int) -> dict:
+        """Настройка автопополнения кампании + история доливов (одним запросом)."""
+        data = await self._raw_get(
+            ADS_GATE_BASE, f"/proxy/autorefill/v2/{campaign_id}", {}, origin=CMP_BASE
+        )
+        settings = data.get("settings") if isinstance(data, dict) else None
+        return settings if isinstance(settings, dict) else {}
+
+    async def save_autorefill(self, campaign_id: int, settings: dict) -> dict:
+        """Сохранить настройку автопополнения в кабинете ВБ. Реальное правило трат.
+
+        Клиент кабинета шлёт ТОЛЬКО рублёвые поля (`*_cents` считает сервер).
+        """
+        data = await self._raw_post(
+            ADS_GATE_BASE + f"/proxy/autorefill/v2/{campaign_id}",
+            {"settings": settings},
+            origin=CMP_BASE,
+        )
+        out = data.get("settings") if isinstance(data, dict) else None
+        return out if isinstance(out, dict) else {}
+
+    # ─── биржа карточек товаров (card-exchange showcase) ──────────────────
+    # REST на seller.wildberries.ru/ns/exc-api/... (НЕ JSON-RPC): тело POST —
+    # это сам объект фильтра, ответ обёрнут в {"data":..., "error":bool, "errorText"}.
+    # Авторизация — authorizev3 + cookie (как supply); wb-seller-lk exc-api не требует,
+    # но _raw_post его подмешивает безвредно и ретраит 401 (см. _raw_post).
+
+    async def showcase_subjects(self) -> list[dict]:
+        """Справочник предметов биржи: [{"id": int, "name": str, "category": str}].
+
+        WB отдаёт ПЛОСКИЙ список без группировки (`category` пустой) — корневые
+        категории даёт наш справочник card_exchange_categories, матчим по `name`.
+        """
+        data = await self._raw_get(AUTH_BASE, EXC_PREFIX + "/showcase/subjects", {})
+        subjects = (data.get("data") or {}).get("subjects") if isinstance(data, dict) else None
+        return subjects if isinstance(subjects, list) else []
+
+    async def showcase_ads(
+        self,
+        *,
+        search: str | None = None,
+        filter: dict | None = None,
+        sort: dict | None = None,
+        cursor: dict | None = None,
+    ) -> dict:
+        """Витрина объявлений биржи (одна страница, курсорная пагинация).
+
+        filter: {"subjectIDs": [int]|None, "brands": [str]|None, "supplierIDs": [int]|None,
+                 "rating": float|None, "hasStocks": bool|None}
+        sort:   {"field": "feedbacksCount"|..., "order": "asc"|"desc"}
+        cursor: None (первая страница) | {"lastAdID": int, "lastValue": <знач. поля сортировки>}
+        Возвращает объект `data`: {"ads": [{adID, nmID, imtID, meta{title,brand,supplierName,
+        imtCount,stockQty,photo,contactCountries,isKiz}, totalPrice, feedbacks{rating,count},
+        hasInCart, isCardOwner}]}.
+        """
+        body = {
+            "search": search,
+            "filter": filter
+            or {"subjectIDs": None, "brands": None, "supplierIDs": None, "rating": None, "hasStocks": None},
+            "sort": sort or {"field": "feedbacksCount", "order": "desc"},
+            "cursor": cursor,
+        }
+        data = await self._raw_post(AUTH_BASE + EXC_PREFIX + "/showcase/ads", body)
+        return (data.get("data") or {}) if isinstance(data, dict) else {}
+
+    async def exc_counters(self) -> dict:
+        """Счётчики биржи: {"showcase": всего объявлений, "ads", "requests", "cart"}.
+
+        Нужен для пагинации: сама выдача total не отдаёт (курсорная), а число страниц
+        показать хочется. ВАЖНО: счётчик — по ВСЕЙ бирже, фильтры его не сужают.
+        """
+        data = await self._raw_get(AUTH_BASE, "/ns/exc-api/monetization/api/v1/counters", {})
+        return (data.get("data") or {}) if isinstance(data, dict) else {}
+
+    async def showcase_brands(self) -> list[str]:
+        """Справочник брендов биржи: массив СТРОК (не объектов)."""
+        data = await self._raw_get(AUTH_BASE, EXC_PREFIX + "/showcase/brands", {})
+        brands = (data.get("data") or {}).get("brands") if isinstance(data, dict) else None
+        return [b for b in brands if b] if isinstance(brands, list) else []
+
+    async def showcase_suppliers(self) -> list[dict]:
+        """Справочник продавцов биржи: [{"id": int, "name": str}]."""
+        data = await self._raw_get(AUTH_BASE, EXC_PREFIX + "/showcase/suppliers", {})
+        sup = (data.get("data") or {}).get("suppliers") if isinstance(data, dict) else None
+        return sup if isinstance(sup, list) else []
+
+    async def showcase_ad_details(self, ad_id: int) -> list[dict]:
+        """Детали объявления: `data.group[]` — товары группы (варианты одного объявления).
+
+        ЕДИНСТВЕННЫЙ источник предмета: в витрине (`showcase/ads`) предмета нет, а здесь
+        у каждого товара есть `meta.subjectName` (+ WB-категория `meta.category`). По
+        subjectName определяем корневую категорию из нашего справочника. Варианты группы
+        могут быть из разных предметов → у объявления бывает несколько категорий.
+        """
+        data = await self._raw_get(AUTH_BASE, f"{EXC_PREFIX}/showcase/ads/{ad_id}/details", {})
+        group = (data.get("data") or {}).get("group") if isinstance(data, dict) else None
+        return group if isinstance(group, list) else []
+
+    async def exc_cart_get(self) -> dict:
+        """Корзина биржи (группировка по продавцам): data{suppliers:[...], flags{...}}."""
+        data = await self._raw_get(AUTH_BASE, EXC_PREFIX + "/cart", {})
+        return (data.get("data") or {}) if isinstance(data, dict) else {}
+
+    async def exc_cart_add(self, ad_id: int) -> bool:
+        """Добавить объявление в корзину биржи. POST /cart/add {"adID": int} → data:true."""
+        data = await self._raw_post(AUTH_BASE + EXC_PREFIX + "/cart/add", {"adID": ad_id})
+        return bool(data.get("data")) if isinstance(data, dict) else False
+
+    async def exc_cart_delete(self, ad_ids: list[int]) -> bool:
+        """Убрать объявления из корзины. POST /cart/delete {"adIDs": [int]} → data:true."""
+        data = await self._raw_post(AUTH_BASE + EXC_PREFIX + "/cart/delete", {"adIDs": ad_ids})
+        return bool(data.get("data")) if isinstance(data, dict) else False
 
     # ─── шаг 1-4: черновик → преордер ─────────────────────────────────────
 

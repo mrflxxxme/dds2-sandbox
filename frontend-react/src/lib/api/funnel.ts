@@ -1,8 +1,8 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
 import type {
-    AdSubject, AdNmCard, CreateCampaignResult, FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdGlueRow, AdsManagerCampaign, AdsScheduleSetting, AdsScheduleLogEntry, AdsWbAutopayStatus, BudgetLedgerEntry, AdsCampaignStateResult, AdsScheduleSaveResult, AdsBudgetGap, AdsBudgetGapHistory, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionsResponse, PositionsProgress, CollectPositionsResult, CollectOneResult, CampaignZones,
-    CampaignZonesUpdate, ClusterMinusResult, ClusterBidResult, ClusterBidBulkResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse } from '@/types/api';
+    AdSubject, AdNmCard, CreateCampaignResult, FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdGlueRow, AdsManagerCampaign, AdsAccountBalance, AdsAutopayLogEntry, WbAutorefillResponse, WbAutorefillSetting, WbAutorefillSaveResult, AdsScheduleSetting, AdsScheduleLogEntry, AdsWbAutopayStatus, BudgetLedgerEntry, AdsCampaignStateResult, AdsScheduleSaveResult, AdsBudgetGap, AdsBudgetGapHistory, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionsResponse, PositionsProgress, CollectPositionsResult, CollectOneResult, CampaignZones,
+    CampaignZonesUpdate, ClusterMinusResult, ClusterBidResult, ClusterBidBulkResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse, FunnelTreeResponse, FunnelDimensionsResponse } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -24,6 +24,30 @@ export function addFunnelMethods(api: ApiClient) {
             if (params?.color) q.set('color', params.color);
             if (params?.subcat) q.set('subcat', 'true');
             return api.request<{ data: (FunnelDayRow | FunnelSkuRow | FunnelGroupRow)[]; detailed: boolean; tax_rate: number; has_bdr?: boolean; group_by?: string }>('GET', `/api/v1/funnel/data?${q.toString()}`);
+        },
+        /** Воронка деревом по произвольной цепочке группировок: dims в порядке уровней. */
+        /** path — ключи узлов-предков (раскрытие ветки), depth — сколько уровней материализовать.
+         *  Без path приезжает только верхний уровень: полное дерево весит десятки мегабайт. */
+        getFunnelTree(params: { dims: string[]; date_from?: string; date_to?: string; brand?: string; subject?: string; vendor_code?: string; extended?: boolean; min_orders?: number; tag?: string; imt?: string; color?: string; path?: string[]; depth?: number }) {
+            const q = new URLSearchParams();
+            q.set('group_by', params.dims.join(','));
+            (params.path || []).forEach(k => q.append('path', k));
+            if (params.depth) q.set('depth', String(params.depth));
+            if (params.date_from) q.set('date_from', params.date_from);
+            if (params.date_to) q.set('date_to', params.date_to);
+            if (params.brand) q.set('brand', params.brand);
+            if (params.subject) q.set('subject', params.subject);
+            if (params.vendor_code) q.set('vendor_code', params.vendor_code);
+            if (params.extended) q.set('extended', 'true');
+            if (params.min_orders) q.set('min_orders', String(params.min_orders));
+            if (params.tag) q.set('tag', params.tag);
+            if (params.imt) q.set('imt', params.imt);
+            if (params.color) q.set('color', params.color);
+            return api.request<FunnelTreeResponse>('GET', `/api/v1/funnel/tree?${q.toString()}`);
+        },
+        /** Каталог измерений для конструктора группировок. */
+        getFunnelDimensions() {
+            return api.request<FunnelDimensionsResponse>('GET', '/api/v1/funnel/dimensions');
         },
         getFunnelColors(subject?: string, brand?: string) {
             const q = new URLSearchParams();
@@ -206,6 +230,25 @@ export function addFunnelMethods(api: ApiClient) {
          *  Можно ввести любую ставку — WB поднимет до минимума (adjusted=true, bid — применённая). */
         setCampaignBid(campaignId: number, bid: number) {
             return api.request<{ ok: boolean; error: string | null; bid: number | null; adjusted?: boolean; min_bid?: number }>('PUT', `/api/v1/funnel/campaigns/${campaignId}/bid`, { bid });
+        },
+        /** Родная настройка автопополнения ВБ из кабинета (+ история доливов ВБ). */
+        getCampaignAutorefill(campaignId: number) {
+            return api.request<WbAutorefillResponse>('GET', `/api/v1/funnel/campaigns/${campaignId}/autorefill`);
+        },
+        /** Изменить автопополнение в кабинете ВБ. Реальное правило трат. */
+        setCampaignAutorefill(campaignId: number, setting: Omit<WbAutorefillSetting, 'status' | 'history'>) {
+            return api.request<WbAutorefillSaveResult>('POST', `/api/v1/funnel/campaigns/${campaignId}/autorefill`, setting);
+        },
+        /** Журнал пополнений (авто + ручные), новые первыми. */
+        getAutopayLog(campaignId?: number) {
+            const q = new URLSearchParams();
+            if (campaignId != null) q.set('campaign_id', String(campaignId));
+            const qs = q.toString();
+            return api.request<AdsAutopayLogEntry[]>('GET', `/api/v1/funnel/campaigns/autopay/log${qs ? `?${qs}` : ''}`);
+        },
+        /** Кошелёк кабинета Продвижения WB: счёт / баланс взаиморасчётов / бонусы. */
+        getAdsBalance() {
+            return api.request<AdsAccountBalance>('GET', '/api/v1/funnel/ads/balance');
         },
         /** Ручное пополнение бюджета кампании (реальные деньги). */
         depositCampaignBudget(campaignId: number, amount: number, source = 0) {

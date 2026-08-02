@@ -41,6 +41,8 @@ _NUMERIC_FIELDS = [
     "rebill_logistic_cost",
     "ppvz_vw",
     "ppvz_vw_nds",
+    "acquiring_fee",
+    "acquiring_percent",
 ]
 
 
@@ -265,13 +267,31 @@ async def _upsert_batch(db: AsyncSession, batch: list[dict], project_id: int) ->
                 if bn:
                     r["brand_name"] = bn[:200]
 
-    stmt = pg_insert(WbFinanceRow).values(batch)
-    update_cols = {k: stmt.excluded[k] for k in batch[0].keys() if k not in ("project_id", "rrd_id")}
-    stmt = stmt.on_conflict_do_update(
-        constraint="uq_wb_finance_rrd",
-        set_=update_cols,
-    )
-    await db.execute(stmt)
+    # asyncpg не принимает больше 32767 параметров на один statement, а параметры
+    # здесь — это строки × колонки. С фиксированным BATCH_SIZE=1000 запас таял с
+    # каждой новой колонкой (на 33-й синк упал бы совсем), поэтому режем чанк по
+    # реальному числу параметров, а не по числу строк.
+    for chunk in _param_safe_chunks(batch):
+        stmt = pg_insert(WbFinanceRow).values(chunk)
+        update_cols = {k: stmt.excluded[k] for k in chunk[0].keys() if k not in ("project_id", "rrd_id")}
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_wb_finance_rrd",
+            set_=update_cols,
+        )
+        await db.execute(stmt)
+
+
+# Держим потолок ниже лимита asyncpg (32767) — запас на служебные параметры UPSERT
+MAX_QUERY_PARAMS = 30_000
+
+
+def _param_safe_chunks(batch: list[dict]) -> list[list[dict]]:
+    """Режет пачку строк так, чтобы строки × колонки влезали в лимит параметров."""
+    if not batch:
+        return []
+    cols = max(len(r) for r in batch)
+    per_chunk = max(1, MAX_QUERY_PARAMS // max(cols, 1))
+    return [batch[i:i + per_chunk] for i in range(0, len(batch), per_chunk)]
 
 
 async def get_sync_status(

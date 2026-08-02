@@ -770,9 +770,20 @@ async def _upsert_orders(
                 "cross_border_type": stmt.excluded.cross_border_type,
                 "is_zero_order": stmt.excluded.is_zero_order,
                 "is_pickup_point_shipment_allowed": stmt.excluded.is_pickup_point_shipment_allowed,
-                # supplier_status / wb_status / is_cancellable / supply_id /
-                # sticker_* / written_off_at НЕ трогаем: их владельцы —
-                # sync_order_statuses, supplies_service и writeoff.
+                # Привязка к поставке ЗАПОЛНЯЕТСЯ, но не затирается. WB кладёт
+                # `supplyId` прямо в payload задания, и это единственный
+                # источник, который догоняет доклад в кабинете: досинк
+                # `_pull_missing_order_ids` берёт активную поставку в кандидаты
+                # только при `orders_count == 0`, поэтому после привязки ПЕРВОГО
+                # задания состав замирал навсегда (прод 02.08.2026: WB-GI-260717413
+                # показывала 5 заданий вместо 203; 2511 строк проекта имели
+                # `supplyId` в raw при NULL в колонке). `coalesce` — потому что
+                # наш `add_orders` проставляет привязку раньше зеркала WB, и
+                # голое присваивание сбрасывало бы её обратно в NULL.
+                "supply_id": func.coalesce(stmt.excluded.supply_id, WbFbsOrder.supply_id),
+                # supplier_status / wb_status / is_cancellable / sticker_* /
+                # written_off_at НЕ трогаем: их владельцы — sync_order_statuses,
+                # supplies_service и writeoff.
                 "ddate": stmt.excluded.ddate,
                 "seller_date": stmt.excluded.seller_date,
                 "comment": stmt.excluded.comment,

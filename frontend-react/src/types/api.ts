@@ -421,6 +421,10 @@ export interface FunnelDayRow {
   margin?: number;
   roi?: number;
   tax?: number;
+  /** НДС, выделенный из налога (в разделе — своя колонка). */
+  nds?: number;
+  /** Эквайринг WB — часть «Расхода WB», не добавка к нему. */
+  acquiring?: number;
   commission_rate?: number;
   commission?: number;
   avg_price?: number;
@@ -455,6 +459,8 @@ export interface FunnelSkuRow {
   add_to_cart_pct: number;
   cart_to_order_pct: number;
   tax: number;
+  nds?: number;
+  acquiring?: number;
   profit: number;
   margin: number;
   commission: number;
@@ -504,6 +510,36 @@ export interface FunnelAbcRow {
     stock_days_left?: number;
     stock_out_date?: string | null;
     stock_trend_pct?: number;
+}
+
+/** Узел дерева произвольной группировки (/funnel/tree). */
+export interface FunnelTreeNode extends FunnelGroupRow {
+  /** Подпись узла: дата, «13.07–19.07», предмет, бренд, артикул… */
+  label: string;
+  /** Измерение уровня: day | week | month | subject | brand | nm | size | tag | imt */
+  dim: string;
+  /** Сортируемый ключ уровня (ISO-дата, «2026-07» и т.п.) — подпись недели для сортировки не годится. */
+  sort_key?: string;
+  date?: string;
+  children?: FunnelTreeNode[];
+  /** Есть ли уровень ниже: дети приезжают отдельным запросом при раскрытии. */
+  has_children?: boolean;
+  /** Товары узла на миниатюры (сейчас — у склеек) и их общее число. */
+  nm_ids?: number[];
+  nm_total?: number;
+}
+
+export interface FunnelTreeResponse {
+  data: FunnelTreeNode[];
+  tax_info: Record<string, number | string | boolean>;
+  has_bdr: boolean;
+  detailed: boolean;
+  group_by: string[];
+}
+
+export interface FunnelDimensionsResponse {
+  dimensions: { key: string; label: string }[];
+  max_chain: number;
 }
 
 export interface FunnelGroupRow extends Omit<FunnelSkuRow, 'nm_id' | 'vendor_code' | 'brand' | 'subject'> {
@@ -4067,6 +4103,62 @@ export interface AdsScheduleSetting {
   resume_hour: number;  // час МСК, когда запускать обратно
 }
 
+/** РОДНАЯ настройка автопополнения ВБ (кабинет, /proxy/autorefill/v2): остаток упал
+ *  ниже threshold → ВБ доливает amount, не чаще limit раз в день. Правило живёт и
+ *  исполняется на стороне ВБ — мы только читаем и меняем его. */
+export interface WbAutorefillSetting {
+  enabled: boolean;
+  threshold: number;  // ₽: остаток, ниже которого ВБ доливает
+  amount: number;  // ₽: сумма долива (минимум ВБ — 1000)
+  daily_limit: boolean;  // ограничивать число доливов в день
+  limit: number;  // сколько раз в день
+  unified_account: boolean;  // источник списания — единый счёт кабинета
+  status: string | null;  // 'working' — правило активно у ВБ
+  history: WbAutorefillEntry[];  // доливы, сделанные ВБ (приходят тем же запросом)
+}
+
+/** Долив, выполненный автопополнением ВБ. */
+export interface WbAutorefillEntry {
+  id: string;
+  date: string | null;  // ISO UTC
+  source: string | null;  // net — баланс взаиморасчётов, account — счёт
+  sum: number;  // ₽
+}
+
+/** Ответ по автопополнению: session — состояние кабинетной сессии.
+ *  EXPIRED/NONE означает «мы не знаем настройку», а НЕ «автопополнение выключено». */
+export interface WbAutorefillResponse {
+  session: 'ACTIVE' | 'EXPIRED' | 'NONE';
+  settings: WbAutorefillSetting | null;
+}
+
+export interface WbAutorefillSaveResult extends WbAutorefillResponse {
+  ok: boolean;
+  error: string | null;
+}
+
+/** Запись журнала пополнений: и автоматических, и ручных (source «вручную»). */
+export interface AdsAutopayLogEntry {
+  campaign_id: number;
+  ts: string;  // ISO UTC
+  amount: number;  // фактически пополнено ₽ (0, если не удалось)
+  requested: number;  // запрошенная сумма ₽
+  source: string;  // счёт | баланс | вручную
+  status: 'ok' | 'error' | 'unknown';
+  budget_before: number | null;
+  budget_after: number | null;
+  reason: string | null;  // текст ошибки WB, если была
+}
+
+/** Кошелёк кабинета Продвижения WB — источник денег при ручном пополнении бюджета кампании. */
+export interface AdsAccountBalance {
+  ok: boolean;
+  balance: number;  // ₽ на счёте (пополняет продавец)
+  net: number;  // ₽ баланса взаиморасчётов (удержание из будущих продаж)
+  bonus: number;  // ₽ бонусов
+  error: string | null;
+}
+
 /** Долив бюджета со стороны ВБ (детект автопополнения ВБ по событиям бюджета:
  *  API ВБ статус автопея не отдаёт). Кампании без записи — доливов не замечено. */
 export interface AdsWbAutopayStatus {
@@ -7459,6 +7551,270 @@ export interface ReviewsSummaryResponse {
   has_key: boolean;
 }
 
+// ─── Вопросы покупателей (зеркало wb_questions) ─────────────────────────────
+
+/** Один вопрос покупателя WB из зеркала. */
+export interface QuestionItem {
+  /** wb_id вопроса */
+  id: string;
+  nm_id: number | null;
+  text: string | null;
+  answer_text: string | null;
+  is_answered: boolean;
+  created_date: string | null;
+  user_name: string | null;
+  subject: string | null;
+  product_name: string | null;
+  article: string | null;
+  brand: string | null;
+  /** True — следим за поступлением товара (wb_stock_watches, бейдж ⏳) */
+  has_stock_watch: boolean;
+}
+
+export interface QuestionsListResponse {
+  items: QuestionItem[];
+  /** Всего неотвеченных (независимо от текущего фильтра) — для пагинации */
+  count_unanswered: number;
+  /** Всего отвеченных (архив) */
+  count_archive: number;
+  has_key: boolean;
+}
+
+/** Итог on-demand синка вопросов. */
+export interface QuestionsSyncResult {
+  rows_fetched: number;
+  rows_upserted: number;
+  has_key: boolean;
+}
+
+// ─── ИИ-агенты автоответов ───────────────────────────────────────────────────
+
+/** На что отвечает агент: отзывы / вопросы / и то и другое. */
+export type ReplyAgentTarget = 'feedback' | 'question' | 'both';
+export type LlmProvider = 'openai_compatible' | 'claude';
+
+/** ИИ-агент автоответов на отзывы/вопросы. */
+export interface ReplyAgent {
+  id: number;
+  name: string;
+  enabled: boolean;
+  target: ReplyAgentTarget;
+  /** Уровни оценок через запятую ("1,2,3") — для отзывов */
+  star_levels: string;
+  /** nm_id через запятую либо null (все товары) */
+  nm_ids: string | null;
+  auto_send: boolean;
+  rules: string;
+  /** JSON few-shot примеров (строкой) */
+  examples: string | null;
+  llm_provider: LlmProvider;
+  llm_model: string;
+  llm_base_url: string | null;
+  last_run_at: string | null;
+}
+
+/** Создание/обновление агента (частичное при PATCH). */
+export interface ReplyAgentSave {
+  name?: string;
+  enabled?: boolean;
+  target?: ReplyAgentTarget;
+  star_levels?: string;
+  nm_ids?: string | null;
+  auto_send?: boolean;
+  rules?: string;
+  examples?: string | null;
+  llm_provider?: LlmProvider;
+  llm_model?: string;
+  llm_base_url?: string | null;
+}
+
+/** Итог прогона агента автоответов. */
+export interface ReplyAgentRunResult {
+  checked: number;
+  drafted: number;
+  errors: number;
+  limit: number;
+  /** True → черновики сразу approved */
+  auto_send: boolean;
+}
+
+// ─── Ответы на отзывы/вопросы (wb_feedback_replies) ──────────────────────────
+
+export type ReplyTargetType = 'feedback' | 'question';
+export type ReplyStatus = 'draft' | 'approved' | 'sent' | 'error' | 'rejected';
+export type ReplyAction = 'approve' | 'reject' | 'reopen';
+
+/** Данные цели ответа из зеркала (для UI). */
+export interface ReplyTarget {
+  text: string | null;
+  /** Только для отзывов */
+  rating: number | null;
+  nm_id: number | null;
+  product_name: string | null;
+  brand: string | null;
+  subject: string | null;
+  user_name: string | null;
+  created_date: string | null;
+}
+
+/** Один ответ/черновик продавца. */
+export interface Reply {
+  id: number;
+  target_type: ReplyTargetType;
+  target_wb_id: string;
+  draft_text: string;
+  final_text: string | null;
+  /** Финальный текст (final_text или draft_text) */
+  text: string;
+  status: ReplyStatus;
+  source: 'agent' | 'manual';
+  agent_id: number | null;
+  /** True — в базе знаний нет фактов для ответа, ждёт ручной доработки */
+  needs_info: boolean;
+  /** Источник генерации: 'llm' | 'kb_direct' | 'template' | null (ручной/needs_info-заглушка) */
+  generation: 'llm' | 'kb_direct' | 'template' | null;
+  /** True — черновик «товар появился в наличии» (wb_stock_watches, бейдж 📦) */
+  is_stock_reply: boolean;
+  error: string | null;
+  sent_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  target: ReplyTarget | null;
+}
+
+export interface RepliesListResponse {
+  items: Reply[];
+  total: number;
+  /** Счётчики по статусам: { draft: n, approved: n, ... } */
+  counts: Record<string, number>;
+}
+
+/** Итог отправки approved-ответов (202 — отправка в фоне). */
+export interface ReplySendResult {
+  sent: number;
+  errors: number;
+  /** Сколько approved стоит в очереди на отправку */
+  pending: number;
+}
+
+// ─── Слежение за поступлением товара (wb_stock_watches) ─────────────────────
+
+export type StockWatchStatus = 'watching' | 'drafted' | 'dismissed';
+
+/** Одно слежение «вопрос → ждём поступление товара». */
+export interface StockWatchItem {
+  id: number;
+  nm_id: number;
+  question_wb_id: string;
+  status: StockWatchStatus;
+  reply_id: number | null;
+  /** Остаток (totalQuantity) при последней проверке тика */
+  last_qty: number | null;
+  created_at: string | null;
+  resolved_at: string | null;
+  question_text: string | null;
+  product_name: string | null;
+}
+
+export interface StockWatchListResponse {
+  items: StockWatchItem[];
+  total: number;
+  /** Счётчики по статусам: { watching: n, drafted: n, dismissed: n } */
+  counts: Record<string, number>;
+}
+
+/** Итог on-demand скана вопросов о наличии. */
+export interface StockWatchScanResult {
+  scanned: number;
+  created: number;
+  dismissed: number;
+}
+
+/** Итог ручного прогона проверки остатков. */
+export interface StockWatchTickResult {
+  checked: number;
+  drafted: number;
+  waiting: number;
+  errors: number;
+}
+
+// ─── База знаний товаров (wb_product_kb) ────────────────────────────────────
+
+/** Темы записей базы знаний. */
+export type KbTopic =
+  | 'Размер'
+  | 'Доставка'
+  | 'Состав'
+  | 'Цвет'
+  | 'Комплект'
+  | 'Гарантия'
+  | 'Качество'
+  | 'Прочее';
+
+/** Товар проекта с числом записей базы знаний. */
+export interface KbProductItem {
+  nm_id: number;
+  kb_count: number;
+  product_name: string | null;
+  article: string | null;
+  brand: string | null;
+}
+
+export interface KbProductsResponse {
+  items: KbProductItem[];
+  total: number;
+}
+
+/** Одна запись базы знаний товара. */
+export interface KbItem {
+  id: number;
+  nm_id: number;
+  topic: string;
+  question_example: string | null;
+  answer: string;
+  /** manual | import */
+  source: 'manual' | 'import';
+  enabled: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface KbListResponse {
+  items: KbItem[];
+  total: number;
+}
+
+/** Создание записи КБ (POST /kb). */
+export interface KbCreate {
+  nm_id: number;
+  topic: string;
+  question_example?: string | null;
+  answer: string;
+}
+
+/** Частичное обновление записи КБ (PATCH /kb/{id}). */
+export interface KbUpdate {
+  nm_id?: number;
+  topic?: string;
+  question_example?: string | null;
+  answer?: string;
+  enabled?: boolean;
+}
+
+/** Итог импорта КБ из архива отвеченных вопросов. */
+export interface KbImportResult {
+  /** Отвеченных вопросов в зеркале */
+  source_questions: number;
+  /** Создано записей КБ */
+  created: number;
+  /** Пропущено дублей */
+  skipped_dupe: number;
+  /** Пропущено пустых текстов */
+  skipped_empty: number;
+  /** Затронуто товаров (nm_id) */
+  nm_count: number;
+}
+
 // ─── Сырые данные (GET /raw-data/sources) ───────────────────────────────────
 
 /** Прогресс принудительной дозагрузки источника (живёт в памяти бэкенда). */
@@ -10064,4 +10420,266 @@ export interface PayrollAgencySheetResponse {
 
 export interface PayrollOkResponse {
   ok: boolean;
+}
+
+// ─── Биржа карточек товаров (card-exchange showcase) ──────────────────────
+export interface RootCategory {
+    category: string;
+    subject_count: number;
+    is_ours: boolean;
+    our_count: number;
+}
+
+export interface ShowcaseAd {
+    ad_id: number;
+    nm_id: number | null;
+    imt_id: number | null;
+    title: string | null;
+    brand: string | null;
+    supplier_name: string | null;
+    imt_count: number | null;
+    stock_qty: number | null;
+    photo: string | null;
+    contact_countries: string[] | null;
+    is_kiz: boolean;
+    total_price: number | null;
+    rating: number;
+    feedbacks_count: number;
+    has_in_cart: boolean;
+    is_card_owner: boolean;
+    is_ours: boolean;
+    categories: string[];
+    our_categories: string[];
+}
+
+export interface ShowcaseCursor {
+    last_ad_id: number;
+    last_value: number;
+}
+
+export interface ShowcaseResponse {
+    ads: ShowcaseAd[];
+    next_cursor: ShowcaseCursor | null;
+    has_more: boolean;
+    unmatched_subjects: string[];
+    scanned_pages?: number | null;
+    scan_truncated?: boolean;
+}
+
+export type CardExchangeOurMode = 'categories' | 'exact';
+
+export interface ExchangeSupplier {
+    id: number;
+    name: string;
+}
+
+export interface ExchangeSubject {
+    id: number;
+    name: string;
+    /** Корневая категория предмета из справочника — UI отмечает её при выборе предмета. */
+    root_category?: string | null;
+}
+
+/** ВНИМАНИЕ: WB принимает рейтинг только как {min,max} (число → 400). */
+export interface RatingRange {
+    min: number;
+    max: number;
+}
+
+export interface ShowcaseQueryPayload {
+    search?: string | null;
+    root_categories?: string[] | null;
+    our_mode?: CardExchangeOurMode | null;
+    subject_ids?: number[] | null;
+    brands?: string[] | null;
+    supplier_ids?: number[] | null;
+    rating?: RatingRange | null;
+    has_stocks?: boolean | null;
+    sort_field?: string;
+    sort_order?: string;
+    cursor?: ShowcaseCursor | null;
+}
+
+export interface CartActionResult {
+    ok: boolean;
+}
+
+export interface ExchangeSessionStatus {
+    status: 'ACTIVE' | 'EXPIRED' | 'NONE';
+    updated_at?: string | null;
+    supplier_id?: string | null;
+}
+
+// ─── Карта СПП: категория × уровень цены → СПП ────────────────────────────
+
+export interface SppLagHint {
+  peer_spp: number;
+  delta: number;
+  peers: number;
+  buyer_price: number;
+}
+
+export interface SppLevelItem {
+  nm_id: number;
+  vendor_code: string | null;
+  price: number;
+  spp: number;
+  buyer_price: number;
+  hint_down: SppHint | null;
+  hint_up: SppHint | null;
+  lag_hint: SppLagHint | null;
+}
+
+export interface SppHint {
+  price: number;
+  spp: number;
+  buyer_price: number;
+  gain: number;
+  leverage: number | null;
+  buyer_delta: number;
+  categories: string[];
+  alt_kind: 'up' | 'down' | null;
+  alt_price: number | null;
+  alt_buyer_price: number | null;
+}
+
+export interface SppLevel {
+  price: number;
+  spp: number;
+  spp_min: number;
+  spp_max: number;
+  buyer_price: number;
+  n: number;
+  safe_price: number;
+  items: SppLevelItem[];
+  hint_down: SppHint | null;
+  hint_up: SppHint | null;
+}
+
+/** Порог цены по всему портфелю: между up_to и from_price СПП меняется скачком. */
+export interface SppThreshold {
+  up_to: number;
+  from_price: number;
+  spp_below: number;
+  spp_above: number;
+  jump: number;
+  n_below: number;
+  n_above: number;
+  band_from: number;
+  band_to: number;
+  categories: string[];
+  categories_count: number;
+  confirmed_by: string[];
+  fuzzy: boolean;
+}
+
+export interface SppCliff {
+  keep_below: number;
+  breaks_at: number;
+  spp_below: number;
+  spp_above: number;
+  drop: number;
+  seller_gives: number;
+  buyer_gains: number;
+  leverage: number | null;
+  n_below: number;
+  n_above: number;
+}
+
+export interface SppCategory {
+  category: string;
+  nm_count: number;
+  levels: SppLevel[];
+  cliffs: SppCliff[];
+  gaps: number[];
+}
+
+export interface SppMapStats {
+  source: string;
+  date_from: string | null;
+  date_to: string | null;
+  step: number;
+  points: number;
+  categories_count: number;
+  with_cliffs: number;
+  last_snapshot_on: string | null;
+}
+
+export interface SppMapResponse {
+  categories: SppCategory[];
+  thresholds: SppThreshold[];
+  stats: SppMapStats;
+}
+
+/** Цель прогона: цена, которой в данных ещё нет, и артикул, которым её пробуем. */
+export interface SppScanTarget {
+  kind: 'narrow' | 'grid' | 'explore';
+  price: number;
+  gap_before: number;
+  gap_after: number;
+  why: string;
+  nearby: number;
+  donor: {
+    nm_id: number;
+    vendor_code: string | null;
+    category: string;
+    price: number;
+    delta: number;
+    step_pct: number;
+  };
+}
+
+export interface SppScanPlan {
+  plan: SppScanTarget[];
+  summary: {
+    probes: number;
+    donors: number;
+    hours_sequential: number;
+    hours_parallel: number;
+    median_step_pct: number;
+  };
+  limits: {
+    max_down_rub: number;
+    max_up_rub: number;
+    max_step_pct: number;
+    hold_hours: number;
+    kopecks: number;
+  };
+  thresholds: SppThreshold[];
+}
+
+export interface SppScanRun {
+  launched: number;
+  applied: number;
+  reacted: {
+    nm_id: number;
+    price: number;
+    buyer_before: number;
+    buyer_after: number;
+    spp: number;
+    after_sec: number;
+  }[];
+  no_reaction: number[];
+  refused: { nm_id: number; price: number; reason: string }[];
+  errors: { nm_id: number; error: string }[];
+  waited_sec: number;
+}
+
+/** Строка журнала проб: что ставили, что увидели, вернулась ли цена. */
+export interface SppProbeRow {
+  id: number;
+  nm_id: number;
+  status: string;
+  price_before: number;
+  target_price: number;
+  buyer_before: number | null;
+  buyer_after: number | null;
+  spp_before: number | null;
+  spp_after: number | null;
+  reacted_after_sec: number | null;
+  polls: number;
+  reverted: boolean;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
 }

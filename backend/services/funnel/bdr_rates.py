@@ -34,6 +34,9 @@ class BdrRates:
     to_pay_rate: float  # to_pay / realization (e.g. 0.598 = 59.8%)
     spp_rate: float  # 1 - sales_amount / realization (e.g. 0.331 = 33.1%)
     buyout_pct: float  # sale_qty / (sale_qty + ret_qty + cancel_qty) (e.g. 0.882 = 88.2%)
+    # Эквайринг / реализация. Уже сидит внутри to_pay — это разбор расхода WB,
+    # а не добавка к нему. Ноль, если отчёт заливали до появления поля.
+    acq_rate: float = 0.0
 
 
 class BdrRatesLookup:
@@ -92,6 +95,11 @@ SELECT
   - COALESCE(SUM(acceptance), 0)
     AS to_pay,
 
+  -- Эквайринг (комиссия за организацию платежей) — внутри ppvz_for_pay
+  COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN acquiring_fee ELSE 0 END), 0) -
+  COALESCE(SUM(CASE WHEN doc_type_name = 'Возврат' THEN acquiring_fee ELSE 0 END), 0)
+    AS acquiring,
+
   -- Quantities
   COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа'
       AND supplier_oper_name IN ('Продажа', 'Возврат')
@@ -117,6 +125,7 @@ def _build_rates(
     sale_qty: int,
     ret_qty: int,
     cancel_qty: int = 0,
+    acquiring: float = 0.0,
 ) -> BdrRates | None:
     """Build BdrRates from raw aggregates, with sanity clamping."""
     if realization <= 0:
@@ -137,6 +146,7 @@ def _build_rates(
         to_pay_rate=round(to_pay_rate, 4),
         spp_rate=round(spp_rate, 4),
         buyout_pct=round(buyout_pct, 4),
+        acq_rate=round(max(acquiring / realization, 0), 4),
     )
 
 
@@ -185,13 +195,14 @@ async def _query_bdr_rates_daily(
         realization = float(row.realization)
         sales_amount = float(row.sales_amount)
         to_pay = float(row.to_pay)
+        acquiring = float(row.acquiring or 0)
         sale_qty = int(row.sale_qty)
         ret_qty = int(row.ret_qty)
         nm_id = row.nm_id
         rr_dt = row.rr_dt
         cancel_qty = cancel_map.get((nm_id, rr_dt), 0)
 
-        rates = _build_rates(realization, sales_amount, to_pay, sale_qty, ret_qty, cancel_qty)
+        rates = _build_rates(realization, sales_amount, to_pay, sale_qty, ret_qty, cancel_qty, acquiring)
         if rates:
             daily_map[(nm_id, rr_dt)] = rates
 
@@ -204,6 +215,7 @@ async def _query_bdr_rates_daily(
                 "sale_qty": 0,
                 "ret_qty": 0,
                 "cancel_qty": 0,
+                "acquiring": 0,
             }
         a = acc[nm_id]
         a["realization"] += realization
@@ -212,6 +224,7 @@ async def _query_bdr_rates_daily(
         a["sale_qty"] += sale_qty
         a["ret_qty"] += ret_qty
         a["cancel_qty"] += cancel_qty
+        a["acquiring"] += acquiring
 
     # Build avg map
     avg_map: dict[int, BdrRates] = {}
@@ -223,6 +236,7 @@ async def _query_bdr_rates_daily(
             a["sale_qty"],
             a["ret_qty"],
             a["cancel_qty"],
+            a["acquiring"],
         )
         if rates:
             avg_map[nm_id] = rates
@@ -296,8 +310,10 @@ def compute_profit_bdr(
     # SPP already deducted from income (price_after_spp), so expenses = only commission
     wb_commission = price_after_spp - to_pay_est
 
-    # Tax calculation using same logic as bdr_enrichment.apply_tax
-    tax = _compute_tax(price_after_spp, tax_info, wb_commission, adv_sum, cost_total)
+    # Tax calculation using same logic as bdr_enrichment.apply_tax.
+    # НДС отдаём отдельно: в разделе он нужен своей колонкой, а не только внутри налога.
+    nds, usn = _compute_tax_parts(price_after_spp, tax_info, wb_commission, adv_sum, cost_total)
+    tax = nds + usn
 
     profit = to_pay_est - cost_total - adv_sum - tax
     margin = (profit / est_real * 100) if est_real > 0 else 0
@@ -307,7 +323,9 @@ def compute_profit_bdr(
         "profit": round(profit, 2),
         "margin": round(margin, 2),
         "tax": round(tax, 2),
+        "nds": round(nds, 2),
         "commission": round(est_real - to_pay_est, 2),
+        "acquiring": round(est_real * bdr.acq_rate, 2),
         "commission_rate": round((1 - bdr.to_pay_rate) * 100, 2),
         "cost_total": round(cost_total, 2),
         "buyout_pct": round(buyout * 100, 2),
@@ -324,7 +342,19 @@ def _compute_tax(
     adv_sum: float,
     cost_total: float,
 ) -> float:
-    """Compute tax from income (price_after_spp).
+    """Совокупный налог (НДС + УСН) — прежний контракт для внешних вызовов."""
+    nds, usn = _compute_tax_parts(income, tax_info, wb_commission, adv_sum, cost_total)
+    return nds + usn
+
+
+def _compute_tax_parts(
+    income: float,
+    tax_info: dict,
+    wb_commission: float,
+    adv_sum: float,
+    cost_total: float,
+) -> tuple[float, float]:
+    """Налог по частям: (НДС, УСН).
 
     Same formula as bdr_enrichment.apply_tax but returns just the number.
     income = price_after_spp (already without SPP)
@@ -345,4 +375,4 @@ def _compute_tax(
         tax_base = income - nds_sum - expenses
 
     usn_sum = max(tax_base * usn_rate, 0)
-    return float(nds_sum + usn_sum)
+    return float(nds_sum), float(usn_sum)

@@ -16,6 +16,7 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.tariff import WbTariffSchema, WbTariffUploadResult
 from backend.services import funnel as funnel_service
+from backend.services.funnel.grouping_tree import MAX_CHAIN
 from backend.services.tariff_service import delete_tariff, list_tariffs, upload_tariffs
 from backend.utils.rate_limit import rate_limit_write
 
@@ -756,6 +757,72 @@ async def get_ad_campaigns_list(
     )
 
 
+class AutorefillRequest(BaseModel):
+    """Родная настройка автопополнения ВБ (реальные деньги — правило трат в кабинете)."""
+
+    enabled: bool = False
+    threshold: float = 0  # ₽: остаток, ниже которого ВБ доливает
+    amount: float = 1000  # ₽: сумма долива (минимум ВБ — 1000)
+    daily_limit: bool = True  # «не чаще N раз в день»
+    limit: int = 1
+    unified_account: bool = True  # источник списания — единый счёт кабинета
+
+
+@router.get("/campaigns/{campaign_id}/autorefill")
+async def get_campaign_autorefill(
+    campaign_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Автопополнение кампании как оно настроено в кабинете ВБ (+ история доливов).
+
+    Ответ несёт статус кабинетной сессии: ACTIVE / EXPIRED / NONE.
+    """
+    from backend.integrations.wb_portal_client import WbPortalError
+    from backend.services.funnel.ads_autorefill import get_autorefill
+
+    try:
+        return await get_autorefill(db, project.id, campaign_id)
+    except WbPortalError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/campaigns/{campaign_id}/autorefill", dependencies=[Depends(rate_limit_write)])
+async def set_campaign_autorefill(
+    campaign_id: int,
+    body: AutorefillRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Изменить родную настройку автопополнения в кабинете ВБ (реальное правило трат)."""
+    from backend.integrations.wb_portal_client import WbPortalError
+    from backend.services.funnel.ads_autorefill import save_autorefill
+
+    try:
+        result = await save_autorefill(db, project.id, campaign_id, body.model_dump())
+    except WbPortalError as e:
+        # Отказ/лимит кабинета — 400 с текстом ВБ, а не 500: правило НЕ изменилось.
+        raise HTTPException(400, str(e)) from e
+    if not result.get("ok") and result.get("error"):
+        raise HTTPException(400, result["error"])
+    return result
+
+
+@router.get("/campaigns/autopay/log")
+async def get_campaigns_autopay_log(
+    campaign_id: int | None = None,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Журнал пополнений — авто и ручных (новые первыми); campaign_id — фильтр по кампании."""
+    from backend.services.funnel.ads_manager import get_autopay_log
+
+    log = await get_autopay_log(db, project.id)
+    if campaign_id is not None:
+        log = [e for e in log if int(e.get("campaign_id") or 0) == campaign_id]
+    return log
+
+
 class ScheduleSettingRequest(BaseModel):
     campaign_id: int
     enabled: bool = False
@@ -1392,6 +1459,17 @@ async def positions_map_endpoint(
     return {"nm_id": nm_id, "positions": await get_positions_map(db, project.id, nm_id)}
 
 
+@router.get("/ads/balance")
+async def ads_account_balance_endpoint(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Кошелёк кабинета Продвижения WB: счёт / баланс взаиморасчётов / бонусы."""
+    from backend.services.funnel.ads_manager import get_adv_account_balance
+
+    return await get_adv_account_balance(db, project.id)
+
+
 class DepositRequest(BaseModel):
     amount: int  # ₽, минимум 1000 (ограничение WB)
     source: int = 0  # 0 = счёт кабинета Продвижения, иные — баланс/бонусы
@@ -1925,3 +2003,82 @@ async def get_product_daily_ep(
     from backend.services.funnel.cluster_analysis_service import get_product_daily
 
     return await get_product_daily(db, project.id, nm_id, date_from, date_to)
+
+
+@router.get("/tree")
+async def get_funnel_tree_endpoint(
+    group_by: str = Query(..., description="Цепочка измерений через запятую: subject,nm,week"),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    brand: str | None = Query(None),
+    vendor_code: str | None = Query(None),
+    subject: str | None = Query(None),
+    extended: bool = Query(False),
+    min_orders: int = Query(0, ge=0),
+    tag: str | None = Query(None),
+    imt: str | None = Query(None),
+    color: str | None = Query(None),
+    path: list[str] = Query(default_factory=list, description="Ключи узлов-предков: раскрытие ветки"),
+    depth: int = Query(1, ge=1, le=MAX_CHAIN, description="Сколько уровней материализовать"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Воронка деревом по произвольной цепочке группировок.
+
+    Порядок ключей в group_by задаёт форму дерева: «subject,nm,week» — предметы,
+    внутри артикулы, внутри недели. Метрики считаются теми же примитивами, что и
+    в одноуровневых режимах, поэтому цифры сходятся с /data.
+
+    По умолчанию отдаётся только запрошенный уровень (`has_children` подсказывает,
+    есть ли что раскрывать): полное дерево на реальных данных — это ~25 тыс. узлов
+    и ~20 МБ, из которых видно 30 строк. Дети приезжают запросом с `path`.
+    """
+    from backend.services.funnel.grouping_tree import UnknownDimension, get_funnel_tree  # noqa: F401
+
+    dims = [d.strip() for d in group_by.split(",") if d.strip()]
+    tax_info = await _load_tax_info(db, project)
+    bdr_rates_map = await _load_bdr_rates(db, project.id)
+    nm_filter = await funnel_service.resolve_filter_nm_ids(db, project.id, tag, imt, color)
+
+    try:
+        data = await funnel_service.get_funnel_tree(
+            db,
+            project.id,
+            tax_info,
+            date_from,
+            date_to,
+            brand,
+            subject,
+            dims,
+            bdr_rates_map=bdr_rates_map,
+            nm_ids=nm_filter,
+            vendor_code=vendor_code,
+            path=path,
+            depth=depth,
+        )
+    except UnknownDimension as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    data = funnel_service.apply_min_orders(data, min_orders)
+    if extended:
+        stock_map = await funnel_service.get_stock_cost_map(db, project.id)
+        funnel_service.merge_stock_costs_tree(data, stock_map)
+
+    return {
+        "data": data,
+        "tax_info": tax_info,
+        "has_bdr": bool(bdr_rates_map),
+        "detailed": False,
+        "group_by": dims,
+    }
+
+
+@router.get("/dimensions")
+async def get_funnel_dimensions():
+    """Каталог измерений для конструктора группировок (ключ + подпись)."""
+    from backend.services.funnel.grouping_tree import MAX_CHAIN, DIMENSIONS
+
+    return {
+        "dimensions": [{"key": k, "label": d.label} for k, d in DIMENSIONS.items()],
+        "max_chain": MAX_CHAIN,
+    }

@@ -54,6 +54,7 @@ ALL_PAGES: list[str] = [
     "container",
     "funnel",
     "reviews",
+    "card-exchange",
     "ads-manager",
     "ab-tests",
     "trends",
@@ -111,6 +112,11 @@ PAGE_ADDED_AT: dict[str, date] = {
     "warehouse": date(2026, 7, 30),
     "measurements": date(2026, 7, 30),
     "reviews": date(2026, 7, 30),
+    # Раздел приехал из dev вместе с биржей карточек, но в каталог его не
+    # внесли — `canAccess` по ключу вне ALL_PAGES всегда ложь, то есть для
+    # editor/viewer «Биржа карточек» была скрыта навсегда (тот же класс дефекта,
+    # что у warehouse/measurements/reviews выше).
+    "card-exchange": date(2026, 8, 2),
 }
 
 # День, когда каталог страниц вообще появился (вместе с RBAC). Гранты старше этой
@@ -157,6 +163,7 @@ PAGES_INHERITABLE: frozenset[str] = frozenset(
         "container",
         "funnel",
         "reviews",
+        "card-exchange",
         "ads-manager",
         "ab-tests",
         "trends",
@@ -185,7 +192,7 @@ SECTION_PAGES: dict[str, list[str]] = {
     ],
     "orders": ["planning", "container"],
     "supply": ["supply-chain"],
-    "sales": ["funnel", "reviews", "ads-manager", "ab-tests", "trends", "opiu", "plan-fact", "geography"],
+    "sales": ["funnel", "reviews", "card-exchange", "ads-manager", "ab-tests", "trends", "opiu", "plan-fact", "geography"],
     "ai": ["ai-chat"],
     "settings": ["monitoring", "raw-data", "project-settings", "team"],
 }

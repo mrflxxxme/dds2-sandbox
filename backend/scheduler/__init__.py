@@ -62,8 +62,15 @@ from backend.scheduler.jobs.faktura_statement_sync import sync_all_projects_fakt
 from backend.scheduler.jobs.vtb_statement_sync import sync_all_projects_vtb_statements
 from backend.scheduler.jobs.wb_goods_returns_sync import sync_all_projects_wb_returns
 from backend.scheduler.jobs.wb_reviews_sync import sync_all_projects_wb_feedbacks
+from backend.scheduler.jobs.wb_questions_sync import sync_all_projects_wb_questions
+from backend.scheduler.jobs.wb_replies_sender import send_all_projects_pending_replies
+from backend.scheduler.jobs.wb_cards_kb_refresh import refresh_all_projects_cards_kb
+from backend.scheduler.jobs.wb_stock_watch import stock_watch_tick_all_projects
 from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
-from backend.scheduler.jobs.wb_prices_sync import sync_all_projects_wb_prices
+from backend.scheduler.jobs.wb_prices_sync import (
+    snapshot_all_projects_spp,
+    sync_all_projects_wb_prices,
+)
 from backend.scheduler.jobs.measurements_digest import send_measurement_digests
 from backend.scheduler.jobs.problem_digest import problem_digest_asap_tick, send_problem_digests
 from backend.scheduler.jobs.wb_measurements import sync_all_projects_wb_measurements
@@ -621,6 +628,20 @@ def start_scheduler():
         misfire_grace_time=3600,
     )
 
+    # Часовой снимок СПП витрины (card-API) — питает «Ступеньки СПП».
+    # Отдельным джобом от цен: СПП двигается в течение дня (иногда за час), а
+    # цены витрины меняются редко — им хватает 2×/день. Ключ WB тут не нужен:
+    # card-API публичный, ходим только по своим nm из wb_prices.
+    _scheduler.add_job(
+        snapshot_all_projects_spp,
+        trigger=CronTrigger(minute=5, timezone=MSK),
+        id="spp_hourly_snapshot",
+        name="СПП витрины — часовой снимок (:05 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=1800,
+    )
+
     # Fulfillment (skladbot, wmscelicom, migfull) stocks + requests mirror —
     # тированное расписание (FAST/SLOW по складам + DEFAULT для остальных,
     # см. config + _add_fulfillment_jobs). Пустые FAST/SLOW → один DEFAULT для
@@ -651,6 +672,56 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=3600,
+    )
+
+    # WB customer questions (вопросы покупателей): ночной прогон 03:25 MSK,
+    # сразу после синка отзывов (общий лимит WB 1 rps на методы отзывов/вопросов).
+    _scheduler.add_job(
+        sync_all_projects_wb_questions,
+        trigger=CronTrigger(hour=3, minute=25, timezone=MSK),
+        id="wb_questions_sync",
+        name="WB questions sync (03:25 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # Отправка approved-ответов на отзывы/вопросы: каждые 2 минуты, троттлинг
+    # 1 rps внутри сервиса. Частый прогон — одобренные в UI ответы не ждут ночи.
+    _scheduler.add_job(
+        send_all_projects_pending_replies,
+        trigger=IntervalTrigger(minutes=2, timezone=MSK),
+        id="wb_replies_sender",
+        name="WB feedback replies sender (every 2 min)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+
+    # Карточки товаров → база знаний: ночной прогон 03:45 MSK (после синков
+    # зеркал). Докачивает карточки новых/устаревших nm_id (>7 дней) и обновляет
+    # записи КБ source='card'. Публичный API WB — ключа не надо.
+    _scheduler.add_job(
+        refresh_all_projects_cards_kb,
+        trigger=CronTrigger(hour=3, minute=45, timezone=MSK),
+        id="wb_cards_kb_refresh",
+        name="WB product cards + KB refresh (03:45 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # Слежение за поступлением товара: каждые 30 минут проверяем остатки по
+    # вопросам «когда появится в наличии?»; появился → черновик draft
+    # (отправка только вручную после одобрения).
+    _scheduler.add_job(
+        stock_watch_tick_all_projects,
+        trigger=IntervalTrigger(minutes=30, timezone=MSK),
+        id="wb_stock_watch_tick",
+        name="WB stock watch tick (every 30 min)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=600,
     )
 
     # Faktura.ru (ВБ Банк) statement auto-sync: 4×/day — 06/12/18/23 MSK.

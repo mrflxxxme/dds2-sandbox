@@ -27,6 +27,7 @@ from backend.routers import (
     assembly_drafts,
     assembly_wb,
     auth,
+    card_exchange,
     cost,
     counterparty,
     fbo_supplies,
@@ -168,6 +169,20 @@ async def lifespan(app: FastAPI):
     # Create default admin user
     async with AsyncSessionLocal() as session:
         await ensure_default_admin(session)
+
+    # Пробы цены живут часами в ЭТОМ процессе (api), и пересборка контейнера
+    # обрывает их вместе с возвратом цены. Любая RUNNING-строка на старте —
+    # сирота: возвращаем цену раньше, чем поднимаем что-либо ещё.
+    if settings.DDS_ROLE != "worker":
+        async with AsyncSessionLocal() as session:
+            try:
+                from backend.services.pricing.spp_probe import recover_stuck_probes
+
+                healed = await recover_stuck_probes(session)
+                if healed:
+                    logger.warning("Возвращены цены %d осиротевших проб СПП", healed)
+            except Exception as e:  # noqa: BLE001 — старт важнее
+                logger.error("Не удалось восстановить пробы цены: %s", e)
 
     # Start background scheduler ONLY in worker container
     from backend.scheduler import start_scheduler, stop_scheduler
@@ -597,6 +612,12 @@ app.include_router(
     assembly_wb.router,
     prefix="/api/v1",
     tags=["Assembly WB"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    card_exchange.router,
+    prefix="/api/v1",
+    tags=["Card Exchange"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

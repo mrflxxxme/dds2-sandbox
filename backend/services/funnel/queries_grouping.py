@@ -45,6 +45,8 @@ def _new_group_agg(has_bdr: bool) -> dict:
         "bdr_revenue": 0.0,
         "bdr_profit": 0.0,
         "bdr_tax": 0.0,
+        "bdr_nds": 0.0,
+        "bdr_acquiring": 0.0,
         "bdr_commission": 0.0,
         "bdr_cost_total": 0.0,
         "w_spp_sum": 0.0,
@@ -83,6 +85,8 @@ def _accumulate_row(agg: dict, r: WbFunnelDaily, nm_id: int, bdr_rates_map, tari
         agg["bdr_revenue"] += m["revenue"]
         agg["bdr_profit"] += m["profit"]
         agg["bdr_tax"] += m["tax"]
+        agg["bdr_nds"] += m.get("nds", 0.0)
+        agg["bdr_acquiring"] += m.get("acquiring", 0.0)
         agg["bdr_commission"] += m["commission"]
         agg["bdr_cost_total"] += m["cost_total"]
         agg["w_spp_sum"] += bdr.spp_rate * orders_sum
@@ -100,7 +104,7 @@ def _accumulate_row(agg: dict, r: WbFunnelDaily, nm_id: int, bdr_rates_map, tari
         agg["cost_total"] += cost_per_unit * orders_count * buyout_pct / 100
 
 
-def _finalize_groups(grp_agg: dict, tax_rate: float, label_key: str, limit: int) -> list[dict]:
+def _finalize_groups(grp_agg: dict, tax_rate: float, label_key: str, limit: int, nds_rate: float = 0.0) -> list[dict]:
     """Convert aggregation dicts to final output rows."""
     data = []
     for _key, agg in grp_agg.items():
@@ -116,6 +120,8 @@ def _finalize_groups(grp_agg: dict, tax_rate: float, label_key: str, limit: int)
 
         leg_tax = agg["leg_revenue"] * tax_rate / 100
         tax = agg["bdr_tax"] + leg_tax
+        # У строк без БДР НДС считаем по ставке проекта — как и весь их налог
+        nds = agg["bdr_nds"] + agg["leg_revenue"] * nds_rate / 100
 
         profit = (
             agg["bdr_profit"]
@@ -154,6 +160,8 @@ def _finalize_groups(grp_agg: dict, tax_rate: float, label_key: str, limit: int)
                 "add_to_cart_pct": round(avg_atc, 2),
                 "cart_to_order_pct": round(avg_cart, 2),
                 "tax": round(tax, 2),
+                "nds": round(nds, 2),
+                "acquiring": round(agg["bdr_acquiring"], 2),
                 "profit": round(profit, 2),
                 "margin": round(margin, 2),
                 "commission": round(commission, 2),
@@ -189,6 +197,8 @@ def _new_child_agg() -> dict:
         "bdr_revenue": 0.0,
         "bdr_profit": 0.0,
         "bdr_tax": 0.0,
+        "bdr_nds": 0.0,
+        "bdr_acquiring": 0.0,
         "bdr_commission": 0.0,
         "bdr_cost_total": 0.0,
         "leg_revenue": 0.0,
@@ -234,6 +244,8 @@ def _accumulate_child(child: dict, r: WbFunnelDaily, nm_id: int, bdr_rates_map, 
         child["bdr_revenue"] += m["revenue"]
         child["bdr_profit"] += m["profit"]
         child["bdr_tax"] += m["tax"]
+        child["bdr_nds"] += m.get("nds", 0.0)
+        child["bdr_acquiring"] += m.get("acquiring", 0.0)
         child["bdr_commission"] += m["commission"]
         child["bdr_cost_total"] += m["cost_total"]
         child["w_spp_sum"] += bdr.spp_rate * orders_sum
@@ -251,7 +263,7 @@ def _accumulate_child(child: dict, r: WbFunnelDaily, nm_id: int, bdr_rates_map, 
         child["cost_total"] += cost_per_unit * orders_count * buyout_pct / 100
 
 
-def _finalize_children(children_map: dict[int, dict], tax_rate: float) -> list[dict]:
+def _finalize_children(children_map: dict[int, dict], tax_rate: float, nds_rate: float = 0.0) -> list[dict]:
     """Convert per-SKU aggregation dicts to final child rows, sorted by orders sum."""
     children = []
     for _nm, c in children_map.items():
@@ -260,6 +272,7 @@ def _finalize_children(children_map: dict[int, dict], tax_rate: float) -> list[d
         ct = c["bdr_cost_total"] + c["cost_total"]
         leg_tax = c["leg_revenue"] * tax_rate / 100
         tx = c["bdr_tax"] + leg_tax
+        nds_c = c["bdr_nds"] + c["leg_revenue"] * nds_rate / 100
         pr = (
             (
                 c["bdr_profit"]
@@ -296,6 +309,8 @@ def _finalize_children(children_map: dict[int, dict], tax_rate: float) -> list[d
                 "adv_views": c["adv_views"],
                 "adv_clicks": c["adv_clicks"],
                 "tax": round(tx, 2),
+                "nds": round(nds_c, 2),
+                "acquiring": round(c["bdr_acquiring"], 2),
                 "profit": round(pr, 2),
                 "margin": round(mg, 2),
                 "commission": round(comm, 2),
@@ -313,11 +328,23 @@ def _finalize_children(children_map: dict[int, dict], tax_rate: float) -> list[d
     return children
 
 
-async def _load_funnel_rows(db: AsyncSession, pid: int, date_from, date_to, brand, subject, nm_ids=None):
-    """Load filtered funnel rows."""
+async def _load_funnel_rows(db: AsyncSession, pid: int, date_from, date_to, brand, subject, nm_ids=None, vendor_code=None):
+    """Load filtered funnel rows.
+
+    vendor_code — тот же матч, что и в одноуровневой воронке: подстрока по
+    артикулу продавца либо точный nm_id, если передали число.
+    """
+    from sqlalchemy import or_
+
     q = select(WbFunnelDaily).where(WbFunnelDaily.project_id == pid)
     if nm_ids is not None:
         q = q.where(WbFunnelDaily.nm_id.in_(nm_ids))
+    if vendor_code:
+        _vc = vendor_code.replace("%", r"\%").replace("_", r"\_")
+        vc_filter = WbFunnelDaily.vendor_code.ilike(f"%{_vc}%", escape="\\")
+        if vendor_code.isdigit():
+            vc_filter = or_(vc_filter, WbFunnelDaily.nm_id == int(vendor_code))
+        q = q.where(vc_filter)
     if date_from:
         q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
     if date_to:
@@ -368,6 +395,7 @@ async def get_funnel_by_tag(
     tariff_map = await get_tariff_map(db, pid)
     buyout_map = await get_avg_buyout_map(db, pid)
     tax_rate = tax_info.get("usn_rate", 0) + tax_info.get("nds_rate", 0)
+    nds_rate = tax_info.get("nds_rate", 0)
     has_bdr = bool(bdr_rates_map)
 
     grp_agg: dict = defaultdict(lambda: _new_group_agg(has_bdr))
@@ -386,9 +414,9 @@ async def get_funnel_by_tag(
             _accumulate_row(agg, r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
             _accumulate_child(sku_agg[tag_name][nm_id], r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
 
-    result = _finalize_groups(grp_agg, tax_rate, "tag", limit)
+    result = _finalize_groups(grp_agg, tax_rate, "tag", limit, nds_rate)
     for group in result:
-        group["children"] = _finalize_children(sku_agg.get(group["tag"], {}), tax_rate)
+        group["children"] = _finalize_children(sku_agg.get(group["tag"], {}), tax_rate, nds_rate)
     return result
 
 
@@ -436,6 +464,7 @@ async def get_funnel_by_imt(
     tariff_map = await get_tariff_map(db, pid)
     buyout_map = await get_avg_buyout_map(db, pid)
     tax_rate = tax_info.get("usn_rate", 0) + tax_info.get("nds_rate", 0)
+    nds_rate = tax_info.get("nds_rate", 0)
     has_bdr = bool(bdr_rates_map)
 
     grp_agg: dict = defaultdict(lambda: _new_group_agg(has_bdr))
@@ -455,9 +484,9 @@ async def get_funnel_by_imt(
         _accumulate_row(agg, r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
         _accumulate_child(sku_agg[grp_key][nm_id], r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
 
-    result = _finalize_groups(grp_agg, tax_rate, "imt_group", limit)
+    result = _finalize_groups(grp_agg, tax_rate, "imt_group", limit, nds_rate)
     for group in result:
-        group["children"] = _finalize_children(sku_agg.get(group["imt_group"], {}), tax_rate)
+        group["children"] = _finalize_children(sku_agg.get(group["imt_group"], {}), tax_rate, nds_rate)
     return result
 
 
@@ -482,6 +511,7 @@ async def get_funnel_by_size(
     tariff_map = await get_tariff_map(db, pid)
     buyout_map = await get_avg_buyout_map(db, pid)
     tax_rate = tax_info.get("usn_rate", 0) + tax_info.get("nds_rate", 0)
+    nds_rate = tax_info.get("nds_rate", 0)
     has_bdr = bool(bdr_rates_map)
 
     grp_agg: dict = defaultdict(lambda: _new_group_agg(has_bdr))
@@ -496,9 +526,9 @@ async def get_funnel_by_size(
         _accumulate_row(agg, r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
         _accumulate_child(sku_agg[grp_key][nm_id], r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
 
-    result = _finalize_groups(grp_agg, tax_rate, "size", limit)
+    result = _finalize_groups(grp_agg, tax_rate, "size", limit, nds_rate)
     for group in result:
-        group["children"] = _finalize_children(sku_agg.get(group["size"], {}), tax_rate)
+        group["children"] = _finalize_children(sku_agg.get(group["size"], {}), tax_rate, nds_rate)
     return result
 
 
@@ -536,6 +566,7 @@ async def get_funnel_by_category_size(
     tariff_map = await get_tariff_map(db, pid)
     buyout_map = await get_avg_buyout_map(db, pid)
     tax_rate = tax_info.get("usn_rate", 0) + tax_info.get("nds_rate", 0)
+    nds_rate = tax_info.get("nds_rate", 0)
     has_bdr = bool(bdr_rates_map)
     overrides = override_map or {}
     aliases = alias_map or {}
@@ -579,20 +610,20 @@ async def get_funnel_by_category_size(
         else:
             _accumulate_child(sku_agg[cat][size][nm_id], r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
 
-    result = _finalize_groups(cat_agg, tax_rate, "subject", limit)
+    result = _finalize_groups(cat_agg, tax_rate, "subject", limit, nds_rate)
     for catrow in result:
         cat = catrow["subject"]
-        sizes = _finalize_groups(size_agg.get(cat, {}), tax_rate, "size", limit)
+        sizes = _finalize_groups(size_agg.get(cat, {}), tax_rate, "size", limit, nds_rate)
         for sizerow in sizes:
             sz = sizerow["size"]
             if split_by_subcategory:
-                subs = _finalize_groups(sub_agg.get(cat, {}).get(sz, {}), tax_rate, "subcategory", limit)
+                subs = _finalize_groups(sub_agg.get(cat, {}).get(sz, {}), tax_rate, "subcategory", limit, nds_rate)
                 for subrow in subs:
                     subrow["children"] = _finalize_children(
-                        sku_sub_agg.get(cat, {}).get(sz, {}).get(subrow["subcategory"], {}), tax_rate
+                        sku_sub_agg.get(cat, {}).get(sz, {}).get(subrow["subcategory"], {}), tax_rate, nds_rate
                     )
                 sizerow["children"] = subs
             else:
-                sizerow["children"] = _finalize_children(sku_agg.get(cat, {}).get(sz, {}), tax_rate)
+                sizerow["children"] = _finalize_children(sku_agg.get(cat, {}).get(sz, {}), tax_rate, nds_rate)
         catrow["children"] = sizes
     return result

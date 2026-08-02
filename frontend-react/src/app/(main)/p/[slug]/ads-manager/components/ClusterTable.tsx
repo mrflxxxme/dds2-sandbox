@@ -4,7 +4,7 @@ import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import type { SearchCluster, ClusterDailyPoint } from '@/types/api';
 import { cpmForTargetCpc } from './clusterBid';
 import { effectiveDrr, campaignEffAverages, recommendBid, recommendProjectedBid } from './clusterEff';
-import { TARGET_DRR_KEY } from './adsShared';
+import { TARGET_DRR_KEY, useOverlayClose } from './adsShared';
 import Tooltip from './Tooltip';
 
 // ─── Форматтеры (Decimal-поля бэка приходят строкой → Number() перед formatNumber) ───
@@ -355,6 +355,8 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
     const [recTiers, setRecTiers] = useState<Set<RecTier>>(new Set<RecTier>(['green', 'amber', 'red']));  // какие цвета применяем массово
     const [recSelConfirm, setRecSelConfirm] = useState(false);    // применение реком. ставок к ВЫБРАННЫМ строкам ждёт подтверждения
     const [nonBidOpen, setNonBidOpen] = useState(false);          // окно «⚠ Без ставки»: список фраз <100 показов (небиддируемых)
+    // Подложка закрывает окно только «настоящим» кликом по ней (не концом выделения текста)
+    const nonBidOverlay = useOverlayClose(() => setNonBidOpen(false));
     // Целевой ДРР задаёт менеджер в тулбаре (переопределяет значение кампании); переживает reload.
     const [drrOverride, setDrrOverride] = useState<number | null>(null);
     const [drrInput, setDrrInput] = useState<string | null>(null);  // черновик ввода цели ДРР (свободный ввод)
@@ -1212,7 +1214,7 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
             {/* Окно «⚠ Без ставки»: фразы <100 показов — WB не принимает по ним ставку,
                 поэтому рекомендованной ставки у них нет. Список с числом показов. */}
             {nonBidOpen && (
-                <div onClick={() => setNonBidOpen(false)}
+                <div {...nonBidOverlay}
                     style={{ position: 'fixed', inset: 0, background: 'rgba(17,24,39,.4)', zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
                     <div onClick={e => e.stopPropagation()}
                         style={{ background: '#fff', borderRadius: 12, boxShadow: '0 20px 60px rgba(17,24,39,.3)', width: 'min(560px, 100%)', maxHeight: '80vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>

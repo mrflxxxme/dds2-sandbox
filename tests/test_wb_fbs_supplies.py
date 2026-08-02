@@ -405,6 +405,23 @@ async def test_active_supply_is_refetched_every_run(db_session, env):
 
 
 @pytest.mark.asyncio
+async def test_active_supply_with_orders_keeps_being_refetched(db_session, env):
+    """Активную с УЖЕ привязанными заданиями тоже спрашиваем — состав растёт.
+
+    Прод-баг 02.08.2026 (`WB-GI-260717413`, склад ЕКБ): гейт `orders_count == 0`
+    выбрасывал поставку из добора сразу после привязки ПЕРВОГО задания, и всё
+    доложенное в кабинете позже оставалось без `supply_id` — 5 заданий у нас
+    против 203 в кабинете WB.
+    """
+    await _seed_supply(db_session, env.project_id, "WB-GI-GROWING", done=False, orders_count=5)
+    client = OrderIdsClient({"WB-GI-GROWING": [770101, 770102]})
+
+    await supplies_service._pull_missing_order_ids(db_session, env.project_id, client)
+
+    assert client.calls == ["WB-GI-GROWING"]
+
+
+@pytest.mark.asyncio
 async def test_confirmed_empty_active_supply_still_offered_for_topup(db_session, env):
     """Инвариант доклада не сломан: подтверждённо пустая активная — кандидат."""
     await _seed_supply(db_session, env.project_id, "WB-GI-EMPTY", done=False)

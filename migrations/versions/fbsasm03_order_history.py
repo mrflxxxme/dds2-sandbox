@@ -16,7 +16,9 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "fbsasm03_order_history"
-down_revision = "ffret01_returns_repack"
+# Перецеплено при выделении FBS-среза: ffret01 (возвраты ФФ) остался в
+# непушенной ветке, а моя миграция от него структурно не зависит.
+down_revision = "fbsasm02_order_events"
 branch_labels = None
 depends_on = None
 

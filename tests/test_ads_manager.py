@@ -665,6 +665,110 @@ async def test_autopay_log_bad_json_returns_empty(monkeypatch):
     assert await am.get_autopay_log(AsyncMock(), PROJECT_ID) == []
 
 
+# ─── Ручное пополнение бюджета ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_manual_deposit_unknown_outcome_warns_to_check(monkeypatch):
+    """timeout/5xx WB: исход неизвестен — вместо «timeout» просим сверить остаток."""
+    from backend.services.funnel import ads_manager as am
+
+    async def fake_key(db, pid):
+        return "tok"
+
+    async def fake_deposit(api_key, cid, amount, source):
+        return {"ok": False, "status": "unknown", "total": None, "error": "timeout"}
+
+    logged: list[dict] = []
+
+    async def fake_log(db, pid, entry):
+        logged.append(entry)
+
+    monkeypatch.setattr(am, "_get_advert_api_key", fake_key)
+    monkeypatch.setattr(am, "append_autopay_log", fake_log)
+    monkeypatch.setattr("backend.services.funnel.wb_advertising_api.deposit_campaign_budget", fake_deposit)
+
+    db = AsyncMock()
+    db.execute.return_value = _scalar_one_result(None)
+    res = await am.deposit_campaign_budget_manual(db, PROJECT_ID, 777, 5000, 0)
+
+    assert res["ok"] is False and res["status"] == "unknown"
+    assert "не подтвердил" in res["error"] and "Историю бюджета" in res["error"]
+    # в журнал ушла попытка с сырой причиной — сверять по ней
+    assert logged and logged[0]["status"] == "unknown" and logged[0]["requested"] == 5000
+
+
+@pytest.mark.asyncio
+async def test_manual_deposit_below_min_rejected_without_wb(monkeypatch):
+    """Меньше 1000 ₽ WB не принимает — не ходим в WB вовсе."""
+    from backend.services.funnel import ads_manager as am
+
+    called = False
+
+    async def fake_deposit(*a, **kw):
+        nonlocal called
+        called = True
+        return {"ok": True, "status": "ok", "total": 1, "error": None}
+
+    monkeypatch.setattr("backend.services.funnel.wb_advertising_api.deposit_campaign_budget", fake_deposit)
+    res = await am.deposit_campaign_budget_manual(AsyncMock(), PROJECT_ID, 777, 500, 0)
+
+    assert res["ok"] is False and "1000" in res["error"]
+    assert called is False
+
+
+# ─── Кошелёк кабинета Продвижения ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_account_balance_maps_wb_wallet(monkeypatch):
+    """Счёт/баланс/бонусы WB приводятся к числам (WB шлёт и строки)."""
+    from backend.services.funnel import ads_manager as am
+
+    async def fake_key(db, pid):
+        return "tok"
+
+    async def fake_balance(api_key):
+        return {"balance": "1500", "net": 300.5, "bonus": None, "currency": "RUB"}
+
+    monkeypatch.setattr(am, "_get_advert_api_key", fake_key)
+    monkeypatch.setattr("backend.services.funnel.wb_advertising_api.fetch_adv_balance", fake_balance)
+
+    res = await am.get_adv_account_balance(AsyncMock(), PROJECT_ID)
+    assert res == {"ok": True, "balance": 1500.0, "net": 300.5, "bonus": 0.0, "error": None}
+
+
+@pytest.mark.asyncio
+async def test_account_balance_without_key_is_soft_error(monkeypatch):
+    """Нет ключа рекламы — ok=False с текстом, а не исключение."""
+    from backend.services.funnel import ads_manager as am
+
+    async def fake_key(db, pid):
+        return None
+
+    monkeypatch.setattr(am, "_get_advert_api_key", fake_key)
+    res = await am.get_adv_account_balance(AsyncMock(), PROJECT_ID)
+    assert res["ok"] is False and res["balance"] == 0.0 and res["error"]
+
+
+@pytest.mark.asyncio
+async def test_account_balance_wb_silent_is_soft_error(monkeypatch):
+    """WB не ответил (None) — ok=False, нули, текст ошибки."""
+    from backend.services.funnel import ads_manager as am
+
+    async def fake_key(db, pid):
+        return "tok"
+
+    async def fake_balance(api_key):
+        return None
+
+    monkeypatch.setattr(am, "_get_advert_api_key", fake_key)
+    monkeypatch.setattr("backend.services.funnel.wb_advertising_api.fetch_adv_balance", fake_balance)
+
+    res = await am.get_adv_account_balance(AsyncMock(), PROJECT_ID)
+    assert res["ok"] is False and res["net"] == 0.0 and res["error"]
+
+
 # ─── Пауза / запуск кампании ─────────────────────────────────────────────────
 
 
