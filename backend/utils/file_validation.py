@@ -1,10 +1,64 @@
 """
-File upload validation: magic bytes + size check.
+File upload validation: magic bytes + size check + блок активного содержимого.
 Zero-dependency approach — no python-magic required.
 """
 
+import mimetypes
 import os
+
 from fastapi import HTTPException
+
+# Расширения исполняемого/активного содержимого — блок на любом upload.
+# svg/html/xml-семейство — активное содержимое при отдаче в браузер (stored XSS/XXE):
+# image/svg+xml проходит allowlist "image/", поэтому режем и по расширению, и по MIME.
+EXEC_BLOCKLIST = {
+    ".exe", ".dll", ".bat", ".cmd", ".com", ".scr", ".msi", ".ps1",
+    ".sh", ".js", ".vbs", ".jar", ".apk", ".app", ".py",
+    ".svg", ".svgz", ".html", ".htm", ".xhtml", ".xml", ".mjs", ".php",
+}
+
+# Явный блок активных MIME ДОПОЛНИТЕЛЬНО к блоклисту расширений: клиентский
+# Content-Type может назвать активный тип при «нейтральном» расширении.
+BLOCKED_MIME_EXACT = {
+    "image/svg+xml",
+    "text/html",
+    "application/xhtml+xml",
+    "text/xml",
+    "application/xml",
+}
+
+
+def resolve_upload_mime(filename: str | None, client_mime: str | None) -> str | None:
+    """MIME по расширению файла (mimetypes), клиентский заголовок — лишь фолбэк.
+
+    Клиентскому Content-Type нельзя доверять: браузер/атакующий выставляет его
+    произвольно. Расширение — тоже клиентские данные, но контролируется парой
+    blocklist расширений + magic-bytes (validate_file_content).
+    """
+    mime = mimetypes.guess_type(filename or "")[0] or client_mime or None
+    return mime.lower() if mime else None
+
+
+def validate_upload_type(filename: str | None, client_mime: str | None) -> str | None:
+    """Блок исполняемого/активного содержимого на upload. Возвращает итоговый MIME.
+
+    Порядок: расширение из EXEC_BLOCKLIST → 415; итоговый MIME (расширение
+    приоритетно над клиентским) из BLOCKED_MIME_EXACT → 415. None — тип
+    неизвестен (ни расширение, ни клиент не дали MIME): решает allowlist роутера.
+    """
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext in EXEC_BLOCKLIST:
+        raise HTTPException(
+            status_code=415,
+            detail="Тип файла не поддерживается (исполняемое или активное содержимое)",
+        )
+    mime = resolve_upload_mime(filename, client_mime)
+    if mime in BLOCKED_MIME_EXACT:
+        raise HTTPException(
+            status_code=415,
+            detail="Тип файла не поддерживается (активное содержимое)",
+        )
+    return mime
 
 
 # File signatures (magic bytes) per extension

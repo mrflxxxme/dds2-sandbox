@@ -52,6 +52,7 @@ from backend.services.counterparty_service import (
     CounterpartyNotFoundError,
     CounterpartyService,
 )
+from backend.utils.file_validation import validate_file_content, validate_upload_type
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/counterparties", tags=["Counterparties"])
@@ -358,12 +359,10 @@ async def upload_counterparty_document(
             detail=f"doc_type must be one of: {ALLOWED_DOC_TYPES}",
         )
 
-    # MIME whitelist — reject executables etc. upfront.
-    content_type = (file.content_type or "").lower()
-    filename_lower = (file.filename or "").lower()
-    # Reject obvious executables by extension (belt-and-braces vs forged MIME)
-    BAD_EXT = (".exe", ".bat", ".cmd", ".dll", ".sh", ".msi", ".ps1", ".com")
-    if filename_lower.endswith(BAD_EXT) or not any(content_type.startswith(p) for p in _ALLOWED_MIME_PREFIXES):
+    # Тип: расширение приоритетно над клиентским Content-Type (ему нельзя доверять);
+    # исполняемые и активное содержимое (svg/html/xml — stored XSS) режет хелпер.
+    mime = validate_upload_type(file.filename, file.content_type)
+    if mime is None or not any(mime.startswith(p) for p in _ALLOWED_MIME_PREFIXES):
         raise HTTPException(
             status_code=415,
             detail="Тип файла не поддерживается. Разрешены PDF / Office / изображения.",
@@ -384,6 +383,7 @@ async def upload_counterparty_document(
             status_code=413,
             detail=f"Файл слишком большой. Максимум: {_COUNTERPARTY_DOC_MAX_MB} МБ",
         )
+    validate_file_content(data, file.filename or "unnamed")  # magic-bytes по расширению
 
     service = CounterpartyService(db)
     doc = await service.upload_document(
@@ -392,7 +392,7 @@ async def upload_counterparty_document(
         file_data=data,
         filename=file.filename or "unnamed",
         doc_type=doc_type,
-        mime_type=file.content_type,
+        mime_type=mime,
         uploaded_by_user_id=user.id,
     )
     return CounterpartyDocumentResponse.model_validate(doc)
@@ -428,7 +428,11 @@ async def download_counterparty_document(
         project_id=project.id,
     )
     disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
-    return Response(content=data, media_type=content_type, headers={"Content-Disposition": disposition})
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Content-Disposition": disposition, "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.delete(

@@ -74,7 +74,7 @@ from backend.services.payment_request_service import (
     PaymentRequestService,
     PaymentRequestValidationError,
 )
-from backend.utils.file_validation import validate_file_content
+from backend.utils.file_validation import validate_file_content, validate_upload_type
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/payment-requests", tags=["Payment Requests"])
@@ -652,8 +652,9 @@ async def parse_invoice_file(
     """
     # Счёт: PDF/Word/Excel/фото. Валидация как у upload_payment_request_document:
     # allowlist MIME ИЛИ расширение (браузер часто шлёт пустой content_type на HEIC)
-    # + блок исполняемых + magic-проверка ниже.
-    content_type = (file.content_type or "").lower()
+    # + блок исполняемых/активного содержимого (хелпер, расширение приоритетно
+    # над клиентским Content-Type) + magic-проверка ниже.
+    mime = validate_upload_type(file.filename, file.content_type)
     filename_lower = (file.filename or "").lower()
     allowed_mime = (
         "application/pdf",
@@ -666,9 +667,10 @@ async def parse_invoice_file(
         ".pdf", ".doc", ".docx", ".xls", ".xlsx",
         ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif",
     )
-    bad_ext = (".exe", ".bat", ".cmd", ".dll", ".sh", ".msi", ".ps1", ".com")
-    ok_type = any(content_type.startswith(p) for p in allowed_mime) or filename_lower.endswith(allowed_ext)
-    if filename_lower.endswith(bad_ext) or not ok_type:
+    ok_type = (
+        mime is not None and any(mime.startswith(p) for p in allowed_mime)
+    ) or filename_lower.endswith(allowed_ext)
+    if not ok_type:
         raise HTTPException(status_code=415, detail="Поддерживаются PDF, Word, Excel или фото счёта (JPG/PNG/HEIC)")
 
     # Распознавание (без записи в БД) допускает файл крупнее хранимого документа: многостраничные
@@ -723,9 +725,11 @@ async def upload_payment_request_document(
     if doc_type not in ALLOWED_PR_DOC_TYPES:
         raise HTTPException(status_code=400, detail=f"doc_type must be one of: {ALLOWED_PR_DOC_TYPES}")
 
-    # Счёт/акт: PDF, Word, Excel или фото (как и документы контрагента). Исполняемые — отсекаем.
-    # Тип берём по MIME ИЛИ расширению: браузер шлёт .heic и .xls с пустым/octet-stream типом.
-    content_type = (file.content_type or "").lower()
+    # Счёт/акт: PDF, Word, Excel или фото (как и документы контрагента).
+    # Исполняемые и активное содержимое (svg/html/xml — stored XSS) режет хелпер;
+    # тип — по расширению приоритетно (клиентскому Content-Type нельзя доверять),
+    # ИЛИ по расширению из allowlist: браузер шлёт .heic и .xls с пустым/octet-stream типом.
+    mime = validate_upload_type(file.filename, file.content_type)
     filename_lower = (file.filename or "").lower()
     allowed_mime = (
         "application/pdf",
@@ -738,9 +742,10 @@ async def upload_payment_request_document(
         ".pdf", ".doc", ".docx", ".xls", ".xlsx",
         ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif",
     )
-    bad_ext = (".exe", ".bat", ".cmd", ".dll", ".sh", ".msi", ".ps1", ".com")
-    ok_type = any(content_type.startswith(p) for p in allowed_mime) or filename_lower.endswith(allowed_ext)
-    if filename_lower.endswith(bad_ext) or not ok_type:
+    ok_type = (
+        mime is not None and any(mime.startswith(p) for p in allowed_mime)
+    ) or filename_lower.endswith(allowed_ext)
+    if not ok_type:
         raise HTTPException(status_code=415, detail="Поддерживаются PDF, Word, Excel или фото (JPG/PNG)")
 
     data = await file.read()
@@ -760,7 +765,7 @@ async def upload_payment_request_document(
         file_data=data,
         filename=file.filename or "document",
         doc_type=doc_type,
-        mime_type=file.content_type,
+        mime_type=mime,
         uploaded_by_user_id=user.id,
     )
     return PaymentRequestDocumentResponse.model_validate(doc)
@@ -777,7 +782,11 @@ async def download_payment_request_document(
         db, project_id=project.id, request_id=request_id, doc_id=doc_id
     )
     disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
-    return Response(content=data, media_type=content_type, headers={"Content-Disposition": disposition})
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Content-Disposition": disposition, "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.delete("/{request_id}/documents/{doc_id}", dependencies=[Depends(rate_limit_write)])
