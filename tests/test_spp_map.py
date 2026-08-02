@@ -631,3 +631,35 @@ class TestBatchReaction:
 
     def test_kopecks_are_not_a_reaction(self):
         assert scan.is_reaction(1675.0, 1675.4) is False
+
+
+class TestSnapshotOrder:
+    """«Снять срез» обязан сначала обновить цены, потом смотреть витрину.
+
+    Живой замер 2026-08-02: без синка цен снимок записал 349 точек и выбросил
+    401 как `stale` (наша база разъехалась с `basic` витрины). После синка —
+    750 точек и ноль потерь. Кнопка молча теряла больше половины портфеля.
+    """
+
+    async def test_prices_are_synced_before_the_card_is_read(self, monkeypatch):
+        from backend.services.pricing import spp_points, sync
+
+        order: list[str] = []
+
+        class _Log:
+            status, rows_inserted, finished_at = "OK", 7, None
+
+        async def fake_sync(db, project_id):
+            order.append("prices")
+            return _Log()
+
+        async def fake_snapshot(db, project_id):
+            order.append("card")
+            return {"status": "OK", "requested": 3, "written": 3, "stale": 0}
+
+        monkeypatch.setattr(sync, "sync_wb_prices", fake_sync)
+        monkeypatch.setattr(spp_points, "snapshot_from_card", fake_snapshot)
+
+        res = await spp_points.snapshot_now(None, 1)
+        assert order == ["prices", "card"]  # порядок и есть предмет теста
+        assert res["prices"]["rows"] == 7 and res["snapshot"]["written"] == 3

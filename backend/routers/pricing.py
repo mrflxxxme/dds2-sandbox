@@ -237,14 +237,21 @@ async def spp_observe(
     db: AsyncSession = Depends(get_db),
     _rl: None = Depends(rate_limit_write),
 ):
-    """Снять точку СПП сейчас (card-API); `backfill_days>0` — ещё и ретро из заказов."""
-    snap = await spp_points_service.snapshot_from_card(db, project.id)
+    """Снять точку СПП сейчас (card-API); `backfill_days>0` — ещё и ретро из заказов.
+
+    Сначала синкаем ЦЕНЫ, потом витрину. Иначе срез считается от нашей вчерашней
+    цены, а точки товаров, которым цену меняли, молча улетают в `stale`: снимок
+    сверяет нашу базу с `basic` витрины и расходящиеся пропускает. Кнопка «Снять
+    срез» обязана давать свежий срез целиком, а не наполовину.
+    """
+    fresh = await spp_points_service.snapshot_now(db, project.id)
+    await invalidate_cache(f"reports:pricing_markup:project_id={project.id}")
     back = (
         await spp_points_service.backfill_from_orders(db, project.id, days=backfill_days)
         if backfill_days
         else {"written": 0, "days": 0}
     )
-    return {"snapshot": snap, "backfill": back}
+    return {**fresh, "backfill": back}
 
 
 @router.post("/sync-spp")

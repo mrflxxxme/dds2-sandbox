@@ -114,6 +114,30 @@ async def snapshot_from_card(db: AsyncSession, project_id: int) -> dict:
     return await record_card_points(db, project_id, card)
 
 
+async def snapshot_now(db: AsyncSession, project_id: int) -> dict:
+    """Полный срез: сначала СИНК ЦЕН, потом витрина.
+
+    Порядок здесь — не украшение. Снимок сверяет нашу `base_price` с `basic`
+    витрины и расходящиеся точки пропускает (`stale`): иначе СПП считался бы от
+    цены, которой уже нет. Если цены не обновить, в `stale` улетает всё, чему
+    меняли цену после последнего синка — на живом портфеле 2026-08-02 это было
+    401 товар из 750, больше половины. Кнопка «Снять срез» обязана давать срез
+    целиком, а не ту половину, что случайно не менялась.
+    """
+    from backend.services.pricing.sync import sync_wb_prices
+
+    log = await sync_wb_prices(db, project_id)
+    snap = await snapshot_from_card(db, project_id)
+    return {
+        "snapshot": snap,
+        "prices": {
+            "status": log.status,
+            "rows": log.rows_inserted,
+            "synced_at": log.finished_at.isoformat() if log.finished_at else None,
+        },
+    }
+
+
 async def record_card_points(db: AsyncSession, project_id: int, card: dict[int, dict]) -> dict:
     """Готовый ответ card-API × наши цены витрины → точки за сегодняшний день.
 
