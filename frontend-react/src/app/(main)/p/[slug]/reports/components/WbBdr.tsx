@@ -12,7 +12,7 @@ function KpiCard({ label, value, sub, color }: { label: string; value: string; s
     return (
         <div className="glass-card" style={{ padding: '14px 16px' }}>
             <div style={{ fontSize: 12, opacity: 0.6, marginBottom: 4 }}>{label}</div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: color || 'var(--text-primary)' }}>{value}</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: color || 'var(--color-text)' }}>{value}</div>
             {sub && <div style={{ fontSize: 12, opacity: 0.5, marginTop: 2 }}>{sub}</div>}
         </div>
     );

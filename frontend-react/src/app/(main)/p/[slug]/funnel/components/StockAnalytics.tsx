@@ -158,7 +158,7 @@ export function StockAnalytics() {
 
             {/* KPI Cards */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
-                <div className="glass-card" style={{ padding: '14px 16px', borderLeft: '4px solid var(--color-primary)' }}>
+                <div className="glass-card" style={{ padding: '14px 16px', borderLeft: '4px solid var(--color-accent)' }}>
                     <div style={{ fontSize: 12, opacity: 0.6, marginBottom: 4 }}>ЗАКАЗЫ ЗА 30 ДНЕЙ</div>
                     <div style={{ fontSize: 22, fontWeight: 700 }}>{formatNumber(data.orders_30d)}</div>
                     <div style={{ fontSize: 12, opacity: 0.5, marginTop: 2 }}>~ {data.total_articles} артикулов</div>
@@ -193,8 +193,8 @@ export function StockAnalytics() {
                     <button key={key}
                         style={{
                             padding: '4px 12px', borderRadius: 12, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none',
-                            background: trafficFilter === key ? c.bg : 'var(--color-bg-tertiary)',
-                            color: trafficFilter === key ? c.text : 'var(--text-primary)',
+                            background: trafficFilter === key ? c.bg : 'var(--color-bg)',
+                            color: trafficFilter === key ? c.text : 'var(--color-text)',
                             opacity: trafficFilter === key ? 1 : 0.7,
                         }}
                         onClick={() => setTrafficFilter(trafficFilter === key ? null : key)}>
@@ -209,7 +209,8 @@ export function StockAnalytics() {
                 <table className="data-table" style={{ fontSize: 12, width: '100%' }}>
                     <thead>
                         <tr>
-                            <th style={{ position: 'sticky', left: 0, background: 'var(--color-bg-secondary)', zIndex: 2, minWidth: 170 }}>АРТИКУЛ</th>
+                            {/* Фон не задаём: .data-table thead th уже даёт frost-подложку */}
+                            <th style={{ position: 'sticky', left: 0, zIndex: 2, minWidth: 170 }}>АРТИКУЛ</th>
                             <th style={{ textAlign: 'right', minWidth: 80 }}>ЗАКАЗЫ 30Д</th>
                             <th style={{ textAlign: 'right', minWidth: 65 }}>ТРЕНД</th>
                             <th style={{ textAlign: 'right', minWidth: 60 }}>СР {trendDays}Д</th>
@@ -222,8 +223,8 @@ export function StockAnalytics() {
                     </thead>
                     <tbody>
                         {/* ИТОГО row */}
-                        <tr style={{ fontWeight: 700, background: 'var(--color-bg-tertiary)' }}>
-                            <td style={{ position: 'sticky', left: 0, background: 'var(--color-bg-tertiary)', zIndex: 1 }}>ИТОГО</td>
+                        <tr style={{ fontWeight: 700, background: 'var(--color-bg)' }}>
+                            <td style={{ position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 1 }}>ИТОГО</td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s: number, a: any) => s + a.orders_30d, 0))}</td>
                             <td></td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s: number, a: any) => s + a.avg_daily, 0))}</td>
@@ -239,16 +240,17 @@ export function StockAnalytics() {
                         {pageArticles.map((a: any) => (
                             <tr key={a.nm_id} style={{ transition: 'background 0.15s' }}
                                 onMouseEnter={e => {
-                                    e.currentTarget.style.background = 'var(--color-bg-tertiary)';
+                                    // Строку подсвечивает CSS (.data-table tbody tr:hover). Замороженной
+                                    // ячейке нужен НЕпрозрачный аналог того же тона — иначе сквозь неё
+                                    // видно уезжающие колонки.
                                     const stickyTd = e.currentTarget.querySelector('td') as HTMLElement;
-                                    if (stickyTd) stickyTd.style.background = 'var(--color-bg-tertiary)';
+                                    if (stickyTd) stickyTd.style.background = 'color-mix(in srgb, var(--color-text) 4%, var(--color-bg))';
                                 }}
                                 onMouseLeave={e => {
-                                    e.currentTarget.style.background = '';
                                     const stickyTd = e.currentTarget.querySelector('td') as HTMLElement;
-                                    if (stickyTd) stickyTd.style.background = '#f5f5f7';
+                                    if (stickyTd) stickyTd.style.background = 'var(--color-bg)';
                                 }}>
-                                <td style={{ position: 'sticky', left: 0, background: '#f5f5f7', zIndex: 1, fontWeight: 600, boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
+                                <td style={{ position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 1, fontWeight: 600, boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
                                     {a.vendor_code || `#${a.nm_id}`}
                                 </td>
                                 <td style={{ textAlign: 'right' }}>{formatNumber(a.orders_30d)}</td>

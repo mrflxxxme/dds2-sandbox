@@ -23,7 +23,7 @@ export function CostHistory() {
     useEffect(() => { load(); }, [load]);
 
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>⏳ Загрузка...</div>;
-    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--danger)' }}>❌ {error}</div>;
+    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>❌ {error}</div>;
     if (!data || !data.articles?.length) return <div className="glass-card" style={{ padding: 32, textAlign: 'center', opacity: 0.6 }}>Нет данных о себестоимости</div>;
 
     const orders: Array<{ order_no: string; ship_date: string }> = data.orders || [];
@@ -53,8 +53,8 @@ export function CostHistory() {
 
     const selectStyle: React.CSSProperties = {
         padding: '8px 12px', borderRadius: 8,
-        border: '1px solid var(--border)',
-        background: 'var(--bg-secondary)', color: 'var(--text-primary)',
+        border: '1px solid var(--color-border)',
+        background: 'var(--color-bg-input)', color: 'var(--color-text)',
     };
 
     return (
@@ -78,12 +78,13 @@ export function CostHistory() {
                 <table className="data-table" style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
                     <thead>
                         <tr>
-                            <th style={{ position: 'sticky', left: 0, background: 'var(--bg-secondary)', zIndex: 2, minWidth: 180 }}>Артикул</th>
+                            {/* Фон не задаём: .data-table thead th уже даёт frost-подложку */}
+                            <th style={{ position: 'sticky', left: 0, zIndex: 2, minWidth: 180 }}>Артикул</th>
                             <th style={{ minWidth: 100 }}>WB Артикул</th>
                             <th style={{ minWidth: 80 }}>Бренд</th>
                             <th style={{ minWidth: 100 }}>Категория</th>
-                            <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--primary)' }}>Средняя ₽</th>
-                            <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--success)' }}>Последняя ₽</th>
+                            <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--color-accent)' }}>Средняя ₽</th>
+                            <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--color-success)' }}>Последняя ₽</th>
                             {orders.map((o: any) => (
                                 <th key={o.order_no} style={{ textAlign: 'right', minWidth: 100 }}>
                                     <div>{o.order_no}</div>
@@ -95,18 +96,18 @@ export function CostHistory() {
                     <tbody>
                         {articles.map((a: any, i: number) => (
                             <tr key={i}>
-                                <td style={{ position: 'sticky', left: 0, background: 'var(--bg-primary)', zIndex: 1, fontWeight: 600 }}>{a.article_seller}</td>
+                                <td style={{ position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 1, fontWeight: 600 }}>{a.article_seller}</td>
                                 <td style={{ opacity: 0.7, fontSize: 12 }}>{a.article_wb || '—'}</td>
                                 <td><span className="badge badge-info" style={{ fontSize: 11 }}>{a.brand || '—'}</span></td>
                                 <td style={{ opacity: 0.7 }}>{a.subject || '—'}</td>
-                                <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--primary)' }}>{a.avg_cost ? formatNumber(a.avg_cost) : '—'}</td>
-                                <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--success)' }}>{a.latest_cost ? formatNumber(a.latest_cost) : '—'}</td>
+                                <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-accent)' }}>{a.avg_cost ? formatNumber(a.avg_cost) : '—'}</td>
+                                <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-success)' }}>{a.latest_cost ? formatNumber(a.latest_cost) : '—'}</td>
                                 {orders.map((o: any, j: number) => {
                                     const c = a.costs?.[o.order_no];
                                     if (!c) return <td key={j} style={{ textAlign: 'right', opacity: 0.2 }}>—</td>;
                                     const prev = j < orders.length - 1 ? (a.costs?.[orders[j + 1]?.order_no]?.cost || 0) : 0;
                                     const diff = prev > 0 ? ((c.cost - prev) / prev * 100) : 0;
-                                    const color = diff > 5 ? 'var(--danger)' : diff < -5 ? 'var(--success)' : 'var(--text-primary)';
+                                    const color = diff > 5 ? 'var(--color-danger)' : diff < -5 ? 'var(--color-success)' : 'var(--color-text)';
                                     return (
                                         <td key={j} style={{ textAlign: 'right', color }}>
                                             <div>{formatNumber(c.cost)}</div>

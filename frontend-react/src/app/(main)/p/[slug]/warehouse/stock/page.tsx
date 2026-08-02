@@ -114,7 +114,7 @@ function SummaryTab({
                         onClick={() => setFilter('all')}
                         style={{
                             padding: '6px 14px', fontSize: 13, border: 'none', cursor: 'pointer',
-                            background: filter === 'all' ? 'var(--color-primary)' : 'var(--color-bg)',
+                            background: filter === 'all' ? 'var(--color-accent)' : 'var(--color-bg)',
                             color: filter === 'all' ? '#fff' : 'var(--color-text)',
                         }}
                     >Все остатки</button>

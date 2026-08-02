@@ -208,7 +208,7 @@ export function CustomsDt() {
             render: (_v: any, row: any) => (
                 <span style={{ fontSize: 12 }}>
                     <select value={row.order_no ?? ''} onChange={e => handleBindOrder(row.id, e.target.value)} disabled={saving === row.id}
-                        style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', fontSize: 12, minWidth: 100, cursor: 'pointer' }}>
+                        style={{ background: 'var(--color-bg)', color: 'var(--color-text)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', fontSize: 12, minWidth: 100, cursor: 'pointer' }}>
                         <option value="">—</option>
                         {orders.map((o: any) => <option key={o.order_no} value={orderNoToInt(String(o.order_no))}>#{o.order_no}{o.invoice_no ? ` (${o.invoice_no})` : ''}</option>)}
                     </select>

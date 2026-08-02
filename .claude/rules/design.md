@@ -8,7 +8,15 @@ paths:
 Apple-inspired glassmorphism. Все стили — в `globals.css` (основное) / `(tma)/tma/tma.css` (Telegram Mini App) — НИКОГДА inline.
 
 ## Цвета — ТОЛЬКО `var(--color-*)`
-`--color-accent` (Apple Blue), `--color-success/warning/danger`, `--color-bg-card` (glass), `--color-text/muted/dim`, `--color-border`.
+`--color-accent` (Apple Blue), `--color-accent-bg` (акцентная подложка: активный пункт, выбранный чип), `--color-success/warning/danger`, `--color-bg-card` (glass), `--color-text/muted/dim`, `--color-border`.
+
+Полотно поверхностей: `--color-bg` (#f5f5f7, НЕпрозрачный — sticky-колонки, тултипы, панели), `--color-bg-card` (glass, полупрозрачный), `--color-bg-input` (поля ввода), `--color-bg-hover` (наведение). Промежуточных `--color-bg-secondary/tertiary/elevated/surface` НЕ существует.
+
+**Сверяйся с `@theme` в `globals.css` — переменной вне этого списка НЕТ.** `var(--несуществующая)` без fallback делает всё объявление невалидным: фон молча остаётся прозрачным, а `color`/`border-color` откатываются к `currentColor` (тёмный текст). Ошибка тихая — ни сборка, ни tsc её не ловят.
+
+**Добавляешь токен в `@theme` — сошлись на него `var(--x)` внутри самого `globals.css`.** Tailwind v4 эмитит в `:root` только «использованные» переменные, а inline-стиль в `.tsx` за использование не считается: иначе токен не доедет до браузера и сломается ровно так же тихо.
+
+Сток замороженной колонки (`position: sticky`) и тултипа — всегда НЕпрозрачный фон, иначе сквозь него видно уезжающий контент. Полупрозрачный тинт делать через `color-mix(in srgb, var(--color-accent) 6%, var(--color-bg))`, не через `rgba()`.
 
 ## Glass-карточки
 Класс `glass-card`: `backdrop-filter: blur(24px)`, `border-radius: 20px`, `padding: 24px`. Тени: `--shadow-glass` / `--shadow-glass-hover`.

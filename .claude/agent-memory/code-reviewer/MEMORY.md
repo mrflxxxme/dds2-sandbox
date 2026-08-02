@@ -13,4 +13,5 @@
 - [Зеркало сборки FBS (kind=fbs)](fbs-assembly-mirror-invariants.md) — kind-фильтр решается по SHIPPED (два in_transit + TG-алярм), seller-имя в wb_warehouse_name_manual, contour_condition ≠ prod-only
 - [Статусы переезда: зеркало заявки](transfer-status-mirror-invariants.md) — нетто-карта приёма ПОЧИНЕНА 08.02; что осталось: недостижимые строки TRANSFER_TRANSITIONS и окно авто-шипа
 - [Забор переезда: носитель денег](transfer-pickup-money-carrier-invariants.md) — upsert теряет оплаченный круг при переотправке, гейт «Отправить» не действует на allowed_from-пути, тупик READY под Газелькой
+- [Эмиссия дизайн-токенов](design-token-emission-invariant.md) — новый токен в `@theme` без `var()`-ссылки ИЗ globals.css не попадёт в `:root` (Tailwind v4 отдаёт только «использованные»)
 - [Поставка Натали: два источника](migfull-inbound-two-sources-invariants.md) — анти-дубль скоуплен по виду документа (кросс-гарда нет, UNCERTAIN-без-guid слепа); почему тут не нужен invalidate_cache

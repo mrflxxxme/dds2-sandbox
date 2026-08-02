@@ -621,7 +621,7 @@ export default function FboSuppliesPage() {
                                         {/* Expanded items row */}
                                         {isExpanded && (
                                             <tr>
-                                                <td colSpan={11} style={{ padding: 0, background: 'var(--color-bg-secondary)' }}>
+                                                <td colSpan={11} style={{ padding: 0, background: 'var(--color-bg)' }}>
                                                     <SupplyItemsPanel
                                                         supply={supply}
                                                         items={expandedItems}

@@ -652,7 +652,7 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType, o
                     {cabinetPass?.has_pass && (
                         <div
                             className="glass-card"
-                            style={{ padding: '10px 14px', borderLeft: '3px solid var(--color-info)', fontSize: 13 }}
+                            style={{ padding: '10px 14px', borderLeft: '3px solid var(--color-accent)', fontSize: 13 }}
                         >
                             <div style={{ fontWeight: 600, marginBottom: 4 }}>Пропуск уже заведён в кабинете WB</div>
                             <div className="text-muted">

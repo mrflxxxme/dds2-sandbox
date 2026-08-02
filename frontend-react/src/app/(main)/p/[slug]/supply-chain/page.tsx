@@ -1304,7 +1304,7 @@ function InlineItemsSection({ order, onCollapse, onItemsAdded }: {
                                 const pct = row.qty > 0 ? Math.round((row.assigned_qty / row.qty) * 100) : 0;
                                 return (
                                     <div className="sc-allocation-cell">
-                                        <span className="sc-allocation-count" style={{ color: pct === 100 ? 'var(--color-success)' : 'var(--color-primary)' }}>
+                                        <span className="sc-allocation-count" style={{ color: pct === 100 ? 'var(--color-success)' : 'var(--color-accent)' }}>
                                             {row.assigned_qty} / {row.qty}
                                         </span>
                                         {pct === 100 ? (
@@ -1794,9 +1794,9 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
 
     const countryBtnStyle = (active: boolean): React.CSSProperties => ({
         padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 500,
-        border: active ? '2px solid var(--color-primary)' : '1px solid var(--color-border)',
-        background: active ? 'var(--color-primary-bg)' : 'var(--color-bg)',
-        color: active ? 'var(--color-primary)' : 'var(--color-text)',
+        border: active ? '2px solid var(--color-accent)' : '1px solid var(--color-border)',
+        background: active ? 'var(--color-accent-bg)' : 'var(--color-bg)',
+        color: active ? 'var(--color-accent)' : 'var(--color-text)',
         cursor: 'pointer', transition: 'all 0.15s',
     });
 
@@ -1833,9 +1833,9 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
                                     type="button"
                                     style={{
                                         padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 500,
-                                        border: '2px solid var(--color-primary)',
-                                        background: 'var(--color-primary-bg)',
-                                        color: 'var(--color-primary)',
+                                        border: '2px solid var(--color-accent)',
+                                        background: 'var(--color-accent-bg)',
+                                        color: 'var(--color-accent)',
                                         cursor: 'default',
                                     }}
                                 >
@@ -1853,9 +1853,9 @@ function CreateVehicleForm({ onClose, onDone }: { onClose: () => void; onDone: (
                                             onClick={() => setForm(f => ({ ...f, container_type: opt.key }))}
                                             style={{
                                                 padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 500,
-                                                border: isSelected ? '2px solid var(--color-primary)' : '1px solid var(--color-border)',
-                                                background: isSelected ? 'var(--color-primary-bg)' : 'var(--color-bg)',
-                                                color: isSelected ? 'var(--color-primary)' : 'var(--color-text)',
+                                                border: isSelected ? '2px solid var(--color-accent)' : '1px solid var(--color-border)',
+                                                background: isSelected ? 'var(--color-accent-bg)' : 'var(--color-bg)',
+                                                color: isSelected ? 'var(--color-accent)' : 'var(--color-text)',
                                                 cursor: 'pointer', transition: 'all 0.15s',
                                             }}
                                         >
@@ -2018,7 +2018,7 @@ function VehiclesTab() {
     };
 
     const NEXT_STATUS: Record<string, { status: string; label: string; color: string }> = {
-        FORMING: { status: 'SHIPPED', label: t('btn_ship'), color: 'var(--color-primary)' },
+        FORMING: { status: 'SHIPPED', label: t('btn_ship'), color: 'var(--color-accent)' },
         SHIPPED: { status: 'CUSTOMS', label: t('transition_to_customs'), color: '#f59e0b' },
         CUSTOMS: { status: 'DISPATCHED', label: t('transition_dispatched'), color: '#8b5cf6' },
         // DISPATCHED → DELIVERED: автоматически при приёмке на складе
@@ -2145,7 +2145,7 @@ function VehiclesTab() {
                                         key={v.order_no}
                                         onClick={() => openVehicle(v.order_no)}
                                         className="sc-tr-row"
-                                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-secondary)')}
+                                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg)')}
                                         onMouseLeave={e => (e.currentTarget.style.background = '')}
                                     >
                                         <td className="sc-vehicles-td-first">{v.vehicle_name || v.order_no}</td>
@@ -3901,7 +3901,7 @@ function SuppliersTab() {
                         label={t('kpi_vehicles')}
                         value={overview.total_vehicles}
                         icon="🚛"
-                        color="var(--color-info, #3b82f6)"
+                        color="var(--color-accent)"
                     />
                     <KpiCard
                         label={t('kpi_items')}

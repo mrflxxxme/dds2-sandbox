@@ -59,7 +59,7 @@ export default function LogisticsCarriers({ byCarrier, byDestination }: Props) {
                             <RechartsTooltip
                                 formatter={(value: number) => [formatNumber(value, 0) + ' ₽', 'Сумма']}
                                 labelFormatter={(_l, p) => (p && p[0] ? p[0].payload.full : '')}
-                                contentStyle={{ background: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 12 }}
+                                contentStyle={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 12 }}
                             />
                             <Bar dataKey="total_cost" radius={[0, 4, 4, 0]}>
                                 {topCarriers.map((c, i) => (

@@ -202,7 +202,7 @@ export default function NewTransferPage() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
                     <div className="form-group" style={{ margin: 0 }}>
                         <label className="form-label">Откуда</label>
-                        <input className="form-input" value={fromName} disabled style={{ background: 'var(--color-hover)' }} />
+                        <input className="form-input" value={fromName} disabled style={{ background: 'var(--color-bg-hover)' }} />
                     </div>
                     <div className="form-group" style={{ margin: 0 }}>
                         <label className="form-label">Куда *</label>

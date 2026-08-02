@@ -80,7 +80,7 @@ export default function LogisticsCostByPallets({ buckets, points, byDestination,
                             <YAxis tick={{ fontSize: 12 }} />
                             <RechartsTooltip
                                 formatter={(value: number, name) => name === 'avg_cost_per_pallet' ? [formatNumber(value, 0) + ' ₽/пал', 'Средняя'] : [value, name]}
-                                contentStyle={{ background: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 13 }}
+                                contentStyle={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 13 }}
                             />
                             <Bar dataKey="avg_cost_per_pallet" radius={[4, 4, 0, 0]} fill="#007aff" maxBarSize={120}>
                                 <LabelList dataKey="avg_cost_per_pallet" position="top" formatter={(v: number) => formatNumber(v, 0) + ' ₽'} style={{ fontSize: 13, fontWeight: 700, fill: 'var(--color-text)' }} />
@@ -109,7 +109,7 @@ export default function LogisticsCostByPallets({ buckets, points, byDestination,
                                 <ZAxis range={[40, 40]} />
                                 <RechartsTooltip
                                     cursor={{ strokeDasharray: '3 3' }}
-                                    contentStyle={{ background: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 12 }}
+                                    contentStyle={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 12 }}
                                     formatter={(value: number, name) => [name === '₽/паллета' ? formatNumber(value, 0) + ' ₽' : value, name]}
                                 />
                                 {scatterSeries.map(s => (
@@ -206,7 +206,7 @@ function DestBucketHeatmap({ cells }: { cells: LogisticsDestBucketCell[] }) {
                             const c = cellMap.get(`${wh}|${b}`);
                             if (!c) {
                                 return (
-                                    <div key={b} style={{ padding: '8px 4px', textAlign: 'center', fontSize: 12, color: 'var(--color-text-muted)', borderRadius: 6, background: 'var(--color-bg-secondary)' }}>—</div>
+                                    <div key={b} style={{ padding: '8px 4px', textAlign: 'center', fontSize: 12, color: 'var(--color-text-muted)', borderRadius: 6, background: 'var(--color-bg)' }}>—</div>
                                 );
                             }
                             return (

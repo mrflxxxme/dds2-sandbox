@@ -249,7 +249,7 @@ export default function ReceiptDetailPage() {
                                 </tr>
                             );
                         })}
-                        <tr style={{ background: 'var(--color-bg-secondary)' }}>
+                        <tr style={{ background: 'var(--color-bg)' }}>
                             <td />
                             <td style={{ padding: '8px', fontWeight: 700 }}>Итого</td>
                             <td />

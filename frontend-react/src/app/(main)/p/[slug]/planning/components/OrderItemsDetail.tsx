@@ -57,7 +57,7 @@ export function OrderItemsDetail({ selected, orders, items, onItemsReload, onOrd
     const renderCell = (key: string, v: any) => {
         if (key === 'article_wb' && v != null) {
             const nmId = typeof v === 'number' ? Math.round(v) : parseInt(String(v).replace(/\s/g, ''), 10);
-            if (!isNaN(nmId)) return <a href={`https://www.wildberries.ru/catalog/${nmId}/detail.aspx`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-info)', textDecoration: 'underline' }}>{nmId}</a>;
+            if (!isNaN(nmId)) return <a href={`https://www.wildberries.ru/catalog/${nmId}/detail.aspx`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-accent)', textDecoration: 'underline' }}>{nmId}</a>;
         }
         if (intCols.has(key) && typeof v === 'number') return Math.round(v);
         if (typeof v === 'number') return formatNumber(v);

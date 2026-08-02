@@ -221,7 +221,7 @@ export default function NewReceiptPage() {
                         onClick={() => setMode('form')}
                         style={{
                             padding: '6px 14px', fontSize: 13, border: 'none', cursor: 'pointer',
-                            background: mode === 'form' ? 'var(--color-primary)' : 'var(--color-bg)',
+                            background: mode === 'form' ? 'var(--color-accent)' : 'var(--color-bg)',
                             color: mode === 'form' ? '#fff' : 'var(--color-text)',
                         }}
                     >Форма</button>
@@ -230,7 +230,7 @@ export default function NewReceiptPage() {
                         style={{
                             padding: '6px 14px', fontSize: 13, border: 'none', cursor: 'pointer',
                             borderLeft: '1px solid var(--color-border)',
-                            background: mode === 'table' ? 'var(--color-primary)' : 'var(--color-bg)',
+                            background: mode === 'table' ? 'var(--color-accent)' : 'var(--color-bg)',
                             color: mode === 'table' ? '#fff' : 'var(--color-text)',
                         }}
                     >Таблица</button>
@@ -259,7 +259,7 @@ export default function NewReceiptPage() {
                                         borderBottom: '1px solid var(--color-border)',
                                         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                                     }}
-                                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-hover)')}
+                                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-hover)')}
                                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                                 >
                                     <span style={{ fontWeight: 500 }}>{nom.label(n)}</span>
