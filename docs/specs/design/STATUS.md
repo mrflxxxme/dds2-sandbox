@@ -9,7 +9,7 @@
 | Фаза | Название | Статус | Дата | Commit | Evidence | Подпись архитектора |
 |---|---|---|---|---|---|---|
 | Ф0 | Хребет | 🟢 done-unsigned | 2026-08-02 | (этот коммит) | alembic up/down/up чист; pytest 17 passed (test_design_models + conventions); mypy 85 файлов чисто; T3-ревью db/sec/code — WARNING→fix-цикл→все 15 правок внесены, гейты перепройдены в dds2-sandbox | свёрнута в финальную (Р16) |
-| Ф1 | Сервис-ядро | ⏳ planned | — | — | — | постфактум |
+| Ф1 | Сервис-ядро | 🟢 done-unsigned | 2026-08-02 | (этот коммит) | pytest 124 passed (state/service/permissions/models); mypy clean; conventions PASSED; T3-ревью code/sec/db — WARNING×3→fix-цикл 15 правок→гейты перепройдены | свёрнута в финальную (Р16) |
 | Ф2 | Роутер + фриз контракта | ⏳ planned | — | — | — | требуется ДО мержа |
 | Ф3 | Фронт-ядро | ⏳ planned | — | — | — | постфактум |
 | Ф4 | Уведомления | ⏳ planned | — | — | — | постфактум |

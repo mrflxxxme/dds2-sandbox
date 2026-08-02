@@ -51,6 +51,7 @@ from backend.models.mixins import SoftDeleteMixin
 | Мониторинг и health | `services/monitoring_service.py`, `health_check_service.py` |
 | География заказов | `services/order_geography_service.py` |
 | Вайбкодинг (телеметрия репозитория) | `services/vibe_service.py`, `routers/vibe.py`, `models/vibe.py` — БЕЗ `project_id` намеренно; доступ по строке в `vibe_authors`, ингест зовёт CI по SSH (не HTTP) |
+| Дизайн карточек (канбан инфографики) | `models/design.py` (словарь `DESIGN_TASK_TRANSITIONS` — источник правды), `schemas/design.py`, `services/design/` (`state` — переходы под FOR UPDATE, `permissions` — флаги прав, `crud` — write-side + нумерация DES-N, `queries` — список/деталка/автоподсказка, `board` — доска+move, `files` — MinIO-материалы/версии/вердикты, `workload`, `stats`, `notify` — no-op до Ф4); спека — `docs/specs/design/` |
 
 ## Ключевые модели
 | Модель | Файл | Назначение |

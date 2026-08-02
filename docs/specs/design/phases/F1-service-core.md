@@ -45,15 +45,15 @@ async def change_status(db, project_id, task_id, target, user, member_role,
 | NEW→ASSIGNED | lead | `assignee_user_id` установлен (через `assign`) | «Назначьте исполнителя» |
 | ASSIGNED→NEW | lead | — (снимает исполнителя) | |
 | ASSIGNED→IN_PROGRESS | assignee, lead | | |
-| IN_PROGRESS→REVIEW | assignee, lead | есть submission `verdict=PENDING` | «Сдайте версию с файлами» |
+| IN_PROGRESS→REVIEW | assignee, lead | есть submission `verdict=PENDING` **с файлами** (join count>0 — окно «PENDING без файлов» короткой транзакции не проходит) | «Сдайте версию с файлами» |
 | REVIEW→REVISION | author, lead | непустой `comment` | «Напишите, что исправить» |
 | REVIEW→ACCEPTED | author, lead | есть версия PENDING | «Нет версии на проверке» |
-| REVISION→REVIEW | assignee, lead | новая версия PENDING | «Приложите исправленную версию» |
+| REVISION→REVIEW | assignee, lead | НОВАЯ версия PENDING с файлами (вход в REVISION отклонил старую) | «Приложите исправленную версию» |
 | *→ON_HOLD | assignee (свою), lead | пишет `held_from_status` | |
-| ON_HOLD→(NEW\|ASSIGNED\|IN_PROGRESS) | lead, assignee | цель ⊆ словаря; UI предлагает `held_from_status`; чистит его | |
+| ON_HOLD→(NEW\|ASSIGNED\|IN_PROGRESS\|REVISION) | lead, assignee | цель ⊆ словаря (вкл. ребро `ON_HOLD→REVISION`, фикс Ф0 — golden-snapshot в test_design_models.py); UI предлагает `held_from_status`; чистит его | |
 | *→CANCELLED | author, lead | непустой `comment` | «Укажите причину отмены» |
 
-Побочные эффекты: первый вход в `IN_PROGRESS` → `started_at`; `ACCEPTED` → `accepted_at` + текущей PENDING-версии `verdict=ACCEPTED`; `ON_HOLD` → `held_from_status=<откуда>`; выход из `ON_HOLD` → `held_from_status=None`. После успешного commit — вызов notify-хука (Ф4, здесь no-op).
+Побочные эффекты: первый вход в `IN_PROGRESS` → `started_at`; `ACCEPTED` → `accepted_at` + PENDING-версии `verdict=ACCEPTED`; **вход в `REVISION` (любой путь) → текущей PENDING-версии `verdict=REJECTED` с `verdict_comment`=комментарий перехода** — гвард REVISION→REVIEW честный (нужна новая версия); `ON_HOLD` → `held_from_status=<откуда>`; выход из `ON_HOLD` → `held_from_status=None`. Вердикт-эффекты бьют в **переданную** `submission_id` (прокидывает `files.set_verdict`); фолбэк «последняя PENDING» — только для прямого `change_status` без версии. После успешного commit — единый диспатч notify-хуков (`_commit_and_notify`) на всех путях переходов (Ф4, здесь no-op).
 
 ### `permissions.py`
 
@@ -73,8 +73,9 @@ def compute_permissions(task, user, member_role) -> dict[str, bool]
 | `get_task(db, project_id, task_id, user, member_role)` | Деталка со связями + `permissions` |
 | `mark_viewed(db, project_id, task_id, user, member_role)` | Только lead; идемпотентно ставит `viewed_by_lead_at` (Р5) |
 | `update_task(...)` | Запрет правки в REVIEW/ACCEPTED/CANCELLED для не-lead; `complexity`/`is_outsourced` — только lead |
-| `assign(db, ..., assignee_user_id | None)` | Только lead; смена исполнителя без смены статуса ИЛИ вместе с NEW→ASSIGNED; событие в журнал; notify-хук «назначили» |
-| `add_comment(...)` | Опциональное вложение через files-хелпер |
+| `assign(db, ..., assignee_user_id | None)` | Только lead; смена исполнителя без смены статуса ИЛИ вместе с NEW→ASSIGNED; снятие исполнителя — только из NEW/ASSIGNED/ON_HOLD («Сначала верните задачу в «Новые» или «Отложенные»»); событие в журнал; notify-хук «назначили» |
+| `delete_task(db, project_id, task_id, user, member_role)` | `soft_delete()`; право author\|lead, из любого статуса (решение lead); событие «Задача удалена» в журнал; номер DES-N не переиспользуется |
+| `add_comment(...)` | Опциональное вложение через files-хелпер; commit валидации ДО заливки вложения (короткие транзакции) |
 | `product_suggest(db, project_id, q, limit=10)` | По `Nomenclature`: `article_seller ILIKE / brand ILIKE / subject ILIKE / article_wb::text LIKE`, distinct по `article_wb`, только `project_id` |
 
 ### `board.py` (Р3, Р4)
@@ -83,9 +84,13 @@ def compute_permissions(task, user, member_role) -> dict[str, bool]
 async def get_board(db, project_id, user, member_role) -> DesignBoardResponse
     # одна выборка WHERE status IN DESIGN_BOARD_STATUSES + is_deleted=false, ORDER BY status, sort_order
     # + counts по ON_HOLD/CANCELLED; limit 200/колонку
-async def move_task(db, project_id, task_id, to_status, after_task_id, user, member_role)
-    # под FOR UPDATE: если to_status != current → change_status (та же матрица/гварды)
-    # позиция: sort_order = midpoint(after, next); зазор <1 → перенумерация колонки шагом 1000 в этой же транзакции
+async def move_task(db, project_id, task_id, to_status, after_task_id, user, member_role,
+                    comment=None)
+    # начало: pg_advisory_xact_lock(0xDE517, project_id) — анти-deadlock двух перетаскиваний
+    # под FOR UPDATE: если to_status != current → переход (та же матрица/гварды);
+    #   comment прокидывается в переход (dnd в «Правки» требует причину — фронт Ф3)
+    # позиция: sort_order = midpoint(after, next); зазор <1 → перенумерация ВСЕЙ колонки
+    #   шагом 1000 в этой же транзакции (предохранитель 2000 строк + warning)
     # перестановка внутри колонки (to_status == current) — только lead (can_reorder)
 ```
 
@@ -93,10 +98,10 @@ async def move_task(db, project_id, task_id, to_status, after_task_id, user, mem
 
 | Функция | Поведение |
 |---|---|
-| `upload_material_file(...)` | `validate_file_content` → MinIO `design/{project_id}/{task_id}/materials/{ts}_{filename}` (донор `payment_request_documents.upload_document:40`) → `DesignMaterial(kind=FILE)`. Лимит 20 МБ (`min(20, settings.MAX_UPLOAD_SIZE_MB)`); MIME: `image/*`, `application/pdf`, `application/zip`, `application/x-rar-compressed`; blocklist исполняемых. MinIO недоступен → 503 |
+| `upload_material_file(...)` | `validate_file_content` → **commit валидации ДО заливки** (БД-транзакция не живёт через внешний HTTP — канон learnings, вариант А) → MinIO `design/{project_id}/{task_id}/materials/{ts}_{filename}` (донор `payment_request_documents.upload_document:40`) → `DesignMaterial(kind=FILE)`. Лимит 20 МБ (`min(20, settings.MAX_UPLOAD_SIZE_MB)`); MIME по расширению (клиентский — фолбэк); blocklist исполняемых + svg/html/xml-семейства. MinIO недоступен → 503 |
 | `add_material_link / add_material_nm` | `kind=LINK|NM`, CheckConstraint соблюсти |
-| `create_submission(db, ..., files, comment)` | `version_no = max+1` под lock; файлы → `design/{project_id}/{task_id}/v{n}/`; далее вызывающий делает `change_status(→REVIEW)` |
-| `set_verdict(...)` | Только на PENDING-версии; `REJECTED` требует `verdict_comment` → `change_status(→REVISION, comment=verdict_comment)`; `ACCEPTED` → `change_status(→ACCEPTED)` |
+| `create_submission(db, ..., files, comment)` | Короткие транзакции: `version_no = max+1` под row-lock задачи, строка `DesignSubmission` **коммитится ДО MinIO**; файлы льются вне транзакции/лока; строки `DesignSubmissionFile` — второй транзакцией. Провал заливки → ValueError «Версия создана, повторите загрузку файлов» (строка версии остаётся, сироты MinIO — warning). **Вторая PENDING запрещена** («По задаче уже есть несданная версия N — дождитесь вердикта»). Капы: ≤10 файлов, ≤100 МБ суммарно. Файлы → `design/{project_id}/{task_id}/v{n}/`; далее вызывающий делает `change_status(→REVIEW)` |
+| `set_verdict(...)` | Только на PENDING-версии; вердикт применяется К ПЕРЕДАННОЙ версии (`submission_id` → `apply_transition_locked`, оба эффекта живут там — без задвоения); `REJECTED` требует `verdict_comment` → переход `→REVISION`; `ACCEPTED` → переход `→ACCEPTED` |
 | `download_material / download_submission_file` | Байты из MinIO с проверкой `project_id`; `Content-Disposition` с `quote(filename)` |
 
 ### `workload.py` / `stats.py`

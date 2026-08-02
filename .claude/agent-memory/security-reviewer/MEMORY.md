@@ -1,1 +1,2 @@
 - [Review tooling env](project_review_tooling_env.md) — Bash-инструмент в worktree без coreutils/python; check_conventions.sh и pytest — только через test-runner
+- [Дизайн карточек: security carry-over](project_design_module_security_carryover.md) — что закрыто на Ф0/Ф1 и чек-лист для ревью Ф2 (роутер)
