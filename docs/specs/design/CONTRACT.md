@@ -1,6 +1,7 @@
 # CONTRACT — API модуля «Дизайн карточек»
 
 **FROZEN 2026-08-02 — изменение = эскалация архитектору.**
+**amended 2026-08-02: +`DesignTaskDetail.allowed_transitions` (additive, санкция lead).**
 
 <!-- HEAD-SUMMARY: замороженный HTTP-контракт Ф2 (backend/routers/design_tasks.py). От него параллельно идут Ф3 (фронт) и Ф4 (уведомления). Схемы — backend/schemas/design.py; поведение — сервис Ф1. -->
 
@@ -21,7 +22,7 @@
 | 413 | файл > 20 МБ или суммарно > 100 МБ | единый источник — роутер И сервисные проверки размеров (files.py) поднимают 413 |
 | 422 | pydantic/Query-валидация (limit/offset/month/body-капы, **невалидный enum в `status[]`/`work_type`**) | FastAPI |
 | 429 | превышение rate_limit_write; ответ несёт заголовок `Retry-After: <сек>` | `RateLimiter` (`backend/utils/rate_limit.py`) |
-| 501 | `POST /{task_id}/ab-test` до Ф6 | заглушка, `detail = "Появится после Ф6"` |
+| 501 | — | снят: ab-test реализован в Ф6 (amended 2026-08-03) |
 | 503 | MinIO недоступен (в т.ч. обрыв заливки при сдаче версии — сквозной, не глотается в 400) | files.py |
 
 ## Ручки
@@ -36,7 +37,7 @@
 | GET | `/calendar` | viewer | `month=YYYY-MM` (pattern, 422; несуществующий месяц → 400) | `DesignCalendarOut` {month, date_from, date_to, tasks} — окно `1-е − 6 дн … последний день + 6 дн` |
 | GET | `/stats` | viewer | `date_from?`, `date_to?` (ISO-даты) | `DesignStatsOut` |
 | GET | `/product-suggest` | editor | `q` (1..100) | `list[DesignProductSuggestion]` (≤10) |
-| GET | `/{task_id}` | viewer | — | `DesignTaskDetail` (permissions — ПОЛНЫЙ набор флагов `compute_permissions`, §6.9) |
+| GET | `/{task_id}` | viewer | — | `DesignTaskDetail` (permissions — ПОЛНЫЙ набор флагов `compute_permissions`, §6.9; + `allowed_transitions` — amendment 2026-08-02, см. §Схемы) |
 | PUT | `/{task_id}` | editor | `DesignTaskUpdate` (PATCH-семантика) | `DesignTaskDetail` |
 | DELETE | `/{task_id}` | editor | — | **204**; soft_delete, право автор\|lead (иначе 403) |
 | POST | `/{task_id}/status` | editor | `DesignStatusChange` {to_status, comment?} | `DesignTaskDetail` |
@@ -51,7 +52,7 @@
 | GET | `/{task_id}/submissions/{sub_id}/files/{file_id}` | viewer | — | байты файла + заголовки download |
 | POST | `/{task_id}/submissions/{sub_id}/verdict` | editor | `DesignVerdictIn` {verdict: ACCEPTED\|REJECTED, verdict_comment?} | `DesignTaskDetail`; REJECTED без комментария → 400 |
 | POST | `/{task_id}/comments` | editor (viewer → 403) | `DesignCommentIn` {body 1..2000} | **201** `DesignCommentOut` |
-| POST | `/{task_id}/ab-test` | editor | — | **501** до Ф6 (реализация — Ф6, контракт зарезервирован) |
+| POST | `/{task_id}/ab-test` | editor | `DesignAbTestIn {campaign_id?: int≥1}` (тело опционально) | 200 `DesignAbTestOut {ab_test_id \| null, prefill \| null}`: без campaign_id → prefill для формы `/ab-tests/create`; с campaign_id → полный мост (amended 2026-08-03, санкция lead, Ф6) |
 
 Порядок объявления в роутере: статические (`board`, `all-projects`, `workload`, `calendar`, `stats`, `product-suggest`) ДО `/{task_id}` — закреплено регресс-тестом openapi.
 
@@ -79,5 +80,7 @@ X-Content-Type-Options: nosniff
 Выход: `DesignTaskListItem`, `DesignBoardResponse`, `DesignTaskDetail` (вложенно: `DesignMaterialOut`, `DesignSubmissionOut` + `DesignSubmissionFileOut`, `DesignCommentOut`, `DesignEventOut`, `DesignTaskPermissions`), `DesignCalendarOut`, `DesignWorkloadRow`, `DesignStatsOut`, `DesignProductSuggestion`.
 
 `DesignTaskPermissions` — 15 флагов, зеркало ключей `compute_permissions` (паритет закреплён тестом `test_permissions_schema_matches_service`): `can_edit`, `can_assign`, `can_take`, `can_change_status`, `can_move`, `can_hold`, `can_reorder`, `can_submit`, `can_verdict`, `can_comment`, `can_cancel`, `can_delete`, `can_set_complexity`, `can_set_outsource`, `can_create_ab_test`. Фронт логику прав НЕ дублирует (§6.9). Семантика отдельных флагов: `can_comment` = `member_role != "viewer"` (viewer read-only, зеркало editor-гейта `POST /comments`); `can_delete` = `lead | автор` — HTTP-гейт ручки `DELETE /{task_id}` остаётся `require_role("editor")`, тонкая доводка «автор|lead» — в сервисе (`crud.delete_task`), не-автор editor → 403.
+
+`DesignTaskDetail.allowed_transitions: list[str]` (amended 2026-08-02, аддитивно, санкция lead): целевые статусы, куда ТЕКУЩИЙ пользователь реально может перевести задачу — `DESIGN_TASK_TRANSITIONS[status]`, отфильтрованный той же матрицей прав `state.can_user_transition` (логика не дублируется; считает `queries.get_task`). Фронт строит кнопки переходов в деталке по этому списку; агрегат `can_change_status` в permissions остаётся. Порядок элементов — порядок объявления enum `DesignTaskStatus`.
 
 Статусы, work_type, complexity, verdict, kind материалов — строковые enum'ы из `backend/models/design.py`; словарь переходов `DESIGN_TASK_TRANSITIONS` — единственный источник правды (Р1).

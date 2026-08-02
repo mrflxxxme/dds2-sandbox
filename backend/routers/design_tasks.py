@@ -30,6 +30,8 @@ from backend.models.design import DesignTaskStatus, DesignWorkType
 from backend.project_context import get_current_project
 from backend.rbac import require_role
 from backend.schemas.design import (
+    DesignAbTestIn,
+    DesignAbTestOut,
     DesignAssign,
     DesignBoardResponse,
     DesignCalendarOut,
@@ -48,7 +50,7 @@ from backend.schemas.design import (
     DesignVerdictIn,
     DesignWorkloadRow,
 )
-from backend.services.design import board, crud, queries, state, stats, workload
+from backend.services.design import ab_bridge, board, crud, queries, state, stats, workload
 from backend.services.design import files as design_files
 from backend.utils.rate_limit import rate_limit_write
 
@@ -658,12 +660,24 @@ async def add_comment(
     )
 
 
-@router.post("/{task_id}/ab-test", dependencies=[Depends(rate_limit_write)])
+@router.post(
+    "/{task_id}/ab-test",
+    response_model=DesignAbTestOut,
+    dependencies=[Depends(rate_limit_write)],
+)
 async def create_ab_test(
     task_id: int,
+    payload: DesignAbTestIn | None = None,
     user: User = Depends(require_editor),
+    member_role: str = Depends(get_member_role),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """АБ-мост (Ф6): объявлен в контракте, реализация — после Ф6."""
-    raise HTTPException(501, "Появится после Ф6")
+    """АБ-мост (Ф6): с campaign_id — создаёт тест по image-файлам последней
+    принятой версии (через сервис funnel); без тела/campaign_id — отдаёт prefill
+    для редиректа на предзаполненную форму создания теста (Hints F6)."""
+    return await _svc(
+        ab_bridge.create_ab_test_from_task(
+            db, project.id, task_id, user, member_role, payload or DesignAbTestIn()
+        )
+    )

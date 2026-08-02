@@ -38,6 +38,7 @@ from backend.schemas.design import (
 )
 from backend.services.design.common import get_task_row
 from backend.services.design.permissions import compute_permissions
+from backend.services.design.state import can_user_transition
 from backend.utils.time import utcnow
 
 _S = DesignTaskStatus
@@ -355,6 +356,16 @@ async def get_task(
     # DesignTaskPermissions зеркалит ключи compute_permissions один-в-один.
     permissions = DesignTaskPermissions(**compute_permissions(task, user, member_role))
 
+    # amendment M3 (2026-08-02, аддитивно): целевые статусы, куда ТЕКУЩИЙ
+    # пользователь реально может перевести задачу. Та же матрица прав, что и сам
+    # переход — can_user_transition (ребро вне словаря → False), логика не дублируется.
+    # Порядок детерминирован объявлением enum'а DesignTaskStatus.
+    allowed_transitions = [
+        s.value
+        for s in DesignTaskStatus
+        if can_user_transition(task, s.value, user.id, member_role)
+    ]
+
     return DesignTaskDetail(
         id=task.id,
         number=task.number,
@@ -410,6 +421,7 @@ async def get_task(
         ],
         events=[DesignEventOut.model_validate(e) for e in events],
         permissions=permissions,
+        allowed_transitions=allowed_transitions,
     )
 
 

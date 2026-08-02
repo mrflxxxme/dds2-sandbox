@@ -339,6 +339,10 @@ class DesignTaskDetail(BaseModel):
     comments: list[DesignCommentOut] = []
     events: list[DesignEventOut] = []
     permissions: DesignTaskPermissions = DesignTaskPermissions()
+    # amended 2026-08-02 (аддитивно, санкция lead): целевые статусы, куда ТЕКУЩИЙ
+    # пользователь реально может перевести задачу — DESIGN_TASK_TRANSITIONS[status],
+    # отфильтрованный матрицей прав state.can_user_transition (считает queries.get_task).
+    allowed_transitions: list[str] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -381,3 +385,31 @@ class DesignStatsOut(BaseModel):
     unassigned_over_2d: int = 0
     outsourced_share: float | None = None
     tracked_share: float | None = None
+
+
+# ─── АБ-мост (Ф6) ─────────────────────────────────────────────────────────────
+
+
+class DesignAbTestIn(BaseModel):
+    """Вход АБ-моста. campaign_id опционален: у задачи дизайна кампании нет
+    (Out of scope F6) — без него ручка НЕ создаёт тест, а отдаёт prefill для
+    редиректа на предзаполненную форму создания теста (вариант Hints F6)."""
+
+    campaign_id: int | None = Field(None, ge=1)
+
+
+class DesignAbTestPrefill(BaseModel):
+    """Данные предзаполнения формы /ab-tests/create?nm_id=...&from_design_task=..."""
+
+    nm_id: int
+    from_design_task: str  # номер DES-N
+    name: str
+    comment: str  # обратная ссылка на задачу — уйдёт в comment теста
+
+
+class DesignAbTestOut(BaseModel):
+    """Ответ моста: либо созданный тест (ab_test_id — редирект на его страницу),
+    либо prefill (campaign_id не передан — редирект на форму создания)."""
+
+    ab_test_id: int | None = None
+    prefill: DesignAbTestPrefill | None = None

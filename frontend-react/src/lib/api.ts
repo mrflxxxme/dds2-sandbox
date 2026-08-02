@@ -40,6 +40,7 @@ import { addVibeMethods } from './api/vibe';
 import { addFfBillingMethods } from './api/ffBilling';
 import { addFbsMethods } from './api/fbs';
 import { addCardExchangeMethods } from './api/card-exchange';
+import { addDesignTaskMethods } from './api/designTasks';
 
 const client = new ApiClient();
 
@@ -75,4 +76,5 @@ export const api = Object.assign(client, {
     ...addFfBillingMethods(client),
     ...addFbsMethods(client),
     ...addCardExchangeMethods(client),
+    ...addDesignTaskMethods(client),
 });

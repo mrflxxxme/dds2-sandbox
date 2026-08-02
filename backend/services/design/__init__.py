@@ -13,6 +13,7 @@ HTTP-слой — Ф2; роутер и фронт опираются ТОЛЬК�
 """
 
 from backend.services.design import (  # noqa: F401
+    ab_bridge,
     board,
     crud,
     files,

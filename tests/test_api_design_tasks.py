@@ -3,7 +3,7 @@
 
 AC-1..AC-7 спека F2 + carry-over ревью Ф1 (полный набор permissions, заголовки
 download-ручек, капы limit/offset, move с comment, submissions multipart,
-501-заглушка АБ-моста, комментарии editor-only).
+АБ-мост Ф6 — гвард «только по принятой», комментарии editor-only).
 
 MinIO в тестах не требуется: пути заливки/скачивания монекпатчатся
 (fixture no_minio) — гоняется и в контейнере без объектного стора.
@@ -559,14 +559,14 @@ async def test_submission_multipart_flow(client, env, db_session, no_minio):
     assert resp.status_code == 400
 
 
-# ─── Carry-over 7: заглушка АБ-моста ─────────────────────────────────────────
+# ─── Carry-over 7: АБ-мост (Ф6 реализован; полный контракт — test_design_ab_bridge) ─
 
 
-async def test_ab_test_stub_501(client, env):
-    task = await _mk_task(client, env.author.h)
+async def test_ab_test_requires_accepted_task(client, env):
+    task = await _mk_task(client, env.author.h)  # NEW — гвард моста отбивает 400
     resp = await client.post(f"{BASE}/{task['id']}/ab-test", headers=env.author.h)
-    assert resp.status_code == 501
-    assert _msg(resp) == "Появится после Ф6"
+    assert resp.status_code == 400
+    assert _msg(resp) == "Тест создаётся только по принятой задаче"
 
 
 # ─── Carry-over 8: комментарии — editor-only, cap 2000 ───────────────────────
@@ -799,3 +799,51 @@ async def test_svg_mime_blocked(client, env):
         headers=env.author.h,
     )
     assert resp.status_code == 400
+
+
+# ─── Fix-цикл Ф3 (M3): allowed_transitions в деталке ─────────────────────────
+
+
+async def test_allowed_transitions_in_detail(client, env, db_session):
+    """allowed_transitions = DESIGN_TASK_TRANSITIONS[status] × матрица прав
+    can_user_transition для ТЕКУЩЕГО пользователя (amendment M3, 2026-08-02).
+
+    Автор в NEW видит только CANCELLED: ON_HOLD — только assignee/lead
+    (*→ON_HOLD: assignee свою, lead — спек F1), ASSIGNED назначает lead.
+    """
+    from backend.models.design import DESIGN_TASK_TRANSITIONS
+
+    task = await _mk_task(client, env.author.h)
+
+    # Автор (editor, не assignee) в NEW: только отмена своей заявки.
+    resp = await client.get(f"{BASE}/{task['id']}", headers=env.author.h)
+    assert resp.status_code == 200
+    assert resp.json()["allowed_transitions"] == ["CANCELLED"]
+
+    # Lead в NEW: всё по словарю переходов.
+    resp = await client.get(f"{BASE}/{task['id']}", headers=env.lead.h)
+    assert set(resp.json()["allowed_transitions"]) == {
+        s.value for s in DESIGN_TASK_TRANSITIONS[DesignTaskStatus.NEW]
+    }
+
+    # Viewer: переходов нет.
+    resp = await client.get(f"{BASE}/{task['id']}", headers=env.viewer.h)
+    assert resp.json()["allowed_transitions"] == []
+
+    # Исполнитель в ASSIGNED: IN_PROGRESS + ON_HOLD (NEW — lead-only,
+    # CANCELLED — автор|lead; исполнитель не автор).
+    t2 = await make_task(
+        db_session,
+        env.pid,
+        env.author.id,
+        status=DesignTaskStatus.ASSIGNED,
+        assignee_id=env.designer.id,
+    )
+    resp = await client.get(f"{BASE}/{t2.id}", headers=env.designer.h)
+    assert set(resp.json()["allowed_transitions"]) == {"IN_PROGRESS", "ON_HOLD"}
+
+    # Lead в ASSIGNED: всё по словарю (IN_PROGRESS, NEW, ON_HOLD, CANCELLED).
+    resp = await client.get(f"{BASE}/{t2.id}", headers=env.lead.h)
+    assert set(resp.json()["allowed_transitions"]) == {
+        s.value for s in DESIGN_TASK_TRANSITIONS[DesignTaskStatus.ASSIGNED]
+    }

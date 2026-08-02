@@ -74,6 +74,18 @@
 - Rationale: Findings api-designer 1–12, code HIGH-1/2, security 1–2; все закрыты до подписи фриза — после стали бы breaking для Ф3
 - Reversibility: reversible
 
+### 2026-08-03T00:15:00Z | F3 | arch+impl · фронт-ядро
+- Fork: M3 ревью — кнопки переходов по агрегату can_change_status давали 403-кнопки; развилка «догадка на фронте vs поле с бэка»
+- Decision: Аддитивный amendment контракта (санкция lead): allowed_transitions[] в DesignTaskDetail, кнопки строятся по нему; H1 required-причина отмены; M1 сравнение дат; M2 фолбэк err.error.message в uploadFormData. Owned Ф3: ?view=list вместо маршрута; canManage() как зеркало is_lead для реордера/viewed (ревью приняло); материалы создания грузятся после POST задачи, сбой не теряет заявку; кнопка ab-test не строилась (Ф6→Ф5)
+- Rationale: §6.9 запрещает выводить права на клиенте; отчёты tm-frontend/frontend-reviewer/fix-f3. Автор в NEW видит {CANCELLED} без ON_HOLD — верно по матрице PRD §7 (менеджер не откладывает)
+- Reversibility: reversible
+
+### 2026-08-03T00:30:00Z | F6 | arch+impl · АБ-мост
+- Fork: create_test донора требует обязательный campaign_id, которого нет у задачи; транзакционность моста при посредине-упавшем add_variant
+- Decision: Гибрид (санкция lead): POST без campaign_id → 200 {ab_test_id:null, prefill:{...}} — фронт редиректит на предзаполненную форму; с campaign_id → полный мост (файлы принятой версии → варианты). Компенсация половинки: DELETE вариантов + soft_delete теста + проброс исходной ошибки; повтор разблокирован. Схемы DesignAbTestIn/Prefill/Out добавлены в schemas (tripwire, санкция по ТЗ фазы); CONTRACT.md — аддитивный amendment строки ab-test (lead)
+- Rationale: Hints F6; оба варианта спека сохранены без изобретения выбора кампании в модуле
+- Reversibility: reversible
+
 ### 2026-08-02T22:30:00Z | F4 | arch+impl · fix-цикл BLOCK-ревью
 - Fork: BLOCK code-ревью Ф4 (CRITICAL: Project без is_deleted в 3+1 местах; сессия через HTTP; тумблер не доведён; N+1)
 - Decision: Все 9 пунктов закрыты: is_deleted-фильтры; двухфазная джоба (сбор в сессии → отправка вне); PATCH /chats/{id}/design-notify c rate_limit_write + поле схемы (санкция lead на tripwire-схему по Р16); батч-IN резолв TG; членство ProjectMember для личных; раздельные антиспам-ключи :digest/:due с захватом после сборки; тесты изоляции/экранирования/пары toggle. Re-review — APPROVE. Deferred решением lead: индекс telegram_bot_users.user_id (батч снял N+1) → потом; _APP_BASE_URL в константу → Ф7

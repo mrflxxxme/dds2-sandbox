@@ -356,7 +356,8 @@ export class ApiClient {
             }
 
             const err = await res.json().catch(() => ({}));
-            const detail = err.detail;
+            // Зеркало request(): единый конверт приложения кладёт текст в error.message.
+            const detail = err.detail ?? err.error?.message;
             const message =
                 typeof detail === 'string' ? detail
                 : Array.isArray(detail) ? detail.map((d: any) => `${d.loc ? d.loc.join('.') + ': ' : ''}${d.msg || JSON.stringify(d)}`).join('; ')

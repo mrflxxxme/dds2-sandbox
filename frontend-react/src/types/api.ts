@@ -9509,3 +9509,253 @@ export interface SppProbeRow {
   started_at: string;
   finished_at: string | null;
 }
+
+// ─── Дизайн карточек (design-tasks) — зеркало docs/specs/design/CONTRACT.md (FROZEN 2026-08-02) ───
+
+export type DesignTaskStatus =
+    | 'NEW' | 'ASSIGNED' | 'IN_PROGRESS' | 'REVIEW' | 'REVISION'
+    | 'ON_HOLD' | 'ACCEPTED' | 'CANCELLED';
+
+export type DesignWorkType = 'MAIN_PHOTO' | 'FULL_SET' | 'EDIT' | 'RICH' | 'VIDEO';
+export type DesignComplexity = 'S' | 'M' | 'L';
+export type DesignMaterialKind = 'FILE' | 'LINK' | 'NM';
+export type DesignVerdict = 'PENDING' | 'ACCEPTED' | 'REJECTED';
+
+export interface DesignTaskListItem {
+    id: number;
+    number: string;
+    title: string;
+    status: DesignTaskStatus;
+    nm_id: number | null;
+    work_type: DesignWorkType;
+    complexity: DesignComplexity;
+    is_urgent: boolean;
+    due_date: string | null;
+    is_overdue: boolean;
+    is_outsourced: boolean;
+    /** Р5: красная метка — NEW && не просмотрено лидом. */
+    unviewed: boolean;
+    assignee_name: string | null;
+    author_name: string | null;
+    versions_count: number;
+    sort_order: number;
+    /** Заполняется только в GET /all-projects. */
+    project_name?: string | null;
+}
+
+export interface DesignBoardResponse {
+    /** 6 колонок доски (ON_HOLD/CANCELLED — вне доски, доступны фильтром). */
+    columns: Partial<Record<DesignTaskStatus, DesignTaskListItem[]>>;
+    /** Счётчики по всем 8 статусам. */
+    counts: Partial<Record<DesignTaskStatus, number>>;
+}
+
+/** 15 флагов — ПОЛНЫЙ набор compute_permissions; фронт логику прав не дублирует (§6.9). */
+export interface DesignTaskPermissions {
+    can_edit: boolean;
+    can_assign: boolean;
+    can_take: boolean;
+    can_change_status: boolean;
+    can_move: boolean;
+    can_hold: boolean;
+    can_reorder: boolean;
+    can_submit: boolean;
+    can_verdict: boolean;
+    can_comment: boolean;
+    can_cancel: boolean;
+    can_delete: boolean;
+    can_set_complexity: boolean;
+    can_set_outsource: boolean;
+    can_create_ab_test: boolean;
+}
+
+/** Без minio_path: скачивание — только GET-ручкой materials/{mat_id}/file. */
+export interface DesignMaterialOut {
+    id: number;
+    kind: DesignMaterialKind;
+    original_filename: string | null;
+    mime_type: string | null;
+    file_size: number | null;
+    url: string | null;
+    ref_nm_id: number | null;
+    caption: string | null;
+    created_by_user_id: number | null;
+    created_at: string;
+}
+
+export interface DesignSubmissionFileOut {
+    id: number;
+    original_filename: string | null;
+    mime_type: string | null;
+    file_size: number | null;
+}
+
+export interface DesignSubmissionOut {
+    id: number;
+    version_no: number;
+    submitted_by_user_id: number;
+    submitted_at: string;
+    comment: string | null;
+    verdict: DesignVerdict;
+    verdict_comment: string | null;
+    verdict_by_user_id: number | null;
+    verdict_at: string | null;
+    files: DesignSubmissionFileOut[];
+}
+
+export interface DesignCommentOut {
+    id: number;
+    author_user_id: number;
+    author_name: string | null;
+    body: string;
+    original_filename: string | null;
+    created_at: string;
+}
+
+export interface DesignEventOut {
+    id: number;
+    old_status: DesignTaskStatus | null;
+    new_status: DesignTaskStatus;
+    changed_at: string;
+    changed_by: string | null;
+    comment: string | null;
+}
+
+export interface DesignTaskDetail {
+    id: number;
+    number: string;
+    title: string;
+    description: string;
+    sheet_url: string;
+    nm_id: number | null;
+    work_type: DesignWorkType;
+    complexity: DesignComplexity;
+    is_urgent: boolean;
+    status: DesignTaskStatus;
+    sort_order: number;
+    due_date: string | null;
+    author_user_id: number;
+    author_name: string | null;
+    assignee_user_id: number | null;
+    assignee_name: string | null;
+    is_outsourced: boolean;
+    viewed_by_lead_at: string | null;
+    held_from_status: DesignTaskStatus | null;
+    started_at: string | null;
+    accepted_at: string | null;
+    created_at: string;
+    updated_at: string | null;
+    materials: DesignMaterialOut[];
+    submissions: DesignSubmissionOut[];
+    comments: DesignCommentOut[];
+    events: DesignEventOut[];
+    permissions: DesignTaskPermissions;
+    /**
+     * Статусы, куда ТЕКУЩИЙ пользователь реально может перевести задачу
+     * (DESIGN_TASK_TRANSITIONS × матрица прав бэка). Кнопки переходов в деталке
+     * строятся по этому списку (amended 2026-08-02, аддитивно).
+     */
+    allowed_transitions: DesignTaskStatus[];
+}
+
+/** Автоподсказка товара (nm_id = Nomenclature.article_wb). */
+export interface DesignProductSuggestion {
+    nm_id: number;
+    article_seller: string | null;
+    brand: string | null;
+    subject: string | null;
+}
+
+export interface DesignCalendarOut {
+    month: string;
+    date_from: string;
+    date_to: string;
+    tasks: DesignTaskListItem[];
+}
+
+export interface DesignWorkloadRow {
+    user_id: number;
+    user_name: string;
+    active_tasks: number;
+    overdue: number;
+    in_revision: number;
+    nearest_due: string | null;
+}
+
+export interface DesignStatsOut {
+    on_time_share: number | null;
+    avg_versions_to_accept: number | null;
+    median_cycle_days: number | null;
+    unassigned_over_2d: number;
+    outsourced_share: number | null;
+    tracked_share: number | null;
+}
+
+// Write-payload'ы контракта design-tasks
+
+export interface DesignTaskCreatePayload {
+    title: string;
+    description: string;
+    sheet_url: string;
+    nm_id?: number | null;
+    work_type?: DesignWorkType;
+    is_urgent?: boolean;
+    due_date?: string | null;
+}
+
+export interface DesignTaskUpdatePayload {
+    title?: string;
+    description?: string;
+    sheet_url?: string;
+    nm_id?: number | null;
+    work_type?: DesignWorkType;
+    complexity?: DesignComplexity;
+    is_urgent?: boolean;
+    due_date?: string | null;
+    is_outsourced?: boolean;
+}
+
+export interface DesignStatusChangePayload {
+    to_status: DesignTaskStatus;
+    comment?: string | null;
+}
+
+export interface DesignMovePayload {
+    /** Только 6 board-статусов (ON_HOLD/CANCELLED — не через dnd). */
+    to_status: DesignTaskStatus;
+    after_task_id?: number | null;
+    comment?: string | null;
+}
+
+export interface DesignAssignPayload {
+    assignee_user_id: number | null;
+}
+
+/** kind=FILE добавляется отдельным upload-эндпоинтом, не этим payload'ом. */
+export interface DesignMaterialInPayload {
+    kind: 'LINK' | 'NM';
+    url?: string | null;
+    ref_nm_id?: number | null;
+    caption?: string | null;
+}
+
+export interface DesignCommentInPayload {
+    body: string;
+}
+
+export interface DesignVerdictInPayload {
+    verdict: 'ACCEPTED' | 'REJECTED';
+    verdict_comment?: string | null;
+}
+
+export interface DesignTaskListParams {
+    status?: DesignTaskStatus[];
+    work_type?: DesignWorkType;
+    assignee_user_id?: number;
+    author_user_id?: number;
+    is_urgent?: boolean;
+    overdue?: boolean;
+    q?: string;
+    limit?: number;
+    offset?: number;
+}

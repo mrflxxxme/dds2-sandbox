@@ -11,10 +11,10 @@
 | Ф0 | Хребет | 🟢 done-unsigned | 2026-08-02 | (этот коммит) | alembic up/down/up чист; pytest 17 passed (test_design_models + conventions); mypy 85 файлов чисто; T3-ревью db/sec/code — WARNING→fix-цикл→все 15 правок внесены, гейты перепройдены в dds2-sandbox | свёрнута в финальную (Р16) |
 | Ф1 | Сервис-ядро | 🟢 done-unsigned | 2026-08-02 | (этот коммит) | pytest 124 passed (state/service/permissions/models); mypy clean; conventions PASSED; T3-ревью code/sec/db — WARNING×3→fix-цикл 15 правок→гейты перепройдены | свёрнута в финальную (Р16) |
 | Ф2 | Роутер + фриз контракта | 🟢 done-unsigned | 2026-08-02 | (этот коммит) | целевые 151 passed; полный срез 5357 passed (до fix-цикла) + регресс api 176 passed; mypy дизайн-скоуп чист; conventions PASSED; T3 (api/sec/code) WARNING×3 → fix-цикл 12 правок; CONTRACT.md FROZEN | свёрнута в финальную (Р16) |
-| Ф3 | Фронт-ядро | ⏳ planned | — | — | — | постфактум |
+| Ф3 | Фронт-ядро | 🟢 done-unsigned | 2026-08-03 | (этот коммит) | tsc чист; vitest 1423 passed; браузерный AC-3 целиком (журнал 7 записей, dnd-отказ текстом бэка, метка, 403 viewer); T1-ревью WARNING → fix-цикл 4 правки (вкл. amendment allowed_transitions); evidence_gap: error-state при выключенном бэке — проверен эквивалентной catch-веткой | свёрнута в финальную (Р16) |
 | Ф4 | Уведомления | 🟢 done-unsigned | 2026-08-02 | (этот коммит) | pytest 138 passed; mypy 14 файлов чисто; conventions PASSED; T1-ревью BLOCK (CRITICAL is_deleted) → fix-цикл 9 правок → re-review APPROVE | свёрнута в финальную (Р16) |
 | Ф5 | Фронт-2 | ⏳ planned | — | — | — | постфактум |
-| Ф6 | АБ-мост + метрики | ⏳ planned | — | — | — | постфактум |
+| Ф6 | АБ-мост + метрики | 🟢 done-unsigned* | 2026-08-03 | (этот коммит) | pytest 100 passed + АБ-регресс 30 passed; mypy чисто; conventions PASSED; *T3-ревью — очередь (пойдёт в составе аудита Ф7 при отсутствии отдельного цикла) | свёрнута в финальную (Р16) |
 | Ф7 | Аудит + ship | ⏳ planned | — | — | — | требуется (финальная) |
 
 ## Блокеры / действия архитектора
