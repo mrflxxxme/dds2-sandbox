@@ -8,7 +8,9 @@ paths:
 Apple-inspired glassmorphism. Все стили — в `globals.css` (основное) / `(tma)/tma/tma.css` (Telegram Mini App) — НИКОГДА inline.
 
 ## Цвета — ТОЛЬКО `var(--color-*)`
-`--color-accent` (Apple Blue), `--color-success/warning/danger`, `--color-bg-card` (glass), `--color-text/muted/dim`, `--color-border`.
+`--color-accent` (Apple Blue), `--color-success/warning/danger`, `--color-bg-card` (glass), `--color-text`, `--color-text-muted`, `--color-text-dim`, `--color-border`.
+
+⚠️ Приглушённый текст — именно `--color-text-muted` / `--color-text-dim`. Сокращений `--color-muted` / `--color-dim` в `globals.css` НЕТ: браузер молча игнорирует такое свойство, и текст рендерится основным цветом. Поймано в модуле дизайна (50 вхождений); в остальном фронте оставалось ещё ~160.
 
 ## Glass-карточки
 Класс `glass-card`: `backdrop-filter: blur(24px)`, `border-radius: 20px`, `padding: 24px`. Тени: `--shadow-glass` / `--shadow-glass-hover`.

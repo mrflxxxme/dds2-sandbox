@@ -39,7 +39,7 @@ const cardDeviation = (r: WarehouseMeasurement): number | null => {
 /** Отклонение с цветом: <10% — зелёным (норма), ≥10% — красным с ⚠️ (обратить внимание). */
 function DeviationCell({ r }: { r: WarehouseMeasurement }) {
     const d = cardDeviation(r);
-    if (d == null) return <span style={{ color: 'var(--color-dim)' }}>—</span>;
+    if (d == null) return <span style={{ color: 'var(--color-text-dim)' }}>—</span>;
     const attention = Math.abs(d) >= 10;
     const sign = d > 0 ? '+' : d < 0 ? '−' : '';
     return (
@@ -94,7 +94,7 @@ const WAREHOUSE_COLS: Column[] = [
 const devVal = (v: string | null) => (v == null ? null : Number(v));
 
 function DevBadge({ dev }: { dev: number | null }) {
-    if (dev == null) return <span style={{ color: 'var(--color-dim)' }}>—</span>;
+    if (dev == null) return <span style={{ color: 'var(--color-text-dim)' }}>—</span>;
     if (Math.abs(dev) < 0.5) return <span style={{ color: 'var(--color-success)' }}>карточка ✓</span>;
     const attention = Math.abs(dev) >= 10;
     const sign = dev > 0 ? '+' : '−';
@@ -282,10 +282,10 @@ export default function MeasurementsPage() {
 
             {/* Filters */}
             <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
-                <label style={{ fontSize: 13, color: 'var(--color-muted)' }}>Период:</label>
+                <label style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Период:</label>
                 <input type="date" className="form-input" style={{ width: 150 }} value={dateFrom}
                        onChange={(e) => setDateFrom(e.target.value)} />
-                <span style={{ color: 'var(--color-muted)' }}>—</span>
+                <span style={{ color: 'var(--color-text-muted)' }}>—</span>
                 <input type="date" className="form-input" style={{ width: 150 }} value={dateTo}
                        onChange={(e) => setDateTo(e.target.value)} />
 

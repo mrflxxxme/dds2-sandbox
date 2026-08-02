@@ -2772,7 +2772,7 @@ export default function AssemblyDraftPage() {
                         readyPkgWbs={readyPkgWbs}
                     />
                 ) : (
-                    <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>
+                    <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>
                         Сначала выберите или создайте черновик (вкладка «📝 Черновик сборки») — ручная раскладка пишет результат в него.
                     </div>
                 )
@@ -2783,7 +2783,7 @@ export default function AssemblyDraftPage() {
                 draftId ? (
                     <DraftHistoryView draftId={draftId} onReverted={() => { reloadDraft(); }} />
                 ) : (
-                    <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>
+                    <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>
                         Сначала выберите или создайте черновик (вкладка «📝 Черновик сборки») — история ведётся по нему.
                     </div>
                 )

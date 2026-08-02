@@ -37,9 +37,9 @@ const dims = (l: number | null, w: number | null, h: number | null) =>
 
 /** Дельта объёма со знаком и цветом: рост габаритов (↑) — хуже (danger), уменьшение (↓) — success. */
 function VolumeDelta({ delta }: { delta: number | null }) {
-    if (delta == null) return <span style={{ color: 'var(--color-dim)' }}>—</span>;
+    if (delta == null) return <span style={{ color: 'var(--color-text-dim)' }}>—</span>;
     if (Math.abs(delta) < 0.0005)
-        return <span style={{ color: 'var(--color-muted)' }}>0</span>;
+        return <span style={{ color: 'var(--color-text-muted)' }}>0</span>;
     const up = delta > 0;
     return (
         <span style={{ color: up ? 'var(--color-danger)' : 'var(--color-success)', fontWeight: 600 }}>
@@ -123,7 +123,7 @@ function buildHistory(items: WarehouseMeasurement[]): HistoryArticle[] {
 
 const thStyle: React.CSSProperties = {
     textAlign: 'left', padding: '8px 12px', fontSize: 12, fontWeight: 600,
-    color: 'var(--color-muted)', borderBottom: '1px solid var(--color-border)',
+    color: 'var(--color-text-muted)', borderBottom: '1px solid var(--color-border)',
 };
 const tdStyle: React.CSSProperties = {
     padding: '8px 12px', fontSize: 13, borderBottom: '1px solid var(--color-border)',
@@ -141,16 +141,16 @@ function ArticleRow({ a }: { a: HistoryArticle }) {
                     textAlign: 'left', color: 'var(--color-text)',
                 }}
             >
-                <span style={{ color: 'var(--color-muted)', width: 14, flexShrink: 0 }}>
+                <span style={{ color: 'var(--color-text-muted)', width: 14, flexShrink: 0 }}>
                     {open ? '▾' : '▸'}
                 </span>
                 <span style={{ fontWeight: 600, fontFamily: 'var(--font-mono, monospace)' }}>{a.nm_id}</span>
                 {a.brand && <span className="badge badge-secondary">{a.brand}</span>}
-                <span style={{ color: 'var(--color-muted)', fontSize: 13 }}>{a.subject_name ?? '—'}</span>
+                <span style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>{a.subject_name ?? '—'}</span>
 
                 <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 16 }}>
                     <span className="badge badge-info">{formatNumber(a.count, 0)} замеров</span>
-                    <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>
+                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
                         {formatNumber(a.first_volume ?? 0, 3)} → <strong style={{ color: 'var(--color-text)' }}>
                             {formatNumber(a.last_volume ?? 0, 3)}
                         </strong> л
@@ -207,11 +207,11 @@ export default function MeasurementHistory({
     const articles = useMemo(() => buildHistory(items), [items]);
 
     if (loading) {
-        return <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-muted)' }}>Загрузка…</div>;
+        return <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка…</div>;
     }
     if (articles.length === 0) {
         return (
-            <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-muted)' }}>
+            <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>
                 <div style={{ fontSize: 40, marginBottom: 8 }}>📈</div>
                 Нет замеров за период. Нажмите «Синхронизировать».
             </div>
@@ -220,7 +220,7 @@ export default function MeasurementHistory({
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ fontSize: 13, color: 'var(--color-muted)', marginBottom: 4 }}>
+            <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 4 }}>
                 {formatNumber(articles.length, 0)} артикулов с замерами — нажмите на артикул, чтобы раскрыть историю
             </div>
             {articles.map((a) => (

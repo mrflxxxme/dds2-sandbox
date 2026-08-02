@@ -741,7 +741,7 @@ export default function PreDistVehiclePage() {
         const groups: { label: string; color: string; count: number }[] = [];
         for (const c of wbCols) {
             const label = DISTRICT_LABELS[c.district] || 'Прочие';
-            const color = DISTRICT_COLORS[c.district] || 'var(--color-muted)';
+            const color = DISTRICT_COLORS[c.district] || 'var(--color-text-muted)';
             const last = groups[groups.length - 1];
             if (last && last.label === label) last.count++;
             else groups.push({ label, color, count: 1 });
@@ -1241,7 +1241,7 @@ export default function PreDistVehiclePage() {
                     <span className={`badge ${vehicle.status === 'DELIVERED' ? 'badge-success' : 'badge-info'}`}>
                         {vehicle.status === 'DELIVERED' ? '✅ Принята' : vehicle.status}
                     </span>
-                    <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>
+                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
                         Склад: <b style={{ color: 'var(--color-text)' }}>{vehicle.target_warehouse_name || '—'}</b>
                         {vehicle.status === 'DELIVERED' && vehicle.accepted_date
                             ? ` · Принята ${formatDate(vehicle.accepted_date)}`
@@ -1256,7 +1256,7 @@ export default function PreDistVehiclePage() {
         return (
             <div className="animate-in">
                 {header}
-                <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>
+                <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>
                     Машина не выбрана. <button className="btn btn-secondary btn-sm" style={{ marginLeft: 8 }} onClick={backToList}>К списку машин</button>
                 </div>
             </div>
@@ -1266,7 +1266,7 @@ export default function PreDistVehiclePage() {
         return (
             <div className="animate-in">
                 {header}
-                <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>Загрузка пула и потребности…</div>
+                <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка пула и потребности…</div>
             </div>
         );
     }
@@ -1285,7 +1285,7 @@ export default function PreDistVehiclePage() {
         return (
             <div className="animate-in">
                 {header}
-                <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>На машине нет товара для распределения</div>
+                <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>На машине нет товара для распределения</div>
             </div>
         );
     }
@@ -1298,7 +1298,7 @@ export default function PreDistVehiclePage() {
             {header}
 
             {vehicle?.status === 'DELIVERED' && (
-                <div className="glass-card" style={{ padding: 12, marginBottom: 16, fontSize: 13, color: 'var(--color-muted)' }}>
+                <div className="glass-card" style={{ padding: 12, marginBottom: 16, fontSize: 13, color: 'var(--color-text-muted)' }}>
                     ✅ Машина уже принята на ФФ — её остаток оприходован на склад. Заявки создадутся{' '}
                     <b style={{ color: 'var(--color-text)' }}>обычными сборками</b> (со списанием остатков ФФ,
                     сразу «В сборке») с меткой машины {vehicle.order_no}.
@@ -1311,7 +1311,7 @@ export default function PreDistVehiclePage() {
                 <div className="glass-card" style={{ padding: 12, marginBottom: 16 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
                         <span style={{ fontWeight: 700, color: 'var(--color-warning)' }}>🧩 Без кратности короба — {formatNumber(noKratnostArticles.length, 0)} арт.</span>
-                        <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>
+                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                             кратность короба не задана → отгружать нечем (россыпь запрещена), остаются на машине; укажите кратность на вкладке «Кратность»
                         </span>
                     </div>
@@ -1335,16 +1335,16 @@ export default function PreDistVehiclePage() {
                 <span>📦 Коробов: <b style={{ fontSize: 18 }}>{formatNumber(plan.totalBoxes, 0)}</b></span>
                 <span>🚚 Паллет: <b style={{ fontSize: 18 }}>{formatNumber(plan.totalPallets, 0)}</b></span>
                 {prebookUnits > 0 && (
-                    <span style={{ color: 'var(--color-muted)' }} title="Часть плана машины, лежащая в предброни (хвосты < паллеты). Заявкой станет после решения (Дозабить / Оставить так). Входит в общую сумму — здесь всё единым числом.">
+                    <span style={{ color: 'var(--color-text-muted)' }} title="Часть плана машины, лежащая в предброни (хвосты < паллеты). Заявкой станет после решения (Дозабить / Оставить так). Входит в общую сумму — здесь всё единым числом.">
                         в т.ч. 🅿️ {formatNumber(prebookUnits, 0)} шт
                     </span>
                 )}
-                <span style={{ color: 'var(--color-muted)' }} title="Что реально станет заявками сейчас (целые паллеты + ручные пины + промоут из предброни)">
+                <span style={{ color: 'var(--color-text-muted)' }} title="Что реально станет заявками сейчас (целые паллеты + ручные пины + промоут из предброни)">
                     Заявок: <b style={{ color: 'var(--color-text)' }}>{formatNumber(commit.requestCount, 0)}</b> · {formatNumber(commit.totalShip, 0)} шт
                 </span>
-                <span style={{ color: 'var(--color-muted)' }} title="Остаётся на машине вне плана (не в заявках и не в предброни)">На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
+                <span style={{ color: 'var(--color-text-muted)' }} title="Остаётся на машине вне плана (не в заявках и не в предброни)">На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center' }}>
-                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }} title="Матрица «Раскладка» = план машины: заявки (целые паллеты) и 🅿️ предбронь единой суммой — числа сходятся с вкладками «Заявки» и «Предбронь».">
+                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }} title="Матрица «Раскладка» = план машины: заявки (целые паллеты) и 🅿️ предбронь единой суммой — числа сходятся с вкладками «Заявки» и «Предбронь».">
                         Матрица — план · 🚚 Заявки — целые паллеты
                     </span>
                     <button className="btn btn-primary" onClick={handleSubmit} disabled={submitting || submitRows.length === 0}>
@@ -1364,7 +1364,7 @@ export default function PreDistVehiclePage() {
 
             {subTab === 'prebook' ? (
                 prebookGroups.length === 0 ? (
-                    <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
+                    <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>
                         Предброни нет — вся раскладка машины набирается целыми паллетами (или ничего не разложено).
                     </div>
                 ) : (
@@ -1440,7 +1440,7 @@ export default function PreDistVehiclePage() {
                         📥 Excel
                     </button>
                     {searchQuery.trim() && (
-                        <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>показано {formatNumber(visibleRows.length, 0)} из {formatNumber(sortedRows.length, 0)}</span>
+                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>показано {formatNumber(visibleRows.length, 0)} из {formatNumber(sortedRows.length, 0)}</span>
                     )}
                     {editMode && (
                         <span style={{ fontSize: 12, color: 'var(--color-warning)' }}>
@@ -1453,7 +1453,7 @@ export default function PreDistVehiclePage() {
                         </button>
                     )}
                 </div>
-                <div style={{ color: 'var(--color-muted)', fontSize: 13 }}>
+                <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
                     Матрица показывает <b style={{ color: 'var(--color-text)' }}>план машины</b>: заявки (целые паллеты) и 🅿️ предбронь каждого SKU единой суммой (ячейки с предбронью подсвечены, доля — в подсказке «Σ отпр.»),
                     источник — остатки этой машины. Колонки складов: 🏬 остаток на WB · 🔧 в сборке · 🚚 в пути · потребность.
                     В <b style={{ color: 'var(--color-text)' }}>Заявки</b> идут целые паллеты и ручные пины; под-паллетные хвосты — в 🅿️ Предбронь (Дозабить / Оставить так / На ФФ) — числа сходятся с матрицей по построению.
@@ -1461,13 +1461,13 @@ export default function PreDistVehiclePage() {
             </div>
 
             {computing ? (
-                <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>Считаю раскладку (потребность · приёмка · коробы · паллеты)…</div>
+                <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>Считаю раскладку (потребность · приёмка · коробы · паллеты)…</div>
             ) : plan.totalShip === 0 && !editMode && onHoldQty === 0 ? (
                 // В ручном режиме матрица стартует пустой (0 распределено) — таблицу ВСЕГДА
                 // показываем как чистый холст со степперами; заглушка только для авто-режима
                 // И только когда на машине вообще нет нераспределённого остатка — иначе
                 // остаток «пропадает с экрана» и его нельзя дораздать (кейс V-0033).
-                <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
+                <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>
                     Нечего разложить: ни у одного артикула машины нет потребности по WB-складам (или не задана кратность короба).
                 </div>
             ) : (
@@ -1492,7 +1492,7 @@ export default function PreDistVehiclePage() {
                                 <th colSpan={3} />
                             </tr>
                             {/* Шапка колонок — клик по заголовку сортирует строки */}
-                            <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-muted)', textAlign: 'right' }}>
+                            <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-muted)', textAlign: 'right' }}>
                                 <th style={{ padding: '8px 12px', textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2, ...sortableTh }} onClick={() => toggleSort('label')} title="Сортировать по названию">Товар{sortArrow('label')}</th>
                                 <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('avail')} title="Сортировать по остатку на машине">На машине{sortArrow('avail')}</th>
                                 <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('inAssembly')} title="Уже в сборке на WB">В сборке{sortArrow('inAssembly')}</th>
@@ -1519,8 +1519,8 @@ export default function PreDistVehiclePage() {
                                     </td>
                                 ))}
                                 <td style={{ padding: '6px 8px', color: 'var(--color-accent)' }}>{formatNumber(plan.totalShip, 0)}</td>
-                                <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Всего коробов в плане (заявки + предбронь)">{formatNumber(plan.totalBoxes, 0)}</td>
-                                <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Остаётся на машине вне плана">{formatNumber(onHoldQty, 0)}</td>
+                                <td style={{ padding: '6px 8px', color: 'var(--color-text-muted)' }} title="Всего коробов в плане (заявки + предбронь)">{formatNumber(plan.totalBoxes, 0)}</td>
+                                <td style={{ padding: '6px 8px', color: 'var(--color-text-muted)' }} title="Остаётся на машине вне плана">{formatNumber(onHoldQty, 0)}</td>
                             </tr>
                         </thead>
                         <tbody>
@@ -1556,11 +1556,11 @@ export default function PreDistVehiclePage() {
                                                         onClick={() => resetRowEdits(row.barcode)}>✏️ вручную · ↺</button>
                                                 )}
                                             </div>
-                                            <div style={{ fontSize: 11, color: 'var(--color-muted)' }}>{row.name ? `${row.name} · ` : ''}ШК {row.barcode}</div>
+                                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{row.name ? `${row.name} · ` : ''}ШК {row.barcode}</div>
                                         </td>
                                         <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(avail, 0)}</td>
-                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.inAssembly > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.inAssembly > 0 ? formatNumber(e.inAssembly, 0) : '·'}</td>
-                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.stocksWb > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.stocksWb > 0 ? formatNumber(e.stocksWb, 0) : '·'}</td>
+                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.inAssembly > 0 ? 'var(--color-text)' : 'var(--color-text-dim)' }}>{e && e.inAssembly > 0 ? formatNumber(e.inAssembly, 0) : '·'}</td>
+                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.stocksWb > 0 ? 'var(--color-text)' : 'var(--color-text-dim)' }}>{e && e.stocksWb > 0 ? formatNumber(e.stocksWb, 0) : '·'}</td>
                                         {(() => {
                                             const na = needArtByNm.get(nm);
                                             const an = analyticsByNm.get(nm);
@@ -1570,10 +1570,10 @@ export default function PreDistVehiclePage() {
                                             const effDaily = Number(na?.eff_avg_daily) || 0;
                                             const growth = Number(na?.growth_ratio) || 1;
                                             const daysInbound = na?.wb_days_left_inbound == null ? null : Number(na.wb_days_left_inbound);
-                                            const daysColor = days == null ? 'var(--color-dim)'
+                                            const daysColor = days == null ? 'var(--color-text-dim)'
                                                 : days < leadDays ? 'var(--color-danger)'
                                                 : days < leadDays + 7 ? 'var(--color-warning)'
-                                                : 'var(--color-muted)';
+                                                : 'var(--color-text-muted)';
                                             const rev = an?.revenue_bdr ?? 0;
                                             const margin = an?.margin_pct == null ? null : Number(an.margin_pct);
                                             const trend = an?.trend_pct == null ? null : Number(an.trend_pct);
@@ -1586,17 +1586,17 @@ export default function PreDistVehiclePage() {
                                                             : `Остатка WB ${formatNumber(e?.stocksWb ?? 0, 0)} шт хватит на ~${formatNumber(days, 1)} дн при скорости ${formatNumber(effDaily, 1)} шт/д${growth >= 1.05 ? ` (рост ×${formatNumber(growth, 1)})` : ''} · с учётом сборки и в пути — ~${daysInbound != null ? formatNumber(daysInbound, 1) : '—'} дн · плечо ~${formatNumber(leadDays, 0)} дн`}>
                                                         {days == null ? '·' : formatNumber(days, days < 10 ? 1 : 0)}
                                                     </td>
-                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: rev > 0 ? 'var(--color-muted)' : 'var(--color-dim)' }}
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: rev > 0 ? 'var(--color-text-muted)' : 'var(--color-text-dim)' }}
                                                         title="Реализация BDR за 14 дней («Сводные остатки»)">{rev > 0 ? formatNumber(rev, 0) : '·'}</td>
-                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: margin == null ? 'var(--color-dim)' : margin < 0 ? 'var(--color-danger)' : margin < 10 ? 'var(--color-warning)' : 'var(--color-success)' }}
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: margin == null ? 'var(--color-text-dim)' : margin < 0 ? 'var(--color-danger)' : margin < 10 ? 'var(--color-warning)' : 'var(--color-success)' }}
                                                         title={margin == null ? 'Нет данных маржи (BDR) за окно' : `Маржа BDR за 14 дней: ${formatNumber(margin, 1)}%`}>
                                                         {margin == null ? '·' : `${formatNumber(margin, 0)}%`}
                                                     </td>
-                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: locPct != null ? (LOC_STATUS_COLOR[loc!.status] || 'var(--color-text)') : 'var(--color-dim)' }}
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: locPct != null ? (LOC_STATUS_COLOR[loc!.status] || 'var(--color-text)') : 'var(--color-text-dim)' }}
                                                         title={loc ? `Заказов 14д: ${formatNumber(loc.total, 0)} · локальных: ${formatNumber(loc.local, 0)} · КТР ${formatNumber(Number(loc.ktr), 2)}` : 'Нет данных локализации за окно 14 дней'}>
                                                         {locPct != null ? `${formatNumber(locPct, 0)}%` : '·'}
                                                     </td>
-                                                    <td style={{ padding: '6px 8px', textAlign: 'right', whiteSpace: 'nowrap', color: trend == null ? 'var(--color-dim)' : trend > 0 ? 'var(--color-success)' : trend < 0 ? 'var(--color-danger)' : 'var(--color-muted)' }}
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', whiteSpace: 'nowrap', color: trend == null ? 'var(--color-text-dim)' : trend > 0 ? 'var(--color-success)' : trend < 0 ? 'var(--color-danger)' : 'var(--color-text-muted)' }}
                                                         title={`Тренд заказов к прошлому окну: ${trend == null ? 'нет данных' : `${trend > 0 ? '+' : ''}${formatNumber(trend, 0)}%`}${growth >= 1.3 ? ` · ⚡ скорость последних дней ×${formatNumber(growth, 1)} к среднему за окно` : ''}`}>
                                                         {trend == null ? '·' : `${trend > 0 ? '↗ +' : trend < 0 ? '↘ ' : ''}${formatNumber(trend, 0)}%`}
                                                         {growth >= 1.3 && <span style={{ fontSize: 10, color: 'var(--color-warning)' }}> ⚡×{formatNumber(growth, 1)}</span>}
@@ -1649,7 +1649,7 @@ export default function PreDistVehiclePage() {
                                             );
                                         })()}
                                         <td style={{ padding: '6px 8px', textAlign: 'right' }}>{rowBoxes > 0 ? formatNumber(rowBoxes, 0) : '·'}</td>
-                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-muted)', whiteSpace: 'nowrap' }}>
+                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
                                             {formatNumber(stays, 0)}
                                             {!!ppb && ppb > 0 && stays >= ppb && (
                                                 <button type="button" className="badge"
@@ -1673,7 +1673,7 @@ export default function PreDistVehiclePage() {
                                 <td style={{ padding: '8px 8px', textAlign: 'right' }}>{formatNumber(plan.totalShip, 0)}</td>
                                 <td colSpan={2} />
                             </tr>
-                            <tr style={{ color: 'var(--color-muted)' }}>
+                            <tr style={{ color: 'var(--color-text-muted)' }}>
                                 <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>📦 Коробов</td>
                                 <td colSpan={8} />
                                 {wbCols.map(c => (
@@ -1682,7 +1682,7 @@ export default function PreDistVehiclePage() {
                                 <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(plan.totalBoxes, 0)}</td>
                                 <td colSpan={2} />
                             </tr>
-                            <tr style={{ color: 'var(--color-muted)' }}>
+                            <tr style={{ color: 'var(--color-text-muted)' }}>
                                 <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>🚚 Паллет</td>
                                 <td colSpan={8} />
                                 {wbCols.map(c => (

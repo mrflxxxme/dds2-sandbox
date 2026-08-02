@@ -32,7 +32,7 @@ function StatusCell({ t }: { t: AbTestListItem }) {
                 <span style={{ width: 80, height: 6, borderRadius: 8, background: 'var(--color-border)', overflow: 'hidden' }}>
                     <span style={{ display: 'block', width: `${t.progress_pct}%`, height: '100%', background: 'var(--color-accent)' }} />
                 </span>
-                <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>{formatNumber(t.progress_pct, 0)}%</span>
+                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{formatNumber(t.progress_pct, 0)}%</span>
             </span>
         );
     }
@@ -91,14 +91,14 @@ export default function AbTestsPage() {
                 </button>
             </div>
 
-            {loading && <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-muted)' }}>Загрузка…</div>}
+            {loading && <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка…</div>}
             {error && !loading && (
                 <div className="glass-card" style={{ color: 'var(--color-danger)' }}>
                     {error} <button className="btn btn-sm btn-secondary" onClick={() => void load()}>Повторить</button>
                 </div>
             )}
             {!loading && !error && visible.length === 0 && (
-                <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-muted)', padding: 48 }}>
+                <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 48 }}>
                     {tests.length === 0
                         ? 'Тестов ещё нет. Создайте первый: выберите артикул, кампанию и загрузите варианты фото.'
                         : 'Нет тестов с таким статусом.'}
@@ -109,7 +109,7 @@ export default function AbTestsPage() {
                 <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
                         <thead>
-                            <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-muted)', fontSize: 12 }}>
+                            <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-muted)', fontSize: 12 }}>
                                 <th style={{ textAlign: 'left', padding: '12px 16px' }}>Создан</th>
                                 <th style={{ textAlign: 'left', padding: '12px 16px' }}>Товар</th>
                                 <th style={{ textAlign: 'left', padding: '12px 16px' }}>Артикул</th>
@@ -131,7 +131,7 @@ export default function AbTestsPage() {
 
                                         <span>
                                             {t.title || t.name}
-                                            <span style={{ display: 'block', fontSize: 12, color: 'var(--color-dim)' }}>{t.vendor_code}</span>
+                                            <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-dim)' }}>{t.vendor_code}</span>
                                         </span>
                                     </td>
                                     <td style={{ padding: '12px 16px' }}>{t.nm_id}</td>

@@ -85,7 +85,7 @@ function BoxCountInput({ boxes, ppb, onSet }: { boxes: number; ppb: number; onSe
             style={{
                 width: 40, padding: '1px 3px', fontSize: 12, fontWeight: 700, textAlign: 'right',
                 borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-bg-card)',
-                color: boxes > 0 ? 'var(--color-accent)' : 'var(--color-dim)',
+                color: boxes > 0 ? 'var(--color-accent)' : 'var(--color-text-dim)',
             }}
         />
     );
@@ -111,13 +111,13 @@ export default function NeedMatrixCell({ ship, stock = 0, asm = 0, transit = 0, 
                             style={edit.boxes <= 0 ? STEP_BTN_OFF : STEP_BTN}
                             disabled={edit.boxes <= 0} onClick={() => edit.onDelta(-1)}>−</button>
                         <BoxCountInput boxes={edit.boxes} ppb={edit.ppb} onSet={(n) => edit.onDelta(n - edit.boxes)} />
-                        <span style={{ fontSize: 9, fontWeight: 500, color: 'var(--color-muted)' }}>кор</span>
+                        <span style={{ fontSize: 9, fontWeight: 500, color: 'var(--color-text-muted)' }}>кор</span>
                         <button type="button" title="+ короб" aria-label="Добавить короб"
                             style={edit.disableInc ? STEP_BTN_OFF : STEP_BTN}
                             disabled={edit.disableInc} onClick={() => edit.onDelta(1)}>+</button>
                     </div>
                     {edit.boxes > 0 ? (
-                        <div style={{ fontSize: 10, color: mark?.closed ? 'var(--color-danger)' : 'var(--color-muted)', whiteSpace: 'nowrap' }}>
+                        <div style={{ fontSize: 10, color: mark?.closed ? 'var(--color-danger)' : 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
                             = {formatNumber(edit.boxes * edit.ppb, 0)} шт
                             <span title={PKG_LABEL[pkg]}> {PKG_ICON[pkg]}</span>
                             {mark?.closed
@@ -144,7 +144,7 @@ export default function NeedMatrixCell({ ship, stock = 0, asm = 0, transit = 0, 
             ) : shipQty > 0 && ship ? (
                 <div style={{ fontWeight: 700, color: mark?.closed ? 'var(--color-danger)' : 'var(--color-accent)', lineHeight: 1.3 }}>
                     {formatNumber(shipQty, 0)}
-                    <span style={{ fontSize: 11, color: 'var(--color-muted)' }} title={PKG_LABEL[ship.pkg]}> {PKG_ICON[ship.pkg]}</span>
+                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }} title={PKG_LABEL[ship.pkg]}> {PKG_ICON[ship.pkg]}</span>
                     {mark?.closed
                         ? <span style={{ fontSize: 11 }} title="Приёмка закрыта — склад не принимает"> ⛔</span>
                         : <>
@@ -153,7 +153,7 @@ export default function NeedMatrixCell({ ship, stock = 0, asm = 0, transit = 0, 
                         </>}
                 </div>
             ) : (
-                <div style={{ color: 'var(--color-dim)', lineHeight: 1.3 }}>·</div>
+                <div style={{ color: 'var(--color-text-dim)', lineHeight: 1.3 }}>·</div>
             )}
             {stock > 0 && (
                 <div style={{ fontSize: 10, color: 'var(--color-accent)', whiteSpace: 'nowrap', lineHeight: 1.4 }} title="Остаток на Wildberries">

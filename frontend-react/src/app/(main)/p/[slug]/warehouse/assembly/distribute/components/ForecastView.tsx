@@ -227,7 +227,7 @@ export default function ForecastView({ draftId, onRemoveSkus, onToast }: Forecas
     }, [matrix, metric, sortedRows]);
 
     if (loading) {
-        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>Загрузка прогноза…</div>;
+        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка прогноза…</div>;
     }
     if (error) {
         return (
@@ -239,7 +239,7 @@ export default function ForecastView({ draftId, onRemoveSkus, onToast }: Forecas
     }
     if (!data || data.items.length === 0) {
         return (
-            <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>
+            <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>
                 Черновик пуст или нет данных об остатках — добавьте товары во вкладке «Потребность по складам».
             </div>
         );
@@ -253,37 +253,37 @@ export default function ForecastView({ draftId, onRemoveSkus, onToast }: Forecas
             {/* KPI-карточки */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
                 <div className="glass-card" style={{ padding: 20 }}>
-                    <div style={{ fontSize: 13, color: 'var(--color-muted)', marginBottom: 8 }}>Индекс локализации (КТР)</div>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>Индекс локализации (КТР)</div>
                     <div style={{ fontSize: 28, fontWeight: 700, display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                        <span style={{ color: 'var(--color-dim)' }}>{formatNumber(loc.index_current, 2)}</span>
-                        <span style={{ color: 'var(--color-muted)' }}>→</span>
+                        <span style={{ color: 'var(--color-text-dim)' }}>{formatNumber(loc.index_current, 2)}</span>
+                        <span style={{ color: 'var(--color-text-muted)' }}>→</span>
                         <span style={{ color: locImproved ? 'var(--color-success)' : 'var(--color-danger)' }}>
                             {formatNumber(loc.index_after, 2)}
                         </span>
                     </div>
-                    <div style={{ fontSize: 12, color: 'var(--color-dim)', marginTop: 4 }}>ниже = лучше</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>ниже = лучше</div>
                 </div>
                 <div className="glass-card" style={{ padding: 20 }}>
-                    <div style={{ fontSize: 13, color: 'var(--color-muted)', marginBottom: 8 }}>Доля локализации</div>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>Доля локализации</div>
                     <div style={{ fontSize: 28, fontWeight: 700, display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                        <span style={{ color: 'var(--color-dim)' }}>{formatNumber(loc.avg_loc_pct_current, 1)}%</span>
-                        <span style={{ color: 'var(--color-muted)' }}>→</span>
+                        <span style={{ color: 'var(--color-text-dim)' }}>{formatNumber(loc.avg_loc_pct_current, 1)}%</span>
+                        <span style={{ color: 'var(--color-text-muted)' }}>→</span>
                         <span style={{ color: 'var(--color-success)' }}>{formatNumber(loc.avg_loc_pct_after, 1)}%</span>
                     </div>
-                    <div style={{ fontSize: 12, color: 'var(--color-dim)', marginTop: 4 }}>спроса покрыто локально (горизонт {loc.horizon_days} дн)</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>спроса покрыто локально (горизонт {loc.horizon_days} дн)</div>
                 </div>
                 <div className="glass-card" style={{ padding: 20 }}>
-                    <div style={{ fontSize: 13, color: 'var(--color-muted)', marginBottom: 8 }}>Lead-time до WB</div>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>Lead-time до WB</div>
                     <div style={{ fontSize: 28, fontWeight: 700 }}>{formatNumber(lt.total_days, 1)} дн</div>
-                    <div style={{ fontSize: 12, color: 'var(--color-dim)', marginTop: 4 }}>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
                         сборка+отправка {formatNumber(lt.assembly_ship_days, 1)} + доставка {formatNumber(lt.delivery_days, 1)}
                         {!lt.has_history && ' (по умолчанию — нет истории)'}
                     </div>
                 </div>
                 <div className="glass-card" style={{ padding: 20 }}>
-                    <div style={{ fontSize: 13, color: 'var(--color-muted)', marginBottom: 8 }}>Входит в поставку</div>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>Входит в поставку</div>
                     <div style={{ fontSize: 28, fontWeight: 700 }}>{formatNumber(summary.total_incoming, 0)} шт</div>
-                    <div style={{ fontSize: 12, color: 'var(--color-dim)', marginTop: 4 }}>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
                         {formatNumber(summary.sku_count, 0)} SKU · {formatNumber(summary.warehouse_count, 0)} складов
                     </div>
                 </div>
@@ -291,7 +291,7 @@ export default function ForecastView({ draftId, onRemoveSkus, onToast }: Forecas
 
             {/* Светофор-итоги */}
             <div className="glass-card" style={{ padding: 16, display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'center' }}>
-                <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>Запас после поставки (склад×SKU):</span>
+                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Запас после поставки (склад×SKU):</span>
                 {LIGHT_ORDER.map((l) => (
                     <span key={l} style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                         <Dot light={l} />
@@ -306,7 +306,7 @@ export default function ForecastView({ draftId, onRemoveSkus, onToast }: Forecas
                 <div style={{ overflowX: 'auto' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                         <thead>
-                            <tr style={{ textAlign: 'right', color: 'var(--color-muted)' }}>
+                            <tr style={{ textAlign: 'right', color: 'var(--color-text-muted)' }}>
                                 <th style={{ textAlign: 'left', padding: '6px 8px' }}>Округ</th>
                                 <th style={{ padding: '6px 8px' }}>Спрос ({loc.horizon_days} дн)</th>
                                 <th style={{ padding: '6px 8px' }}>Покрытие сейчас</th>
@@ -319,11 +319,11 @@ export default function ForecastView({ draftId, onRemoveSkus, onToast }: Forecas
                                 <tr key={d.district} style={{ borderTop: '1px solid var(--color-border)' }}>
                                     <td style={{ textAlign: 'left', padding: '6px 8px' }}>{d.label}</td>
                                     <td style={{ textAlign: 'right', padding: '6px 8px' }}>{formatNumber(d.demand, 0)}</td>
-                                    <td style={{ textAlign: 'right', padding: '6px 8px', color: 'var(--color-dim)' }}>{formatNumber(d.avail_current, 0)}</td>
+                                    <td style={{ textAlign: 'right', padding: '6px 8px', color: 'var(--color-text-dim)' }}>{formatNumber(d.avail_current, 0)}</td>
                                     <td style={{ textAlign: 'right', padding: '6px 8px' }}>{formatNumber(d.avail_after, 0)}</td>
                                     <td style={{ textAlign: 'right', padding: '6px 8px' }}>
-                                        <span style={{ color: 'var(--color-dim)' }}>{formatNumber(d.local_pct_current, 0)}%</span>
-                                        <span style={{ color: 'var(--color-muted)' }}> → </span>
+                                        <span style={{ color: 'var(--color-text-dim)' }}>{formatNumber(d.local_pct_current, 0)}%</span>
+                                        <span style={{ color: 'var(--color-text-muted)' }}> → </span>
                                         <strong style={{ color: 'var(--color-success)' }}>{formatNumber(d.local_pct_after, 0)}%</strong>
                                     </td>
                                 </tr>
@@ -381,7 +381,7 @@ export default function ForecastView({ draftId, onRemoveSkus, onToast }: Forecas
                         />
                     </label>
                     {illiquidOnly && (
-                        <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>
+                        <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
                             найдено: <strong>{formatNumber(sortedRows.length, 0)}</strong> SKU
                         </span>
                     )}
@@ -435,10 +435,10 @@ export default function ForecastView({ draftId, onRemoveSkus, onToast }: Forecas
                                         {r.vendor || `nm:${r.nm_id}`}
                                     </td>
                                     <td style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap', borderBottom: '1px solid var(--color-border)' }}>
-                                        {r.locAfter == null ? <span style={{ color: 'var(--color-dim)' }}>—</span> : (
+                                        {r.locAfter == null ? <span style={{ color: 'var(--color-text-dim)' }}>—</span> : (
                                             <>
-                                                <span style={{ color: 'var(--color-dim)' }}>{formatNumber(r.locCur ?? 0, 0)}%</span>
-                                                <span style={{ color: 'var(--color-muted)' }}> → </span>
+                                                <span style={{ color: 'var(--color-text-dim)' }}>{formatNumber(r.locCur ?? 0, 0)}%</span>
+                                                <span style={{ color: 'var(--color-text-muted)' }}> → </span>
                                                 <strong style={{ color: (r.locAfter > (r.locCur ?? 0)) ? 'var(--color-success)' : 'var(--color-text)' }}>{formatNumber(r.locAfter, 0)}%</strong>
                                             </>
                                         )}
@@ -452,7 +452,7 @@ export default function ForecastView({ draftId, onRemoveSkus, onToast }: Forecas
                                     {matrix.columns.map((w) => {
                                         const it = matrix.cell.get(`${r.nm_id}::${w.warehouse_name}`);
                                         if (!it) {
-                                            return <td key={w.warehouse_name} style={{ padding: '8px', textAlign: 'right', color: 'var(--color-dim)', borderBottom: '1px solid var(--color-border)' }}>·</td>;
+                                            return <td key={w.warehouse_name} style={{ padding: '8px', textAlign: 'right', color: 'var(--color-text-dim)', borderBottom: '1px solid var(--color-border)' }}>·</td>;
                                         }
                                         const val = metricValue(it, metric);
                                         const isDays = metric === 'days';
@@ -497,7 +497,7 @@ export default function ForecastView({ draftId, onRemoveSkus, onToast }: Forecas
                             </tr>
                         </tfoot>
                     </table>
-                    <div style={{ padding: '10px 12px', fontSize: 12, color: 'var(--color-muted)', display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <div style={{ padding: '10px 12px', fontSize: 12, color: 'var(--color-text-muted)', display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
                         {metric === 'days' && LIGHT_ORDER.map((l) => <Dot key={l} light={l} />)}
                         {metric === 'stock_in' && <span>ячейка: остаток <span style={{ color: 'var(--color-accent)' }}>+входящая</span></span>}
                         <span>· 🆕 — новинка · наведи на ячейку для деталей</span>

@@ -815,7 +815,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
         const groups: { label: string; color: string; count: number }[] = [];
         for (const c of wbCols) {
             const label = DISTRICT_LABELS[c.district] || 'Прочие';
-            const color = DISTRICT_COLORS[c.district] || 'var(--color-muted)';
+            const color = DISTRICT_COLORS[c.district] || 'var(--color-text-muted)';
             const last = groups[groups.length - 1];
             if (last && last.label === label) last.count++;
             else groups.push({ label, color, count: 1 });
@@ -1529,7 +1529,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
 
     // ─── States ────────────────────────────────────────────────────────────
     if (loading) {
-        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>Загрузка потребности и остатков ФФ…</div>;
+        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка потребности и остатков ФФ…</div>;
     }
     if (error) {
         return (
@@ -1540,7 +1540,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
         );
     }
     if (articles.length === 0 && draftAll.length === 0) {
-        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>Черновик пуст, и свободного остатка на ФФ нет.</div>;
+        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>Черновик пуст, и свободного остатка на ФФ нет.</div>;
     }
 
     // Спиннер — только на ПЕРВИЧНом расчёте (distRows===null). Пересчёт при клике степпера
@@ -1557,7 +1557,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                 <div className="glass-card" style={{ padding: 12, marginBottom: 16 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
                         <span style={{ fontWeight: 700, color: 'var(--color-warning)' }}>🧩 Без кратности короба — {formatNumber(noKratnostArticles.length, 0)} арт.</span>
-                        <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>
+                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                             кратность короба не задана → отгружать нечем (россыпь запрещена), остаются на ФФ; укажите кратность на вкладке «Кратность»
                         </span>
                     </div>
@@ -1580,13 +1580,13 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                 <span>📦 Коробов: <b style={{ fontSize: 18 }}>{formatNumber(draftAgg.totalBoxes, 0)}</b></span>
                 <span>🚚 Паллет: <b style={{ fontSize: 18 }}>{formatNumber(draftAgg.totalPallets, 0)}</b></span>
                 {draftPrebookUnits > 0 && (
-                    <span style={{ color: 'var(--color-muted)' }} title="Часть плана черновика, лежащая в предброни (хвосты < паллеты). Входит в общую сумму — здесь всё единым числом.">
+                    <span style={{ color: 'var(--color-text-muted)' }} title="Часть плана черновика, лежащая в предброни (хвосты < паллеты). Входит в общую сумму — здесь всё единым числом.">
                         в т.ч. 🅿️ {formatNumber(draftPrebookUnits, 0)} шт
                     </span>
                 )}
-                <span style={{ color: 'var(--color-muted)' }}>На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
+                <span style={{ color: 'var(--color-text-muted)' }}>На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center' }}>
-                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }} title="План сам синхронизируется с живым расчётом при заходе (need-канал + новинки cold-start с гвардом пересорта): целые паллеты → строки, хвосты → предбронь. ✋ ручные SKU (правленные степпером/✕) авто-синк не трогает — вернуть SKU в авто можно кнопкой ↺ на его строке.">
+                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }} title="План сам синхронизируется с живым расчётом при заходе (need-канал + новинки cold-start с гвардом пересорта): целые паллеты → строки, хвосты → предбронь. ✋ ручные SKU (правленные степпером/✕) авто-синк не трогает — вернуть SKU в авто можно кнопкой ↺ на его строке.">
                         {computing ? 'расчёт от потребности…' : `авто-синк с расчётом включён${manualNms.size > 0 ? ` · ✋ ручных SKU: ${formatNumber(manualNms.size, 0)}` : ''}`}
                     </span>
                     <button className="btn btn-primary" onClick={() => runAutoSync('manual')} disabled={writing || computing}>
@@ -1617,7 +1617,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                             </span>
                         )}
                     </div>
-                    <div style={{ color: 'var(--color-muted)', fontSize: 13 }}>
+                    <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
                         Таблица показывает <b style={{ color: 'var(--color-text)' }}>черновик</b>: строки и 🅿️ предбронь каждого SKU единой суммой (ячейки с предбронью подсвечены, доля — в подсказке «Σ отпр.»).
                         Правки степперами сохраняются в черновик сразу (план нормализуется: целые паллеты → строки-заявки, хвост меньше паллеты → 🅿️ предбронь; ✋ при этом сохраняется); ✕ убирает SKU целиком.
                         План <b style={{ color: 'var(--color-text)' }}>сам синхронизируется</b> с живым расчётом при заходе (need-канал + новинки cold-start с гвардом пересорта ⚠): целые паллеты → строки, хвосты → предбронь. SKU, правленный руками, помечается ✋ и авто-синком не трогается (↺ на строке возвращает в авто); «⟳ Обновить сейчас» — форс-синк без перезахода.
@@ -1625,7 +1625,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                         Колонка <b style={{ color: 'var(--color-text)' }}>«Расчёт»</b> — что предлагает живой расчёт (для сравнения с планом).
                     </div>
                     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
-                        <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>🔎 Фильтр:</span>
+                        <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>🔎 Фильтр:</span>
                         <input className="form-input" style={{ maxWidth: 220 }} type="search" value={filterQuery}
                             onChange={(e) => setFilterQuery(e.target.value)} placeholder="Артикул / ШК / nm" />
                         <select className="form-input" style={{ maxWidth: 240 }} value={filterSubject} onChange={(e) => setFilterSubject(e.target.value)}>
@@ -1653,7 +1653,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                         {isFiltered && (
                             <>
                                 <button className="btn btn-sm btn-secondary" onClick={() => { setFilterQuery(''); setFilterSubject(''); setFilterBrand(''); setFilterFf(''); setFilterKind(''); setHideEmpty(false); }}>Сбросить фильтр</button>
-                                <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>показано {formatNumber(visibleRows.length, 0)} из {formatNumber(sortedRows.length, 0)}</span>
+                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>показано {formatNumber(visibleRows.length, 0)} из {formatNumber(sortedRows.length, 0)}</span>
                             </>
                         )}
                         {ffSliceActive && ffFilterId != null && (
@@ -1670,7 +1670,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                 </div>
 
                 {draftAgg.totalShip === 0 && !editMode && sortedRows.length === 0 ? (
-                    <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
+                    <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>
                         Черновик пуст и свободного остатка на ФФ нет.
                     </div>
                 ) : (
@@ -1686,7 +1686,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                                     ))}
                                     <th colSpan={3} />
                                 </tr>
-                                <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-muted)', textAlign: 'right' }}>
+                                <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-muted)', textAlign: 'right' }}>
                                     <th style={{ padding: '8px 12px', textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2, ...sortableTh }} onClick={() => toggleSort('label')} title="Сортировать по названию">Товар{sortArrow('label')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('avail')} title="Сортировать по остатку на ФФ">На ФФ{sortArrow('avail')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('inAssembly')} title="Уже в сборке на WB">В сборке{sortArrow('inAssembly')}</th>
@@ -1729,7 +1729,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                                 </tr>
                                 <tr style={{ borderBottom: '2px solid var(--color-border)', fontWeight: 700, background: 'rgba(59,130,246,0.06)', textAlign: 'right' }}>
                                     <td style={{ padding: '6px 12px', textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }}>
-                                        Сдаём <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--color-muted)' }}>шт · кор</span>
+                                        Сдаём <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--color-text-muted)' }}>шт · кор</span>
                                     </td>
                                     <td colSpan={7} />
                                     {wbCols.map((c) => {
@@ -1738,13 +1738,13 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                                         return (
                                             <td key={c.name} style={{ padding: '6px 8px', background: districtTint(c.district) }} title={`${formatNumber(u, 0)} штук · ${formatNumber(bx, 0)} коробов`}>
                                                 <div style={{ color: 'var(--color-accent)' }}>{u > 0 ? `${formatNumber(u, 0)} шт` : '·'}</div>
-                                                {bx > 0 && <div style={{ fontWeight: 400, fontSize: 11, color: 'var(--color-muted)' }}>{formatNumber(bx, 0)} кор</div>}
+                                                {bx > 0 && <div style={{ fontWeight: 400, fontSize: 11, color: 'var(--color-text-muted)' }}>{formatNumber(bx, 0)} кор</div>}
                                             </td>
                                         );
                                     })}
                                     <td style={{ padding: '6px 8px', color: 'var(--color-accent)' }} title="Всего штук в черновике (строки + предбронь)">{formatNumber(matrixView.totalShip, 0)} шт</td>
-                                    <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Всего коробов">{formatNumber(matrixView.totalBoxes, 0)} кор</td>
-                                    <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Остаётся на хранении ФФ">{formatNumber(matrixViewOnHold, 0)}</td>
+                                    <td style={{ padding: '6px 8px', color: 'var(--color-text-muted)' }} title="Всего коробов">{formatNumber(matrixView.totalBoxes, 0)} кор</td>
+                                    <td style={{ padding: '6px 8px', color: 'var(--color-text-muted)' }} title="Остаётся на хранении ФФ">{formatNumber(matrixViewOnHold, 0)}</td>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1781,7 +1781,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                                                     )}
                                                     {ppb ? <span className="badge badge-secondary" style={{ fontSize: 10, padding: '1px 6px' }}>📦 кратно {formatNumber(ppb, 0)}</span> : <span className="badge" style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>без кратности</span>}
                                                 </div>
-                                                <div style={{ fontSize: 11, color: 'var(--color-muted)' }}>{a.subject ? `${a.subject} · ` : ''}ШК {a.barcode}</div>
+                                                <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{a.subject ? `${a.subject} · ` : ''}ШК {a.barcode}</div>
                                             </td>
                                             <td style={{ padding: '6px 8px', textAlign: 'right' }}
                                                 title={reservedForBarcode(reserved, a.barcode) > 0
@@ -1792,8 +1792,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                                                     <div style={{ fontSize: 10, color: 'var(--color-warning)' }}>🔒 −{formatNumber(reservedForBarcode(reserved, a.barcode), 0)} др. черновик</div>
                                                 )}
                                             </td>
-                                            <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.inAssembly > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.inAssembly > 0 ? formatNumber(e.inAssembly, 0) : '·'}</td>
-                                            <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.stocksWb > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.stocksWb > 0 ? formatNumber(e.stocksWb, 0) : '·'}</td>
+                                            <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.inAssembly > 0 ? 'var(--color-text)' : 'var(--color-text-dim)' }}>{e && e.inAssembly > 0 ? formatNumber(e.inAssembly, 0) : '·'}</td>
+                                            <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.stocksWb > 0 ? 'var(--color-text)' : 'var(--color-text-dim)' }}>{e && e.stocksWb > 0 ? formatNumber(e.stocksWb, 0) : '·'}</td>
                                             {(() => {
                                                 const days = a.wb_days_left == null ? null : Number(a.wb_days_left);
                                                 const leadDays = Number(a.lead_days) || 0;
@@ -1802,10 +1802,10 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                                                 const daysInbound = a.wb_days_left_inbound == null ? null : Number(a.wb_days_left_inbound);
                                                 // Красный: остатка меньше, чем едет поставка → разрыв стока
                                                 // неизбежен без немедленной отгрузки. Янтарный: впритык.
-                                                const daysColor = days == null ? 'var(--color-dim)'
+                                                const daysColor = days == null ? 'var(--color-text-dim)'
                                                     : days < leadDays ? 'var(--color-danger)'
                                                     : days < leadDays + 7 ? 'var(--color-warning)'
-                                                    : 'var(--color-muted)';
+                                                    : 'var(--color-text-muted)';
                                                 return (
                                                     <td style={{ padding: '6px 8px', textAlign: 'right', color: daysColor, fontWeight: days != null && days < leadDays ? 700 : 400, whiteSpace: 'nowrap' }}
                                                         title={days == null
@@ -1824,15 +1824,15 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                                                 const locPct = loc ? Number(loc.loc_pct) || 0 : null;
                                                 return (
                                                     <>
-                                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: needQty > 0 ? 'var(--color-text)' : 'var(--color-dim)', whiteSpace: 'nowrap' }}
+                                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: needQty > 0 ? 'var(--color-text)' : 'var(--color-text-dim)', whiteSpace: 'nowrap' }}
                                                             title={`Раскладочная потребность: Σ локальных дефицитов складов (излишек чужого ФО спрос региона не закрывает). Нетто по сети (к закупке): ${formatNumber(netNeed, 0)} шт`}>
                                                             {needQty > 0 ? formatNumber(needQty, 0) : '·'}
                                                             {growth >= 1.3 && (
                                                                 <span style={{ fontSize: 10, color: 'var(--color-warning)' }} title={`Растущий SKU: скорость последних дней ×${formatNumber(growth, 1)} к среднему за окно — потребность посчитана по ускоренному темпу`}> ⚡×{formatNumber(growth, 1)}</span>
                                                             )}
                                                         </td>
-                                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: rev > 0 ? 'var(--color-muted)' : 'var(--color-dim)' }}>{rev > 0 ? formatNumber(rev, 0) : '·'}</td>
-                                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: locPct != null ? (LOC_STATUS_COLOR[loc!.status] || 'var(--color-text)') : 'var(--color-dim)' }}
+                                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: rev > 0 ? 'var(--color-text-muted)' : 'var(--color-text-dim)' }}>{rev > 0 ? formatNumber(rev, 0) : '·'}</td>
+                                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: locPct != null ? (LOC_STATUS_COLOR[loc!.status] || 'var(--color-text)') : 'var(--color-text-dim)' }}
                                                             title={loc ? `Заказов 14д: ${formatNumber(loc.total, 0)} · локальных: ${formatNumber(loc.local, 0)} · КТР ${formatNumber(Number(loc.ktr), 2)}` : 'Нет данных локализации за окно 14 дней'}>
                                                             {locPct != null ? `${formatNumber(locPct, 0)}%` : '·'}
                                                         </td>
@@ -1891,7 +1891,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                                                 );
                                             })()}
                                             <td style={{ padding: '6px 8px', textAlign: 'right' }}>{rowBoxes > 0 ? formatNumber(rowBoxes, 0) : '·'}</td>
-                                            <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-muted)', whiteSpace: 'nowrap' }}>
+                                            <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
                                                 {formatNumber(stays, 0)}
                                                 {!!ppb && ppb > 0 && stays >= ppb && (
                                                     <button type="button" className="badge"
@@ -1906,7 +1906,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                                 })}
                                 {visibleRows.length === 0 && (
                                     <tr>
-                                        <td colSpan={wbCols.length + 11} style={{ padding: 24, textAlign: 'center', color: 'var(--color-muted)' }}>
+                                        <td colSpan={wbCols.length + 11} style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
                                             Ничего не найдено по выбранному фильтру
                                         </td>
                                     </tr>
@@ -1922,7 +1922,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                                     <td style={{ padding: '8px 8px', textAlign: 'right' }}>{formatNumber(matrixView.totalShip, 0)}</td>
                                     <td colSpan={2} />
                                 </tr>
-                                <tr style={{ color: 'var(--color-muted)' }}>
+                                <tr style={{ color: 'var(--color-text-muted)' }}>
                                     <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>📦 Коробов</td>
                                     <td colSpan={7} />
                                     {wbCols.map((c) => (
@@ -1931,7 +1931,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                                     <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.totalBoxes, 0)}</td>
                                     <td colSpan={2} />
                                 </tr>
-                                <tr style={{ color: 'var(--color-muted)' }}>
+                                <tr style={{ color: 'var(--color-text-muted)' }}>
                                     <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>🚚 Паллет</td>
                                     <td colSpan={7} />
                                     {wbCols.map((c) => (

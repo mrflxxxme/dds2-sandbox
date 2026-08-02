@@ -305,10 +305,10 @@ export default function CreatedRequestsModal({ slug, rows, listQuery, onClose }:
             <div className="modal-card modal-card-solid" style={{ width: 860, maxWidth: '100%', maxHeight: '85vh', overflow: 'auto', padding: 20 }} onClick={e => e.stopPropagation()}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
                     <h3 style={{ margin: 0, fontSize: 16 }}>✅ Создано заявок: {formatNumber(rows.length, 0)}</h3>
-                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>{formatNumber(totals.qty, 0)} шт</span>
+                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{formatNumber(totals.qty, 0)} шт</span>
                     <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={onClose} disabled={busy}>✕</button>
                 </div>
-                <div style={{ fontSize: 12, color: 'var(--color-muted)', marginBottom: 12 }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
                     Отсюда можно сразу завести WB-поставку (преордер кабинета) и заявку ФФ — по строке или для всех.
                 </div>
                 {wbSession && wbSession !== 'ACTIVE' && (
@@ -319,11 +319,11 @@ export default function CreatedRequestsModal({ slug, rows, listQuery, onClose }:
                 {/* Параметры заявок ФФ + массовые действия */}
                 <div style={{ display: 'flex', alignItems: 'flex-end', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
                     <div className="form-group" style={{ margin: 0 }}>
-                        <label style={{ fontSize: 11, color: 'var(--color-muted)' }}>Дата забора (ФФ)</label>
+                        <label style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Дата забора (ФФ)</label>
                         <input className="form-input" type="date" value={collectionDate} onChange={e => setCollectionDate(e.target.value)} style={{ width: 150 }} />
                     </div>
                     <div className="form-group" style={{ margin: 0 }}>
-                        <label style={{ fontSize: 11, color: 'var(--color-muted)' }}>Доставка (ФФ)</label>
+                        <label style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Доставка (ФФ)</label>
                         <select className="form-input" value={deliveryType} onChange={e => setDeliveryType(e.target.value as 'straight' | 'cross_dock')} style={{ width: 150 }}>
                             <option value="straight">Прямая</option>
                             <option value="cross_dock">Кросс-док</option>
@@ -341,7 +341,7 @@ export default function CreatedRequestsModal({ slug, rows, listQuery, onClose }:
                 </div>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                     <thead>
-                        <tr style={{ color: 'var(--color-muted)', fontSize: 11, textAlign: 'left' }}>
+                        <tr style={{ color: 'var(--color-text-muted)', fontSize: 11, textAlign: 'left' }}>
                             <th style={{ padding: '6px 8px' }}>Заявка</th>
                             <th style={{ padding: '6px 8px' }}>ФФ (забор)</th>
                             <th style={{ padding: '6px 8px' }}>Склад WB (сдача)</th>
@@ -373,7 +373,7 @@ export default function CreatedRequestsModal({ slug, rows, listQuery, onClose }:
                                             if (mode === 'portal') return <span className="badge badge-info" title="Оператор ФФ работает в нашей системе — сборка уже видна в его портале (+Telegram-уведомление). Отдельная заявка ФФ не нужна.">🖥 портал ФФ</span>;
                                             if (mode === 'provider') return <span className="badge badge-secondary" title="Провайдер этого склада не поддерживает создание заявок из DDS — создай в кабинете ФФ">⚙ вручную у ФФ</span>;
                                             if (mode === 'none') return <span className="badge badge-secondary" title="У склада нет интеграции ФФ — заявка не создаётся">без интеграции</span>;
-                                            return <span style={{ color: 'var(--color-dim)', fontSize: 12 }}>…</span>;
+                                            return <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>…</span>;
                                         })()}
                                         {(ff?.st === 'error' || ff?.st === 'warn') && (
                                             // Ретрай: Натали — через превью (там же force_resend для «уже отправлялась»), bulk — повторный пуш.
@@ -522,21 +522,21 @@ function NataliBatchModal({ rows, onClose, onRowResult }: {
             <div className="modal-card modal-card-solid" style={{ width: 720, maxWidth: '100%', maxHeight: '85vh', overflow: 'auto', padding: 20 }} onClick={e => e.stopPropagation()}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
                     <h3 style={{ margin: 0, fontSize: 16 }}>📋 Отправка в портал ФФ Натали</h3>
-                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>{formatNumber(rows.length, 0)} заявок</span>
+                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{formatNumber(rows.length, 0)} заявок</span>
                     <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={onClose} disabled={busySend}>✕</button>
                 </div>
                 <div style={{ padding: '8px 12px', borderRadius: 12, background: 'color-mix(in srgb, var(--color-warning) 12%, transparent)', color: 'var(--color-warning)', fontSize: 12, marginBottom: 10 }}>
                     ⚠ Отправка необратима: отменить или удалить заявку в портале Натали нельзя. До кнопки «Отправить» наружу ничего не уходит.
                 </div>
                 {phase === 'loading' ? (
-                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-muted)', fontSize: 13 }}>
+                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 13 }}>
                         ⏳ Готовлю описи… {formatNumber(loadedCount, 0)} / {formatNumber(rows.length, 0)}
                     </div>
                 ) : (
                     <>
                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                             <thead>
-                                <tr style={{ color: 'var(--color-muted)', fontSize: 11, textAlign: 'left' }}>
+                                <tr style={{ color: 'var(--color-text-muted)', fontSize: 11, textAlign: 'left' }}>
                                     <th style={{ padding: '6px 8px' }} />
                                     <th style={{ padding: '6px 8px' }}>Заявка</th>
                                     <th style={{ padding: '6px 8px' }}>Склад WB</th>
@@ -590,7 +590,7 @@ function NataliBatchModal({ rows, onClose, onRowResult }: {
                             {phase === 'review' && (
                                 <>
                                     <button className="btn btn-secondary btn-sm" onClick={selectCleanOnly} title="Оставить в батче только заявки, где вся опись целыми коробами">✓ Только коробами</button>
-                                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>
+                                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                                         Выбрано: {formatNumber(selected.size, 0)} · {formatNumber(totals.boxes, 0)} кор · {formatNumber(totals.pieces, 0)} шт
                                     </span>
                                     <span style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
@@ -601,7 +601,7 @@ function NataliBatchModal({ rows, onClose, onRowResult }: {
                                     </span>
                                 </>
                             )}
-                            {phase === 'sending' && <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>⏳ Отправляю по одной — не закрывай окно…</span>}
+                            {phase === 'sending' && <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>⏳ Отправляю по одной — не закрывай окно…</span>}
                             {phase === 'done' && (
                                 <button className="btn btn-primary btn-sm" style={{ marginLeft: 'auto' }} onClick={onClose}>Готово</button>
                             )}
