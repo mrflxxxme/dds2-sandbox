@@ -374,6 +374,11 @@ class StockTransferSchema(BaseModel):
     #: `uq_outbound_shipments_stock_transfer`, а вторая копия FK разъезжается.
     pickup_shipment_id: int | None = None
     pickup_shipment_number: str | None = None
+    #: Локальный архив — РУЧНОЕ решение человека убрать переезд из рабочих
+    #: списков. Не путать с видом «Архив», который вычисляется по статусу:
+    #: живой по статусу переезд может быть архивным, и наоборот.
+    archived: bool = False
+    archived_at: datetime | None = None
 
 
 class TransferAssignVehicle(BaseModel):

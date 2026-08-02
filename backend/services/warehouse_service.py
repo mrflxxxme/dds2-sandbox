@@ -53,6 +53,7 @@ from backend.services.warehouse_outbound import (  # noqa: F401
     mark_transfer_ready,
     return_transfer,
     send_transfer,
+    set_transfer_archived,
     ship_shipment,
     unassign_vehicle_transfer,
     update_transfer,

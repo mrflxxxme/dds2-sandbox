@@ -548,6 +548,7 @@ async def list_transfers(
     status_in: list[str] | None = None,
     has_vehicle: bool | None = None,
     has_pickup_cost: bool | None = None,
+    archived: bool | None = None,
     converted_from_assembly_id: int | None = None,
 ) -> list:
     """List transfers. Optionally filter only SHIPPED (в пути) and/or by warehouse (source OR destination).
@@ -613,6 +614,11 @@ async def list_transfers(
         query = query.where(
             or_(StockTransfer.pickup_cost.is_(None), StockTransfer.pickup_cost == 0)
         )
+    # Локальный архив. None = «не фильтровать» (вид «Все»); False — рабочий
+    # список; True — только убранное человеком. Дефолт намеренно None, а не
+    # False: список переездов читают и отчёты, которым архив прятать нельзя.
+    if archived is not None:
+        query = query.where(StockTransfer.archived == archived)
     if converted_from_assembly_id is not None:
         query = query.where(
             StockTransfer.converted_from_assembly_id == converted_from_assembly_id
@@ -2352,6 +2358,37 @@ async def return_transfer(
         invalidate_cache("reports:warehouse_need"),
         invalidate_cache("reports:assembly_link_anomalies"),
     )
+    await db.refresh(transfer, ["items"])
+    await _attach_transfer_labels(db, project_id, [transfer])
+    return transfer
+
+
+async def set_transfer_archived(
+    db: AsyncSession,
+    project_id: int,
+    transfer_id: int,
+    archived: bool,
+) -> StockTransfer:
+    """Локальный архив переезда — зеркало `fulfillment_service.archive_request`.
+
+    🔴 Статус НЕ трогает и сток НЕ двигает: архив — это «убрать с глаз», а не
+    состояние документа. Архивный переезд по-прежнему виден в отчётах, в
+    остатках и в «Оплатах» — его сток реально уехал, и прятать деньги вместе с
+    карточкой значило бы потерять их из сводок.
+
+    Не soft-delete по той же причине: `soft_delete()` выключил бы переезд из
+    ВСЕХ выборок, включая денежные.
+
+    Идемпотентно: повторный вызов не сдвигает `archived_at` (момент решения
+    человека — факт, а не «когда последний раз нажали»).
+    """
+    transfer = await _get_transfer_locked(db, project_id, transfer_id)
+    if not transfer:
+        raise ValueError("Перемещение не найдено")
+    if transfer.archived != archived:
+        transfer.archived = archived
+        transfer.archived_at = utcnow() if archived else None
+        await db.commit()
     await db.refresh(transfer, ["items"])
     await _attach_transfer_labels(db, project_id, [transfer])
     return transfer

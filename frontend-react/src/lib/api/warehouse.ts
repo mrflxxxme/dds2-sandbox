@@ -221,6 +221,8 @@ export function addWarehouseMethods(api: ApiClient) {
                 hasVehicle?: boolean;
                 /** false — стоимость забора не заполнена (переезд не доехал до оплат). */
                 hasPickupCost?: boolean;
+                /** Локальный архив: не задан — все, false — рабочие, true — архив. */
+                archived?: boolean;
             },
         ) {
             const qs = new URLSearchParams({ in_transit: String(inTransitOnly) });
@@ -229,6 +231,7 @@ export function addWarehouseMethods(api: ApiClient) {
             if (opts?.statuses?.length) qs.set('status_in', opts.statuses.join(','));
             if (opts?.hasVehicle !== undefined) qs.set('has_vehicle', String(opts.hasVehicle));
             if (opts?.hasPickupCost !== undefined) qs.set('has_pickup_cost', String(opts.hasPickupCost));
+            if (opts?.archived !== undefined) qs.set('archived', String(opts.archived));
             return api.request<StockTransfer[]>('GET', `/api/v1/warehouse/transfers?${qs.toString()}`);
         },
         /**
@@ -364,6 +367,17 @@ export function addWarehouseMethods(api: ApiClient) {
          */
         assignTransferVehicleBulk(ids: number[], payload: TransferAssignVehiclePayload) {
             return api.request<StockTransfer[]>('POST', '/api/v1/warehouse/transfers/assign-vehicle-bulk', { ids, payload });
+        },
+        /**
+         * POST/DELETE /warehouse/transfers/{id}/archive — локальный архив.
+         * Статус и сток не трогает: переезд просто уходит из рабочих списков,
+         * оставаясь в отчётах и в «Оплатах».
+         */
+        archiveTransfer(transferId: number) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/archive`);
+        },
+        unarchiveTransfer(transferId: number) {
+            return api.request<StockTransfer>('DELETE', `/api/v1/warehouse/transfers/${transferId}/archive`);
         },
         /** POST /warehouse/transfers/{id}/unassign-vehicle — снять машину: VEHICLE_ASSIGNED → READY. */
         unassignTransferVehicle(transferId: number) {

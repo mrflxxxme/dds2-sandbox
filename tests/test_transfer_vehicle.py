@@ -39,6 +39,7 @@ from backend.schemas.warehouse import (
 )
 from backend.services.warehouse_crud import create_warehouse
 from backend.services.warehouse_inbound import accept_receipt, create_receipt
+from backend.services import warehouse_outbound
 from backend.services.warehouse_outbound import (
     assign_vehicle_transfer as _assign_vehicle_raw,
     cancel_shipment,
@@ -2685,3 +2686,68 @@ class TestGazelkaTransferUnmatchReleasesGuard:
             )
         ).scalar_one()
         assert row.status == GazelkaOrderStatus.CANCELLED
+
+
+class TestTransferArchive:
+    """Локальный архив: «убрать с глаз», не трогая ни статус, ни сток, ни деньги."""
+
+    async def test_archive_does_not_touch_status_or_stock(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        await _stock(db_session, project, src_wh, barcode, 100)
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": src_wh.id,
+                "to_warehouse_id": dst_wh.id,
+                "items": [{"barcode": barcode, "quantity": 10}],
+            },
+        )
+        before = transfer.status
+
+        archived = await warehouse_outbound.set_transfer_archived(
+            db_session, project.id, transfer.id, True
+        )
+        assert archived.archived is True
+        assert archived.archived_at is not None
+        # Статус не сдвинулся — архив это не ступень цепочки.
+        assert archived.status == before
+
+        stamp = archived.archived_at
+        # Идемпотентность: повторный вызов не переписывает момент решения.
+        again = await warehouse_outbound.set_transfer_archived(
+            db_session, project.id, transfer.id, True
+        )
+        assert again.archived_at == stamp
+
+        back = await warehouse_outbound.set_transfer_archived(
+            db_session, project.id, transfer.id, False
+        )
+        assert back.archived is False
+        assert back.archived_at is None
+        assert back.status == before
+
+    async def test_archived_filter_splits_list(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """`archived=None` отдаёт всё — этим живут отчёты; True/False делят список."""
+        await _stock(db_session, project, src_wh, barcode, 100)
+        payload = {
+            "from_warehouse_id": src_wh.id,
+            "to_warehouse_id": dst_wh.id,
+            "items": [{"barcode": barcode, "quantity": 5}],
+        }
+        keep = await create_transfer(db_session, project.id, dict(payload))
+        hide = await create_transfer(db_session, project.id, dict(payload))
+        await warehouse_outbound.set_transfer_archived(db_session, project.id, hide.id, True)
+
+        all_ids = {t.id for t in await warehouse_outbound.list_transfers(db_session, project.id)}
+        assert {keep.id, hide.id} <= all_ids
+
+        working = await warehouse_outbound.list_transfers(db_session, project.id, archived=False)
+        assert hide.id not in {t.id for t in working}
+        assert keep.id in {t.id for t in working}
+
+        archived = await warehouse_outbound.list_transfers(db_session, project.id, archived=True)
+        assert {t.id for t in archived} == {hide.id}

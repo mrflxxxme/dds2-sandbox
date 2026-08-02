@@ -489,6 +489,23 @@ class StockTransfer(Base, TimestampMixin, SoftDeleteMixin):
     delivery_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     vehicle_assigned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # ─── Локальный архив ──────────────────────────────────────────────────
+    # Ручное «убрать с глаз» — ЗЕРКАЛО `FulfillmentRequest.local_archived`.
+    #
+    # 🔴 Это НЕ то же, что вид «Архив» в списке: тот вычисляется по статусу
+    # (DELIVERED / CLOSED / CANCELLED + брак) и убирает завершённое само. Здесь
+    # решение ЧЕЛОВЕКА: переезд может быть жив по статусу, но работать с ним
+    # больше не собираются (создали по ошибке, дубль, отложили насовсем) — и он
+    # мозолит глаза в рабочем списке. Обратное тоже верно: архивный по статусу
+    # переезд бывает нужен на виду, пока с ним не закрыты деньги.
+    #
+    # Не soft-delete: архивный переезд остаётся в отчётах и в остатках —
+    # его сток реально уехал. Прячется только из рабочих списков.
+    archived: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     # Переезд, созданный ИЗ заявки на сборку («Переделать в перемещение»).
     # Кейс: ФФ собрал заявку, но товар едет не на WB, а на транзитный склад
     # (в т.ч. после возврата «WB не принял» — ASM-807 → возврат IN-232 →

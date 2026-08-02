@@ -692,6 +692,8 @@ async def list_transfers(
     status_in: str | None = Query(None),
     has_vehicle: bool | None = Query(None),
     has_pickup_cost: bool | None = Query(None),
+    # Локальный архив: не передан — «Все», false — рабочий список, true — архив.
+    archived: bool | None = Query(None),
     converted_from_assembly_id: int | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -724,6 +726,7 @@ async def list_transfers(
         status_in=statuses,
         has_vehicle=has_vehicle,
         has_pickup_cost=has_pickup_cost,
+        archived=archived,
         converted_from_assembly_id=converted_from_assembly_id,
     )
     return [StockTransferSchema.model_validate(r) for r in rows]
@@ -1056,6 +1059,50 @@ async def return_transfer(
     try:
         transfer = await warehouse_service.return_transfer(
             db, project.id, transfer_id, comment=payload.comment if payload else None
+        )
+        return StockTransferSchema.model_validate(transfer)
+    except ValueError as e:
+        raise _transfer_error(e) from None
+
+
+@router.post(
+    "/transfers/{transfer_id}/archive",
+    response_model=StockTransferSchema,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def archive_transfer(
+    transfer_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Убрать переезд в локальный архив: статус и сток не трогаются.
+
+    Отличается от вида «Архив» в списке (тот вычисляется по статусу) — здесь
+    решение человека. Переезд остаётся в отчётах и в «Оплатах».
+    """
+    try:
+        transfer = await warehouse_service.set_transfer_archived(
+            db, project.id, transfer_id, True
+        )
+        return StockTransferSchema.model_validate(transfer)
+    except ValueError as e:
+        raise _transfer_error(e) from None
+
+
+@router.delete(
+    "/transfers/{transfer_id}/archive",
+    response_model=StockTransferSchema,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def unarchive_transfer(
+    transfer_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Вернуть переезд из локального архива."""
+    try:
+        transfer = await warehouse_service.set_transfer_archived(
+            db, project.id, transfer_id, False
         )
         return StockTransferSchema.model_validate(transfer)
     except ValueError as e:
