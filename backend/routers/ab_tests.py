@@ -15,6 +15,7 @@ from backend.database import get_db
 from backend.integrations.wb_content_api import WbContentError
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.rbac import require_role
 from backend.services.funnel import ab_photo_tests as svc
 from backend.utils.rate_limit import rate_limit_write
 
@@ -34,7 +35,7 @@ class CreateTestRequest(BaseModel):
     max_days: int = Field(7, ge=1, le=30)
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_role("viewer", page="ab-tests"))])
 async def list_ab_tests(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -43,7 +44,7 @@ async def list_ab_tests(
     return {"tests": await svc.list_tests(db, project.id)}
 
 
-@router.post("", dependencies=[Depends(rate_limit_write)])
+@router.post("", dependencies=[Depends(rate_limit_write), Depends(require_role("editor", page="ab-tests"))])
 async def create_ab_test(
     payload: CreateTestRequest,
     project: Project = Depends(get_current_project),
@@ -70,7 +71,7 @@ async def create_ab_test(
     return {"id": test.id, "status": test.status}
 
 
-@router.get("/{test_id}")
+@router.get("/{test_id}", dependencies=[Depends(require_role("viewer", page="ab-tests"))])
 async def get_ab_test(
     test_id: int,
     project: Project = Depends(get_current_project),
@@ -83,7 +84,10 @@ async def get_ab_test(
         raise HTTPException(404, str(e))
 
 
-@router.post("/{test_id}/photos", dependencies=[Depends(rate_limit_write)])
+@router.post(
+    "/{test_id}/photos",
+    dependencies=[Depends(rate_limit_write), Depends(require_role("editor", page="ab-tests"))],
+)
 async def upload_ab_photo(
     test_id: int,
     file: UploadFile = File(...),
@@ -102,7 +106,7 @@ async def upload_ab_photo(
     return {"id": variant.id, "position": variant.position}
 
 
-@router.get("/{test_id}/photos/{variant_id}")
+@router.get("/{test_id}/photos/{variant_id}", dependencies=[Depends(require_role("viewer", page="ab-tests"))])
 async def get_ab_photo(
     test_id: int,
     variant_id: int,
@@ -116,7 +120,10 @@ async def get_ab_photo(
     return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
-@router.delete("/{test_id}/photos/{variant_id}", dependencies=[Depends(rate_limit_write)])
+@router.delete(
+    "/{test_id}/photos/{variant_id}",
+    dependencies=[Depends(rate_limit_write), Depends(require_role("editor", page="ab-tests"))],
+)
 async def delete_ab_photo(
     test_id: int,
     variant_id: int,
@@ -131,7 +138,10 @@ async def delete_ab_photo(
     return {"ok": True}
 
 
-@router.post("/{test_id}/start", dependencies=[Depends(rate_limit_write)])
+@router.post(
+    "/{test_id}/start",
+    dependencies=[Depends(rate_limit_write), Depends(require_role("editor", page="ab-tests"))],
+)
 async def start_ab_test(
     test_id: int,
     project: Project = Depends(get_current_project),
@@ -145,7 +155,10 @@ async def start_ab_test(
     return {"id": test.id, "status": test.status}
 
 
-@router.post("/{test_id}/stop", dependencies=[Depends(rate_limit_write)])
+@router.post(
+    "/{test_id}/stop",
+    dependencies=[Depends(rate_limit_write), Depends(require_role("editor", page="ab-tests"))],
+)
 async def stop_ab_test(
     test_id: int,
     project: Project = Depends(get_current_project),
@@ -159,7 +172,10 @@ async def stop_ab_test(
     return {"id": test.id, "status": test.status, "winner_variant_id": test.winner_variant_id}
 
 
-@router.post("/{test_id}/resume", dependencies=[Depends(rate_limit_write)])
+@router.post(
+    "/{test_id}/resume",
+    dependencies=[Depends(rate_limit_write), Depends(require_role("editor", page="ab-tests"))],
+)
 async def resume_ab_test(
     test_id: int,
     project: Project = Depends(get_current_project),
@@ -175,7 +191,10 @@ async def resume_ab_test(
     return {"id": test.id, "status": test.status}
 
 
-@router.post("/{test_id}/variants/{variant_id}/exclude", dependencies=[Depends(rate_limit_write)])
+@router.post(
+    "/{test_id}/variants/{variant_id}/exclude",
+    dependencies=[Depends(rate_limit_write), Depends(require_role("editor", page="ab-tests"))],
+)
 async def exclude_ab_variant(
     test_id: int,
     variant_id: int,
@@ -190,7 +209,10 @@ async def exclude_ab_variant(
     return {"ok": True}
 
 
-@router.post("/{test_id}/variants/{variant_id}/include", dependencies=[Depends(rate_limit_write)])
+@router.post(
+    "/{test_id}/variants/{variant_id}/include",
+    dependencies=[Depends(rate_limit_write), Depends(require_role("editor", page="ab-tests"))],
+)
 async def include_ab_variant(
     test_id: int,
     variant_id: int,
@@ -205,7 +227,10 @@ async def include_ab_variant(
     return {"ok": True}
 
 
-@router.post("/{test_id}/apply-winner", dependencies=[Depends(rate_limit_write)])
+@router.post(
+    "/{test_id}/apply-winner",
+    dependencies=[Depends(rate_limit_write), Depends(require_role("editor", page="ab-tests"))],
+)
 async def apply_ab_winner(
     test_id: int,
     project: Project = Depends(get_current_project),
