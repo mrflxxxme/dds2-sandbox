@@ -18,8 +18,13 @@ from backend.models.design import (
     DesignTask,
     DesignTaskStatus,
 )
-from backend.schemas.design import DesignBoardResponse, DesignTaskListItem
+from backend.schemas.design import (
+    DesignBoardPermissions,
+    DesignBoardResponse,
+    DesignTaskListItem,
+)
 from backend.services.design.common import get_task_row, is_lead
+from backend.services.design.permissions import compute_board_permissions
 from backend.services.design.queries import to_list_items
 from backend.services.design.state import _commit_and_notify, apply_transition_locked
 
@@ -34,13 +39,17 @@ _BOARD_VALUES = [s.value for s in DESIGN_BOARD_STATUSES]
 _MOVE_LOCK_CLASS = 0x00DE517  # 910615, класс свободен (нумерация crud — 0xDE516)
 
 
-async def get_board(db: AsyncSession, project_id: int) -> DesignBoardResponse:
+async def get_board(
+    db: AsyncSession, project_id: int, member_role: str = "viewer"
+) -> DesignBoardResponse:
     """Одна выборка по 6 колонкам + counts по всем статусам (вкл. ON_HOLD/
     CANCELLED — они вне доски, доступны фильтром).
 
-    Доска одинакова для всех участников проекта: прав-зависимых полей в
-    DesignTaskListItem нет (permissions считаются только в деталке, §6.9), —
-    поэтому user/member_role в сигнатуре не нужны (были не использованы).
+    Карточки одинаковы для всех участников проекта: прав-зависимых полей в
+    DesignTaskListItem нет (per-task permissions считаются только в деталке,
+    §6.9). member_role нужен лишь для permissions УРОВНЯ ДОСКИ (can_create /
+    can_reorder): их фронт раньше выводил из роли сам — дублирование логики
+    прав, снято amendment'ом 2026-08-03.
 
     Пер-колоночный лимит — в SQL: row_number() OVER (PARTITION BY status) <= 200.
     Порядок внутри партиции: живые колонки — sort_order, id; ACCEPTED —
@@ -100,7 +109,11 @@ async def get_board(db: AsyncSession, project_id: int) -> DesignBoardResponse:
     counts = {s.value: 0 for s in DesignTaskStatus}
     counts.update({row[0]: row[1] for row in counts_res.all()})
 
-    return DesignBoardResponse(columns=columns, counts=counts)
+    return DesignBoardResponse(
+        columns=columns,
+        counts=counts,
+        permissions=DesignBoardPermissions(**compute_board_permissions(member_role)),
+    )
 
 
 async def move_task(

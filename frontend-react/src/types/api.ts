@@ -9545,14 +9545,26 @@ export interface DesignTaskListItem {
     project_name?: string | null;
 }
 
+/**
+ * Права УРОВНЯ ДОСКИ — считает бэк (§6.9), фронт роль не проверяет
+ * (amended 2026-08-03, аддитивно).
+ */
+export interface DesignBoardPermissions {
+    /** Создать заявку: зеркало гейта POST /design-tasks (viewer read-only). */
+    can_create: boolean;
+    /** Перестановка карточек внутри колонки (lead) — dnd между колонками не гейтит. */
+    can_reorder: boolean;
+}
+
 export interface DesignBoardResponse {
     /** 6 колонок доски (ON_HOLD/CANCELLED — вне доски, доступны фильтром). */
     columns: Partial<Record<DesignTaskStatus, DesignTaskListItem[]>>;
     /** Счётчики по всем 8 статусам. */
     counts: Partial<Record<DesignTaskStatus, number>>;
+    permissions: DesignBoardPermissions;
 }
 
-/** 15 флагов — ПОЛНЫЙ набор compute_permissions; фронт логику прав не дублирует (§6.9). */
+/** 16 флагов — ПОЛНЫЙ набор compute_permissions; фронт логику прав не дублирует (§6.9). */
 export interface DesignTaskPermissions {
     can_edit: boolean;
     can_assign: boolean;
@@ -9569,6 +9581,8 @@ export interface DesignTaskPermissions {
     can_set_complexity: boolean;
     can_set_outsource: boolean;
     can_create_ab_test: boolean;
+    /** Р5: отметка «лид просмотрел» — POST /{task_id}/viewed (amended 2026-08-03). */
+    can_mark_viewed: boolean;
 }
 
 /** Без minio_path: скачивание — только GET-ручкой materials/{mat_id}/file. */

@@ -341,7 +341,7 @@ async def test_board_not_captured_by_task_id(client, env):
     """Регресс на порядок роутов: /board отвечает доской, а не 422 от /{task_id}."""
     resp = await client.get(f"{BASE}/board", headers=env.viewer.h)
     assert resp.status_code == 200
-    assert set(resp.json().keys()) == {"columns", "counts"}
+    assert set(resp.json().keys()) == {"columns", "counts", "permissions"}
 
 
 # ─── AC-7: каждая мутация под rate_limit_write ───────────────────────────────
@@ -374,6 +374,51 @@ def test_permissions_schema_matches_service():
     task = SimpleNamespace(status="NEW", author_user_id=1, assignee_user_id=None, nm_id=None)
     perms = compute_permissions(task, SimpleNamespace(id=1), "admin")
     assert set(perms) == set(DesignTaskPermissions.model_fields)
+
+
+def test_board_permissions_schema_matches_service():
+    """Схема DesignBoardPermissions зеркалит ключи compute_board_permissions."""
+    from backend.schemas.design import DesignBoardPermissions
+    from backend.services.design.permissions import compute_board_permissions
+
+    assert set(compute_board_permissions("admin")) == set(DesignBoardPermissions.model_fields)
+
+
+def test_board_can_reorder_matches_task_permissions():
+    """can_reorder доски и одноимённый флаг compute_permissions не расходятся."""
+    from backend.services.design.permissions import compute_board_permissions, compute_permissions
+
+    task = SimpleNamespace(status="NEW", author_user_id=1, assignee_user_id=None, nm_id=None)
+    for role in ("owner", "admin", "editor", "viewer"):
+        assert (
+            compute_board_permissions(role)["can_reorder"]
+            == compute_permissions(task, SimpleNamespace(id=1), role)["can_reorder"]
+        ), role
+
+
+async def test_board_returns_permissions_by_role(client, env):
+    """GET /board отдаёт права уровня доски: lead — обе, editor — только create,
+    viewer — ничего (фронт гейтит кнопки этим, не ролью; §6.9)."""
+    for who, expected in (
+        (env.lead, {"can_create": True, "can_reorder": True}),
+        (env.author, {"can_create": True, "can_reorder": False}),
+        (env.viewer, {"can_create": False, "can_reorder": False}),
+    ):
+        resp = await client.get(f"{BASE}/board", headers=who.h)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["permissions"] == expected
+
+
+async def test_can_mark_viewed_flag(client, env):
+    """can_mark_viewed зеркалит гвард crud.mark_viewed (только lead)."""
+    task = await _mk_task(client, env.author.h)
+    lead = await client.get(f"{BASE}/{task['id']}", headers=env.lead.h)
+    assert lead.json()["permissions"]["can_mark_viewed"] is True
+    author = await client.get(f"{BASE}/{task['id']}", headers=env.author.h)
+    assert author.json()["permissions"]["can_mark_viewed"] is False
+    # Флаг не врёт: у автора ручка действительно 403.
+    resp = await client.post(f"{BASE}/{task['id']}/viewed", headers=env.author.h)
+    assert resp.status_code == 403, resp.text
 
 
 async def test_detail_returns_full_permissions(client, env):

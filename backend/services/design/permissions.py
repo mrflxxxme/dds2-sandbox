@@ -61,4 +61,27 @@ def compute_permissions(
         and task.nm_id is not None,
         "can_change_status": can_change_status,
         "can_move": lead or can_change_status,
+        # Отметка просмотра лидом (Р5, crud.mark_viewed) — гвард is_lead один-в-один.
+        "can_mark_viewed": lead,
+    }
+
+
+def compute_board_permissions(member_role: str) -> dict[str, bool]:
+    """Права УРОВНЯ ДОСКИ (без конкретной задачи) — §6.9: их тоже считает бэк.
+
+    Доска (`GET /board`) не отдаёт per-task permissions, поэтому фронт раньше
+    гейтил «+ Новая заявка» и reorder ролью — дублирование логики прав.
+    Значения:
+
+    - can_create — зеркало гейта `POST /design-tasks` (require_editor: viewer
+      read-only), тот же предикат, что у `can_comment` в compute_permissions;
+    - can_reorder — перестановка карточек внутри колонки, зеркало ключа
+      `can_reorder` (lead) в compute_permissions; паритет закреплён тестом.
+
+    Page-гейт (`page="design-tasks"`) применяет роутер до вызова — здесь только
+    роль внутри проекта.
+    """
+    return {
+        "can_create": member_role != "viewer",
+        "can_reorder": is_lead(member_role),
     }

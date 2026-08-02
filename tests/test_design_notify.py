@@ -369,6 +369,42 @@ async def test_due_tomorrow_personal_reminder(db_session, project, sent, fake_re
     assert f"/p/{project.slug}/design-tasks/{task.id}" in personal[0]
 
 
+async def test_two_tg_bindings_resolve_to_freshest(db_session, project, sent, fake_redis):
+    """`telegram_bot_users.user_id` НЕ уникален: две привязки одного пользователя
+    → и джоба, и личные уведомления шлют в СВЕЖУЮ (максимальный id), а не в
+    случайную (детерминированный ORDER BY + limit)."""
+    team = await make_team(db_session, project)
+    old_tg = await _link_tg(db_session, team.designer.id)
+    new_tg = await _link_tg(db_session, team.designer.id)  # id больше → свежее
+    assert old_tg != new_tg
+
+    tomorrow_msk = datetime.now(dn.MSK).date() + timedelta(days=1)
+    task = await make_task(db_session, project.id, team.author.id, due_date=tomorrow_msk)
+
+    # 1. Личное уведомление (services/design/notify._resolve_chat_id).
+    await design_crud.assign(
+        db_session, project.id, task.id, team.designer.id, actor(team.lead), "admin"
+    )
+    assert sent.to_chat(new_tg) and sent.to_chat(old_tg) == []
+
+    # 2. Батч-резолв джобы «срок завтра» (_resolve_telegram_ids).
+    sent.calls.clear()
+    await dn.send_design_digests()
+    assert sent.to_chat(new_tg) and sent.to_chat(old_tg) == []
+
+
+async def test_resolve_telegram_ids_is_deterministic(db_session, project):
+    """Прямой контракт батч-резолва: одна запись на пользователя, свежайшая."""
+    team = await make_team(db_session, project)
+    first = await _link_tg(db_session, team.designer.id)
+    last = await _link_tg(db_session, team.designer.id)
+
+    resolved = await dn._resolve_telegram_ids(db_session, project.id, {team.designer.id})
+
+    assert resolved == {team.designer.id: last}
+    assert first not in resolved.values()
+
+
 # ─── AC-6: CancelledError пробрасывается перед except Exception ──────────────
 
 

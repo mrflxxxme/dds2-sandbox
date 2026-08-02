@@ -29,8 +29,11 @@ function task(id: number, status: DesignTaskStatus, sortOrder = id * 1000): Desi
     };
 }
 
+/** Права уровня доски в маппинге колонок не участвуют — фиксируем нейтральные. */
+const NO_PERMS: DesignBoardResponse['permissions'] = { can_create: false, can_reorder: false };
+
 function boardOf(...tasks: DesignTaskListItem[]): BoardColumns {
-    const res: DesignBoardResponse = { columns: {}, counts: {} };
+    const res: DesignBoardResponse = { columns: {}, counts: {}, permissions: NO_PERMS };
     for (const t of tasks) {
         (res.columns[t.status] ??= []).push(t);
     }
@@ -39,7 +42,11 @@ function boardOf(...tasks: DesignTaskListItem[]): BoardColumns {
 
 describe('buildBoardColumns — маппинг GET /board в 6 колонок', () => {
     it('отсутствующие в ответе статусы становятся пустыми колонками', () => {
-        const columns = buildBoardColumns({ columns: { NEW: [task(1, 'NEW')] }, counts: {} });
+        const columns = buildBoardColumns({
+            columns: { NEW: [task(1, 'NEW')] },
+            counts: {},
+            permissions: NO_PERMS,
+        });
         expect(Object.keys(columns)).toEqual([...DESIGN_BOARD_STATUSES]);
         expect(columns.NEW).toHaveLength(1);
         expect(columns.ASSIGNED).toEqual([]);
@@ -50,6 +57,7 @@ describe('buildBoardColumns — маппинг GET /board в 6 колонок', 
         const columns = buildBoardColumns({
             columns: { NEW: [task(1, 'NEW')], ON_HOLD: [task(2, 'ON_HOLD')], CANCELLED: [task(3, 'CANCELLED')] },
             counts: {},
+            permissions: NO_PERMS,
         });
         expect(Object.keys(columns)).toEqual([...DESIGN_BOARD_STATUSES]);
         expect(findTaskColumn(columns, 2)).toBeNull();
@@ -60,6 +68,7 @@ describe('buildBoardColumns — маппинг GET /board в 6 колонок', 
         const columns = buildBoardColumns({
             columns: { NEW: [task(5, 'NEW'), task(2, 'NEW'), task(9, 'NEW')] },
             counts: {},
+            permissions: NO_PERMS,
         });
         expect(columns.NEW.map((t) => t.id)).toEqual([5, 2, 9]);
     });

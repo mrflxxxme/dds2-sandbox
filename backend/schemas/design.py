@@ -212,11 +212,28 @@ class DesignTaskListItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class DesignBoardPermissions(BaseModel):
+    """Права уровня доски — считает бэк (§6.9), фронт логику прав не дублирует.
+
+    Зеркалит ключи `permissions.compute_board_permissions`; паритет полей и
+    значений закреплён тестами (`tests/test_api_design_tasks.py`).
+    """
+
+    can_create: bool = False
+    can_reorder: bool = False
+
+
 class DesignBoardResponse(BaseModel):
-    """Доска одним ответом (Р4): 6 колонок + счётчики (вкл. ON_HOLD/CANCELLED для фильтра)."""
+    """Доска одним ответом (Р4): 6 колонок + счётчики (вкл. ON_HOLD/CANCELLED для фильтра).
+
+    permissions — права уровня доски (amended 2026-08-03, аддитивно): доска не
+    отдаёт per-task флаги, а «+ Новая заявка» и reorder внутри колонки фронту
+    гейтить чем-то надо (§6.9 — не ролью).
+    """
 
     columns: dict[str, list[DesignTaskListItem]]
     counts: dict[str, int]
+    permissions: DesignBoardPermissions = Field(default_factory=DesignBoardPermissions)
 
 
 class DesignTaskPermissions(BaseModel):
@@ -242,6 +259,8 @@ class DesignTaskPermissions(BaseModel):
     can_set_complexity: bool = False
     can_set_outsource: bool = False
     can_create_ab_test: bool = False
+    # Р5: отметка «лид просмотрел» (POST /{task_id}/viewed) — amended 2026-08-03.
+    can_mark_viewed: bool = False
 
 
 class DesignMaterialOut(BaseModel):

@@ -13,7 +13,11 @@ import TaskCard from './TaskCard';
 
 interface BoardViewProps {
     columns: BoardColumns;
-    /** Reorder внутри своей колонки — только lead (Р3/Р4); иначе dnd между колонками. */
+    /**
+     * Флаг `permissions.can_reorder` из ответа GET /board (§6.9 — считает бэк).
+     * false → dnd разрешён только МЕЖДУ колонками, перестановка внутри своей
+     * колонки заблокирована (Р3/Р4; бэк вернул бы 403 на такой move).
+     */
     canReorder: boolean;
     onOpen: (taskId: number) => void;
     /** Запрос перемещения (страница решает: сразу move или модалка причины для REVISION). */
@@ -29,7 +33,7 @@ export default function BoardView({ columns, canReorder, onOpen, onMoveRequest }
         setDragOverCol(null);
         if (dragTaskId == null) return;
         const fromStatus = findTaskColumn(columns, dragTaskId);
-        // Перестановка внутри колонки — только can_reorder (lead); прочим dnd только между колонками.
+        // Перестановка внутри колонки — только по флагу бэка can_reorder; прочим dnd только между колонками.
         if (fromStatus === toStatus && !canReorder) {
             setDragTaskId(null);
             return;

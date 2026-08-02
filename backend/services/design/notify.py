@@ -51,6 +51,10 @@ async def _resolve_chat_id(db: AsyncSession, user_id: int | None, project_id: in
 
     Резолв только при АКТИВНОМ членстве в проекте (ProjectMember без is_deleted):
     удалённый из проекта пользователь уведомления не получает.
+
+    `telegram_bot_users.user_id` НЕ уникален (уникален telegram_id) — при двух
+    привязках `limit(1)` без порядка отдавал случайную. `id DESC` = свежайшая
+    привязка (зеркало `scheduler/jobs/design_notify._resolve_telegram_ids`).
     """
     if user_id is None:
         return None
@@ -62,6 +66,7 @@ async def _resolve_chat_id(db: AsyncSession, user_id: int | None, project_id: in
             ProjectMember.project_id == project_id,
             ProjectMember.is_deleted == False,  # noqa: E712
         )
+        .order_by(TelegramBotUser.id.desc())
         .limit(1)
     )
     return res.scalar_one_or_none()

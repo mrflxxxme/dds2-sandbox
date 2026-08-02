@@ -51,6 +51,9 @@ _ANTISPAM_TTL_SECONDS = 48 * 3600
 # Предохранители от простыни: больше строк не разбираем.
 _DUE_SOON_CAP = 200
 _PROJECTS_CAP = 1000
+# Резолв telegram_id: ≤_DUE_SOON_CAP исполнителей, у каждого может быть несколько
+# привязок (user_id в telegram_bot_users не уникален) — берём запас с головой.
+_TG_RESOLVE_LIMIT = _DUE_SOON_CAP * 5
 
 _ACTIVE_VALUES = [s.value for s in DESIGN_ACTIVE_STATUSES]
 
@@ -229,6 +232,12 @@ async def _resolve_telegram_ids(
 
     Только пользователи с АКТИВНЫМ членством в проекте (ProjectMember без
     is_deleted): удалённый из проекта исполнитель напоминание не получает.
+
+    `telegram_bot_users.user_id` НЕ уникален (уникален telegram_id) — у одного
+    пользователя может быть несколько привязок. Порядок детерминированный
+    (user_id ASC, id DESC) + `.limit()`: на пользователя берётся ПЕРВАЯ строка =
+    максимальный id = свежайшая привязка; усечение по лимиту режет хвост по
+    user_id, а не случайные строки (зеркало `notify._resolve_chat_id`).
     """
     if not user_ids:
         return {}
@@ -240,8 +249,13 @@ async def _resolve_telegram_ids(
             ProjectMember.project_id == project_id,
             ProjectMember.is_deleted == False,  # noqa: E712
         )
+        .order_by(TelegramBotUser.user_id.asc(), TelegramBotUser.id.desc())
+        .limit(_TG_RESOLVE_LIMIT)
     )
-    return {int(uid): int(tg_id) for uid, tg_id in rows.all()}
+    resolved: dict[int, int] = {}
+    for uid, tg_id in rows.all():
+        resolved.setdefault(int(uid), int(tg_id))
+    return resolved
 
 
 async def send_design_digests() -> None:

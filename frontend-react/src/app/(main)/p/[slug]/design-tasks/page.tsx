@@ -7,7 +7,6 @@ import { formatNumber } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
 import PageHeader from '@/components/PageHeader';
 import Toast from '@/components/Toast';
-import { usePermissions } from '@/lib/hooks/usePermissions';
 import {
     applyOptimisticMove,
     buildBoardColumns,
@@ -15,7 +14,7 @@ import {
     type BoardColumns,
     type DesignBoardStatus,
 } from '@/lib/design';
-import type { DesignBoardResponse } from '@/types/api';
+import type { DesignBoardPermissions, DesignBoardResponse } from '@/types/api';
 import BoardView from './components/BoardView';
 import ListView from './components/ListView';
 import HoldCancelledOverlay from './components/HoldCancelledOverlay';
@@ -29,16 +28,19 @@ interface PendingMove {
     beforeTaskId: number | null;
 }
 
+/** До ответа /board кнопок нет: права считает бэк (§6.9), роль фронт не проверяет. */
+const NO_BOARD_PERMS: DesignBoardPermissions = { can_create: false, can_reorder: false };
+
 function DesignTasksPageInner() {
     const params = useParams<{ slug: string }>();
     const router = useRouter();
     const searchParams = useSearchParams();
-    const { canEdit, canManage } = usePermissions();
 
     const view = searchParams.get('view') === 'list' ? 'list' : 'board';
 
     const [columns, setColumns] = useState<BoardColumns | null>(null);
     const [counts, setCounts] = useState<DesignBoardResponse['counts']>({});
+    const [perms, setPerms] = useState<DesignBoardPermissions>(NO_BOARD_PERMS);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -57,6 +59,7 @@ function DesignTasksPageInner() {
             if (!mountedRef.current) return;
             setColumns(buildBoardColumns(res));
             setCounts(res.counts);
+            setPerms(res.permissions);
         } catch (e) {
             if (!mountedRef.current) return;
             if (!quiet) setError(e instanceof Error ? e.message : 'Не удалось загрузить доску');
@@ -67,7 +70,11 @@ function DesignTasksPageInner() {
 
     useEffect(() => {
         mountedRef.current = true;
-        if (view === 'board') void load();
+        // В режиме списка доска тоже запрашивается — тихо (без спиннера и баннера
+        // ошибки): её ответ несёт permissions уровня доски, а «+ Новая заявка»
+        // живёт в общей шапке обоих режимов. Права считает бэк (§6.9), роль фронт
+        // не проверяет; сбой запроса оставляет флаги false — кнопки просто нет.
+        void load(view !== 'board');
         return () => { mountedRef.current = false; };
     }, [load, view]);
 
@@ -125,7 +132,7 @@ function DesignTasksPageInner() {
                 actions={
                     <>
                         <DesignTabs slug={params.slug} active={view} />
-                        {canEdit() && (
+                        {perms.can_create && (
                             <button className="btn btn-primary btn-sm" onClick={() => router.push(`/p/${params.slug}/design-tasks/new`)}>
                                 + Новая заявка
                             </button>
@@ -167,7 +174,7 @@ function DesignTasksPageInner() {
                         ) : (
                             <BoardView
                                 columns={columns}
-                                canReorder={canManage()}
+                                canReorder={perms.can_reorder}
                                 onOpen={openTask}
                                 onMoveRequest={onMoveRequest}
                             />

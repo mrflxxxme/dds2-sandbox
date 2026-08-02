@@ -92,10 +92,12 @@ docker compose -p dds2-sandbox exec backend pytest tests/ -q
 docker compose -p dds2-sandbox exec backend pytest tests/test_design_models.py tests/test_design_state.py tests/test_design_service.py tests/test_design_permissions.py tests/test_design_notify.py tests/test_design_ab_bridge.py tests/test_api_design_tasks.py -q
 ```
 
-Типы и юнит-тесты фронта:
+Типы и юнит-тесты фронта — **с хоста**, из каталога `frontend-react` (нужен Node 20+ и один раз `npm ci`). Внутри контейнера они не запускаются: образ фронта production-сборка, dev-зависимостей (TypeScript, vitest) в нём нет, и `npx` уйдёт скачивать пакет в сеть и упадёт с `EACCES`.
 
 ```bash
-docker compose -p dds2-sandbox exec frontend-react npx tsc --noEmit
+cd frontend-react
+npx tsc --noEmit     # типы
+npx vitest run       # юнит-тесты (106 файлов, 1436 тестов)
 ```
 
 ## 7. Обновление, остановка, удаление

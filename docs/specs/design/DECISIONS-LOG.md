@@ -80,6 +80,12 @@
 - Rationale: §6.9 запрещает выводить права на клиенте; отчёты tm-frontend/frontend-reviewer/fix-f3. Автор в NEW видит {CANCELLED} без ON_HOLD — верно по матрице PRD §7 (менеджер не откладывает)
 - Reversibility: reversible
 
+### 2026-08-03T07:00:00Z | F7 | arch+impl · финальный аудит и закрытие замечаний
+- Fork: аудит Ф7 (APPROVE-WITH-NOTES) оставил 3 замечания: (а) недетерминированный резолв telegram_id при двух привязках; (б) инвариант §6.9 частично — 3 места фронта гейтили по ролям, т.к. ответ доски не содержал флагов; (в) кнопка АБ-теста видна без доступа к разделу ab-tests
+- Decision: (а) ORDER BY user_id, id DESC + limit в обоих местах (свежая привязка выигрывает); (б) вариант «флаги на доске»: DesignBoardResponse.permissions {can_create, can_reorder} + DesignTaskPermissions.can_mark_viewed, usePermissions убран со страницы доски, CONTRACT amended; (в) кнопка = can_create_ab_test && canAccess('ab-tests'). Известный компромисс варианта (б): в режиме списка идёт тихий фоновый GET /board ради флага can_create (кнопка «Новая заявка» в общей шапке); при сбое запроса кнопка просто не показывается
+- Rationale: отчёт audit-f7 + fix-final; 120 тестов затронутых сьют, mypy, tsc, vitest 1436 — зелёные
+- Reversibility: reversible
+
 ### 2026-08-03T04:00:00Z | F7-подготовка | arch+impl · устранение расхождений код↔спека
 - Fork: аудит документации нашёл 7 расхождений, главное — мёртвый код: вложения к комментариям реализованы в сервисе и модели, но недостижимы через API (нет multipart-ручки и скачивания)
 - Decision: (1) вложения доведены — `POST /{task_id}/comments/file` (отдельная ручка, зеркало materials: FastAPI не совмещает JSON-body и multipart в одной) + `GET /{task_id}/comments/{comment_id}/file`, CONTRACT amended; (2) verdict_comment сохраняется при приёмке; (3) исправлены врущие десятичные комментарии advisory-локов (910614/910615); (4) актуализированы докстринги «no-op до Ф4»; (5) миграция dsn03 — 4 FK-индекса (правило «FK ⇒ индекс»); (6) get_board потерял неиспользуемые user/member_role, спека F1 синхронизирована. Отклонение принято lead: svg отдаёт 400, а не 415 — консистентность с materials и таблицей ошибок FROZEN-контракта важнее буквы задания

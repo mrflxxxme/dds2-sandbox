@@ -159,13 +159,13 @@ async def get_board(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Доска: 6 колонок одним ответом + counts по всем статусам (Р4).
+    """Доска: 6 колонок одним ответом + counts по всем статусам (Р4) + permissions
+    уровня доски (can_create / can_reorder — §6.9, amended 2026-08-03).
 
-    member_role сервису не нужен (доска одинакова для всех участников), но
-    Depends остаётся гейтом: снятый участник (ProjectMember.is_deleted) → 403,
-    как на остальных ручках задачи.
+    member_role одновременно гейт (снятый участник, ProjectMember.is_deleted →
+    403, как на остальных ручках задачи) и вход матрицы прав доски.
     """
-    return await board.get_board(db, project.id)
+    return await board.get_board(db, project.id, member_role)
 
 
 @router.get("/all-projects", response_model=list[DesignTaskListItem])

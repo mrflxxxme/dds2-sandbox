@@ -3,6 +3,7 @@
 **FROZEN 2026-08-02 — изменение = эскалация архитектору.**
 **amended 2026-08-02: +`DesignTaskDetail.allowed_transitions` (additive, санкция lead).**
 **amended 2026-08-03 (Ф7-подготовка, санкция lead): +`POST /{task_id}/comments/file` (комментарий с вложением, multipart) и +`GET /{task_id}/comments/{comment_id}/file` (скачивание вложения) — аддитивно; `POST /{task_id}/comments` (JSON) не изменён.**
+**amended 2026-08-03 (пост-аудит Ф7, инвариант §6.9, санкция lead): +`DesignBoardResponse.permissions {can_create, can_reorder}` и +`DesignTaskPermissions.can_mark_viewed` — аддитивно; закрывают гейтинг кнопок доски и отметки просмотра по роли на фронте.**
 
 <!-- HEAD-SUMMARY: замороженный HTTP-контракт Ф2 (backend/routers/design_tasks.py). От него параллельно идут Ф3 (фронт) и Ф4 (уведомления). Схемы — backend/schemas/design.py; поведение — сервис Ф1. -->
 
@@ -30,7 +31,7 @@
 
 | Метод | Путь | min_role | Запрос | Ответ (2xx) |
 |---|---|---|---|---|
-| GET | `/board` | viewer | — | `DesignBoardResponse` {columns: {status: [DesignTaskListItem]}, counts: {status: int}} — 6 колонок доски, counts по всем 8 статусам |
+| GET | `/board` | viewer | — | `DesignBoardResponse` {columns: {status: [DesignTaskListItem]}, counts: {status: int}, permissions: `DesignBoardPermissions`} — 6 колонок доски, counts по всем 8 статусам, права уровня доски (amended 2026-08-03, см. §Схемы) |
 | GET | `` | viewer | query: `status[]`, `work_type` (enum'ы, невалидный → 422), `assignee_user_id`, `author_user_id`, `is_urgent`, `overdue`, `q` (≤100), `limit` 1..200 (def 100), `offset` ≥0 | `list[DesignTaskListItem]` |
 | POST | `` | editor | `DesignTaskCreate` | **201** `DesignTaskDetail` |
 | GET | `/all-projects` | — (только JWT, без `X-Project-Id`) | query: `status[]` (enum, невалидный → 422), `limit` 1..200, `offset` ≥0 | `list[DesignTaskListItem]` c `project_name`; только проекты членства, где участнику доступна страница `design-tasks` (owner/admin — всегда; editor/viewer — по ключу в `pages`, `get_effective_pages`) |
@@ -80,9 +81,11 @@ X-Content-Type-Options: nosniff
 ## Схемы (backend/schemas/design.py)
 
 Вход: `DesignTaskCreate`, `DesignTaskUpdate`, `DesignStatusChange`, `DesignMoveIn`, `DesignAssign`, `DesignMaterialIn`, `DesignVerdictIn`, `DesignCommentIn` (JSON-путь комментария; multipart-путь `/comments/file` схемы не использует — `body` приходит как Form, зеркало `/materials/file`).
-Выход: `DesignTaskListItem`, `DesignBoardResponse`, `DesignTaskDetail` (вложенно: `DesignMaterialOut`, `DesignSubmissionOut` + `DesignSubmissionFileOut`, `DesignCommentOut`, `DesignEventOut`, `DesignTaskPermissions`), `DesignCalendarOut`, `DesignWorkloadRow`, `DesignStatsOut`, `DesignProductSuggestion`.
+Выход: `DesignTaskListItem`, `DesignBoardResponse` (вложенно `DesignBoardPermissions`), `DesignTaskDetail` (вложенно: `DesignMaterialOut`, `DesignSubmissionOut` + `DesignSubmissionFileOut`, `DesignCommentOut`, `DesignEventOut`, `DesignTaskPermissions`), `DesignCalendarOut`, `DesignWorkloadRow`, `DesignStatsOut`, `DesignProductSuggestion`.
 
-`DesignTaskPermissions` — 15 флагов, зеркало ключей `compute_permissions` (паритет закреплён тестом `test_permissions_schema_matches_service`): `can_edit`, `can_assign`, `can_take`, `can_change_status`, `can_move`, `can_hold`, `can_reorder`, `can_submit`, `can_verdict`, `can_comment`, `can_cancel`, `can_delete`, `can_set_complexity`, `can_set_outsource`, `can_create_ab_test`. Фронт логику прав НЕ дублирует (§6.9). Семантика отдельных флагов: `can_comment` = `member_role != "viewer"` (viewer read-only, зеркало editor-гейта `POST /comments`); `can_delete` = `lead | автор` — HTTP-гейт ручки `DELETE /{task_id}` остаётся `require_role("editor")`, тонкая доводка «автор|lead» — в сервисе (`crud.delete_task`), не-автор editor → 403.
+`DesignTaskPermissions` — 16 флагов, зеркало ключей `compute_permissions` (паритет закреплён тестом `test_permissions_schema_matches_service`): `can_edit`, `can_assign`, `can_take`, `can_change_status`, `can_move`, `can_hold`, `can_reorder`, `can_submit`, `can_verdict`, `can_comment`, `can_cancel`, `can_delete`, `can_set_complexity`, `can_set_outsource`, `can_create_ab_test`, `can_mark_viewed` (amended 2026-08-03: `lead`, зеркало гварда `crud.mark_viewed` — фронт дёргает `POST /{task_id}/viewed` по нему, а не по роли). Фронт логику прав НЕ дублирует (§6.9). Семантика отдельных флагов: `can_comment` = `member_role != "viewer"` (viewer read-only, зеркало editor-гейта `POST /comments`); `can_delete` = `lead | автор` — HTTP-гейт ручки `DELETE /{task_id}` остаётся `require_role("editor")`, тонкая доводка «автор|lead» — в сервисе (`crud.delete_task`), не-автор editor → 403.
+
+`DesignBoardResponse.permissions: DesignBoardPermissions {can_create, can_reorder}` (amended 2026-08-03, аддитивно, санкция lead): права УРОВНЯ ДОСКИ — доска не отдаёт per-task флаги, а фронту надо гейтить «+ Новая заявка» и перестановку внутри колонки. Считает `permissions.compute_board_permissions(member_role)`: `can_create` = `member_role != "viewer"` (зеркало гейта `POST /design-tasks`), `can_reorder` = `is_lead` (то же значение, что одноимённый ключ `compute_permissions` — паритет закреплён тестом `test_board_can_reorder_matches_task_permissions`). Page-гейт применяет роутер до вызова.
 
 `DesignTaskDetail.allowed_transitions: list[str]` (amended 2026-08-02, аддитивно, санкция lead): целевые статусы, куда ТЕКУЩИЙ пользователь реально может перевести задачу — `DESIGN_TASK_TRANSITIONS[status]`, отфильтрованный той же матрицей прав `state.can_user_transition` (логика не дублируется; считает `queries.get_task`). Фронт строит кнопки переходов в деталке по этому списку; агрегат `can_change_status` в permissions остаётся. Порядок элементов — порядок объявления enum `DesignTaskStatus`.
 

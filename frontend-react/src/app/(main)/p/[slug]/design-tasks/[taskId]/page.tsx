@@ -38,7 +38,9 @@ export default function DesignTaskDetailPage() {
     const params = useParams<{ slug: string; taskId: string }>();
     const router = useRouter();
     const taskId = Number(params.taskId);
-    const { canManage } = usePermissions();
+    // Права по задаче считает бэк (task.permissions, §6.9). Здесь роль не нужна —
+    // только доступ к СОСЕДНЕЙ странице /ab-tests (навигация, не право действия).
+    const { canAccess } = usePermissions();
 
     const [task, setTask] = useState<DesignTaskDetail | null>(null);
     const [loading, setLoading] = useState(true);
@@ -78,15 +80,17 @@ export default function DesignTaskDetailPage() {
         return () => { mountedRef.current = false; };
     }, [load, params.slug]);
 
-    // Р5: при открытии деталки лидом — POST /viewed (идемпотентно), снимает красную метку.
+    // Р5: при открытии деталки лидом — POST /viewed (идемпотентно), снимает красную
+    // метку. Гейт — флаг бэка can_mark_viewed (§6.9), не роль; viewed_by_lead_at —
+    // состояние задачи, а не право.
     useEffect(() => {
         if (!task || viewedRef.current) return;
-        if (!canManage() || task.viewed_by_lead_at) return;
+        if (!task.permissions.can_mark_viewed || task.viewed_by_lead_at) return;
         viewedRef.current = true;
         api.markDesignTaskViewed(task.id)
             .then((t) => { if (mountedRef.current) setTask(t); })
             .catch(() => { /* best-effort */ });
-    }, [task, canManage]);
+    }, [task]);
 
     const userName = useCallback(
         (id: number | null) => (id == null ? '—' : memberNames[id] ?? `#${id}`),
@@ -315,7 +319,10 @@ export default function DesignTaskDetailPage() {
                                     → {DESIGN_STATUS_LABEL[t]}
                                 </button>
                             ))}
-                            {perms.can_create_ab_test && (
+                            {/* Право на создание теста считает бэк, но кнопка ВЕДЁТ на
+                                страницу /ab-tests: без page-доступа к ней клик упёрся бы
+                                в PageGuard/403 — прячем (гейт навигации, не права). */}
+                            {perms.can_create_ab_test && canAccess('ab-tests') && (
                                 <button
                                     className="btn btn-primary btn-sm"
                                     disabled={abBusy}
