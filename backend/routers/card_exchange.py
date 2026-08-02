@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.rbac import require_page
 from backend.schemas.card_exchange import (
     CartActionResult,
     CartAdd,
@@ -26,9 +27,15 @@ from backend.schemas.card_exchange import (
 from backend.services import integrations_service
 from backend.services.card_exchange import showcase as svc
 from backend.services.card_exchange.showcase import CardExchangeError
-from backend.utils.rate_limit import rate_limit_write
+from backend.utils.rate_limit import rate_limit_read_heavy, rate_limit_write
 
-router = APIRouter(prefix="/card-exchange", tags=["Card Exchange"])
+# `/showcase` — POST ради тела фильтра, а не мутация: это основное чтение
+# страницы, поэтому viewer с ключом раздела обязан его видеть.
+router = APIRouter(
+    prefix="/card-exchange",
+    tags=["Card Exchange"],
+    dependencies=[Depends(require_page("card-exchange", read_paths=frozenset({"/showcase"})))],
+)
 
 
 @router.get("/session/status", response_model=ExchangeSessionStatus)
@@ -127,7 +134,13 @@ async def list_subjects(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/showcase", response_model=ShowcaseResponse)
+# rate_limit_read_heavy, а не write: ручка читающая, но в режиме 'exact' идёт
+# полным сканом — бакет отдельный, чтобы скан не выедал write-лимит корзине.
+@router.post(
+    "/showcase",
+    response_model=ShowcaseResponse,
+    dependencies=[Depends(rate_limit_read_heavy)],
+)
 async def showcase(
     query: ShowcaseQuery,
     db: AsyncSession = Depends(get_db),

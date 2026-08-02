@@ -9,7 +9,7 @@ import json
 import logging
 from datetime import date, datetime
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -270,6 +270,40 @@ def get_effective_pages(role: str, pages_json: str | None, configured_at: dateti
     return explicit + inherited_pages(explicit, configured_at)
 
 
+async def _check_access(
+    db: AsyncSession,
+    project: Project,
+    user: User,
+    min_role: str,
+    page: str | None,
+) -> User:
+    """Общее ядро проверки: членство в проекте, уровень роли, ключ страницы."""
+    member = (
+        await db.execute(
+            select(ProjectMember).where(
+                ProjectMember.project_id == project.id,
+                ProjectMember.user_id == user.id,
+                ProjectMember.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+
+    if not member:
+        raise HTTPException(403, "Нет доступа к проекту")
+
+    role_level = ROLE_HIERARCHY.get(member.role, 0)
+    required_level = ROLE_HIERARCHY.get(min_role, 0)
+    if role_level < required_level:
+        raise HTTPException(403, f"Требуется роль {min_role} или выше")
+
+    if page and member.role in ("editor", "viewer"):
+        member_pages = get_effective_pages(member.role, member.pages, member.pages_updated_at)
+        if page not in member_pages:
+            raise HTTPException(403, f"Нет доступа к странице: {page}")
+
+    return user
+
+
 def require_role(min_role: str = "viewer", page: str | None = None):
     """FastAPI dependency factory — checks role hierarchy + page access."""
 
@@ -278,29 +312,55 @@ def require_role(min_role: str = "viewer", page: str | None = None):
         user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
     ) -> User:
-        member = (
-            await db.execute(
-                select(ProjectMember).where(
-                    ProjectMember.project_id == project.id,
-                    ProjectMember.user_id == user.id,
-                    ProjectMember.is_deleted == False,  # noqa: E712
-                )
-            )
-        ).scalar_one_or_none()
+        return await _check_access(db, project, user, min_role, page)
 
-        if not member:
-            raise HTTPException(403, "Нет доступа к проекту")
+    return dependency
 
-        role_level = ROLE_HIERARCHY.get(member.role, 0)
-        required_level = ROLE_HIERARCHY.get(min_role, 0)
-        if role_level < required_level:
-            raise HTTPException(403, f"Требуется роль {min_role} или выше")
 
-        if page and member.role in ("editor", "viewer"):
-            member_pages = get_effective_pages(member.role, member.pages, member.pages_updated_at)
-            if page not in member_pages:
-                raise HTTPException(403, f"Нет доступа к странице: {page}")
+# HTTP-методы, которые считаем чтением. Всё остальное — мутация.
+READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 
-        return user
+
+def require_page(
+    page: str,
+    read_role: str = "viewer",
+    write_role: str = "editor",
+    read_paths: frozenset[str] = frozenset(),
+):
+    """Гейт уровня РОУТЕРА: ключ страницы + роль, выбранная по методу запроса.
+
+    Чем отличается от `require_role`, который вешают на отдельную ручку:
+
+    * вешается один раз в `APIRouter(dependencies=[...])` и закрывает ВСЕ ручки
+      роутера, включая те, которые допишут завтра. Это fail-closed: новая ручка
+      защищена по умолчанию, а не «пока кто-нибудь не вспомнит про гейт» — ровно
+      тот класс дефекта, из-за которого домен АБ-тестов уехал в прод открытым;
+    * роль зависит от метода (GET/HEAD — `read_role`, мутации — `write_role`),
+      поэтому одного гейта хватает и на чтение, и на запись, и в БД по-прежнему
+      уходит ОДИН запрос за участником, а не два (как было бы при паре
+      «router-level viewer + route-level editor»).
+
+    `read_paths` — суффиксы путей, которые считаются чтением вопреки методу. Это
+    для POST-ради-тела: поиск/витрина, где POST выбран из-за размера фильтра, а
+    не потому, что что-то меняется (`/card-exchange/showcase`). Без такого списка
+    viewer с ключом раздела получил бы 403 на основном чтении страницы.
+
+    `require_role` остаётся для точечных случаев: ручка со своей ролью
+    (`payment-requests/approve` — только admin) или роутер, где ручки живут на
+    разных ключах каталога.
+    """
+
+    async def dependency(
+        request: Request,
+        project: Project = Depends(get_current_project),
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+    ) -> User:
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", "") or request.url.path
+        is_read = request.method.upper() in READ_METHODS or any(
+            route_path.endswith(suffix) for suffix in read_paths
+        )
+        return await _check_access(db, project, user, read_role if is_read else write_role, page)
 
     return dependency
