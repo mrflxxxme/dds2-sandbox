@@ -882,6 +882,59 @@ async def fbo_by_warehouse(
     }
 
 
+async def fbo_warehouse_totals(db: AsyncSession, project_id: int) -> list[dict[str, Any]]:
+    """Остаток FBO ПО СКЛАДАМ WB на весь проект: `[{name, qty, counted}]`, ↓ по qty.
+
+    Кормит селектор «Склады FBO» на матрице. В отличие от `fbo_by_warehouse`
+    НЕ режет игнор/сгоревшие: показываем и «мёртвые» склады с их фантомным
+    остатком — иначе их не увидеть, чтобы снять с учёта, и не вернуть обратно.
+    `counted` = учитывается ли склад сейчас в колонке FBO (прошёл тот же фильтр
+    доверия, `_fbo_allowed_names`: игнор ∪ исключённые). Группируем по базовому
+    имени без «(…)» — ровно как хранится 🔥-список и как сравнивает гейт, иначе
+    отметка «учитывается» разошлась бы с реальным поведением FBO.
+
+    Транзит «в пути», возвраты, сортировочные центры и итоговую псевдострочку
+    не показываем: это не склады хранения, тумблер по ним смысла не имеет.
+    """
+    from backend.services.settings_service import get_excluded_warehouses, get_stock_ignored_set
+
+    has_remains = (
+        await db.execute(
+            select(WbWarehouseRemains.id).where(WbWarehouseRemains.project_id == project_id).limit(1)
+        )
+    ).first() is not None
+    model = WbWarehouseRemains if has_remains else WbWarehouseStock
+    result = await db.execute(
+        select(model.warehouse_name, func.sum(model.quantity).label("qty"))
+        .where(model.project_id == project_id)
+        .group_by(model.warehouse_name)
+        .limit(_MAX_FBO_WAREHOUSES)
+    )
+    ignored = {_strip_parens(n) for n in await get_stock_ignored_set(db, project_id)}
+    excluded = {_strip_parens(n) for n in await get_excluded_warehouses(db, project_id)}
+
+    agg: dict[str, int] = {}
+    for raw, qty in result.all():
+        name = (raw or "").strip()
+        if not name or name == _FBO_TOTAL_ROW:
+            continue
+        if _FBO_TRANSIT_MARK in name.casefold():
+            continue
+        if _is_sorting_centre(name):
+            continue
+        base = _strip_parens(name)
+        if not base:
+            continue
+        agg[base] = agg.get(base, 0) + int(qty or 0)
+
+    out = [
+        {"name": base, "qty": qty, "counted": base not in excluded and base not in ignored}
+        for base, qty in agg.items()
+    ]
+    out.sort(key=lambda w: (-int(w["qty"]), str(w["name"])))
+    return out
+
+
 def _remains_by_nm_query(project_id: int, chunk: list[int], names: list[str]) -> Any:
     """Остаток remains по строкам, чей баркод НЕ заведён в номенклатуре (джойн по nm_id)."""
     nom_bc = aliased(Nomenclature)
@@ -1701,6 +1754,10 @@ async def stock_matrix(db: AsyncSession, project_id: int, trend_days: int = 14) 
         "rows": rows,
         "wb_stock_known": wb_known,
         "trend_days": int(trend_days),
+        # Все склады WB проекта с их остатком — для селектора «Склады FBO».
+        # Включает и снятые с учёта (counted=false), чтобы их было видно и можно
+        # было вернуть; колонка FBO суммирует только counted-склады.
+        "fbo_warehouses": await fbo_warehouse_totals(db, project_id),
     }
 
 # ─── Потоварная замена количества ────────────────────────────────────────────

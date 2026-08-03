@@ -147,6 +147,14 @@ async def set_stock_ignored_warehouses(db: AsyncSession, project_id: int, wareho
             await invalidate_cache(f"{prefix}:project_id={project_id}")
         except Exception as e:
             logger.warning("invalidate %s failed: %s", prefix, e)
+    # Гейт «Можем» на вкладке FBS берёт остаток FBO из КЭШИРУЕМОГО превью
+    # (`fbs:stock_preview`, ttl=60) — без сброса склад, снятый с учёта, ещё
+    # минуту держал бы старый охват гейта. Точечного project-ключа у превью нет
+    # (как и у синка остатков) — гасим весь префикс.
+    try:
+        await invalidate_cache("fbs:stock_preview")
+    except Exception as e:
+        logger.warning("invalidate fbs:stock_preview failed: %s", e)
     logger.info("Set stock-ignored warehouses for project %s: %s", project_id, valid)
     return valid
 

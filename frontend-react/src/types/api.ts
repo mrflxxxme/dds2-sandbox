@@ -10046,11 +10046,21 @@ export interface FbsMatrixWarehouse {
   name?: string | null;
 }
 
+/** Склад WB с остатком — строка селектора «Склады FBO». */
+export interface FbsFboWarehouseTotal {
+  name: string;
+  qty: number;
+  /** false — склад сейчас НЕ входит в колонку FBO (сгоревший/исключённый). */
+  counted: boolean;
+}
+
 export interface FbsMatrix {
   warehouses: FbsMatrixWarehouse[];
   rows: FbsMatrixRow[];
   wb_stock_known: boolean;
   trend_days: number;
+  /** Все склады WB проекта с остатком — для фильтра «Склады FBO». */
+  fbo_warehouses?: FbsFboWarehouseTotal[];
 }
 
 // ─── Payroll (Зарплата) ──────────────────────────────────────────────────────

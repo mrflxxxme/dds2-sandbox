@@ -382,12 +382,27 @@ class FbsMatrixWarehouse(BaseModel):
     name: str | None = None
 
 
+class FbsFboWarehouseTotal(BaseModel):
+    """Склад WB с его остатком — строка селектора «Склады FBO».
+
+    В отличие от `FbsFboWarehouse` (разбивка по товару) — на весь проект и
+    включает снятые с учёта склады: `counted=False` — склад сейчас НЕ входит
+    в колонку FBO (сгоревший/исключённый), но показан, чтобы его было видно.
+    """
+
+    name: str
+    qty: int = 0
+    counted: bool = True
+
+
 class FbsMatrixOut(BaseModel):
     warehouses: list[FbsMatrixWarehouse] = Field(default_factory=list)
     rows: list[FbsMatrixRow] = Field(default_factory=list)
     #: False → все `cells[*].wb` = None, рисуем прочерк, а не ноль.
     wb_stock_known: bool = False
     trend_days: int = 14
+    #: Все склады WB проекта с остатком — для селектора «Склады FBO».
+    fbo_warehouses: list[FbsFboWarehouseTotal] = Field(default_factory=list)
 
 
 # ─── Сверка с кабинетом ──────────────────────────────────────────────────────
