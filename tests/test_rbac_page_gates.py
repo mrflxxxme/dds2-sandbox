@@ -83,6 +83,9 @@ GATED_DOMAINS: dict[str, set[str]] = {
     # создают и отправляют реальные поставки. Один ключ на весь домен —
     # страница «FBS Wildberries» единственный потребитель.
     "wb_fbs": {"fbs"},
+    # АБ-тесты фото: домен-донор этого гарда, закрыт в fix/ab-tests-rbac-gate —
+    # каждая ручка на require_role(..., page="ab-tests"), мутации от editor.
+    "ab_tests": {"ab-tests"},
     # Дизайн карточек: модуль изначально написан с гейтом на каждой ручке
     # (require_role(..., page="design-tasks")) — держим, чтобы не отъехал назад.
     "design_tasks": {"design-tasks"},
@@ -135,7 +138,6 @@ DEFERRED_DOMAINS: dict[str, str] = {
     "reports": "Частично закрыт: 4 dashboard-ручки с гейтом, остальные 14 без. Ключи dashboard/reports.",
     "reports_stock": "Отчёты по остаткам; ключ stocks.",
     "reports_wb": "Отчёты WB; ключ reports.",
-    "ab_tests": "Чинится параллельно в ветке fix/ab-tests-rbac-gate — не трогаем, чтобы не разъехаться в merge.",
     "ai_chat": "AI-ассистент; ключ ai-chat.",
     "wb_returns": "Возвраты на ПВЗ; ключ warehouse.",
     "warehouse_speed": "Приоритет складов, только чтение; ключ stock-analytics.",
