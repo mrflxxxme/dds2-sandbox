@@ -867,7 +867,10 @@ async def download_vehicle_document(
     return Response(
         content=data,
         media_type=content_type,
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(safe_name)}"},
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(safe_name)}",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

@@ -41,7 +41,7 @@ from backend.schemas.ff_billing import (
     FfTransferExpectedCost,
 )
 from backend.services import ff_billing
-from backend.utils.file_validation import validate_file_content
+from backend.utils.file_validation import validate_file_content, validate_upload_type
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(tags=["FF Billing"])
@@ -199,7 +199,6 @@ _INVOICE_ALLOWED_EXT = (
     ".pdf", ".doc", ".docx", ".xls", ".xlsx",
     ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif",
 )
-_INVOICE_BAD_EXT = (".exe", ".bat", ".cmd", ".dll", ".sh", ".msi", ".ps1", ".com")
 
 
 @router.get("/ff-invoices", response_model=FfInvoiceListResponse)
@@ -241,13 +240,14 @@ async def upload_ff_invoice(
     db: AsyncSession = Depends(get_db),
 ):
     """Файл счёта ФФ → распознавание реквизитов → черновик счёта (NEW/MIXED)."""
-    content_type = (file.content_type or "").lower()
+    # Исполняемые и активное содержимое (svg/html/xml — stored XSS) режет хелпер;
+    # тип — по расширению приоритетно (клиентскому Content-Type нельзя доверять).
+    mime = validate_upload_type(file.filename, file.content_type)
     filename_lower = (file.filename or "").lower()
     ok_type = (
-        any(content_type.startswith(p) for p in _INVOICE_ALLOWED_MIME)
-        or filename_lower.endswith(_INVOICE_ALLOWED_EXT)
-    )
-    if filename_lower.endswith(_INVOICE_BAD_EXT) or not ok_type:
+        mime is not None and any(mime.startswith(p) for p in _INVOICE_ALLOWED_MIME)
+    ) or filename_lower.endswith(_INVOICE_ALLOWED_EXT)
+    if not ok_type:
         raise HTTPException(
             status_code=415, detail="Поддерживаются PDF, Word, Excel или фото счёта (JPG/PNG/HEIC)"
         )
@@ -264,7 +264,7 @@ async def upload_ff_invoice(
 
     return await ff_billing.upload_invoice(
         db, project.id, file_data=data, filename=file.filename or "invoice",
-        mime_type=file.content_type,
+        mime_type=mime,
     )
 
 
@@ -346,7 +346,11 @@ async def download_ff_invoice_document(
         db, project.id, invoice_id
     )
     disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
-    return Response(content=data, media_type=content_type, headers={"Content-Disposition": disposition})
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Content-Disposition": disposition, "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.post(
