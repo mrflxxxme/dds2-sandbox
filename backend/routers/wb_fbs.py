@@ -38,6 +38,7 @@ from backend.integrations.wb_fbs_api import (
 from backend.integrations.wb_portal_client import WbPortalError, WbSessionExpired
 from backend.models import Project, User
 from backend.project_context import get_current_project
+from backend.rbac import require_page
 from backend.schemas.wb_fbs import (
     ALLOWED_ORDER_STATUS_FILTERS,
     ALLOWED_STAGE_BUCKETS,
@@ -97,12 +98,27 @@ from backend.services.wb_fbs.client_factory import (
 )
 from backend.services.wb_fbs.locks import PUSH_LOCK_NAME, PUSH_RUN_BUDGET_SEC, is_locked
 from backend.services.wb_fbs.order_history import HistorySyncBusy
-from backend.utils.rate_limit import rate_limit_write
+from backend.utils.rate_limit import rate_limit_read_heavy, rate_limit_write
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.wb_fbs")
 
-router = APIRouter(prefix="/fbs", tags=["WB FBS"])
+#: POST-ради-тела: предпросмотр разбиения заданий на поставки. В WB не ходит,
+#: наше зеркало не меняет, а тело — тысячи id, которые в query не помещаются.
+#: Без этого исключения гейт отобрал бы у viewer основной сценарий страницы.
+READ_PATHS: frozenset[str] = frozenset({"/supplies/plan"})
+
+# Весь домен сидит на одном ключе каталога: страница «FBS Wildberries»
+# (/warehouse/fbs, pageKey `fbs`) — единственный потребитель этих ручек.
+# Гейт на APIRouter: ручка, дописанная завтра, закрыта по умолчанию.
+# `require_internal` на include_router (backend/main.py) отсекает внешние
+# аккаунты, но участника проекта с ролью viewer он пропускал — сюда пишутся
+# остатки в кабинет WB и создаются реальные поставки.
+router = APIRouter(
+    prefix="/fbs",
+    tags=["WB FBS"],
+    dependencies=[Depends(require_page("fbs", read_paths=READ_PATHS))],
+)
 
 #: Единственный текст про отсутствие ключа — фронт показывает его как есть.
 FBS_NOT_CONFIGURED = (
@@ -922,7 +938,11 @@ async def sync_supplies(
     return FbsActionOut(ok=True, message="Поставки обновлены", affected=int(count or 0))
 
 
-@router.post("/supplies/plan", response_model=FbsSupplyPlanOut)
+@router.post(
+    "/supplies/plan",
+    response_model=FbsSupplyPlanOut,
+    dependencies=[Depends(rate_limit_read_heavy)],
+)
 async def plan_supplies(
     payload: FbsSupplyBulkCreate,
     project: Project = Depends(get_current_project),
@@ -939,7 +959,10 @@ async def plan_supplies(
     Три следствия для HTTP-слоя:
       • ручка ЧИТАЮЩАЯ (только наше зеркало заданий) — значит обязана работать
         в режиме `safe`, где запись в WB заблокирована, и не гейтится
-        `rate_limit_write` (iron rule 9 — про write-ручки);
+        `rate_limit_write` (iron rule 9 — про write-ручки). По той же причине
+        путь лежит в `READ_PATHS` RBAC-гейта: для viewer это чтение, а не
+        мутация. Лимитер всё же есть — `rate_limit_read_heavy`: в выделении
+        бывают тысячи заданий, и это тяжёлое чтение;
       • тело — тот же `FbsSupplyBulkCreate`, что у `/supplies/bulk`: фронт шлёт
         ОДИН payload сначала на план, потом на создание, и они гарантированно
         не разъезжаются. `name_prefix` / `reuse_existing` здесь не влияют

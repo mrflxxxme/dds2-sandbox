@@ -13,6 +13,7 @@ from backend.database import AsyncSessionLocal, get_db
 from backend.integrations.wb_api import WBApiClient
 from backend.models import Project, User
 from backend.project_context import get_current_project
+from backend.rbac import require_page
 from backend.schemas.wb_fbo import (
     FboArchiveRequest,
     FboAuditListResponse,
@@ -35,7 +36,11 @@ from backend.services.integrations_service import _get_wb_key
 from backend.utils.rate_limit import rate_limit_write
 
 logger = logging.getLogger("dds.routers.fbo_supplies")
-router = APIRouter(prefix="/warehouse/fbo-supplies", tags=["FBO Supplies"])
+router = APIRouter(
+    prefix="/warehouse/fbo-supplies",
+    tags=["FBO Supplies"],
+    dependencies=[Depends(require_page("fbo"))],
+)
 
 # Store background task references to prevent GC
 _background_tasks: set = set()

@@ -31,6 +31,7 @@ from backend.schemas import (
     TaxRateSaveRequest,
 )
 from backend.services import reports as reports_service
+from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/reports")
 
@@ -221,7 +222,7 @@ async def get_category_counterparties(
     )
 
 
-@router.post("/fx_rates/backfill")
+@router.post("/fx_rates/backfill", dependencies=[Depends(rate_limit_write)])
 async def backfill_fx_rates(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -274,7 +275,7 @@ async def get_tax_rates(
     return await tax_service.get_tax_rates(db, project.id, year)
 
 
-@router.post("/tax_rates")
+@router.post("/tax_rates", dependencies=[Depends(rate_limit_write)])
 async def save_tax_rates(
     payload: TaxRateSaveRequest,
     project: Project = Depends(get_current_project),

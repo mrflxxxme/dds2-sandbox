@@ -13,6 +13,7 @@ from backend.cache import invalidate_cache
 from backend.database import get_db
 from backend.models import Project, WbSppProbe
 from backend.project_context import get_current_project
+from backend.rbac import require_page
 from backend.schemas.pricing import SppMapResponse
 from backend.services.pricing import ai_advisor
 from backend.services.pricing import markup as markup_service
@@ -25,7 +26,11 @@ from backend.utils.rate_limit import rate_limit_write
 
 logger = logging.getLogger("dds.pricing")
 
-router = APIRouter(prefix="/pricing")
+# Ценообразование меняет цены в кабинете WB и гоняет SPP-пробы живыми ценами —
+# это прямые деньги, поэтому гейт стоит на РОУТЕРЕ, а не на отдельных ручках:
+# новая ручка закрыта по умолчанию. Страница /pricing в меню сидит под ключом
+# funnel (frontend-react/src/app/(main)/p/[slug]/layout.tsx).
+router = APIRouter(prefix="/pricing", dependencies=[Depends(require_page("funnel"))])
 
 
 @router.get("/markup")

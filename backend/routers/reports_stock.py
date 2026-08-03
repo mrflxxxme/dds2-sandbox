@@ -19,7 +19,7 @@ from backend.schemas.cold_start import (
     DistributeRequest,
     DistributeResponse,
 )
-from backend.utils.rate_limit import rate_limit_import, rate_limit_write
+from backend.utils.rate_limit import rate_limit_import, rate_limit_read_heavy, rate_limit_write
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.routers.reports_stock")
@@ -374,7 +374,11 @@ async def order_geography(
 # ─── Cold-start: распределение SKU по WB-складам без своей истории ─────────
 
 
-@router.post("/distribute_cold_start", response_model=DistributeResponse)
+@router.post(
+    "/distribute_cold_start",
+    response_model=DistributeResponse,
+    dependencies=[Depends(rate_limit_read_heavy)],
+)
 async def distribute_cold_start(
     req: DistributeRequest,
     localization_target: int = Query(
@@ -392,7 +396,9 @@ async def distribute_cold_start(
     Использует bench соседнего проекта-донора (`bench_from_project_id`)
     или общероссийский WB-фолбэк (если своих заказов <100 за окно).
 
-    Read-only расчёт (никаких записей в БД), rate_limit_write не требуется.
+    Read-only расчёт (никаких записей в БД), rate_limit_write не требуется —
+    но расчёт тяжёлый, поэтому стоит `rate_limit_read_heavy` (POST здесь из-за
+    размера тела, а не из-за мутации).
     """
     from backend.services.cold_start_distribution_service import compute_distribution
 

@@ -19,7 +19,7 @@ from backend.schemas import (
     TransactionSchema,
 )
 from backend.services import transactions_service
-from backend.utils.rate_limit import rate_limit_import, rate_limit_write
+from backend.utils.rate_limit import rate_limit_import, rate_limit_read_heavy, rate_limit_write
 
 router = APIRouter()
 
@@ -105,7 +105,13 @@ async def get_import_logs(project: Project = Depends(get_current_project), db: A
 # ─── Transactions ─────────────────────────────────────────────────────────────
 
 
-@router.post("/transactions/search", response_model=list[TransactionSchema])
+# POST-ради-тела: фильтр операций не помещается в query-строку. Ручка ЧИТАЕТ,
+# поэтому лимитер читающий (`rate_limit_read_heavy`), а не `rate_limit_write`.
+@router.post(
+    "/transactions/search",
+    response_model=list[TransactionSchema],
+    dependencies=[Depends(rate_limit_read_heavy)],
+)
 async def search_transactions(
     f: TransactionFilter,
     project: Project = Depends(get_current_project),

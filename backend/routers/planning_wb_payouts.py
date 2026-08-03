@@ -8,11 +8,14 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas import WbPayoutSchema, WbReconcileRequest
 from backend.services import planning as planning_service
+from backend.utils.rate_limit import rate_limit_import, rate_limit_write
 
 router = APIRouter()
 
 
-@router.post("/wb_payouts/upload")
+# Аплоад Excel — тот же лимитер, что у прочих импортов (5/мин): парсинг файла
+# дороже обычной мутации.
+@router.post("/wb_payouts/upload", dependencies=[Depends(rate_limit_import)])
 async def upload_wb_payouts(
     file: UploadFile = File(...),
     project: Project = Depends(get_current_project),
@@ -55,7 +58,7 @@ async def get_wb_payouts(
     return [WbPayoutSchema.model_validate(p).model_dump() for p in payouts]
 
 
-@router.delete("/wb_payouts/{payout_id}")
+@router.delete("/wb_payouts/{payout_id}", dependencies=[Depends(rate_limit_write)])
 async def delete_wb_payout(
     payout_id: int,
     project: Project = Depends(get_current_project),
@@ -67,7 +70,7 @@ async def delete_wb_payout(
     return {"ok": True}
 
 
-@router.post("/wb_payouts/{payout_id}/reconcile")
+@router.post("/wb_payouts/{payout_id}/reconcile", dependencies=[Depends(rate_limit_write)])
 async def manual_reconcile_wb(
     payout_id: int,
     payload: WbReconcileRequest,

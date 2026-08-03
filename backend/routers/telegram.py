@@ -22,7 +22,7 @@ from backend.utils.rate_limit import rate_limit_write
 router = APIRouter(prefix="/telegram", tags=["Telegram"])
 
 
-@router.post("/link", response_model=TelegramLinkResponse)
+@router.post("/link", response_model=TelegramLinkResponse, dependencies=[Depends(rate_limit_write)])
 async def generate_link(
     user: User = Depends(get_current_user),
 ):
@@ -40,7 +40,7 @@ async def list_chats(
     return await telegram_service.list_chat_bindings(db, project.id)
 
 
-@router.delete("/chats/{binding_id}")
+@router.delete("/chats/{binding_id}", dependencies=[Depends(rate_limit_write)])
 async def unbind_chat(
     binding_id: int,
     project: Project = Depends(get_current_project),
@@ -53,7 +53,7 @@ async def unbind_chat(
     return {"message": "Привязка удалена"}
 
 
-@router.patch("/chats/{binding_id}/notify")
+@router.patch("/chats/{binding_id}/notify", dependencies=[Depends(rate_limit_write)])
 async def toggle_notify(
     binding_id: int,
     body: ToggleNotifyRequest,
@@ -68,7 +68,7 @@ async def toggle_notify(
     return {"message": f"Дайджест {status}"}
 
 
-@router.patch("/chats/{binding_id}/ff-notify")
+@router.patch("/chats/{binding_id}/ff-notify", dependencies=[Depends(rate_limit_write)])
 async def toggle_ff_notify(
     binding_id: int,
     body: ToggleNotifyRequest,
@@ -83,7 +83,7 @@ async def toggle_ff_notify(
     return {"message": f"Уведомления ФФ {status}"}
 
 
-@router.patch("/chats/{binding_id}/measurements-notify")
+@router.patch("/chats/{binding_id}/measurements-notify", dependencies=[Depends(rate_limit_write)])
 async def toggle_measurements_notify(
     binding_id: int,
     body: ToggleNotifyRequest,
@@ -98,7 +98,7 @@ async def toggle_measurements_notify(
     return {"message": f"Сводка замеров {status}"}
 
 
-@router.patch("/chats/{binding_id}/supply-notify")
+@router.patch("/chats/{binding_id}/supply-notify", dependencies=[Depends(rate_limit_write)])
 async def toggle_supply_notify(
     binding_id: int,
     body: ToggleNotifyRequest,
@@ -128,7 +128,7 @@ async def toggle_design_notify(
     return {"message": f"Сводка дизайн-задач {status}"}
 
 
-@router.patch("/chats/{binding_id}/ff-board")
+@router.patch("/chats/{binding_id}/ff-board", dependencies=[Depends(rate_limit_write)])
 async def set_ff_board(
     binding_id: int,
     body: FfBoardConfigRequest,

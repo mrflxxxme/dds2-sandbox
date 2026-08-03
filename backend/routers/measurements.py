@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.rbac import require_page
 from backend.schemas.measurements import (
     MeasurementFiltersResponse,
     MeasurementPenaltyListResponse,
@@ -24,7 +25,7 @@ from backend.utils.rate_limit import rate_limit_write
 
 logger = logging.getLogger("dds.measurements")
 
-router = APIRouter(prefix="/measurements")
+router = APIRouter(prefix="/measurements", dependencies=[Depends(require_page("measurements"))])
 
 
 @router.get("/filters", response_model=MeasurementFiltersResponse)
