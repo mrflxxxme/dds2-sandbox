@@ -927,12 +927,13 @@ async def fbo_warehouse_totals(db: AsyncSession, project_id: int) -> list[dict[s
             continue
         agg[base] = agg.get(base, 0) + int(qty or 0)
 
-    out = [
+    # Сортируем по agg.items() (qty здесь заведомо int), а не по готовым
+    # словарям: в dict-литерале со смешанными типами значений mypy вывел бы
+    # тип значения как object, и int(w["qty"]) в ключе сортировки не прошёл бы.
+    return [
         {"name": base, "qty": qty, "counted": base not in excluded and base not in ignored}
-        for base, qty in agg.items()
+        for base, qty in sorted(agg.items(), key=lambda kv: (-kv[1], kv[0]))
     ]
-    out.sort(key=lambda w: (-int(w["qty"]), str(w["name"])))
-    return out
 
 
 def _remains_by_nm_query(project_id: int, chunk: list[int], names: list[str]) -> Any:
