@@ -22,13 +22,17 @@ raw_data, reports/dashboard, payment_requests), а остальные ~860 ру�
 import pytest
 
 from backend.main import app
-from backend.rbac import ALL_PAGES, require_page, require_role
+from backend.rbac import ALL_PAGES, require_page, require_page_map, require_role
+from backend.routers.funnel import PAGES_BY_ROUTE as FUNNEL_PAGES_BY_ROUTE
+from backend.routers.funnel import ROUTES_BY_PAGES as FUNNEL_ROUTES_BY_PAGES
 from backend.utils.rate_limit import RateLimiter
 
-# Оба гейта — фабрики, возвращающие замыкание `dependency`; узнаём их по qualname.
-# `require_role` вешают на ручку, `require_page` — на роутер целиком.
+# Все три гейта — фабрики, возвращающие замыкание `dependency`; узнаём их по
+# qualname. `require_role` вешают на ручку, `require_page` — на роутер целиком,
+# `require_page_map` — на роутер, ручки которого сидят на разных ключах.
 ROLE_GATE_MARKER = require_role().__qualname__
 PAGE_GATE_MARKER = require_page("dashboard").__qualname__
+PAGE_MAP_GATE_MARKER = require_page_map({}, "dashboard").__qualname__
 
 WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
@@ -57,6 +61,28 @@ GATED_DOMAINS: dict[str, set[str]] = {
     # Оба пункта меню («Оплаты», «Счета ФФ», «Слоты сдачи») — ключ logistics.
     "gazelka": {"logistics"},
     "migfull_portal": {"logistics"},
+    # Реклама WB: /campaigns/{id}/deposit тратит РЕАЛЬНЫЕ деньги, ставки и
+    # старт/стоп кампаний — тоже деньги. 91 ручка на семь ключей каталога, так
+    # что домен закрыт раскладкой `require_page_map` (backend/routers/funnel.py):
+    # ключ у каждой ручки свой, роль выбирается по методу. Здесь перечислены ВСЕ
+    # ключи, которые раскладка вправе использовать; что раскладка полная и что
+    # денежные ручки сидят именно на ads-manager, проверяют отдельные тесты ниже.
+    "funnel": {
+        "funnel",
+        "ads-manager",
+        "trends",
+        "geography",
+        "opiu",
+        "ai-chat",
+        "cost",
+        "project-settings",
+        "ab-tests",
+        "dashboard",
+    },
+    # FBS: /stock/push транслирует остатки в кабинет WB, /supplies + /deliver
+    # создают и отправляют реальные поставки. Один ключ на весь домен —
+    # страница «FBS Wildberries» единственный потребитель.
+    "wb_fbs": {"fbs"},
     # Уже были закрыты до этой итерации — держим, чтобы не отъехали назад.
     "payroll": {"salary"},
     "raw_data": {"raw-data"},
@@ -77,21 +103,6 @@ EXEMPT_ROUTES: dict[str, str] = {
 # ролью viewer и без ключа раздела может дёрнуть эти ручки напрямую.
 DEFERRED_DOMAINS: dict[str, str] = {
     # ── ПРИОРИТЕТ 1 следующей итерации: мутации меняют внешнее состояние ──
-    "funnel": (
-        "САМОЕ ОПАСНОЕ ИЗ ОТЛОЖЕННОГО. 91 ручка на шесть ключей (funnel/ads-manager/"
-        "trends/opiu/plan-fact/geography), поэтому одним ключом роутер не закрыть — "
-        "нужна раскладка ручка→ключ. Внутри: POST /funnel/campaigns/{id}/deposit "
-        "(пополнение рекламного бюджета WB — прямые деньги), PUT /campaigns/{id}/bid "
-        "и /zone-bid (ставки — деньги), POST /campaigns/{id}/state, /stop, "
-        "DELETE /campaigns/{id} (старт/пауза/удаление кампаний)."
-    ),
-    "wb_fbs": (
-        "POST /fbs/stock/push и /stock/reconcile транслируют остатки в кабинет WB "
-        "(влияет на то, что реально продаётся), POST /fbs/supplies + PATCH "
-        "/supplies/{id}/deliver + DELETE создают и отправляют реальные поставки, "
-        "PATCH /orders/{id}/cancel отменяет сборочные задания. Частично прикрыт "
-        "require_internal на include_router — внешние аккаунты (ФФ/лендер) не ходят."
-    ),
     "assembly_wb": (
         "POST /wb/bulk-preorder и /{id}/wb/{goods,boxes,pass}/push заводят и проводят "
         "реальный преордер поставки в кабинете WB через WbPortalClient. Ключ assembly."
@@ -190,12 +201,20 @@ def _closure(fn) -> dict:
     return out
 
 
-def _gates(route) -> list[dict]:
-    """Гейты ручки, приведённые к общему виду {page, read_role, write_role}.
+def _gates(route, path: str) -> list[dict]:
+    """Гейты ручки, приведённые к общему виду {pages, read_role, write_role}.
 
     `require_role` задаёт одну роль на любой метод, `require_page` — разные для
-    чтения и мутации, поэтому нормализуем оба к одной форме.
+    чтения и мутации, `require_page_map` — ещё и разные ключи по путям, поэтому
+    нормализуем все три к одной форме. `pages` всегда множество: ключей у ручки
+    может быть несколько («достаточно любого»), см. `_check_access`.
     """
+
+    def _pages(page) -> set[str]:
+        if not page:
+            return set()
+        return {page} if isinstance(page, str) else set(page)
+
     found = []
     for fn in _dep_calls(route):
         qualname = getattr(fn, "__qualname__", "")
@@ -203,7 +222,7 @@ def _gates(route) -> list[dict]:
         if qualname == ROLE_GATE_MARKER:
             found.append(
                 {
-                    "page": cl.get("page"),
+                    "pages": _pages(cl.get("page")),
                     "read_role": cl.get("min_role"),
                     "write_role": cl.get("min_role"),
                 }
@@ -211,10 +230,22 @@ def _gates(route) -> list[dict]:
         elif qualname == PAGE_GATE_MARKER:
             found.append(
                 {
-                    "page": cl.get("page"),
+                    "pages": _pages(cl.get("page")),
                     "read_role": cl.get("read_role"),
                     "write_role": cl.get("write_role"),
                     "read_paths": cl.get("read_paths") or frozenset(),
+                }
+            )
+        elif qualname == PAGE_MAP_GATE_MARKER:
+            by_route = cl.get("pages_by_route") or {}
+            found.append(
+                {
+                    "pages": _pages(by_route.get(path, cl.get("default"))),
+                    "read_role": cl.get("read_role"),
+                    "write_role": cl.get("write_role"),
+                    "read_paths": cl.get("read_paths") or frozenset(),
+                    # False = ключ достался ручке из `default`, а не из раскладки.
+                    "explicit": path in by_route,
                 }
             )
     return found
@@ -233,12 +264,12 @@ def test_every_route_of_domain_is_gated(module: str):
     for route, path, mod in _iter_api_routes():
         if mod != module or path in EXEMPT_ROUTES:
             continue
-        gates = _gates(route)
+        gates = _gates(route, path)
         label = f"{sorted(route.methods)} {path}"
         if not gates:
             ungated.append(label)
-        elif not any(g.get("page") in allowed for g in gates):
-            wrong_page.append(f"{label} -> pages={[g.get('page') for g in gates]}")
+        elif not any(g["pages"] & allowed for g in gates):
+            wrong_page.append(f"{label} -> pages={[sorted(g['pages']) for g in gates]}")
 
     assert ungated == [], f"ручки {module} без RBAC page-гейта: {ungated}"
     assert wrong_page == [], f"ручки {module} с чужим ключом (ожидался один из {sorted(allowed)}): {wrong_page}"
@@ -253,7 +284,7 @@ def test_domain_mutations_require_editor(module: str):
             continue
         if not (set(route.methods or ()) & WRITE_METHODS):
             continue
-        gates = _gates(route)
+        gates = _gates(route, path)
         # POST-ради-тела (поиск/витрина) объявлен чтением через read_paths —
         # для него editor не требуется по построению.
         if any(
@@ -279,6 +310,100 @@ def test_domain_mutations_are_rate_limited(module: str):
         if not _has_rate_limit(route):
             unlimited.append(f"{sorted(route.methods)} {path}")
     assert unlimited == [], f"мутации {module} без rate limiter: {unlimited}"
+
+
+# ─── Раскладка ключей внутри /funnel ──────────────────────────────────────────
+# Домен закрыт не одним ключом, а таблицей «путь → ключ(и)», поэтому у него свои
+# гарды: таблица обязана покрывать ВСЕ ручки роутера, а денежные ручки — сидеть
+# именно на ключе «Управление рекламой».
+
+
+def test_funnel_page_map_covers_every_route():
+    """Каждая ручка /funnel обязана быть в раскладке явно, а не падать в `default`.
+
+    `default` — страховка от незакрытой ручки (fail-closed), но ключ там почти
+    наверняка не тот, что нужен странице. Красный тест = автор новой ручки
+    должен дописать её в `ROUTES_BY_PAGES` и выбрать раздел осознанно.
+    """
+    implicit = [
+        f"{sorted(route.methods)} {path}"
+        for route, path, mod in _iter_api_routes()
+        if mod == "funnel" and not all(g.get("explicit") for g in _gates(route, path))
+    ]
+    assert implicit == [], (
+        "ручки /funnel вне раскладки ключей (закрыты дефолтным ключом): "
+        f"{implicit}. Добавь путь в ROUTES_BY_PAGES (backend/routers/funnel.py)."
+    )
+
+
+def test_funnel_page_map_has_no_duplicate_paths():
+    """Путь в двух группах раскладки — тихая потеря ключей при инверсии словаря.
+
+    `PAGES_BY_ROUTE` собирается из `ROUTES_BY_PAGES` по принципу «последний
+    выигрывает», так что дубль не упал бы, а молча отдал ручку чужому разделу.
+    """
+    declared = sum(len(paths) for paths in FUNNEL_ROUTES_BY_PAGES.values())
+    assert declared == len(FUNNEL_PAGES_BY_ROUTE), (
+        "в ROUTES_BY_PAGES один путь объявлен дважды: "
+        f"{declared} записей свернулись в {len(FUNNEL_PAGES_BY_ROUTE)}"
+    )
+
+
+def test_funnel_page_map_uses_known_page_keys():
+    """Ключ вне ALL_PAGES = вечный 403: `get_effective_pages` его не вернёт."""
+    unknown = {p for pages in FUNNEL_PAGES_BY_ROUTE.values() for p in pages if p not in ALL_PAGES}
+    assert unknown == set(), f"ключи вне каталога ALL_PAGES: {sorted(unknown)}"
+
+
+# Ручки, которые тратят деньги или меняют состояние рекламы в кабинете WB.
+# Им мало «какого-нибудь ключа из домена» — нужен именно ads-manager и editor.
+ADS_MONEY_ROUTES: dict[str, str] = {
+    "/api/v1/funnel/campaigns/{campaign_id}/deposit": "пополнение бюджета кампании — прямое списание",
+    "/api/v1/funnel/campaigns/{campaign_id}/bid": "ставка кампании — цена клика",
+    "/api/v1/funnel/campaigns/{campaign_id}/zone-bid": "ставка по зоне — цена клика",
+    "/api/v1/funnel/campaigns/{campaign_id}/card-bids": "ставки по карточкам",
+    "/api/v1/funnel/campaigns/{campaign_id}/clusters/bid": "ставка по кластеру",
+    "/api/v1/funnel/campaigns/{campaign_id}/clusters/bid-bulk": "ставки по кластерам пачкой",
+    "/api/v1/funnel/products/{nm_id}/clusters/bid": "ставка по кластеру товара",
+    "/api/v1/funnel/campaigns/{campaign_id}/state": "старт/пауза кампании — открывает трату",
+    "/api/v1/funnel/campaigns/{campaign_id}/stop": "остановка кампании",
+    "/api/v1/funnel/campaigns/{campaign_id}": "удаление кампании",
+    "/api/v1/funnel/campaigns/create": "создание кампании в кабинете WB",
+    "/api/v1/funnel/campaigns/{campaign_id}/autorefill": "автопополнение — регулярное списание",
+    "/api/v1/funnel/campaigns/schedule": "расписание старт/стоп — управляет тратой",
+}
+
+# То же для FBS: наружу уходят остатки и реальные поставки.
+FBS_DANGEROUS_ROUTES: dict[str, str] = {
+    "/api/v1/fbs/stock/push": "трансляция остатков в кабинет WB",
+    "/api/v1/fbs/stock/reconcile": "выравнивание остатков в WB",
+    "/api/v1/fbs/stock/override": "ручная правка остатка к трансляции",
+    "/api/v1/fbs/supplies": "создание поставки в WB",
+    "/api/v1/fbs/supplies/bulk": "создание поставок пачкой",
+    "/api/v1/fbs/supplies/{wb_supply_id}": "удаление поставки",
+    "/api/v1/fbs/supplies/{wb_supply_id}/deliver": "отправка поставки в доставку — необратимо",
+    "/api/v1/fbs/orders/{wb_order_id}/cancel": "отмена сборочного задания",
+}
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_page", "why"),
+    [(p, "ads-manager", why) for p, why in ADS_MONEY_ROUTES.items()]
+    + [(p, "fbs", why) for p, why in FBS_DANGEROUS_ROUTES.items()],
+)
+def test_dangerous_route_requires_its_page_and_editor(path: str, expected_page: str, why: str):
+    """Денежная ручка: ключ ровно свой, роль на мутации — не ниже editor."""
+    routes = [r for r, p, _ in _iter_api_routes() if p == path]
+    assert routes, f"ручка пропала из приложения: {path} ({why})"
+
+    for route in routes:
+        if not (set(route.methods or ()) & WRITE_METHODS):
+            continue  # у пути бывает и GET-сосед (напр. /autorefill, /schedule)
+        gates = _gates(route, path)
+        pages = {p for g in gates for p in g["pages"]}
+        assert pages == {expected_page}, f"{path} ({why}) закрыт ключами {sorted(pages)}"
+        roles = {g.get("write_role") for g in gates}
+        assert roles & WRITE_ROLES, f"{path} ({why}) доступен роли viewer: {sorted(r for r in roles if r)}"
 
 
 # ─── Поведенческая проверка гейта ─────────────────────────────────────────────
@@ -395,6 +520,106 @@ async def test_read_paths_lets_viewer_post_showcase(client):
         headers=headers,
     )
     assert resp.status_code == 403, f"viewer не должен править корзину биржи: {resp.status_code}"
+
+
+@pytest.mark.asyncio
+async def test_viewer_cannot_deposit_ad_budget(client):
+    """САМОЕ ДОРОГОЕ: viewer с ключом ads-manager не пополняет рекламный бюджет WB.
+
+    `POST /funnel/campaigns/{id}/deposit` списывает РЕАЛЬНЫЕ деньги со счёта
+    кабинета Продвижения. До гейта единственным, что отделяло «смотрящего»
+    участника от списания, было отсутствие WB-ключа у тестового проекта:
+    ручка отвечала 400 «Нет WB-ключа», то есть доходила до сервиса.
+    """
+    owner_headers, project = await _owner_with_project(client, "RBAC ads viewer")
+    headers = await _member(client, owner_headers, project, "viewer", ["ads-manager"])
+
+    resp = await client.post(
+        "/api/v1/funnel/campaigns/1/deposit",
+        json={"amount": 1000, "source": 0},
+        headers=headers,
+    )
+    assert resp.status_code == 403, f"viewer дошёл до пополнения бюджета: {resp.status_code} {resp.text}"
+
+
+@pytest.mark.asyncio
+async def test_editor_without_ads_page_blocked_on_campaigns(client):
+    """editor БЕЗ ключа ads-manager: 403 и на чтении списка кампаний, и на ставке."""
+    owner_headers, project = await _owner_with_project(client, "RBAC ads no page")
+    headers = await _member(client, owner_headers, project, "editor", ["reports"])
+
+    resp = await client.get("/api/v1/funnel/campaigns", headers=headers)
+    assert resp.status_code == 403, f"чтение кампаний без ключа: {resp.status_code} {resp.text}"
+
+    resp = await client.put("/api/v1/funnel/campaigns/1/bid", json={"bid": 500}, headers=headers)
+    assert resp.status_code == 403, f"ставка без ключа: {resp.status_code} {resp.text}"
+
+
+@pytest.mark.asyncio
+async def test_viewer_with_ads_page_reads_campaigns(client):
+    """viewer С ключом ads-manager сохраняет чтение — гейт защищает, а не ломает страницу."""
+    owner_headers, project = await _owner_with_project(client, "RBAC ads read")
+    headers = await _member(client, owner_headers, project, "viewer", ["ads-manager"])
+
+    resp = await client.get("/api/v1/funnel/campaigns", headers=headers)
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_geography_viewer_keeps_funnel_data(client):
+    """Несколько ключей на ручку: «Индекс локализации» читает `GET /funnel/data`.
+
+    Ключ у страницы — geography, а ручка живёт в роутере воронки. Требуй гейт
+    ровно ключ funnel — и страница локализации перестала бы грузиться.
+    """
+    owner_headers, project = await _owner_with_project(client, "RBAC geo data")
+    headers = await _member(client, owner_headers, project, "viewer", ["geography"])
+
+    resp = await client.get("/api/v1/funnel/data?group_by=day", headers=headers)
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_viewer_cannot_push_fbs_stocks(client):
+    """viewer с ключом fbs не транслирует остатки в кабинет WB.
+
+    `POST /fbs/stock/push` пишет остатки на склад продавца — это то, что
+    реально продаётся. До гейта viewer доходил до сервиса (409 «нет ключа
+    Маркетплейс»).
+    """
+    owner_headers, project = await _owner_with_project(client, "RBAC fbs viewer")
+    headers = await _member(client, owner_headers, project, "viewer", ["fbs"])
+
+    resp = await client.post("/api/v1/fbs/stock/push", json={}, headers=headers)
+    assert resp.status_code == 403, f"viewer дошёл до трансляции остатков: {resp.status_code} {resp.text}"
+
+
+@pytest.mark.asyncio
+async def test_editor_without_fbs_page_blocked(client):
+    """editor БЕЗ ключа fbs: 403 и на чтении заданий, и на создании поставки."""
+    owner_headers, project = await _owner_with_project(client, "RBAC fbs no page")
+    headers = await _member(client, owner_headers, project, "editor", ["reports"])
+
+    resp = await client.get("/api/v1/fbs/orders", headers=headers)
+    assert resp.status_code == 403, f"чтение заданий без ключа fbs: {resp.status_code} {resp.text}"
+
+    resp = await client.post("/api/v1/fbs/supplies", json={"name": "test"}, headers=headers)
+    assert resp.status_code == 403, f"создание поставки без ключа fbs: {resp.status_code} {resp.text}"
+
+
+@pytest.mark.asyncio
+async def test_fbs_supply_plan_stays_read_for_viewer(client):
+    """`POST /fbs/supplies/plan` — предпросмотр разбиения, а не запись: viewer его не теряет.
+
+    POST выбран из-за размера тела (тысячи заданий в выделении), в WB ручка не
+    ходит. Без `read_paths` гейт отобрал бы у «смотрящего» основной сценарий
+    страницы FBS.
+    """
+    owner_headers, project = await _owner_with_project(client, "RBAC fbs plan")
+    headers = await _member(client, owner_headers, project, "viewer", ["fbs"])
+
+    resp = await client.post("/api/v1/fbs/supplies/plan", json={"order_ids": []}, headers=headers)
+    assert resp.status_code != 403, f"viewer потерял предпросмотр поставок: {resp.text}"
 
 
 def test_exempt_routes_still_exist():

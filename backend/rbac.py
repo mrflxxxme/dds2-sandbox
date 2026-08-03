@@ -7,6 +7,7 @@ Pages: granular page-level access for editor/viewer roles.
 
 import json
 import logging
+from collections.abc import Mapping
 from datetime import date, datetime
 
 from fastapi import Depends, HTTPException, Request
@@ -19,6 +20,9 @@ from backend.models.auth import Project, ProjectMember, User
 from backend.project_context import get_current_project
 
 logger = logging.getLogger(__name__)
+
+# Ключ каталога или несколько ключей («достаточно любого»), см. `_check_access`.
+PageKey = str | tuple[str, ...]
 
 ROLE_HIERARCHY: dict[str, int] = {
     "owner": 4,
@@ -270,14 +274,27 @@ def get_effective_pages(role: str, pages_json: str | None, configured_at: dateti
     return explicit + inherited_pages(explicit, configured_at)
 
 
+def _as_pages(page: PageKey | None) -> tuple[str, ...]:
+    """Ключ страницы или набор ключей → кортеж. Пустой кортеж = гейта по ключу нет."""
+    if not page:
+        return ()
+    return (page,) if isinstance(page, str) else tuple(page)
+
+
 async def _check_access(
     db: AsyncSession,
     project: Project,
     user: User,
     min_role: str,
-    page: str | None,
+    page: PageKey | None,
 ) -> User:
-    """Общее ядро проверки: членство в проекте, уровень роли, ключ страницы."""
+    """Общее ядро проверки: членство в проекте, уровень роли, ключ страницы.
+
+    `page` — ключ каталога или НЕСКОЛЬКО ключей. Несколько означает «любого
+    достаточно»: одну и ту же ручку читают разные разделы (напр. `GET
+    /funnel/data` открыт с «Воронки», «Управления рекламой» и «Индекса
+    локализации»), и требовать пересечения значило бы сломать две страницы из трёх.
+    """
     member = (
         await db.execute(
             select(ProjectMember).where(
@@ -296,15 +313,16 @@ async def _check_access(
     if role_level < required_level:
         raise HTTPException(403, f"Требуется роль {min_role} или выше")
 
-    if page and member.role in ("editor", "viewer"):
-        member_pages = get_effective_pages(member.role, member.pages, member.pages_updated_at)
-        if page not in member_pages:
-            raise HTTPException(403, f"Нет доступа к странице: {page}")
+    wanted = _as_pages(page)
+    if wanted and member.role in ("editor", "viewer"):
+        member_pages = set(get_effective_pages(member.role, member.pages, member.pages_updated_at))
+        if not member_pages.intersection(wanted):
+            raise HTTPException(403, f"Нет доступа к странице: {' / '.join(wanted)}")
 
     return user
 
 
-def require_role(min_role: str = "viewer", page: str | None = None):
+def require_role(min_role: str = "viewer", page: PageKey | None = None):
     """FastAPI dependency factory — checks role hierarchy + page access."""
 
     async def dependency(
@@ -321,8 +339,23 @@ def require_role(min_role: str = "viewer", page: str | None = None):
 READ_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
+def _route_path_of(request: Request) -> str:
+    """Шаблон пути ручки (`/api/v1/funnel/campaigns/{campaign_id}/bid`).
+
+    Именно шаблон, а не `request.url.path`: по нему ищут раскладку ключей и
+    исключения `read_paths`, а конкретный id в пути для этого не нужен.
+    """
+    route = request.scope.get("route")
+    return getattr(route, "path", "") or request.url.path
+
+
+def _is_read(method: str, route_path: str, read_paths: frozenset[str]) -> bool:
+    """Чтение — по методу или по явному исключению для POST-ради-тела."""
+    return method.upper() in READ_METHODS or any(route_path.endswith(s) for s in read_paths)
+
+
 def require_page(
-    page: str,
+    page: PageKey,
     read_role: str = "viewer",
     write_role: str = "editor",
     read_paths: frozenset[str] = frozenset(),
@@ -356,11 +389,49 @@ def require_page(
         user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
     ) -> User:
-        route = request.scope.get("route")
-        route_path = getattr(route, "path", "") or request.url.path
-        is_read = request.method.upper() in READ_METHODS or any(
-            route_path.endswith(suffix) for suffix in read_paths
-        )
+        is_read = _is_read(request.method, _route_path_of(request), read_paths)
+        return await _check_access(db, project, user, read_role if is_read else write_role, page)
+
+    return dependency
+
+
+def require_page_map(
+    pages_by_route: Mapping[str, PageKey],
+    default: PageKey,
+    read_role: str = "viewer",
+    write_role: str = "editor",
+    read_paths: frozenset[str] = frozenset(),
+):
+    """То же, что `require_page`, но для роутера, ручки которого сидят на РАЗНЫХ ключах.
+
+    Зачем отдельная фабрика. `/funnel` — один роутер на 91 ручку и СЕМЬ разделов
+    каталога («Воронка», «Управление рекламой», «Метрики и тренды», «Индекс
+    локализации», «Себестоимость», «Настройка проекта», «АБ-тесты»): страницы
+    исторически ходят в один и тот же аналитический бэкенд. Одним ключом такой
+    роутер не закрыть, а вешать `require_role` на каждую ручку — не fail-closed:
+    ручка, дописанная завтра, снова окажется открытой (ровно так домен АБ-тестов
+    уехал в прод без гейта).
+
+    Здесь гейт по-прежнему ОДИН на `APIRouter`, а ключ выбирается по шаблону
+    пути. В БД уходит один запрос за участником — как и у `require_page`.
+
+    `pages_by_route` — ПОЛНЫЙ шаблон пути (`/api/v1/funnel/campaigns/{campaign_id}/bid`)
+    → ключ или кортеж ключей. `default` — ключ для пути, которого в раскладке
+    нет: новая ручка остаётся закрытой (fail-closed), пусть и не тем ключом,
+    какой ей нужен. Что раскладка полная, проверяет гард-тест
+    `test_funnel_page_map_covers_every_route`, так что `default` — страховка, а
+    не рабочий режим.
+    """
+
+    async def dependency(
+        request: Request,
+        project: Project = Depends(get_current_project),
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+    ) -> User:
+        route_path = _route_path_of(request)
+        page = pages_by_route.get(route_path, default)
+        is_read = _is_read(request.method, route_path, read_paths)
         return await _check_access(db, project, user, read_role if is_read else write_role, page)
 
     return dependency
