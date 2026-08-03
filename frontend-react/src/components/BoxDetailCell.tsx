@@ -405,7 +405,7 @@ function DropdownEdit({ qty, pcsPerBox, boxDetail, orderId, itemId, onSaved, onC
         <div style={{
             position: 'absolute', top: '100%', right: 0, marginTop: 4,
             padding: '10px 14px',
-            background: 'var(--color-bg-card)', backdropFilter: 'blur(24px) saturate(180%)',
+            background: 'var(--color-bg-card)', backdropFilter: 'blur(24px) saturate(180%)', WebkitBackdropFilter: 'blur(24px) saturate(180%)',
             border: '1px solid var(--color-border)', borderRadius: 12,
             boxShadow: '0 8px 32px rgba(0,0,0,0.12)', zIndex: 50,
             minWidth: 200, fontSize: 12,

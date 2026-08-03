@@ -38,6 +38,7 @@ export default function Toast({ message, type = 'success', onClose, duration = 4
             display: 'flex', alignItems: 'center', gap: 10,
             animation: 'fadeIn 0.2s ease-out',
             backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
         }}>
             <span>{message}</span>
             <span style={{ cursor: 'pointer', opacity: 0.7 }} onClick={onClose}>✕</span>

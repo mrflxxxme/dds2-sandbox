@@ -2834,7 +2834,7 @@ export default function AssemblyDraftPage() {
                 <>
                     <div style={{
                         position: 'fixed', inset: 0, zIndex: 200,
-                        background: 'rgba(0,0,0,0.18)', backdropFilter: 'blur(6px)',
+                        background: 'rgba(0,0,0,0.18)', backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)',
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                     }}>
                         <div className="glass-card" style={{ padding: 28, textAlign: 'center', maxWidth: 360 }}>
