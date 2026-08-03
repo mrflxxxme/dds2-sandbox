@@ -2626,35 +2626,42 @@ async def convert_assembly_to_transfer(
         )
         units_total += item.quantity
 
-    # Зеркала ФФ. По умолчанию остаются на заявке (её история), на переезд
-    # вяжутся свежие заявки провайдера с обеих сторон. move_ff_links=True —
+    # Отмена активной заявки — см. блок 🔴 в докстринге. Терминальные не трогаем.
+    # Считаем ДО переноса зеркал: от факта отмены зависит судьба живых связок.
+    cancelled = AssemblyStatus(assembly.status) not in _TERMINAL_ASSEMBLY_STATUSES
+
+    # Зеркала ФФ. ЗАВЕРШЁННЫЕ по умолчанию остаются на заявке (её история), на
+    # переезд вяжутся свежие заявки провайдера с обеих сторон. move_ff_links=True —
     # когда ФФ собрал ровно этот переезд под видом сборки и заводить новую
     # заявку у провайдера никто не будет.
+    #
+    # 🔴 НЕЗАВЕРШЁННАЯ заявка провайдера уезжает на переезд ВСЕГДА, когда мы
+    # отменяем заявку (`cancelled`), — без всякой галки. Переделка гасит
+    # документ, а работа у провайдера остаётся открытой и делается физически
+    # под ЭТОТ переезд: оставить её на отменённой заявке значит потерять её из
+    # виду с обеих сторон. Прод 03.08.2026: ASM-770 → TR-32, заявка ФФ 1036
+    # («Ожидает отгрузки») повисла на отменённой ASM-770, а живой TR-32 остался
+    # без связки. Признак берём нормализованный (`is_completed`, ведёт синк), а
+    # не сырой статус: у трёх провайдеров это свободный текст («Закрыт»,
+    # «Отгружена», «Ожидает отгрузки»…), классифицировать его тут нельзя.
     ff_links_moved = 0
-    if payload.move_ff_links:
+    if payload.move_ff_links or cancelled:
         from backend.models.fulfillment import FulfillmentRequest
 
-        mirrors = (
-            (
-                await db.execute(
-                    select(FulfillmentRequest)
-                    .where(
-                        FulfillmentRequest.project_id == project_id,
-                        FulfillmentRequest.assembly_request_id == assembly.id,
-                    )
-                    .limit(200)
-                )
-            )
-            .scalars()
-            .all()
+        mirror_q = select(FulfillmentRequest).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.assembly_request_id == assembly.id,
         )
+        if not payload.move_ff_links:
+            mirror_q = mirror_q.where(
+                FulfillmentRequest.is_completed == False  # noqa: E712 — SQLAlchemy expression
+            )
+        mirrors = ((await db.execute(mirror_q.limit(200))).scalars().all())
         for mirror in mirrors:
             mirror.assembly_request_id = None
             mirror.stock_transfer_id = transfer.id
             ff_links_moved += 1
 
-    # Отмена активной заявки — см. блок 🔴 в докстринге. Терминальные не трогаем.
-    cancelled = AssemblyStatus(assembly.status) not in _TERMINAL_ASSEMBLY_STATUSES
     if cancelled:
         old_status = assembly.status
         assembly.status = AssemblyStatus.CANCELLED
