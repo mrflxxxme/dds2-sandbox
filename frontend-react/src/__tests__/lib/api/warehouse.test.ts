@@ -226,6 +226,19 @@ describe('warehouse.getTransfers', () => {
         await api.getTransfers(true);
         expect(spy.mock.calls[0][0]).toContain('in_transit=true');
     });
+
+    it('передаёт срез Листа логиста: status + has_vehicle', async () => {
+        const spy = mockFetch([]);
+        const api = makeApi();
+        // Срез «ждут машину» — READY: машина назначается именно оттуда
+        // (назначенная уводит переезд в VEHICLE_ASSIGNED).
+        await api.getTransfers(false, undefined, { status: 'READY', hasVehicle: false });
+        const url = spy.mock.calls[0][0] as string;
+        expect(url).toContain('status=READY');
+        // has_vehicle=false обязан УЙТИ в запрос: наивная проверка `if (v)`
+        // выбросила бы его и превратила «без машины» в «все подряд».
+        expect(url).toContain('has_vehicle=false');
+    });
 });
 
 describe('warehouse.createTransfer', () => {
@@ -243,6 +256,82 @@ describe('warehouse.createTransfer', () => {
         const body = JSON.parse((init as RequestInit).body as string);
         expect(body.from_warehouse_id).toBe(1);
         expect(body.to_warehouse_id).toBe(2);
+    });
+
+    /**
+     * Контракты СОЗДАНИЯ и НАЗНАЧЕНИЯ МАШИНЫ трактуют пустую единицу по-разному,
+     * и перепутать их легко:
+     *   • create (StockTransferCreate): shipped_as_boxes — обычный bool,
+     *     дефолт false, пустое = «паллеты». Флаг обязан уйти ВСЕГДА;
+     *   • assign-vehicle (TransferAssignVehicle): трёхзначный, null = «не
+     *     трогать уже заданное» (иначе bulk превратил бы коробочный переезд
+     *     в паллетный).
+     * Тест держит обе стороны.
+     */
+    it('создание: коробочная единица уходит явно, пустая оценка — null', async () => {
+        const spy = mockFetch({ id: 1, status: 'DRAFT' });
+        const api = makeApi();
+        await api.createTransfer({
+            from_warehouse_id: 1,
+            to_warehouse_id: 2,
+            items: [{ barcode: '111', quantity: 5 }],
+            pallets_count: null,
+            pallet_weight_kg: null,
+            shipped_as_boxes: true,
+        });
+        const body = JSON.parse((spy.mock.calls[0][1] as RequestInit).body as string);
+        expect(body.shipped_as_boxes).toBe(true);
+        expect(body.pallets_count).toBeNull();
+        expect(body.pallet_weight_kg).toBeNull();
+    });
+});
+
+describe('warehouse.assignTransferVehicle', () => {
+    const vehicleBase = {
+        vehicle_info: 'В874УА37',
+        vehicle_brand: 'ГАЗ-330',
+        driver_first_name: 'Дмитрий',
+        driver_last_name: 'Крапива',
+        driver_phone: '+79991234567',
+        logistics_by_warehouse: false,
+        carrier_inn: null,
+        carrier_name: null,
+        pickup_date: '2026-08-01',
+        pickup_time_slot: '08:00-12:00',
+        pickup_cost: 15000,
+        delivery_date: '2026-08-02',
+    };
+
+    it('назначение: нетронутая единица уходит как null — «не трогать»', async () => {
+        const spy = mockFetch({ id: 7 });
+        const api = makeApi();
+        await api.assignTransferVehicle(7, {
+            ...vehicleBase,
+            pallets_count: null,
+            pallet_weight_kg: null,
+            shipped_as_boxes: null,
+        });
+        const [url, init] = spy.mock.calls[0];
+        expect(url).toContain('/api/v1/warehouse/transfers/7/assign-vehicle');
+        const body = JSON.parse((init as RequestInit).body as string);
+        // Именно null, а не false: false здесь означал бы «сделать паллетным».
+        expect(body.shipped_as_boxes).toBeNull();
+    });
+
+    it('bulk шлёт {ids, payload} — реквизиты общие на всю пачку', async () => {
+        const spy = mockFetch([]);
+        const api = makeApi();
+        await api.assignTransferVehicleBulk([31, 32], {
+            ...vehicleBase,
+            pallets_count: null,
+            pallet_weight_kg: null,
+            shipped_as_boxes: null,
+        });
+        const [url, init] = spy.mock.calls[0];
+        expect(url).toContain('/api/v1/warehouse/transfers/assign-vehicle-bulk');
+        const body = JSON.parse((init as RequestInit).body as string);
+        expect(body.ids).toEqual([31, 32]);
+        expect(body.payload.vehicle_info).toBe('В874УА37');
     });
 });
 

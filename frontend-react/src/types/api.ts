@@ -42,6 +42,8 @@ export interface ProjectMember {
   telegram_username?: string;
   role: 'owner' | 'admin' | 'editor' | 'viewer';
   pages: string[];
+  /** Подмножество pages, выданное автоматически: раздел появился после настройки доступа. */
+  pages_inherited?: string[];
   joined_at: string;
 }
 
@@ -1233,6 +1235,26 @@ export interface InboundReceipt {
   items: InboundReceiptItem[];
 }
 
+/** Машина в пути на склад — карточка блока «Ожидаемые поставки» */
+export interface ExpectedVehicleRow {
+  id: number;
+  order_no: string;
+  status: string;
+  invoice_no: string | null;
+  ship_date: string | null;
+  estimated_arrival_date: string | null;
+  actual_ship_date: string | null;
+  items_count: number;
+  total_qty: number;
+  container_type: string | null;
+  transport_type: string | null;
+  /** id нашей приёмки этой машины (InboundReceipt.cost_order_id) — цель связки заявок ФФ */
+  receipt_id: number | null;
+  /** Уже связанные заявки ФФ (номера PVB-… Натали) — карточка показывает связку */
+  linked_ff_numbers?: string[];
+}
+
+
 export interface OutboundShipmentItem {
   id: number;
   shipment_id: number;
@@ -1256,6 +1278,14 @@ export interface OutboundShipment {
   created_at?: string;
   updated_at?: string;
   items: OutboundShipmentItem[];
+  /**
+   * Забор внутреннего ПЕРЕЕЗДА, а не отгрузка на маркетплейс.
+   * Такой забор нельзя отменять через отгрузку: сток он никогда не списывал,
+   * и отмена вернула бы на склад несуществующие единицы — отменяется только
+   * через само перемещение (бэкенд на «Отгрузить»/«Доставлено»/«Отменить»
+   * отвечает 400 — гард UI дублирует серверный, а не заменяет его).
+   */
+  stock_transfer_id?: number | null;
 }
 
 export interface StockTransferItem {
@@ -1266,19 +1296,328 @@ export interface StockTransferItem {
   quantity: number;
 }
 
+/**
+ * Статусы переезда — ЗЕРКАЛО `AssemblyStatus`: переезд между складами ведётся
+ * как заявка на сборку, теми же ступенями.
+ *
+ * PENDING → IN_PROGRESS → READY → VEHICLE_ASSIGNED → SHIPPED → DELIVERED,
+ * плюс RETURNED → CLOSED и CANCELLED.
+ *
+ * Сток двигают РОВНО два перехода: → SHIPPED списывает со склада-источника,
+ * → DELIVERED приходует на получателе (и → RETURNED возвращает источнику).
+ *
+ * Старая тонкая шкала переведена миграцией `trv04`: DRAFT → PENDING,
+ * IN_TRANSIT → SHIPPED, COMPLETED → DELIVERED.
+ */
+export type StockTransferStatus =
+  | 'PENDING'
+  | 'IN_PROGRESS'
+  | 'READY'
+  | 'VEHICLE_ASSIGNED'
+  | 'SHIPPED'
+  | 'DELIVERED'
+  | 'RETURNED'
+  | 'CLOSED'
+  | 'CANCELLED';
+
 export interface StockTransfer {
   id: number;
   project_id: number;
   from_warehouse_id: number;
   to_warehouse_id: number;
   number: string;
-  status: 'DRAFT' | 'IN_TRANSIT' | 'COMPLETED';
+  status: StockTransferStatus;
   comment?: string;
   is_defect: boolean;
   defect_reason?: string;
   created_at?: string;
   updated_at?: string;
-  items: StockTransferItem[];
+  /**
+   * Состав. Есть только в `GET /transfers/{id}`: из ответа СПИСКА он убран —
+   * тянуть полный состав всех переездов ради двух чисел стоило мегабайты.
+   * Для «сколько там всего» есть units_total / sku_count (см. ниже).
+   */
+  items?: StockTransferItem[];
+  /** Штук всего — считает бэкенд; в списке это единственный источник. */
+  units_total?: number;
+  /** Позиций (SKU) — тоже с бэкенда, состав для этого больше не нужен. */
+  sku_count?: number;
+  /**
+   * Уже зачислено получателю, штук — НЕТТО по журналу движений (приход минус
+   * откат возврата), поэтому после переотправки счётчик начинается заново, а не
+   * помнит прошлый круг. Знаменатель прогресса — `units_total`, отдельного
+   * «плана» НЕТ.
+   *
+   * Приходит и в списке, и в карточке. Прогресс рисуем только у SHIPPED:
+   * у DELIVERED он равен `units_total` и его место занимает сам статус, а до
+   * отгрузки «принято 0 из 500» читалось бы как потерянный товар.
+   */
+  received_units?: number;
+
+  // ─── Машина и логистика переезда (зеркало блока «Назначить машину» заявки) ───
+  vehicle_info?: string | null;
+  vehicle_brand?: string | null;
+  driver_first_name?: string | null;
+  driver_last_name?: string | null;
+  driver_phone?: string | null;
+  /** Перевозчик: контрагент склада-источника (logistics_by_warehouse) либо подрядчик по ИНН. */
+  counterparty_id?: number | null;
+  logistics_by_warehouse?: boolean;
+  pickup_date?: string | null;
+  pickup_time_slot?: string | null;
+  /** Numeric(18,2) сериализуется СТРОКОЙ — приводить через transferPickupCost(). */
+  pickup_cost?: string | number | null;
+  delivery_date?: string | null;
+  vehicle_assigned_at?: string | null;
+  /**
+   * Вехи цепочки — зеркало `AssemblyRequest.actual_ready_date` / `shipped_at`.
+   * Из статуса НЕ выводятся: он хранит только текущее состояние, а сводному
+   * списку нужны сами даты («висит готовым N дней»).
+   * `actual_ready_date` ставится на переходе в READY (кнопкой, синком ФФ или
+   * наследованием от заявки при конвертации) и переживает возврат;
+   * `shipped_at` — на отгрузке, при возврате обнуляется.
+   */
+  actual_ready_date?: string | null;
+  shipped_at?: string | null;
+  /** Заявка на сборку, из которой переделали этот переезд (кнопка «Переделать в перемещение»). */
+  converted_from_assembly_id?: number | null;
+
+  // ─── Транспортная единица (семантика 1:1 с AssemblyRequest) ─────────────
+  // Флаг меняет только ЕДИНИЦУ измерения pallets_count/pallet_weight_kg и
+  // подписи: «Палеты» / «Вес 1 палеты» против «Короба» / «Вес 1 короба».
+  // В отличие от заявки — nullable: переезд можно завести без оценки.
+  pallets_count?: number | null;
+  /** Вес ОДНОЙ единицы (Numeric → строка). */
+  pallet_weight_kg?: string | number | null;
+  shipped_as_boxes?: boolean;
+
+  /**
+   * Переезд ведёт Газелька — машину назначает агрегатор, вручную нельзя
+   * (зеркало `AssemblyRequest.via_gazelka`). Приходит и в списке, и в карточке.
+   */
+  via_gazelka?: boolean;
+  /**
+   * Забор переезда (`OutboundShipment` со `stock_transfer_id`) — носитель денег:
+   * через него переезд виден во вкладке «Оплаты» и в отчёте логистики. Пусто —
+   * забора нет: либо переезд ещё не уехал, либо уехал без оформленной логистики
+   * (тогда его надо добрать через «Указать перевозчика и стоимость»).
+   */
+  pickup_shipment_id?: number | null;
+  pickup_shipment_number?: string | null;
+  /**
+   * Локальный архив — РУЧНОЕ «убрать с глаз». Не путать с видом «Архив» в
+   * списке: тот вычисляется по статусу (принят/закрыт/отменён + брак), а это
+   * решение человека. Архивный переезд остаётся в отчётах и в «Оплатах».
+   */
+  archived?: boolean;
+  archived_at?: string | null;
+
+  // Обогащение, которое сервис заполняет пачкой (не relationship).
+  // Всё, чего в схеме НЕТ, объявлять тут нельзя: «поле есть, тип верный, в
+  // рантайме вечный null» не ловится ни типами, ни ревью. Данных расхода по
+  // забору здесь по-прежнему нет — оплату показывает «Лист логиста».
+  from_warehouse_name?: string | null;
+  to_warehouse_name?: string | null;
+  /** Имя перевозчика. Пока не приехало — UI честно падает на «Контрагент #id». */
+  counterparty_name?: string | null;
+  /**
+   * Связанные заявки ФФ обеих сторон маршрута. Заполняется ТОЛЬКО в деталке
+   * (`GET /warehouse/transfers/{id}` и ответе PUT) — в списке всегда пусто,
+   * опираться там на него нельзя. Раньше карточка ради этого списка тянула ВСЕ
+   * заявки обоих складов (два тяжёлых запроса на открытие).
+   */
+  ff_links?: TransferFfLink[];
+}
+
+/** Сторона маршрута переезда: отгрузка у источника / приёмка у получателя. */
+export type TransferFfSide = 'source' | 'dest';
+
+/**
+ * Заявка ФФ на стороне переезда — ОДИН тип на три места:
+ *  • `StockTransfer.ff_links` — уже связанные;
+ *  • `GET /warehouse/transfers/{id}/ff-candidates?side=…` — свободные кандидаты;
+ *  • `AssemblyFfCandidate` (см. ниже) — то же для заявки на сборку, без `side`.
+ *    Форма ответа общая намеренно: кандидатов показывает одна модалка на оба
+ *    документа, и разъехавшиеся формы заставили бы её ветвиться на разборе
+ *    данных, а не только на подписях.
+ *
+ * Имя `FfLinkCandidate` занято кандидатом ОБРАТНОГО направления (наш документ
+ * как кандидат для заявки ФФ, `{doc_id, doc_kind, score…}`) — не путать.
+ *
+ * `warehouse_id` — склад самой заявки ФФ; он нужен ручкам link/unlink (в их
+ * путях есть warehouse_id) и ссылке на деталку заявки. `side` бэкенд считает
+ * сам (склад совпал с from → source, с to → dest; на легаси-маршруте — по
+ * kind), поле всегда непустое.
+ */
+export interface TransferFfLink {
+  /** fulfillment_requests.id */
+  id: number;
+  warehouse_id: number;
+  side: TransferFfSide;
+  number: string | null;
+  external_id: string;
+  /** 'assembly' | 'inbound' | 'return' | 'other' */
+  kind: string;
+  status: string | null;
+  stage_title: string | null;
+  total_qty: number | null;
+  /** Дата (YYYY-MM-DD), не datetime. */
+  external_created_at: string | null;
+}
+
+/**
+ * Кандидат на связь с ЗАЯВКОЙ НА СБОРКУ —
+ * `GET /warehouse/assembly/{id}/ff-candidates` (в т.ч. учётное зеркало FBS,
+ * kind=fbs: запрет на его связь с ФФ снят 02.08.2026).
+ *
+ * Это `TransferFfLink` БЕЗ `side`: у сборки сторона одна — склад-источник,
+ * который её собирает, и бэкенд поля не шлёт. Объявляем `Omit`, а не
+ * переиспользуем тип целиком, чтобы «поле есть, а в рантайме всегда undefined»
+ * не жило в типах.
+ */
+export type AssemblyFfCandidate = Omit<TransferFfLink, 'side'>;
+
+/**
+ * Тело PUT /warehouse/transfers/{id} — правка ЧЕРНОВИКА.
+ *
+ * 🔴 `shipped_as_boxes` здесь — обычный bool (как на создании), а НЕ
+ * трёхзначный «null = не трогать» из assign-vehicle: форма правки всегда
+ * показывает текущее значение переключателем, значит всегда знает, что слать.
+ * `items` — ПОЛНАЯ замена состава; передавать частичный список нельзя.
+ * Разрешено только в статусе DRAFT — в пути/принято бэкенд вернёт 400.
+ */
+export interface TransferUpdatePayload {
+  from_warehouse_id: number;
+  to_warehouse_id: number;
+  comment: string | null;
+  is_defect: boolean;
+  defect_reason: string | null;
+  pallets_count: number | null;
+  pallet_weight_kg: number | null;
+  shipped_as_boxes: boolean;
+  items: { barcode: string; quantity: number }[] | null;
+}
+
+/** Тело POST /warehouse/transfers/{id}/assign-vehicle. */
+export interface TransferAssignVehiclePayload {
+  vehicle_info: string;
+  vehicle_brand: string;
+  driver_first_name: string;
+  driver_last_name: string;
+  driver_phone: string;
+  logistics_by_warehouse: boolean;
+  carrier_inn: string | null;
+  carrier_name: string | null;
+  // 🔴 Даты и стоимость — `string | null` / `number | null`, а не просто string.
+  // На бэкенде это `date | None` / `Decimal | None`, и Pydantic v2 пустую строку
+  // в дату НЕ коэрсит: «» даёт `date_from_datetime_parsing` → 422 ещё до сервиса.
+  // Пока тип обещал `string`, пустая строка была легальна для tsc, и любая
+  // отправка снимка переезда без дат (а до назначения машины они пусты у ВСЕХ
+  // переездов) молча падала. «Не знаю» = null.
+  pickup_date: string | null;
+  pickup_time_slot: string;
+  // null = «стоимость неизвестна». 0 значит «везли бесплатно» и намертво
+  // блокирует бэкфилл тарифа Газелькой (`_apply_transfer_cost` пишет только
+  // поверх NULL) — подставлять его вместо пустого поля нельзя.
+  pickup_cost: number | null;
+  delivery_date: string | null;
+  // Транспортная единица. null = «не трогать»: бэкенд игнорирует null и не
+  // затирает уже заданное значение (пустое поле формы ≠ обнуление).
+  // Важно для bulk: если логист единицу не трогал, шлём null во всех трёх —
+  // иначе дефолт «паллеты» перевёл бы коробочный переезд в паллетный.
+  pallets_count: number | null;
+  pallet_weight_kg: number | null;
+  shipped_as_boxes: boolean | null;
+}
+
+// ─── Отчёт логистики переездов (GET /warehouse/transfers/logistics-report) ───
+// Денежные поля — Numeric, приезжают СТРОКОЙ: приводить через toMoney().
+
+export interface TransferLogisticsSummary {
+  transfers_count: number;
+  total_cost: string | number | null;
+  avg_cost: string | number | null;
+  total_units: number;
+  cost_per_unit: string | number | null;
+  /** Стоимость заборов с проведённой оплатой / без неё. */
+  paid_cost: string | number | null;
+  unpaid_cost: string | number | null;
+  /** Паллет в ПАЛЛЕТНЫХ переездах и коробов в коробочных — единицы разные, не суммируются. */
+  total_pallets: number;
+  total_boxes: number;
+  /** ₽/паллета считается ТОЛЬКО по паллетным переездам (коробочные в знаменатель не идут). */
+  cost_per_pallet: string | number | null;
+}
+
+export interface TransferLogisticsRouteRow {
+  from_warehouse_id: number;
+  from_warehouse: string | null;
+  to_warehouse_id: number;
+  to_warehouse: string | null;
+  transfers_count: number;
+  total_cost: string | number | null;
+  avg_cost: string | number | null;
+  total_units: number;
+  cost_per_unit: string | number | null;
+  total_pallets: number;
+  cost_per_pallet: string | number | null;
+}
+
+export interface TransferLogisticsCarrierRow {
+  counterparty_id: number | null;
+  counterparty_name: string | null;
+  transfers_count: number;
+  total_cost: string | number | null;
+  avg_cost: string | number | null;
+}
+
+export interface TransferLogisticsPeriodRow {
+  period: string;
+  transfers_count: number;
+  total_cost: string | number | null;
+  total_units: number;
+  cost_per_unit: string | number | null;
+  total_pallets: number;
+  cost_per_pallet: string | number | null;
+}
+
+export interface TransferLogisticsDetailRow {
+  transfer_id: number;
+  transfer_number: string;
+  shipment_id: number | null;
+  shipment_number: string | null;
+  shipped_date: string | null;
+  from_warehouse: string | null;
+  to_warehouse: string | null;
+  vehicle_info: string | null;
+  counterparty_name: string | null;
+  pickup_cost: string | number | null;
+  units_total: number;
+  sku_count: number;
+  transfer_status: StockTransferStatus | string;
+  payment_request_number: string | null;
+  is_paid: boolean;
+  /** Транспортная единица переезда: количество + чем меряем (флаг). */
+  pallets_count: number | null;
+  shipped_as_boxes: boolean;
+}
+
+export interface TransferLogisticsReport {
+  summary: TransferLogisticsSummary;
+  by_route: TransferLogisticsRouteRow[];
+  by_carrier: TransferLogisticsCarrierRow[];
+  by_period: TransferLogisticsPeriodRow[];
+  rows: TransferLogisticsDetailRow[];
+}
+
+/** Ответ POST /warehouse/assembly/{id}/to-transfer. */
+export interface AssemblyToTransferResponse {
+  transfer_id: number;
+  transfer_number: string;
+  assembly_number: string;
+  items_count: number;
+  units_total: number;
+  ff_links_moved: number;
 }
 
 export interface StockMovement {
@@ -2397,10 +2736,19 @@ export interface AssemblyApplyWeightBulkResult {
 
 // ─── Gazelka integration ─────────────────────────────────────────────────────
 
+/** Какой наш документ закрывает заказ портала Газельки. */
+export type GazelkaLinkKind = 'assembly' | 'transfer';
+
 export interface GazelkaConfig {
   configured: boolean;
   warehouse_id: number | null;
   warehouse_name: string | null;
+  /**
+   * Все склады, с которых Газельке можно отдавать груз (сегодня — ровно один).
+   * ПЕРЕЕЗД гейтится по складу-ИСТОЧНИКУ, поэтому спрашиваем список, а не поле:
+   * второй ключ интеграции не должен ломать контракт.
+   */
+  warehouse_ids?: number[];
 }
 
 export interface GazelkaSelectOption {
@@ -2435,6 +2783,14 @@ export interface GazelkaFormOptions {
 }
 
 export interface GazelkaPrefill {
+  /**
+   * 'yes' — груз едет на маркетплейс (сборка), 'no' — переезд между нашими
+   * складами. Раньше значение было зашито в модалке константой; теперь его
+   * задаёт бэкенд, иначе переезд не мог бы адресоваться на наш склад.
+   */
+  is_marketplace?: string;
+  /** Прайс-лист (город-источник) портала. null — брать дефолт из options. */
+  price_id?: string | null;
   customer_phone: string | null;
   delivery_address: string | null;
   delivery_address_x2: string | null;
@@ -2520,6 +2876,18 @@ export interface GazelkaOrderRow {
   linked_assembly_status: string | null;
   suggested_assembly_id: number | null;
   suggested_assembly_number: string | null;
+  /**
+   * Обобщённая связь: заказ портала закрывает сборку ЛИБО переезд.
+   * Для сборки бэкенд заполняет и `linked_assembly_*`, и эти поля; для переезда
+   * — только эти. UI должен читать `linked_kind`, а не гадать по id.
+   */
+  linked_kind?: GazelkaLinkKind | null;
+  linked_id?: number | null;
+  linked_number?: string | null;
+  linked_status?: string | null;
+  suggested_kind?: GazelkaLinkKind | null;
+  suggested_id?: number | null;
+  suggested_number?: string | null;
   route_number: string | null;
   route_date: string | null;
   carrier: string | null;
@@ -2542,6 +2910,8 @@ export interface GazelkaEditDraft {
 }
 
 export interface GazelkaMatchCandidate {
+  /** Тип документа. Для переезда `assembly_id` несёт id ПЕРЕЕЗДА — различать по `kind`. */
+  kind?: GazelkaLinkKind;
   assembly_id: number;
   number: string;
   warehouse_name: string | null;
@@ -2556,6 +2926,9 @@ export interface GazelkaMatchResult {
   ok: boolean;
   linked_assembly_id: number | null;
   linked_assembly_number: string | null;
+  linked_kind?: GazelkaLinkKind | null;
+  linked_id?: number | null;
+  linked_number?: string | null;
 }
 
 export interface GazelkaUnmatchResult {
@@ -2575,15 +2948,26 @@ export interface MigfullDeliveryTypeOption {
   label: string;
 }
 
+/**
+ * Источник заявки на отгрузку у Натали: какой документ DDS даёт состав.
+ * `assembly` — наша сборка (склад Натали), `transfer` — перемещение, у которого
+ * Натали склад-ИСТОЧНИК (сборки у переезда нет, вывоз заводит эта заявка).
+ */
+export interface MigfullShipmentSource {
+  kind: 'assembly' | 'transfer';
+  id: number;
+}
+
 export interface MigfullShipmentPrefill {
-  number: string | null;                       // № поставки WB
+  number: string | null;                       // № поставки WB либо TR-… переезда
   shipment_date: string | null;                // YYYY-MM-DD
   filter_delivery_type: 'direct' | 'transit' | 'pickup';
   notes: string | null;
-  wb_warehouse_name: string | null;            // инфо: куда отгрузка (WB-склад)
+  wb_warehouse_name: string | null;            // инфо: куда отгрузка (WB-склад / склад-получатель переезда)
   destination_name: string | null;            // распознанный склад в ФФ (выставим при создании)
   destination_matched: boolean;               // удалось ли сматчить склад назначения
-  assembly_number: string | null;
+  assembly_number: string | null;             // инфо: наша сборка (ASM-…)
+  transfer_number: string | null;             // инфо: наше перемещение (TR-…)
 }
 
 export interface MigfullOpisLine {
@@ -2624,6 +3008,77 @@ export interface MigfullSendResult {
   shipment_number: string | null;
   message: string | null;
   order_id: number | null;
+}
+
+// Поставка (приёмка) на склад Натали. Источник — ОДИН ИЗ ДВУХ: наша приёмка
+// машины (InboundReceipt, V-…/IN-…) либо наше перемещение (StockTransfer, TR-…,
+// наш склад → Натали; своей приёмки не создаёт — приход заводит эта поставка).
+// Схемы/эндпоинты у обоих источников одинаковые, различается только префикс URL.
+
+/** Источник поставки для модалки: какой документ DDS даёт состав. */
+export interface MigfullInboundSource {
+  kind: 'receipt' | 'transfer';
+  id: number;
+}
+
+export interface MigfullInboundPrefill {
+  number: string | null;            // наш номер для оператора (V-… машины / № приёмки / TR-…)
+  submission_date: string | null;   // YYYY-MM-DD (плановая дата поставки)
+  notes: string | null;
+  vehicle_order_no: string | null;  // инфо: машина-источник (V-…)
+  receipt_number: string | null;    // инфо: наша приёмка (IN-…)
+  transfer_number: string | null;   // инфо: наше перемещение (TR-…)
+}
+
+/** Источник кратности строки: карта Натали → наша кратность отгрузки → нет. */
+export type MigfullPackSource = 'natali' | 'ours' | 'none';
+
+/** Откуда ШК короба: реальный короб Натали либо выведенный нами GTIN-14. */
+export type MigfullBoxBarcodeSource = 'natali' | 'derived';
+
+/** Строка состава приёмки для редактируемой модалки (по-SKU, до нарезки на короба). */
+export interface MigfullInboundItem {
+  barcode: string;                  // ШК товара (EAN13)
+  name: string | null;
+  article_seller: string | null;    // наш артикул (Nomenclature по barcode)
+  qty: number;                      // всего штук в приёмке
+  units_per_box: number | null;     // prefill: шт в коробе (null — кратность неизвестна)
+  pack_source: MigfullPackSource;
+  box_barcode: string | null;       // ШК короба ITF14 (карта Натали / выведенный GTIN-14)
+  box_barcode_source: MigfullBoxBarcodeSource | null;
+  units_natali: number | null;      // кратность из карты Натали (если известна)
+  units_ours: number | null;        // НАША кратность (строки машины / per-ФФ / SKU-дефолт)
+}
+
+/** Per-line packing из модалки: units_per_box null/1 — россыпь; >=2 — короба + остаток россыпью. */
+export interface MigfullPackingLine {
+  barcode: string;
+  qty: number;                      // 0..кол-во строки приёмки (0 — строка не едет)
+  units_per_box: number | null;     // >= 1
+  /** Явный сплит: сколько КОРОБОВ (остаток россыпью без warning); 0 — всё россыпью; null — максимум коробов. */
+  boxes?: number | null;            // >= 0, boxes×units_per_box <= qty
+}
+
+export interface MigfullInboundDraft {
+  eligible: boolean;                // склад приёмки == склад интеграции
+  already_sent: boolean;            // поставка для этой приёмки уже есть/создавалась
+  sent_guid: string | null;
+  sent_number: string | null;
+  prefill: MigfullInboundPrefill;
+  items: MigfullInboundItem[];      // редактируемый состав (prefill кратности + источник)
+  opis_lines: MigfullOpisLine[];    // превью описи по дефолтному packing
+  total_boxes: number;
+  total_pieces: number;
+  warnings: string[];
+}
+
+export interface MigfullInboundSendRequest {
+  number: string | null;
+  submission_date: string | null;
+  notes: string | null;
+  force_resend: boolean;
+  /** Per-line packing (коробом/россыпью). null — сервис строит опись по дефолтной цепочке. */
+  packing?: MigfullPackingLine[] | null;
 }
 
 export interface CreatedRequestBrief {
@@ -3381,6 +3836,13 @@ export interface PaymentRequestListResponse {
 export interface ShippableShipmentRow {
   outbound_shipment_id: number;
   assembly_request_id: number | null;
+  /**
+   * Забор внутреннего переезда: у такой строки assembly_request_id пуст, а наш
+   * документ — перемещение (переход по строке ведёт на его деталку).
+   * Заполняется в payment_request_service.list_shippable из
+   * outbound_shipments.stock_transfer_id.
+   */
+  stock_transfer_id?: number | null;
   number: string;
   destination: string | null;
   shipped_date: string | null;
@@ -6356,7 +6818,7 @@ export interface FfNomenclatureOption {
   subject: string | null;
 }
 
-export type FfRequestKind = 'assembly' | 'inbound';
+export type FfRequestKind = 'assembly' | 'inbound' | 'return';
 
 /** Нормализованный высокоуровневый статус ФФ-заявки (бэкенд: _ff_status_code) */
 export type FfStatusCode = 'assembling' | 'ready' | 'shipped' | 'expected' | 'accepted' | 'archived' | 'expired';
@@ -6365,7 +6827,7 @@ export interface FfRequestRow {
   id: number;
   external_id: string;
   number: string | null;
-  kind: 'assembly' | 'inbound' | 'other';
+  kind: 'assembly' | 'inbound' | 'return' | 'other';
   type_name: string | null;
   status: string | null;
   stage_code: string | null;
@@ -6379,6 +6841,10 @@ export interface FfRequestRow {
   total_qty: number | null;
   /** кол-во в штуках россыпи (пересчёт коробов, migfull); null — без коробов/не разрезолвлено */
   total_qty_units: number | null;
+  /** Сколько КОРОБОВ в составе (строки с кратностью >1, migfull); null — коробов нет */
+  total_boxes?: number | null;
+  /** Принято фактически (живой факт приёмки migfull) — «принято X из Y»; null — нет данных */
+  accepted_qty?: number | null;
   /** склад отгрузки МП («Склад МП» / shipped_target) */
   dest_warehouse: string | null;
   external_created_at: string | null;
@@ -6392,6 +6858,14 @@ export interface FfRequestRow {
   linked_status: string | null;
   /** состав нашего документа расходится с заявкой(ами) ФФ (true — расхождение, null — неизвестно) */
   linked_mismatch?: boolean | null;
+  /** Номер машины (V-…), породившей нашу приёмку — тип строки «Приход машины» */
+  vehicle_order_no?: string | null;
+  /** Вскрытие коробов (migfull): id заявки-пары — у поступления это пара-возврат, у возврата пара-поступление */
+  repack_return_id?: number | null;
+  /** Номер заявки-пары по вскрытию коробов (для подписи бейджа) */
+  repack_pair_number?: string | null;
+  /** Возврат без пары-поступления — возможно, реальный возврат товара со склада ФФ */
+  repack_unpaired?: boolean;
   /** Локальный архив (наша пометка, не статус провайдера) */
   local_archived: boolean;
   local_archived_at: string | null;
@@ -6403,7 +6877,7 @@ export interface FfStatusEvent {
   fulfillment_request_id: number;
   external_id: string;
   number: string | null;
-  kind: 'assembly' | 'inbound' | 'other';
+  kind: 'assembly' | 'inbound' | 'return' | 'other';
   provider: string;
   /** created — заявка впервые появилась; changed — статус/стадия изменились */
   event_type: 'created' | 'changed';
@@ -6526,6 +7000,16 @@ export interface FfRequestFieldValue {
   value: string | null;
 }
 
+/** «Сестра» заявки ФФ по мульти-связке (N заявок → один наш документ) */
+export interface FfSiblingRequest {
+  id: number;
+  number: string | null;
+  /** assembly | inbound | return | other */
+  kind: string;
+  /** заявлено всего, шт (зеркало БД) */
+  total_qty: number | null;
+}
+
 /** Деталка заявки ФФ: шапка списочной строки + живой состав от провайдера */
 export interface FfRequestDetail extends FfRequestRow {
   comment: string | null;
@@ -6540,6 +7024,10 @@ export interface FfRequestDetail extends FfRequestRow {
   fields: FfRequestFieldValue[];
   /** сверка состава со связанным нашим документом; null — связи нет */
   match: FfRequestMatch | null;
+  /** мульти-связка: другие активные заявки ФФ того же документа (без текущей) */
+  sibling_requests?: FfSiblingRequest[];
+  /** сверка построена по СУММЕ группы: номера всех заявок (включая текущую); null — обычная */
+  mismatch_group_numbers?: string[] | null;
 }
 
 /* ─── Сводная страница «Заявки ФФ» (все склады с интеграцией) ─── */
@@ -6624,6 +7112,31 @@ export interface FfLinkCandidatesResponse {
   /** false — состав ФФ-заявки недоступен, score не рассчитан */
   composition_available: boolean;
   candidates: FfLinkCandidate[];
+}
+
+/** Кандидат-поступление для РУЧНОЙ связки пары «вскрытие коробов» (migfull).
+ *  Авто-матчер помечает пару только при точном равенстве состава; здесь —
+ *  близкие кандидаты, решает человек. */
+export interface FfRepackCandidate {
+  id: number;
+  number: string | null;
+  external_created_at: string | null;
+  status: string | null;
+  /** Σ штук россыпи по составу поступления (для сравнения с возвратом) */
+  units_sum: number;
+  /** пересечение состава с возвратом, % от большей стороны (0–100) */
+  overlap_pct: number;
+  /** состав совпал точно — такой кандидат авто-матчер пометил бы сам */
+  exact: boolean;
+}
+
+/** GET /requests/{id}/repack-candidates — кандидаты пары для возврата */
+export interface FfRepackCandidatesOut {
+  return_id: number;
+  return_number: string | null;
+  /** Σ штук россыпи возврата (короба × кратность + россыпь); null — состав не разрешён в ШК */
+  return_units: number | null;
+  candidates: FfRepackCandidate[];
 }
 
 /** Итог создания заявки на сборку из ФФ-заявки */
@@ -7040,6 +7553,270 @@ export interface ReviewsSummaryResponse {
   has_key: boolean;
 }
 
+// ─── Вопросы покупателей (зеркало wb_questions) ─────────────────────────────
+
+/** Один вопрос покупателя WB из зеркала. */
+export interface QuestionItem {
+  /** wb_id вопроса */
+  id: string;
+  nm_id: number | null;
+  text: string | null;
+  answer_text: string | null;
+  is_answered: boolean;
+  created_date: string | null;
+  user_name: string | null;
+  subject: string | null;
+  product_name: string | null;
+  article: string | null;
+  brand: string | null;
+  /** True — следим за поступлением товара (wb_stock_watches, бейдж ⏳) */
+  has_stock_watch: boolean;
+}
+
+export interface QuestionsListResponse {
+  items: QuestionItem[];
+  /** Всего неотвеченных (независимо от текущего фильтра) — для пагинации */
+  count_unanswered: number;
+  /** Всего отвеченных (архив) */
+  count_archive: number;
+  has_key: boolean;
+}
+
+/** Итог on-demand синка вопросов. */
+export interface QuestionsSyncResult {
+  rows_fetched: number;
+  rows_upserted: number;
+  has_key: boolean;
+}
+
+// ─── ИИ-агенты автоответов ───────────────────────────────────────────────────
+
+/** На что отвечает агент: отзывы / вопросы / и то и другое. */
+export type ReplyAgentTarget = 'feedback' | 'question' | 'both';
+export type LlmProvider = 'openai_compatible' | 'claude';
+
+/** ИИ-агент автоответов на отзывы/вопросы. */
+export interface ReplyAgent {
+  id: number;
+  name: string;
+  enabled: boolean;
+  target: ReplyAgentTarget;
+  /** Уровни оценок через запятую ("1,2,3") — для отзывов */
+  star_levels: string;
+  /** nm_id через запятую либо null (все товары) */
+  nm_ids: string | null;
+  auto_send: boolean;
+  rules: string;
+  /** JSON few-shot примеров (строкой) */
+  examples: string | null;
+  llm_provider: LlmProvider;
+  llm_model: string;
+  llm_base_url: string | null;
+  last_run_at: string | null;
+}
+
+/** Создание/обновление агента (частичное при PATCH). */
+export interface ReplyAgentSave {
+  name?: string;
+  enabled?: boolean;
+  target?: ReplyAgentTarget;
+  star_levels?: string;
+  nm_ids?: string | null;
+  auto_send?: boolean;
+  rules?: string;
+  examples?: string | null;
+  llm_provider?: LlmProvider;
+  llm_model?: string;
+  llm_base_url?: string | null;
+}
+
+/** Итог прогона агента автоответов. */
+export interface ReplyAgentRunResult {
+  checked: number;
+  drafted: number;
+  errors: number;
+  limit: number;
+  /** True → черновики сразу approved */
+  auto_send: boolean;
+}
+
+// ─── Ответы на отзывы/вопросы (wb_feedback_replies) ──────────────────────────
+
+export type ReplyTargetType = 'feedback' | 'question';
+export type ReplyStatus = 'draft' | 'approved' | 'sent' | 'error' | 'rejected';
+export type ReplyAction = 'approve' | 'reject' | 'reopen';
+
+/** Данные цели ответа из зеркала (для UI). */
+export interface ReplyTarget {
+  text: string | null;
+  /** Только для отзывов */
+  rating: number | null;
+  nm_id: number | null;
+  product_name: string | null;
+  brand: string | null;
+  subject: string | null;
+  user_name: string | null;
+  created_date: string | null;
+}
+
+/** Один ответ/черновик продавца. */
+export interface Reply {
+  id: number;
+  target_type: ReplyTargetType;
+  target_wb_id: string;
+  draft_text: string;
+  final_text: string | null;
+  /** Финальный текст (final_text или draft_text) */
+  text: string;
+  status: ReplyStatus;
+  source: 'agent' | 'manual';
+  agent_id: number | null;
+  /** True — в базе знаний нет фактов для ответа, ждёт ручной доработки */
+  needs_info: boolean;
+  /** Источник генерации: 'llm' | 'kb_direct' | 'template' | null (ручной/needs_info-заглушка) */
+  generation: 'llm' | 'kb_direct' | 'template' | null;
+  /** True — черновик «товар появился в наличии» (wb_stock_watches, бейдж 📦) */
+  is_stock_reply: boolean;
+  error: string | null;
+  sent_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  target: ReplyTarget | null;
+}
+
+export interface RepliesListResponse {
+  items: Reply[];
+  total: number;
+  /** Счётчики по статусам: { draft: n, approved: n, ... } */
+  counts: Record<string, number>;
+}
+
+/** Итог отправки approved-ответов (202 — отправка в фоне). */
+export interface ReplySendResult {
+  sent: number;
+  errors: number;
+  /** Сколько approved стоит в очереди на отправку */
+  pending: number;
+}
+
+// ─── Слежение за поступлением товара (wb_stock_watches) ─────────────────────
+
+export type StockWatchStatus = 'watching' | 'drafted' | 'dismissed';
+
+/** Одно слежение «вопрос → ждём поступление товара». */
+export interface StockWatchItem {
+  id: number;
+  nm_id: number;
+  question_wb_id: string;
+  status: StockWatchStatus;
+  reply_id: number | null;
+  /** Остаток (totalQuantity) при последней проверке тика */
+  last_qty: number | null;
+  created_at: string | null;
+  resolved_at: string | null;
+  question_text: string | null;
+  product_name: string | null;
+}
+
+export interface StockWatchListResponse {
+  items: StockWatchItem[];
+  total: number;
+  /** Счётчики по статусам: { watching: n, drafted: n, dismissed: n } */
+  counts: Record<string, number>;
+}
+
+/** Итог on-demand скана вопросов о наличии. */
+export interface StockWatchScanResult {
+  scanned: number;
+  created: number;
+  dismissed: number;
+}
+
+/** Итог ручного прогона проверки остатков. */
+export interface StockWatchTickResult {
+  checked: number;
+  drafted: number;
+  waiting: number;
+  errors: number;
+}
+
+// ─── База знаний товаров (wb_product_kb) ────────────────────────────────────
+
+/** Темы записей базы знаний. */
+export type KbTopic =
+  | 'Размер'
+  | 'Доставка'
+  | 'Состав'
+  | 'Цвет'
+  | 'Комплект'
+  | 'Гарантия'
+  | 'Качество'
+  | 'Прочее';
+
+/** Товар проекта с числом записей базы знаний. */
+export interface KbProductItem {
+  nm_id: number;
+  kb_count: number;
+  product_name: string | null;
+  article: string | null;
+  brand: string | null;
+}
+
+export interface KbProductsResponse {
+  items: KbProductItem[];
+  total: number;
+}
+
+/** Одна запись базы знаний товара. */
+export interface KbItem {
+  id: number;
+  nm_id: number;
+  topic: string;
+  question_example: string | null;
+  answer: string;
+  /** manual | import */
+  source: 'manual' | 'import';
+  enabled: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface KbListResponse {
+  items: KbItem[];
+  total: number;
+}
+
+/** Создание записи КБ (POST /kb). */
+export interface KbCreate {
+  nm_id: number;
+  topic: string;
+  question_example?: string | null;
+  answer: string;
+}
+
+/** Частичное обновление записи КБ (PATCH /kb/{id}). */
+export interface KbUpdate {
+  nm_id?: number;
+  topic?: string;
+  question_example?: string | null;
+  answer?: string;
+  enabled?: boolean;
+}
+
+/** Итог импорта КБ из архива отвеченных вопросов. */
+export interface KbImportResult {
+  /** Отвеченных вопросов в зеркале */
+  source_questions: number;
+  /** Создано записей КБ */
+  created: number;
+  /** Пропущено дублей */
+  skipped_dupe: number;
+  /** Пропущено пустых текстов */
+  skipped_empty: number;
+  /** Затронуто товаров (nm_id) */
+  nm_count: number;
+}
+
 // ─── Сырые данные (GET /raw-data/sources) ───────────────────────────────────
 
 /** Прогресс принудительной дозагрузки источника (живёт в памяти бэкенда). */
@@ -7300,7 +8077,7 @@ export interface VibeStats {
 // (контракт: backend/schemas/ff_billing.py)
 // ═══════════════════════════════════════════════════════════════════════════
 
-export type FfServiceType = 'PALLETIZING' | 'BOX_PROCESSING' | 'STORAGE' | 'TRUCK_UNLOADING' | 'LOADING';
+export type FfServiceType = 'PALLETIZING' | 'BOX_PROCESSING' | 'STORAGE' | 'TRUCK_UNLOADING' | 'LOADING' | 'TRANSFER_ASSEMBLY';
 export type FfTariffUnit = 'PALLET' | 'BOX';
 export type FfInvoiceKind = 'SHIPMENT' | 'STORAGE' | 'RECEIVING' | 'LOGISTICS' | 'MIXED';
 export type FfInvoiceStatus = 'NEW' | 'RECONCILED' | 'DISPUTED' | 'PAID';
@@ -7312,7 +8089,7 @@ export interface FfTariffRow {
   id: number;
   warehouse_id: number;
   service_type: FfServiceType;
-  /** Только для LOADING: чем биллит склад. У прочих услуг null. */
+  /** Только для LOADING и TRANSFER_ASSEMBLY: чем биллит склад. У прочих услуг null. */
   unit: FfTariffUnit | null;
   rate: number;
   valid_from: string;
@@ -7346,16 +8123,19 @@ export interface FfStorageDailyRow {
   storage_cost: number | null;
 }
 
-/** Компонент ожидаемой стоимости услуг ФФ по заявке сборки. */
+/** Компонент ожидаемой стоимости услуг ФФ по заявке сборки / переезду. */
 export interface FfExpectedComponent {
   service_type: FfServiceType | 'CUSTOM';
-  /** PALLET | BOX | VEHICLE | null (CUSTOM) */
+  /** PALLET | BOX | VEHICLE | null (CUSTOM). При unit_mismatch — единица ТАРИФА. */
   unit: string | null;
   qty: number | null;
   /** null = тариф не задан на складе */
   rate: number | null;
-  /** qty × rate; null если нет тарифа */
+  /** qty × rate; null если нет тарифа или единицы не совпали */
   cost: number | null;
+  /** Ставка есть, но в другой единице, чем документ (₽/паллета vs коробочный
+   *  переезд) — суммы нет намеренно, пересчёт по выдуманному курсу запрещён. */
+  unit_mismatch: boolean;
 }
 
 export interface FfAssemblyExpectedCost {
@@ -7371,6 +8151,31 @@ export interface FfAssemblyExpectedCost {
   total: number | null;
   /** service_type без ставки на дату */
   missing_tariffs: string[];
+}
+
+/** Ожидаемая стоимость услуг ФФ по ПЕРЕЕЗДУ (тариф склада-ИСТОЧНИКА).
+ *  Услуга одна — TRANSFER_ASSEMBLY (₽/паллета или ₽/короб), плюс CUSTOM. */
+export interface FfTransferExpectedCost {
+  transfer_id: number;
+  transfer_number: string;
+  from_warehouse_id: number;
+  from_warehouse_name: string | null;
+  to_warehouse_id: number;
+  /** Единица переезда: PALLET (по умолчанию) | BOX (shipped_as_boxes) */
+  unit: FfTariffUnit;
+  /** pallets_count в этой единице (нет объёма → 0) */
+  qty: number;
+  /** Дата, на которую резолвились ставки (готов → отправлен → заведён) */
+  on_date: string;
+  components: FfExpectedComponent[];
+  custom_cost: number | null;
+  custom_cost_comment: string | null;
+  /** Σ cost компонент (null, если считать нечего) */
+  total: number | null;
+  /** service_type без ставки на дату */
+  missing_tariffs: string[];
+  /** Хоть один компонент с несовпадением единиц — итог его НЕ учитывает */
+  unit_mismatch: boolean;
 }
 
 export interface FfCustomCostPayload {
@@ -9248,6 +10053,375 @@ export interface FbsMatrix {
   rows: FbsMatrixRow[];
   wb_stock_known: boolean;
   trend_days: number;
+}
+
+// ─── Payroll (Зарплата) ──────────────────────────────────────────────────────
+// Зеркало backend/schemas/payroll.py. Numeric/Decimal-поля бэка приходят
+// СТРОКАМИ — тип `number | string`, перед formatNumber всегда Number(x).
+
+/** Строка графика выплат фикс-оклада: день месяца (1–28) и доля (0..1]. */
+export interface PayrollPayDayShare {
+  day: number;
+  share: number | string;
+}
+
+/** Период оклада: с месяца month действует amount (история изменений). */
+export interface PayrollSalaryPeriod {
+  /** 'YYYY-MM'. */
+  month: string;
+  amount: number | string;
+}
+
+export interface PayrollEmployeeIn {
+  name: string;
+  /** Должность («Бухгалтер», «Логист»…) — группирует фикс-оклад в подстроках «ФОТ (начислено)» ОПиУ. */
+  position?: string | null;
+  counterparty_id?: number | null;
+  /** История фикс-окладов; оклад месяца = период с max(month) <= месяц, до первого периода — 0. */
+  salary_periods?: PayrollSalaryPeriod[] | null;
+  /** null — дефолт 50/50 на 10-е и 25-е; сумма долей должна быть равна 1. */
+  fixed_pay_days?: PayrollPayDayShare[] | null;
+  is_active?: boolean;
+  notes?: string | null;
+}
+
+export interface PayrollEmployeeUpdate {
+  name?: string | null;
+  position?: string | null;
+  clear_position?: boolean;
+  counterparty_id?: number | null;
+  clear_counterparty?: boolean;
+  /** undefined — не трогать; массив (в т.ч. пустой []) — полная замена истории окладов. */
+  salary_periods?: PayrollSalaryPeriod[] | null;
+  fixed_pay_days?: PayrollPayDayShare[] | null;
+  is_active?: boolean | null;
+  notes?: string | null;
+}
+
+export interface PayrollEmployee {
+  id: number;
+  name: string;
+  position: string | null;
+  counterparty_id: number | null;
+  counterparty_name?: string | null;
+  salary_periods: PayrollSalaryPeriod[];
+  /** Оклад, действующий в текущем месяце (для таблицы; null — нет периода). */
+  current_salary: number | string | null;
+  fixed_pay_days: PayrollPayDayShare[] | null;
+  is_active: boolean;
+  notes: string | null;
+  team_names: string[];
+}
+
+export interface PayrollEmployeeListResponse {
+  items: PayrollEmployee[];
+}
+
+/**
+ * Скоуп команды: бренд, категория или пересечение (бренд × категория).
+ * Хотя бы одно поле; композит (оба) вытесняет одноимённые общие скоупы
+ * других команд — их база считается за вычетом закреплённых композитов.
+ */
+export interface PayrollTeamScope {
+  brand?: string | null;
+  subject?: string | null;
+}
+
+export interface PayrollTeamIn {
+  name: string;
+  is_active?: boolean;
+}
+
+export interface PayrollTeamUpdate {
+  name?: string | null;
+  is_active?: boolean | null;
+}
+
+/** Участие в команде с границами по месяцам ('YYYY-MM'; null = без границы, to_month включительно). */
+export interface PayrollTeamMemberIn {
+  employee_id: number;
+  from_month?: string | null;
+  to_month?: string | null;
+}
+
+export interface PayrollTeamMember {
+  employee_id: number;
+  name: string;
+  from_month?: string | null;
+  to_month?: string | null;
+}
+
+export interface PayrollTeam {
+  id: number;
+  name: string;
+  is_active: boolean;
+  scopes: PayrollTeamScope[];
+  members: PayrollTeamMember[];
+}
+
+export interface PayrollTeamListResponse {
+  items: PayrollTeam[];
+}
+
+/** Доступные значения брендов/категорий из wb_finance_rows проекта. */
+export interface PayrollScopeOptions {
+  brands: string[];
+  subjects: string[];
+}
+
+export interface PayrollTariffStepIn {
+  threshold: number;
+  /** Доли (0..1), не проценты: 0.972% → 0.00972. */
+  company_rate: number;
+  team_rate: number;
+}
+
+export interface PayrollTariffReplace {
+  valid_from: string;
+  steps: PayrollTariffStepIn[];
+}
+
+export interface PayrollTariffStep {
+  id: number;
+  threshold: number | string;
+  company_rate: number | string;
+  team_rate: number | string;
+}
+
+export interface PayrollTariffResponse {
+  valid_from: string | null;
+  steps: PayrollTariffStep[];
+}
+
+/** Начисление команды за одну неделю WB (Пн-Вс). */
+export interface PayrollSheetWeekAccrual {
+  date_from: string;
+  date_to: string;
+  /** «Чистая выплата» по скоупам команды за неделю. */
+  base_amount: number | string;
+  /** Ступень лестницы (null — выплата <= 0, ставка 0). */
+  threshold: number | string | null;
+  team_rate: number | string;
+  team_amount: number | string;
+  per_member: number | string;
+}
+
+export interface PayrollSheetTeam {
+  team_id: number;
+  name: string;
+  scopes: PayrollTeamScope[];
+  member_names: string[];
+  weeks: PayrollSheetWeekAccrual[];
+  total_amount: number | string;
+}
+
+export interface PayrollSheetTeamAccrual {
+  team_id: number;
+  team_name: string;
+  amount: number | string;
+}
+
+export interface PayrollOfficialTxn {
+  date: string;
+  amount: number | string;
+  purpose: string | null;
+  bank: string;
+}
+
+/** Строка плана выплат: день (10/25/из графика фикса) месяца, следующего за расчётным. */
+export interface PayrollSheetPayout {
+  pay_day: number;
+  pay_date: string;
+  amount: number | string;
+  paid: boolean;
+  paid_amount: number | string | null;
+  comment: string | null;
+}
+
+export interface PayrollSheetEmployee {
+  employee_id: number;
+  name: string;
+  position?: string | null;
+  counterparty_id: number | null;
+  team_accruals: PayrollSheetTeamAccrual[];
+  fixed_accrual: number | string;
+  accrued_total: number | string;
+  /** Факт из выписки за месяц выплат (следующий за расчётным). */
+  official_paid: number | string;
+  official_txns: PayrollOfficialTxn[];
+  /** accrued_total − official_paid. */
+  unofficial_due: number | string;
+  payouts: PayrollSheetPayout[];
+}
+
+export interface PayrollSheetWeekRef {
+  date_from: string;
+  date_to: string;
+}
+
+export interface PayrollSheetTotals {
+  accrued_total: number | string;
+  official_total: number | string;
+  unofficial_total: number | string;
+}
+
+export interface PayrollSheetResponse {
+  /** 'YYYY-MM'. */
+  month: string;
+  /** Недели Пн-Вс, привязанные к месяцу (по четвергу). */
+  weeks: PayrollSheetWeekRef[];
+  teams: PayrollSheetTeam[];
+  employees: PayrollSheetEmployee[];
+  totals: PayrollSheetTotals;
+}
+
+export interface PayrollPayoutMarkIn {
+  employee_id: number;
+  /** 'YYYY-MM' — расчётный месяц. */
+  month: string;
+  pay_day: number;
+  paid: boolean;
+  amount?: number | null;
+  comment?: string | null;
+}
+
+// ─── Payroll: Агентство (консалтинг) ─────────────────────────────────────────
+
+export type PayrollBillingMode = 'fixed' | 'percent' | 'profit_share';
+export type PayrollClientEntryKind = 'week_base' | 'month_profit';
+
+/** Период формата оплаты: с месяца month действует billing_mode с параметрами. */
+export interface PayrollClientBillingPeriod {
+  /** 'YYYY-MM'. */
+  month: string;
+  billing_mode: PayrollBillingMode;
+  /** Для fixed. */
+  fixed_amount?: number | string | null;
+  /** Доля от ЧП (profit_share), 0..1. */
+  fee_percent?: number | string | null;
+}
+
+/**
+ * Клиент агентства. Сплит: manager_share команде, остаток агентству.
+ * Формат оплаты — историей периодов: формат месяца M = период с max(month) <= M;
+ * до первого периода начисления нет.
+ */
+export interface PayrollClientProjectIn {
+  name: string;
+  team_id?: number | null;
+  /** Кабинет клиента в системе (percent). */
+  linked_project_id?: number | null;
+  billing_periods?: PayrollClientBillingPeriod[] | null;
+  /** Доля команды, дефолт 0.45. */
+  manager_share?: number;
+  is_active?: boolean;
+  notes?: string | null;
+}
+
+export interface PayrollClientProjectUpdate {
+  name?: string | null;
+  team_id?: number | null;
+  clear_team?: boolean;
+  linked_project_id?: number | null;
+  clear_linked_project?: boolean;
+  /** undefined — не трогать; массив (в т.ч. пустой []) — полная замена истории. */
+  billing_periods?: PayrollClientBillingPeriod[] | null;
+  manager_share?: number | null;
+  is_active?: boolean | null;
+  notes?: string | null;
+}
+
+export interface PayrollClientEntry {
+  kind: PayrollClientEntryKind;
+  /** week_base — понедельник недели; month_profit — 1-е число месяца. */
+  date_from: string;
+  amount: number | string;
+}
+
+export interface PayrollClientProject {
+  id: number;
+  name: string;
+  team_id: number | null;
+  team_name?: string | null;
+  linked_project_id: number | null;
+  linked_project_name?: string | null;
+  billing_periods: PayrollClientBillingPeriod[];
+  /** Формат, действующий в текущем месяце (для карточки; null — нет периода). */
+  current_billing: PayrollClientBillingPeriod | null;
+  manager_share: number | string;
+  is_active: boolean;
+  notes: string | null;
+  entries: PayrollClientEntry[];
+}
+
+export interface PayrollClientProjectListResponse {
+  items: PayrollClientProject[];
+}
+
+/** Ручная сумма: недельная база внешнего кабинета либо ЧП месяца. */
+export interface PayrollClientEntryUpsert {
+  kind: PayrollClientEntryKind;
+  date_from: string;
+  amount: number;
+}
+
+/** Проект инсталляции для привязки кабинета клиента. */
+export interface PayrollProjectOption {
+  id: number;
+  name: string;
+  slug: string;
+}
+
+export interface PayrollProjectOptionsResponse {
+  items: PayrollProjectOption[];
+}
+
+/** Неделя percent-режима: база, ступень, ставка «Команда», fee. */
+export interface PayrollAgencyClientWeek {
+  date_from: string;
+  date_to: string;
+  base_amount: number | string;
+  threshold: number | string | null;
+  team_rate: number | string;
+  fee: number | string;
+  /** База вводится руками (внешний кабинет). */
+  manual: boolean;
+  /** Ручная запись week_base реально существует (false — неделя ещё не введена). */
+  has_entry: boolean;
+}
+
+export interface PayrollAgencySheetClient {
+  client_id: number;
+  name: string;
+  /** Формат оплаты, действовавший В РАСЧЁТНОМ месяце (null — период не задан). */
+  billing_mode: PayrollBillingMode | null;
+  team_id: number | null;
+  team_name: string | null;
+  manager_share: number | string;
+  /** percent. */
+  weeks: PayrollAgencyClientWeek[];
+  /** profit_share: введённая ЧП месяца. */
+  profit_amount: number | string | null;
+  fee_percent: number | string | null;
+  fee_total: number | string;
+  /** Уходит команде (в ведомость и ФОТ «Менеджеры»). */
+  manager_amount: number | string;
+  /** Остаток агентству (в ОПиУ пока не включается). */
+  agency_amount: number | string;
+  /** Не хватает данных: нет команды / нет ЧП месяца / нет недельных баз внешнего. */
+  warnings: string[];
+}
+
+export interface PayrollAgencySheetResponse {
+  month: string;
+  clients: PayrollAgencySheetClient[];
+  totals_fee: number | string;
+  totals_manager: number | string;
+  totals_agency: number | string;
+}
+
+export interface PayrollOkResponse {
+  ok: boolean;
 }
 
 // ─── Биржа карточек товаров (card-exchange showcase) ──────────────────────

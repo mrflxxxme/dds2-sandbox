@@ -227,6 +227,8 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
             user_id=user.id,
             role=invite.role,
             pages=invite.pages,
+            # Момент создания инвайта, не акцепта — набор галочек выбран тогда.
+            pages_updated_at=invite.created_at,
         )
         db.add(member)
         # Atomically claim the invite: the conditional UPDATE enforces one-time

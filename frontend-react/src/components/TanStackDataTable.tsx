@@ -27,6 +27,11 @@ interface TanStackDataTableProps {
     emptyText?: string;
     title?: string;
     exportName?: string;
+    /** Колонки ДЛЯ ВЫГРУЗКИ, если они шире экранных. Нужен, когда часть данных
+     *  убрана с экрана ради читаемости (свёрнута в раскрытие строки), но в
+     *  Excel обязана остаться: без этого чистка таблицы молча обрезает выгрузку.
+     *  Не задан — выгружаются `columns`. */
+    exportColumns?: Column[];
     /** Доп. листы в xlsx-выгрузке (например, шаблон для вставки). */
     exportAdditionalSheets?: ExcelExtraSheet[];
     actions?: React.ReactNode;
@@ -128,6 +133,7 @@ export default function TanStackDataTable({
     emptyText = 'Нет данных',
     title,
     exportName,
+    exportColumns,
     exportAdditionalSheets,
     actions,
     onRowClick,
@@ -189,7 +195,7 @@ export default function TanStackDataTable({
                         {exportName && data.length > 0 && (
                             <button
                                 className="btn btn-secondary btn-sm"
-                                onClick={() => exportToExcel(data, exportName, columns, exportAdditionalSheets)}
+                                onClick={() => exportToExcel(data, exportName, exportColumns ?? columns, exportAdditionalSheets)}
                             >
                                 📥 Excel
                             </button>

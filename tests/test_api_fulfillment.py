@@ -118,6 +118,72 @@ async def test_expected_vehicles_excludes_soft_deleted_items(client, auth_header
 
 
 @pytest.mark.asyncio
+async def test_expected_vehicles_carries_receipt_id(client, auth_headers, db_session):
+    """Карточка машины несёт id нашей приёмки (связка заявок ФФ из модалки):
+    предпочитается EXPECTED-приёмка, DRAFT-добор её не перетирает;
+    soft-deleted приёмка не учитывается; без приёмки — receipt_id = null."""
+    import uuid
+    from decimal import Decimal
+
+    from backend.models.cost import CostOrder
+    from backend.models.enums import VehicleStatus
+    from backend.models.warehouse import InboundReceipt, InboundStatus
+
+    headers = await _project_headers(client, auth_headers)
+    pid = int(headers["X-Project-Id"])
+    wh_id = await _create_warehouse(client, headers)
+
+    def _vehicle(order_no):
+        return CostOrder(
+            project_id=pid,
+            order_no=order_no,
+            country="CHINA",
+            status=VehicleStatus.DISPATCHED,
+            target_warehouse_id=wh_id,
+            rate_cny=Decimal("1"),
+            rate_usd=Decimal("1"),
+            rate_eur=Decimal("1"),
+            delivery_cost_cny=Decimal("0"),
+            delivery_cost_usd=Decimal("0"),
+        )
+
+    suffix = uuid.uuid4().hex[:8]
+    with_receipt = _vehicle(f"V-RCP-{suffix}")
+    without_receipt = _vehicle(f"V-NORCP-{suffix}")
+    db_session.add_all([with_receipt, without_receipt])
+    await db_session.flush()
+
+    def _receipt(number, status, cost_order_id, *, deleted=False):
+        r = InboundReceipt(
+            project_id=pid,
+            warehouse_id=wh_id,
+            number=number,
+            status=status,
+            cost_order_id=cost_order_id,
+        )
+        if deleted:
+            r.soft_delete()
+        return r
+
+    expected = _receipt(f"IN-E-{suffix}", InboundStatus.EXPECTED, with_receipt.id)
+    db_session.add_all([
+        expected,
+        # DRAFT-добор ПОСЛЕ EXPECTED (больший id) — не должен перетереть EXPECTED
+        _receipt(f"IN-D-{suffix}", InboundStatus.DRAFT, with_receipt.id),
+        # soft-deleted приёмка второй машины — не считается
+        _receipt(f"IN-X-{suffix}", InboundStatus.EXPECTED, without_receipt.id, deleted=True),
+    ])
+    await db_session.commit()
+
+    resp = await client.get(f"/api/v1/warehouse/{wh_id}/expected-vehicles", headers=headers)
+    assert resp.status_code == 200, resp.text
+    rows = {v["order_no"]: v for v in resp.json()}
+    assert rows[with_receipt.order_no]["receipt_id"] == expected.id
+    assert rows[with_receipt.order_no]["id"] == with_receipt.id
+    assert rows[without_receipt.order_no]["receipt_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_endpoints_require_auth(client):
     resp = await client.get("/api/v1/warehouse/1/fulfillment/status")
     assert resp.status_code in (401, 403, 422)

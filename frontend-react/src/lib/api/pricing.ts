@@ -66,11 +66,13 @@ export function addPricingMethods(api: ApiClient) {
             const q = new URLSearchParams({ limit: String(limit) });
             return api.request<{ rows: SppProbeRow[] }>('GET', `/api/v1/pricing/spp-probes?${q.toString()}`);
         },
+        /** Снять срез: сначала синк цен ВБ, потом витрина — иначе точки уедут в stale. */
         observeSpp(backfillDays = 0) {
             const q = backfillDays ? `?backfill_days=${backfillDays}` : '';
             return api.request<{
                 snapshot: { requested: number; written: number; stale: number };
                 backfill: { written: number; days: number };
+                prices: { status: string; rows: number; synced_at: string | null };
             }>('POST', `/api/v1/pricing/spp-observe${q}`);
         },
         getPricingAiRecommendations(params?: { date_from?: string; date_to?: string; only_in_stock?: boolean }) {

@@ -193,17 +193,26 @@ async def list_tasks_all_projects(
     """
     limit = min(limit, 200)
     member_res = await db.execute(
-        select(ProjectMember.project_id, ProjectMember.role, ProjectMember.pages)
+        select(
+            ProjectMember.project_id,
+            ProjectMember.role,
+            ProjectMember.pages,
+            ProjectMember.pages_updated_at,
+        )
         .where(
             ProjectMember.user_id == user_id,
             ProjectMember.is_deleted == False,  # noqa: E712
         )
         .limit(1000)
     )
+    # pages_updated_at обязателен: без него get_effective_pages выключает
+    # наследование разделов, и участник, получивший design-tasks по наследству
+    # (раздел появился в каталоге позже настройки его доступов), проходит
+    # require_role на обычных ручках, но молча теряет бренд в сквозном списке.
     allowed_ids = [
         row.project_id
         for row in member_res.all()
-        if "design-tasks" in get_effective_pages(row.role, row.pages)
+        if "design-tasks" in get_effective_pages(row.role, row.pages, row.pages_updated_at)
     ]
     if not allowed_ids:
         return []

@@ -242,7 +242,18 @@ class PaymentRequestService:
             OutboundShipment.is_deleted == False,  # noqa: E712
             # Все заборы логиста: отгруженные И уже сданные/доставленные.
             OutboundShipment.status.in_([OutboundStatus.SHIPPED, OutboundStatus.DELIVERED]),
-            OutboundShipment.assembly_request_id.isnot(None),
+            # Забор заявки на сборку ИЛИ забор ПЕРЕЕЗДА между нашими складами:
+            # обе перевозки едут наёмной машиной и оплачиваются одинаково.
+            # Без переездов здесь `etl/sync_shipment_payments` (фильтра по заявке
+            # не имеет) заматчил бы забор переезда с дебетом выписки, транзакция
+            # ушла бы в consumed-сеты матчеров — а владельца платежа в рабочем
+            # списке логиста не было бы: деньги списаны, владелец невидим.
+            # Побочно чинит get_counterparty_reconciliation: без этого
+            # привязанный переезд давал ложную недостачу на свою стоимость.
+            or_(
+                OutboundShipment.assembly_request_id.isnot(None),
+                OutboundShipment.stock_transfer_id.isnot(None),
+            ),
         ]
         if counterparty_id is not None:
             conds.append(OutboundShipment.counterparty_id == counterparty_id)
@@ -295,6 +306,7 @@ class PaymentRequestService:
                 ShippableShipmentRow(
                     outbound_shipment_id=os_row.id,
                     assembly_request_id=os_row.assembly_request_id,
+                    stock_transfer_id=os_row.stock_transfer_id,
                     number=os_row.number,
                     destination=os_row.destination,
                     shipped_date=os_row.shipped_date,
@@ -953,7 +965,11 @@ class PaymentRequestService:
         if not shipments:
             ref = f"от {pickup_date.strftime('%d.%m.%Y')}" if pickup_date else ""
             return f"Оплата транспортных услуг {ref}".strip()
-        pallets = sum(s.pallets_count or 0 for s in shipments)
+        # `pallets_count` — поле с ДВУМЯ единицами: при `shipped_as_boxes` там
+        # короба. Считаем раздельно, иначе в назначении платежа за коробочный
+        # переезд стояло бы «30 палет» — неверная единица в банковском документе.
+        pallets = sum(s.pallets_count or 0 for s in shipments if not s.shipped_as_boxes)
+        boxes = sum(s.pallets_count or 0 for s in shipments if s.shipped_as_boxes)
         dates = sorted({d for d in (s.pickup_date or s.shipped_date for s in shipments) if d})
         dests: list[str] = []
         for s in shipments:
@@ -962,6 +978,8 @@ class PaymentRequestService:
         parts = ["Транспортные услуги"]
         if pallets:
             parts.append(f"{pallets} палет")
+        if boxes:
+            parts.append(f"{boxes} коробов")
         if dates:
             if len(dates) == 1:
                 parts.append(f"забор {dates[0].strftime('%d.%m.%Y')}")

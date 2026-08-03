@@ -14,13 +14,25 @@ import type {
     GazelkaDraft,
     GazelkaEditDraft,
     GazelkaFormOptions,
+    GazelkaLinkKind,
     GazelkaPrefill,
     GazelkaSendRequest,
     GazelkaSelectOption,
 } from '@/types/api';
 
 interface Props {
+    /**
+     * Что отдаём перевозчику. 'assembly' (дефолт) — заявка на сборку, едет на
+     * маркетплейс. 'transfer' — ПЕРЕЕЗД между нашими складами: другой draft,
+     * другой send, и маркетплейса у него нет вовсе.
+     *
+     * Дефолт обязателен: все прежние вызовы (Лист логиста, правка заявки
+     * портала) поле не передают и обязаны продолжать работать как работали.
+     */
+    kind?: GazelkaLinkKind;
+    /** id нашего документа: сборки либо ПЕРЕЕЗДА при kind='transfer'. */
     assemblyId: number;
+    /** Номер документа для шапки: ASM-… либо TR-… при kind='transfer'. */
     assemblyNumber: string;
     onClose: () => void;
     onSuccess: () => void;
@@ -152,12 +164,22 @@ function initForm(options: GazelkaFormOptions, prefill: GazelkaPrefill) {
     // Дефолты берём из выбранных порталом значений: у него первая опция ≠ выбранная
     // (price_id идёт Симферополь…Иваново, выбрано Иваново), а от price_id зависит график.
     const entity = options.default_entity_id ?? options.entities[0]?.value ?? '';
+    // 🔴 Раньше здесь стояла константа 'yes' — из-за неё переезд физически не
+    // мог предложить «не маркетплейс», а значит и адресоваться на наш склад.
+    // Теперь режим задаёт бэкенд: у сборки 'yes', у переезда 'no'.
+    const isMarketplace = (prefill.is_marketplace ?? 'yes') === 'yes';
     return {
         entity_id: entity,
         payer_id: entity,
-        price_id: options.default_price_id ?? options.price_lists[0]?.value ?? '',
-        is_marketplace: 'yes' as string,
-        marketplace_id: prefill.marketplace_id ?? options.marketplaces[0]?.value ?? '',
+        // Прайс-лист = город-источник. У сборки его подсказывать нечем — берём
+        // выбранный порталом дефолт. У переезда источником бывает чужой город,
+        // и тогда бэкенд присылает конкретный price_id: подставить дефолт
+        // домашнего города значило бы посчитать поездку по чужому тарифу.
+        price_id: prefill.price_id || options.default_price_id || options.price_lists[0]?.value || '',
+        is_marketplace: (prefill.is_marketplace ?? 'yes') as string,
+        // Вне маркетплейсного режима первую опцию НЕ подставляем: невидимое
+        // поле не должно молча уехать в портал чужим значением.
+        marketplace_id: prefill.marketplace_id ?? (isMarketplace ? options.marketplaces[0]?.value ?? '' : ''),
         supply_id: prefill.supply_id ?? '',
         // Без матча склад НЕ угадываем: первый в списке может принадлежать другому маркетплейсу
         delivery_address: prefill.delivery_address ?? '',
@@ -215,8 +237,15 @@ function initFormFromValues(values: GazelkaSendRequest): ReturnType<typeof initF
 
 type FormState = ReturnType<typeof initForm>;
 
-export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSuccess, editPlanId, editTitle }: Props) {
+export default function GazelkaModal({ kind = 'assembly', assemblyId, assemblyNumber, onClose, onSuccess, editPlanId, editTitle }: Props) {
     const isEditMode = editPlanId !== undefined;
+    // Тип документа важен ТОЛЬКО в режиме отправки: правка правит заказ портала,
+    // а он у обоих типов один и тот же (GazelkaEditDraft про наш документ не
+    // знает). Отсюда `&& !isEditMode` — иначе правка заявки, открытая из
+    // переездной ветки, ушла бы в transfer-эндпоинт.
+    const isTransfer = kind === 'transfer' && !isEditMode;
+    /** Существительное документа — чтобы каждый текст не разветвлять вручную. */
+    const docWord = isTransfer ? 'Переезд' : 'Заявка';
 
     // В режиме отправки — GazelkaDraft; в режиме редактирования — GazelkaEditDraft.
     const [draft, setDraft] = useState<GazelkaDraft | null>(null);
@@ -250,7 +279,10 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                 if (!controller.signal.aborted) setLoadingDraft(false);
             });
         } else {
-            api.getGazelkaDraft(assemblyId).then(d => {
+            const draftPromise = isTransfer
+                ? api.getGazelkaTransferDraft(assemblyId)
+                : api.getGazelkaDraft(assemblyId);
+            draftPromise.then(d => {
                 if (controller.signal.aborted) return;
                 setDraft(d);
                 setForm(initForm(d.options, d.prefill));
@@ -262,7 +294,7 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
             });
         }
         return () => controller.abort();
-    }, [assemblyId, isEditMode, editPlanId]);
+    }, [assemblyId, isEditMode, editPlanId, isTransfer]);
 
     useEffect(() => loadDraft(), [loadDraft]);
 
@@ -276,9 +308,15 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
     const plan = formOptions && form && isMarketplace
         ? findPlan(formOptions, form.price_id, form.delivery_address, form.marketplace_id)
         : null;
+    // 🔴 Вне маркетплейсного режима складов НЕТ — и это не упрощение.
+    // Раньше сюда падал ПОЛНЫЙ список `delivery_warehouses` (все склады всех
+    // маркетплейсов), из-за чего ветка свободного текста была недостижима, а
+    // переезд физически нельзя было адресовать на наш склад: в dropdown портала
+    // наших складов не существует, и логист вынужденно выбирал чужой склад WB.
+    // Пустой список включает TextField — ровно то, что нужно переезду.
     const warehouses = formOptions && form && isMarketplace
         ? warehousesFor(formOptions, form.price_id, form.marketplace_id)
-        : (formOptions?.delivery_warehouses ?? []);
+        : [];
     // Даты, реально допустимые для этого направления. Протухший prefill (или дата уже
     // созданной заявки) в списки не попадает и потому НЕ считается выбранным.
     const dates = formOptions && form && plan ? dateChoices(formOptions, plan, form.departure_date) : null;
@@ -298,9 +336,20 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
         setSubmitError('');
     };
 
-    /** Смена склада или даты отправки делает прежнюю дату доставки невалидной. */
+    /**
+     * Смена склада или даты отправки делает прежнюю дату доставки невалидной.
+     *
+     * Сброс дат — только в маркетплейсном режиме, где адрес = склад из
+     * dropdown'а и у каждого направления свой график. В свободном тексте
+     * графика нет, а сбрасывать даты на КАЖДОЕ нажатие клавиши означало бы
+     * стирать уже выбранные даты, пока логист дописывает адрес.
+     */
     const setDeliveryAddress = (value: string) => {
-        setForm(prev => prev ? { ...prev, delivery_address: value, departure_date: '', delivery_date: '' } : prev);
+        setForm(prev => prev
+            ? (isMarketplace
+                ? { ...prev, delivery_address: value, departure_date: '', delivery_date: '' }
+                : { ...prev, delivery_address: value })
+            : prev);
         setValidationError('');
         setSubmitError('');
     };
@@ -323,6 +372,11 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
             if (!plan) { setValidationError('Это направление не обслуживается из выбранного города'); return; }
             if (!departureValue) { setValidationError('Выберите дату отправки'); return; }
             if (!deliveryValue) { setValidationError('Выберите дату доставки'); return; }
+        } else if (isTransfer && !form.delivery_address && !form.delivery_address_x2) {
+            // Склада получателя в dropdown портала нет, адрес несёт только
+            // свободный текст — пустым он оставит водителя без точки назначения.
+            setValidationError('Укажите адрес доставки: склада-получателя в справочнике портала нет');
+            return;
         }
 
         const body: GazelkaSendRequest = {
@@ -330,8 +384,11 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
             payer_id: form.payer_id,
             price_id: form.price_id,
             is_marketplace: form.is_marketplace,
-            marketplace_id: form.marketplace_id || null,
-            supply_id: form.supply_id || null,
+            // Поля маркетплейса скрыты вне маркетплейсного режима — и уезжать
+            // они тоже не должны: null портал читает как «оставить дефолт», а
+            // залипший в стейте id отправил бы переезд «на маркетплейс».
+            marketplace_id: isMarketplace ? (form.marketplace_id || null) : null,
+            supply_id: isMarketplace ? (form.supply_id || null) : null,
             delivery_address: form.delivery_address || null,
             delivery_address_x2: form.delivery_address_x2 || null,
             // Только нормализованные даты: залипшее в стейте протухшее значение не уедет
@@ -363,6 +420,8 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
             let result;
             if (isEditMode && editPlanId !== undefined) {
                 result = await api.saveGazelkaEdit(editPlanId, body);
+            } else if (isTransfer) {
+                result = await api.sendTransferToGazelka(assemblyId, body);
             } else {
                 result = await api.sendToGazelka(assemblyId, body);
             }
@@ -370,7 +429,9 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                 setSubmitSuccess(
                     isEditMode
                         ? (result.ref ? `Заявка сохранена. Ref: ${result.ref}` : 'Заявка успешно сохранена')
-                        : (result.ref ? `Заявка отправлена. Ref: ${result.ref}` : 'Заявка успешно отправлена в Газельку')
+                        : (result.ref
+                            ? `${docWord} отправлен${isTransfer ? '' : 'а'} в Газельку. Ref: ${result.ref}`
+                            : `${docWord} отправлен${isTransfer ? '' : 'а'} в Газельку`)
                 );
                 onSuccess();
             } else {
@@ -409,12 +470,14 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                 }}>
                     <div>
                         <h2 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>
-                            {isEditMode ? 'Редактировать заявку' : 'Отправить в Газельку'}
+                            {isEditMode
+                                ? 'Редактировать заявку'
+                                : isTransfer ? 'Отправить переезд в Газельку' : 'Отправить в Газельку'}
                         </h2>
                         <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 2 }}>
                             {isEditMode
                                 ? (editTitle || `Заявка ${editPlanId}`)
-                                : `Заявка ${assemblyNumber}`
+                                : `${docWord} ${assemblyNumber}`
                             }
                         </div>
                     </div>
@@ -458,14 +521,17 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                 {/* Not eligible (только в режиме отправки) */}
                 {!loadingDraft && !draftError && !isEditMode && draft && !draft.eligible && (
                     <div style={{ padding: '16px', borderRadius: 8, background: 'rgba(245,158,11,0.1)', color: 'var(--color-warning)' }}>
-                        Эта заявка недоступна для отправки в Газельку.
+                        {isTransfer
+                            ? 'Этот переезд недоступен для отправки в Газельку: Газелька возит только со складов, привязанных к ключу интеграции.'
+                            : 'Эта заявка недоступна для отправки в Газельку.'}
                     </div>
                 )}
 
                 {/* Already sent warning (только в режиме отправки) */}
                 {!loadingDraft && !draftError && !isEditMode && draft?.eligible && draft.already_sent && (
                     <div style={{ padding: '12px 16px', borderRadius: 8, background: 'rgba(245,158,11,0.1)', color: 'var(--color-warning)', marginBottom: 16, fontSize: 14 }}>
-                        Заявка уже была отправлена{draft.sent_ref ? ` (ref: ${draft.sent_ref})` : ''}. Повторная отправка создаст новую заявку в Газельке.
+                        {docWord} уже {isTransfer ? 'был отправлен' : 'была отправлена'}
+                        {draft.sent_ref ? ` (ref: ${draft.sent_ref})` : ''}. Повторная отправка создаст новую заявку в Газельке.
                     </div>
                 )}
 
@@ -526,7 +592,10 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                                     </select>
                                 </div>
                             </div>
-                            {formOptions.marketplaces.length > 0 && (
+                            {/* Маркетплейс только в маркетплейсном режиме: у переезда
+                                его нет, а видимое поле провоцирует выбрать «хоть
+                                что-нибудь» — и заказ уедет в чужое направление. */}
+                            {isMarketplace && formOptions.marketplaces.length > 0 && (
                                 <div style={{ marginTop: 12 }}>
                                     <SelectField
                                         label="ID маркетплейса"
@@ -535,6 +604,16 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                                         options={formOptions.marketplaces}
                                         placeholder="— выберите —"
                                     />
+                                </div>
+                            )}
+                            {/* Прайс = город-источник, и портал считает по нему всю
+                                поездку. Для сборки он всегда домашний, а переезд
+                                нередко забирают из другого города — молчаливый
+                                дефолт дал бы тариф не того города. */}
+                            {isTransfer && (
+                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 8 }}>
+                                    Прайс-лист — город, ИЗ которого забирают груз. Если склад-источник не в домашнем
+                                    городе, выберите его прайс руками: тариф поездки портал берёт отсюда.
                                 </div>
                             )}
                         </div>
@@ -574,7 +653,8 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                                         label="Адрес доставки"
                                         value={form.delivery_address}
                                         onChange={setDeliveryAddress}
-                                        placeholder="Адрес"
+                                        placeholder={isTransfer ? 'Город, улица, дом — куда везём' : 'Адрес'}
+                                        required={isTransfer}
                                     />
                                 )}
                                 <TextField
@@ -652,6 +732,13 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                                     Это направление не обслуживается из выбранного города — выберите другой склад или прайс-лист.
                                 </div>
                             )}
+                            {/* Почему тут текст, а не привычный dropdown складов. */}
+                            {isTransfer && !isMarketplace && (
+                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 8 }}>
+                                    Наших складов в справочнике портала нет — адрес пишется текстом. Даты тоже свободные:
+                                    график погрузки и доставки есть только у маркетплейсных направлений.
+                                </div>
+                            )}
                         </div>
 
                         {/* ── Контакты ── */}
@@ -714,12 +801,17 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                                     type="number"
                                     placeholder="м³"
                                 />
-                                <TextField
-                                    label="Номер поставки WB"
-                                    value={form.supply_id}
-                                    onChange={v => set('supply_id', v)}
-                                    placeholder="WB-..."
-                                />
+                                {/* № поставки — реквизит маркетплейса. У переезда его
+                                    не бывает: пустое поле «WB-…» на нашем маршруте
+                                    читается как забытое, а не как неприменимое. */}
+                                {isMarketplace && (
+                                    <TextField
+                                        label="Номер поставки WB"
+                                        value={form.supply_id}
+                                        onChange={v => set('supply_id', v)}
+                                        placeholder="WB-..."
+                                    />
+                                )}
                             </div>
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginTop: 12 }}>
                                 <NumberField

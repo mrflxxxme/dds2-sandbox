@@ -1,9 +1,18 @@
 # ruff: noqa: RUF002, RUF003
 """
-Router: /migfull-portal — создание заявки на отгрузку в портале ФФ «Натали» (migfull).
+Router: /migfull-portal — создание документов в портале ФФ «Натали» (migfull).
 
-HTTP + валидация; логика — в services/migfull_portal_service. У migfull нет write-API:
-интеграция ходит как браузер (Livewire-сессия). `send` — РЕАЛЬНОЕ создание заявки
+Четыре пары ручек, по документу и источнику состава:
+  • `/assembly/{id}/draft|send`                — ОТГРУЗКА из нашей сборки;
+  • `/transfer/{id}/shipment-draft|shipment-send` — ОТГРУЗКА из перемещения
+    (склад Натали — ИСТОЧНИК переезда);
+  • `/inbound/{id}/draft|send`                — ПРИЁМКА из нашей приёмки машины;
+  • `/transfer/{id}/draft|send`               — ПРИЁМКА из перемещения
+    (склад Натали — ПОЛУЧАТЕЛЬ переезда).
+
+HTTP + валидация; логика — в services/migfull_portal_service (отгрузка) и
+services/migfull_portal_inbound (приёмка). У migfull нет write-API: интеграция
+ходит как браузер (Livewire-сессия). `send` — РЕАЛЬНОЕ создание документа
 (НЕОБРАТИМО, у клиента портала нет delete/cancel), под rate_limit_write.
 
 НЕ путать с read-only API migfull (вкладка остатков/заявок ФФ).
@@ -20,11 +29,13 @@ from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.migfull_portal import (
     MigfullDraftResponse,
+    MigfullInboundDraftResponse,
+    MigfullInboundSendRequest,
     MigfullPortalConfigResponse,
     MigfullSendRequest,
     MigfullSendResult,
 )
-from backend.services import migfull_portal_service
+from backend.services import migfull_portal_inbound, migfull_portal_service
 from backend.services.migfull_portal_service import MigfullPortalServiceError
 from backend.utils.rate_limit import rate_limit_write
 
@@ -74,3 +85,129 @@ async def migfull_portal_send(
         return await migfull_portal_service.send_shipment(db, project.id, assembly_id, payload, actor=_actor(user))
     except MigfullPortalServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+
+
+# ─── Поставка (приёмка) на склад Натали из нашей приёмки машины ──────────────
+
+
+@router.get("/inbound/{receipt_id}/draft", response_model=MigfullInboundDraftResponse)
+async def migfull_portal_inbound_draft(
+    receipt_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> MigfullInboundDraftResponse:
+    """Превью поставки для confirm-модалки: prefill шапки + состав (позиции/штуки/короба)."""
+    try:
+        return await migfull_portal_inbound.build_inbound_draft(db, project.id, receipt_id)
+    except MigfullPortalServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post(
+    "/inbound/{receipt_id}/send",
+    response_model=MigfullSendResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def migfull_portal_inbound_send(
+    receipt_id: int,
+    payload: MigfullInboundSendRequest,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MigfullSendResult:
+    """РЕАЛЬНОЕ создание поставки (приёмки) в ФФ «Натали» (НЕОБРАТИМО). Пишет audit."""
+    try:
+        return await migfull_portal_inbound.send_submission(db, project.id, receipt_id, payload, actor=_actor(user))
+    except MigfullPortalServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+# ─── Та же поставка, но из ПЕРЕМЕЩЕНИЯ (наш склад → Натали) ──────────────────
+# Перемещение своей приёмки не создаёт (приход у ФФ заводит эта поставка), поэтому
+# источником состава выступает сам переезд TR-…. Контур идентичен /inbound.
+
+
+@router.get("/transfer/{transfer_id}/draft", response_model=MigfullInboundDraftResponse)
+async def migfull_portal_transfer_draft(
+    transfer_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> MigfullInboundDraftResponse:
+    """Превью поставки из перемещения: prefill шапки + состав (позиции/штуки/короба)."""
+    try:
+        return await migfull_portal_inbound.build_transfer_draft(db, project.id, transfer_id)
+    except MigfullPortalServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post(
+    "/transfer/{transfer_id}/send",
+    response_model=MigfullSendResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def migfull_portal_transfer_send(
+    transfer_id: int,
+    payload: MigfullInboundSendRequest,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MigfullSendResult:
+    """РЕАЛЬНОЕ создание поставки из перемещения (НЕОБРАТИМО). Пишет audit."""
+    try:
+        return await migfull_portal_inbound.send_transfer_submission(
+            db, project.id, transfer_id, payload, actor=_actor(user)
+        )
+    except MigfullPortalServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+# ─── ОТГРУЗКА из ПЕРЕМЕЩЕНИЯ (Натали → наш склад) ───────────────────────────
+# Вторая сторона того же переезда: когда склад Натали — ИСТОЧНИК, у неё заводится
+# не приёмка, а заявка на отгрузку (контур /assembly, состав — строки переезда).
+# Пути с суффиксом `shipment-`, чтобы не столкнуться с приёмочными выше.
+
+
+@router.get("/transfer/{transfer_id}/shipment-draft", response_model=MigfullDraftResponse)
+async def migfull_portal_transfer_shipment_draft(
+    transfer_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> MigfullDraftResponse:
+    """Превью заявки на отгрузку из перемещения: prefill шапки + строки описи."""
+    try:
+        return await migfull_portal_service.build_transfer_shipment_draft(db, project.id, transfer_id)
+    except MigfullPortalServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post(
+    "/transfer/{transfer_id}/shipment-send",
+    response_model=MigfullSendResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def migfull_portal_transfer_shipment_send(
+    transfer_id: int,
+    payload: MigfullSendRequest,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MigfullSendResult:
+    """РЕАЛЬНОЕ создание заявки на отгрузку из перемещения (НЕОБРАТИМО). Пишет audit."""
+    try:
+        return await migfull_portal_service.send_transfer_shipment(
+            db, project.id, transfer_id, payload, actor=_actor(user)
+        )
+    except MigfullPortalServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e

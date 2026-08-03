@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -48,9 +49,71 @@ class OutboundStatus(str, enum.Enum):
 
 
 class TransferStatus(str, enum.Enum):
-    DRAFT = "DRAFT"
-    IN_TRANSIT = "IN_TRANSIT"
-    COMPLETED = "COMPLETED"
+    """Статус переезда — ЗЕРКАЛО `AssemblyStatus` (канон юзера 31.07.2026).
+
+    Переезд между складами ФФ ведётся как заявка на сборку: те же ступени, те же
+    сигналы синка провайдера, машина внутри той же цепочки. Прежняя тонкая шкала
+    DRAFT / IN_TRANSIT / COMPLETED легла на новую так: DRAFT → PENDING,
+    IN_TRANSIT → SHIPPED, COMPLETED → DELIVERED (миграция `trv04`).
+
+    Сток движется РОВНО в двух переходах:
+      → SHIPPED   — списание со склада-источника (TRANSFER_OUT) + транзит на получателе;
+      → DELIVERED — приход на получателе (TRANSFER_IN) и снятие транзита.
+    Плюс → RETURNED: возврат на склад-источник, если получатель не принял.
+    """
+
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"  # ФФ собирает переезд у себя
+    READY = "READY"  # ФФ собрал (стадия «Собран») либо отмечено руками
+    VEHICLE_ASSIGNED = "VEHICLE_ASSIGNED"
+    SHIPPED = "SHIPPED"  # уехал: сток списан с источника, висит транзитом на получателе
+    DELIVERED = "DELIVERED"  # принят получателем полностью
+    RETURNED = "RETURNED"  # получатель не принял — товар вернулся на склад-источник
+    CLOSED = "CLOSED"  # терминал после возврата
+    CANCELLED = "CANCELLED"
+
+
+#: Разрешённые переходы. Отличия от `ASSEMBLY_TRANSITIONS` ровно два, оба
+#: осознанные:
+#:  • PENDING → READY напрямую: у переезда БЕЗ связки с ФФ фазы «ФФ собирает» не
+#:    существует (транзитные склады интеграции не имеют), и гонять человека через
+#:    IN_PROGRESS ради одной лишней кнопки незачем.
+#:  • SHIPPED → READY НЕТ (у заявки есть): сток уже списан, откат делает только
+#:    RETURNED, который его возвращает. Иначе переезд «вернулся» бы в готовность,
+#:    оставив единицы списанными.
+TRANSFER_TRANSITIONS: dict["TransferStatus", set["TransferStatus"]] = {
+    TransferStatus.PENDING: {
+        TransferStatus.IN_PROGRESS,
+        TransferStatus.READY,
+        TransferStatus.CANCELLED,
+    },
+    TransferStatus.IN_PROGRESS: {TransferStatus.READY, TransferStatus.CANCELLED},
+    TransferStatus.READY: {
+        TransferStatus.VEHICLE_ASSIGNED,
+        TransferStatus.IN_PROGRESS,
+        TransferStatus.CANCELLED,
+    },
+    TransferStatus.VEHICLE_ASSIGNED: {
+        TransferStatus.SHIPPED,
+        TransferStatus.READY,
+        TransferStatus.CANCELLED,
+    },
+    # CANCELLED из SHIPPED/RETURNED НЕТ намеренно: сток уже списан, а отмена его
+    # не возвращает — это делает только RETURNED. `cancel_transfer` и так рубит
+    # всё после отгрузки, но таблица подана как единственный источник истины, и
+    # первый же новый вызывающий, доверившийся ей, отменил бы переезд поверх
+    # уехавшего товара.
+    TransferStatus.SHIPPED: {TransferStatus.DELIVERED, TransferStatus.RETURNED},
+    TransferStatus.DELIVERED: {TransferStatus.RETURNED, TransferStatus.CLOSED},
+    TransferStatus.RETURNED: {TransferStatus.READY, TransferStatus.CLOSED},
+    TransferStatus.CLOSED: set(),
+    TransferStatus.CANCELLED: set(),
+}
+
+#: Статусы, в которых переезд ещё можно править и он НЕ держит движений стока.
+TRANSFER_EDITABLE_STATUSES = frozenset(
+    {TransferStatus.PENDING, TransferStatus.IN_PROGRESS, TransferStatus.READY}
+)
 
 
 class DefectMarkStatus(str, enum.Enum):
@@ -243,6 +306,22 @@ class OutboundShipment(Base, TimestampMixin, SoftDeleteMixin):
     wb_fbo_supply_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("wb_fbo_supplies.id", ondelete="SET NULL"), nullable=True
     )
+    # ─── Забор ВНУТРЕННЕГО ПЕРЕЕЗДА (перемещение между складами) ───────────
+    # Отгрузка создаётся при send_transfer как НОСИТЕЛЬ ЛОГИСТИКИ И ДЕНЕГ:
+    # снимок машины/перевозчика/стоимости + связка с заявкой на оплату
+    # (PaymentRequestShipment: N заборов → 1 платёж, кейс «одна машина везёт
+    # три документа») и с банковской выпиской (etl/sync_shipment_payments).
+    # СТОК ЭТОТ ЗАБОР НЕ ДВИГАЕТ — списание уже сделал сам перемещение
+    # (MovementType.TRANSFER_OUT, reference_type='TRANSFER'). Второй раз
+    # списывать нельзя: движения остаются за перемещением, забор — только
+    # логистика и деньги.
+    # ВАЖНО для читателей outbound_shipments: строка с непустым
+    # stock_transfer_id — это ПЕРЕЕЗД МЕЖДУ НАШИМИ СКЛАДАМИ, а не отгрузка на
+    # маркетплейс. Отчёты, считающие отгрузку/выручку/списание, обязаны её
+    # исключать (фильтр stock_transfer_id IS NULL).
+    stock_transfer_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("stock_transfers.id", ondelete="SET NULL"), nullable=True
+    )
     attempt_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     # Снимок логистики попытки на момент отгрузки — на AssemblyRequest эти поля
     # перезатираются при назначении нового водителя; здесь сохраняются по-попыточно.
@@ -285,6 +364,21 @@ class OutboundShipment(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_outbound_shipments_project_id", "project_id"),
         Index("ix_outbound_shipments_warehouse_id", "warehouse_id"),
         Index("ix_outbound_shipments_assembly_request_id", "assembly_request_id"),
+        # Одна ПОПЫТКА ОТПРАВКИ переезда — ровно один живой забор. На уровне БД
+        # два забора на один stock_transfer_id ничем не запрещались, а это прямой
+        # путь к двойной заявке на оплату одной перевозки.
+        # `attempt_no` в ключе — не формальность: переотправка после возврата
+        # (RETURNED → READY → SHIPPED) у переезда СУЩЕСТВУЕТ, и второй круг обязан
+        # получить СВОЙ документ. Без номера попытки уникальность вынуждала бы
+        # перезаписывать забор первого круга — вместе с его стоимостью, датой
+        # отгрузки и связкой с уже проведённым платежом.
+        Index(
+            "uq_outbound_shipments_stock_transfer",
+            "stock_transfer_id",
+            "attempt_no",
+            unique=True,
+            postgresql_where=text("stock_transfer_id IS NOT NULL AND is_deleted = false"),
+        ),
         Index("ix_outbound_shipments_wb_fbo_supply_id", "wb_fbo_supply_id"),
         Index("ix_outbound_shipments_counterparty_id", "counterparty_id"),
         Index("ix_outbound_shipments_matched_transaction_id", "matched_transaction_id"),
@@ -325,10 +419,103 @@ class StockTransfer(Base, TimestampMixin, SoftDeleteMixin):
     from_warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
     to_warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
     number: Mapped[str] = mapped_column(String(20), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default=TransferStatus.DRAFT, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default=TransferStatus.PENDING, nullable=False)
     comment: Mapped[str | None] = mapped_column(Text)
     is_defect: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     defect_reason: Mapped[str | None] = mapped_column(Text)
+
+    # ─── Машина и логистика переезда ───────────────────────────────────────
+    # Зеркало блока «Назначить машину» у заявки на сборку (AssemblyRequest):
+    # переезд между ФФ везёт та же наёмная машина и оплачивается так же.
+    # Отличия от заявки: НЕТ WB-пропуска (переезд не едет на маркетплейс) и
+    # НЕТ гарда Газельки (агрегатор возит только сборки на WB).
+    # Статусную цепочку DRAFT → IN_TRANSIT → COMPLETED машина НЕ трогает:
+    # ступень VEHICLE_ASSIGNED не вводим (её читают авто-приём ФФ и отчёты —
+    # см. _collect_transfer_fact_candidates), назначенная машина показывается
+    # бейджем на черновике.
+    #
+    # vehicle_info — госномер (как на заявке: у старых записей может лежать
+    # свободный текст «номер, водитель, ТК», читатели обязаны терпеть оба).
+    vehicle_info: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    vehicle_brand: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    driver_first_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    driver_last_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    driver_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # ondelete=SET NULL — как у counterparty_id заявки и забора: жёсткое
+    # удаление контрагента не должно ронять переезд. Слияние контрагентов
+    # перецепляет эту ссылку (counterparty_service.merge), иначе забор с мёртвым
+    # id никогда не сматчился бы с выпиской.
+    counterparty_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("counterparty.id", ondelete="SET NULL"), nullable=True
+    )
+    # Логистику оказывает склад забора: перевозчик берётся из
+    # Warehouse.counterparty_id склада-ИСТОЧНИКА, а не из введённого ИНН.
+    # Флаг — чтобы UI помнил режим при переоткрытии (симметрично заявке).
+    logistics_by_warehouse: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    pickup_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    pickup_time_slot: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Вехи цепочки — зеркало AssemblyRequest: «когда ФФ собрал» и «когда уехал».
+    # Нужны сводному списку логиста, где переезды идут вперемешку с заявками и
+    # обязаны заполнять те же колонки; вывести их из статуса нельзя — статус
+    # хранит только ТЕКУЩЕЕ состояние.
+    actual_ready_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    shipped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Ручная сумма доп-услуг ФФ по этому переезду (стрейч, маркировка и т.п. вне
+    # тарифной сетки) — слагаемое ожидаемой стоимости услуг, зеркало полей
+    # заявки на сборку. Тарифицируемая часть считается по ставке склада-источника
+    # (`FfServiceType.TRANSFER_ASSEMBLY`), эта — то, что в сетку не укладывается.
+    ff_custom_cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    ff_custom_cost_comment: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    # Транспортная единица переезда — 1:1 с заявкой на сборку (AssemblyRequest):
+    # shipped_as_boxes=False → паллеты (по умолчанию), True → короба. Флаг меняет
+    # только ЕДИНИЦУ измерения pallets_count/pallet_weight_kg и подписи в UI
+    # («Короба» / «Вес 1 короба» vs «Палеты»). При конвертации заявки в переезд
+    # единица и её количество переносятся из заявки — иначе переезд терял бы
+    # паллеты (у всех шести заявок кейса «транзит Питер/ЕКБ» они проставлены),
+    # а ₽/паллета по переездам было бы не посчитать.
+    # Nullable (в отличие от заявки): переезд можно завести и без транспортной
+    # оценки — например когда машину ещё не считали.
+    pallets_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pallet_weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    shipped_as_boxes: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    # Стоимость забора. Деньги хранятся ЗДЕСЬ только как план переезда; фактом
+    # оплаты владеет OutboundShipment (снимок логистики + связка с выпиской и
+    # заявкой на оплату), который создаётся при отправке перемещения.
+    pickup_cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    delivery_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    vehicle_assigned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # ─── Локальный архив ──────────────────────────────────────────────────
+    # Ручное «убрать с глаз» — ЗЕРКАЛО `FulfillmentRequest.local_archived`.
+    #
+    # 🔴 Это НЕ то же, что вид «Архив» в списке: тот вычисляется по статусу
+    # (DELIVERED / CLOSED / CANCELLED + брак) и убирает завершённое само. Здесь
+    # решение ЧЕЛОВЕКА: переезд может быть жив по статусу, но работать с ним
+    # больше не собираются (создали по ошибке, дубль, отложили насовсем) — и он
+    # мозолит глаза в рабочем списке. Обратное тоже верно: архивный по статусу
+    # переезд бывает нужен на виду, пока с ним не закрыты деньги.
+    #
+    # Не soft-delete: архивный переезд остаётся в отчётах и в остатках —
+    # его сток реально уехал. Прячется только из рабочих списков.
+    archived: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Переезд, созданный ИЗ заявки на сборку («Переделать в перемещение»).
+    # Кейс: ФФ собрал заявку, но товар едет не на WB, а на транзитный склад
+    # (в т.ч. после возврата «WB не принял» — ASM-807 → возврат IN-232 →
+    # переезд). Заявка остаётся со своей историей и своими зеркалами ФФ,
+    # перемещение живёт рядом. Конвертация РАЗРЕШЕНА только когда нетто-сток
+    # заявки не списан (движения ASSEMBLY компенсированы возвратом) — иначе
+    # отправка переезда списала бы те же единицы второй раз.
+    converted_from_assembly_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("assembly_requests.id", ondelete="SET NULL"), nullable=True
+    )
 
     # Relationships
     items: Mapped[list["StockTransferItem"]] = relationship(
@@ -336,7 +523,50 @@ class StockTransfer(Base, TimestampMixin, SoftDeleteMixin):
         cascade="all, delete-orphan",
     )
 
-    __table_args__ = (Index("ix_stock_transfers_project_id", "project_id"),)
+    __table_args__ = (
+        Index("ix_stock_transfers_project_id", "project_id"),
+        Index("ix_stock_transfers_counterparty_id", "counterparty_id"),
+        # Одна заявка — один живой переезд: проверка «уже сконвертирована» в
+        # сервисе не атомарна, двойной клик дал бы два переезда по одному
+        # составу и двойное списание при отправке.
+        Index(
+            "uq_stock_transfers_converted_from_assembly",
+            "converted_from_assembly_id",
+            unique=True,
+            postgresql_where=text("converted_from_assembly_id IS NOT NULL AND is_deleted = false"),
+        ),
+    )
+
+
+class StockTransferStatusHistory(Base):
+    """Журнал смены статусов переезда — один в один `AssemblyStatusHistory`.
+
+    Раз переезд ведётся как заявка, у него должен быть и тот же ответ на вопрос
+    «кто и когда это сделал»: статус двигают трое — человек кнопкой, синк ФФ по
+    стадии провайдера (`changed_by='ff_sync'`) и авто-переходы (`'system'`).
+    Без журнала разбор «почему сток уехал» упирался бы в пустоту: сам переезд
+    хранит только ТЕКУЩИЙ статус.
+
+    Append-only, без soft-delete; каскадно удаляется вместе с переездом.
+    """
+
+    __tablename__ = "stock_transfer_status_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    stock_transfer_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("stock_transfers.id", ondelete="CASCADE"), nullable=False
+    )
+    old_status: Mapped[str | None] = mapped_column(String(20))
+    new_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    changed_by: Mapped[str | None] = mapped_column(String(50))  # user | ff_sync | system
+    comment: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("ix_stock_transfer_status_history_project_id", "project_id"),
+        Index("ix_stock_transfer_status_history_transfer_id", "stock_transfer_id"),
+    )
 
 
 class StockTransferItem(Base):

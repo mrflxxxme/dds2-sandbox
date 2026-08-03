@@ -6,3 +6,15 @@
 - [Design /all-projects RBAC tension](design-allprojects-rbac-tension.md) — сквозная ручка без page-гейта vs Р11 «все ручки под require_role»; поднято на Ф2, ждёт архитектора
 - [AB-photo-tests donor traps](ab-photo-tests-donor-traps.md) — мост поверх funnel/ab_photo_tests: WbContentError мимо ValueError-маппинга, откат через контроль-вариант, txn через WB-HTTP, /ab-tests без require_role
 - [Sweep-job donor trap](sweep-job-donor-trap.md) — draft_staleness_watch как донор: его безопасность держится на get_sync_project_ids (is_deleted) и коротком gather; копии ловят оба бага
+- [Cost auto-opening invariants](cost-valuation-auto-opening-invariants.md) — two-pass `_walk`: what's provably invariant (on_hand, lifetime contour), what shifts, and the zero-cost first-batch trap
+- [Переезд с машиной: конвертация](transfer-vehicle-conversion-invariants.md) — забор держится на пустом assembly_request_id; три слепые зоны гарда двойного списания (FBS-зеркало, живая заявка, гонка)
+- [Transfer-fact auto-receive invariants](transfer-fact-autoreceive-invariants.md) — что в авто-приёме TR по факту ФФ доказуемо идемпотентно (движения), что держится на маркере ff11, почему transfer_transit не задваивает капитал
+- [SKU-ключи: два класса пробела](sku-key-whitespace-classes.md) — btrim ≠ python .strip() (`\r\n`-артикулы), цифры по данным + полный список потребителей карт себестоимости
+- [Разбивка ФОТ: инварианты](payroll-fot-breakdown-invariants.md) — «родитель = Σ детей» точен в Decimal, ломается на ±0.01 после float pro-rata ОПиУ (репро внутри)
+- [FBS: списание и транзит](fbs-writeoff-transit-invariants.md) — blacklist wbStatus ловит ready_for_pickup в «зависло», written_off_at = ещё и метка бэкфилла, ff_fbs lifetime-нетто с глухим капом
+- [RBAC-наследование разделов](rbac-page-inheritance-invariants.md) — отзыв доступа держится на одном бампе pages_updated_at; гарды каталога фронт↔бэк всегда skip в контейнере; семантика PAGE_ADDED_AT
+- [Аналитика этапов FBS](fbs-stage-analytics-invariants.md) — после истории кабинета t_closed ≠ «зеркало поставки есть» (ломает _left_us_expr молча); период не действует на matured/refused и на узлы
+- [Зеркало сборки FBS (kind=fbs)](fbs-assembly-mirror-invariants.md) — kind-фильтр решается по SHIPPED (два in_transit + TG-алярм), seller-имя в wb_warehouse_name_manual, contour_condition ≠ prod-only
+- [Статусы переезда: зеркало заявки](transfer-status-mirror-invariants.md) — нетто-карта приёма ПОЧИНЕНА 08.02; что осталось: недостижимые строки TRANSFER_TRANSITIONS и окно авто-шипа
+- [Забор переезда: носитель денег](transfer-pickup-money-carrier-invariants.md) — upsert теряет оплаченный круг при переотправке, гейт «Отправить» не действует на allowed_from-пути, тупик READY под Газелькой
+- [Поставка Натали: два источника](migfull-inbound-two-sources-invariants.md) — анти-дубль скоуплен по виду документа (кросс-гарда нет, UNCERTAIN-без-guid слепа); почему тут не нужен invalidate_cache

@@ -442,6 +442,76 @@ class TestMirrorStatusChain:
         assert req.status == AssemblyStatus.CANCELLED.value
         assert await _stock_side_effects(db_session, project.id) == (0, 0)
 
+    async def test_emptied_supply_cancels_mirror(self, db_session, project, wh, nom):
+        """Поставку ОПУСТОШИЛИ (задания перенесли) — зеркало гасим.
+
+        Прод 02.08.2026: WMS перенёс задания из WB-GI-260717413 в соседнюю
+        поставку. Задания не отменены — они просто больше не принадлежат этой
+        поставке, и список приходит пустым. Прежняя ветка отмены смотрела на
+        `все задания отменены` и пустой список не ловила: ASM-1158 и ASM-1172
+        остались висеть в «На сборке» с нулём заданий.
+        """
+        wb_wh = await _mk_fbs_wh(db_session, project.id, wh.id)
+        supply_id = await _mk_supply(db_session, project.id)
+        order_id = await _mk_order(db_session, project.id, wb_wh, supply_id, nom)
+
+        await sync_fbs_assembly_mirror(db_session, project.id)
+        assert (await _mirror_of(db_session, project.id, supply_id)).status == (
+            AssemblyStatus.IN_PROGRESS.value
+        )
+
+        # Задание уехало в другую поставку + WB подтвердил, что здесь пусто.
+        order = (
+            await db_session.execute(
+                select(WbFbsOrder).where(
+                    WbFbsOrder.project_id == project.id, WbFbsOrder.wb_order_id == order_id
+                )
+            )
+        ).scalar_one()
+        order.supply_id = "WB-GI-ELSEWHERE"
+        supply = (
+            await db_session.execute(
+                select(WbFbsSupply).where(
+                    WbFbsSupply.project_id == project.id,
+                    WbFbsSupply.wb_supply_id == supply_id,
+                )
+            )
+        ).scalar_one()
+        supply.raw = {**(supply.raw or {}), "_dds_wb_orders": 0}
+        await db_session.commit()
+
+        assert await sync_fbs_assembly_mirror(db_session, project.id) == 1
+        req = await _mirror_of(db_session, project.id, supply_id)
+        assert req.status == AssemblyStatus.CANCELLED.value
+        assert await _stock_side_effects(db_session, project.id) == (0, 0)
+
+    async def test_unchecked_empty_supply_is_not_cancelled(self, db_session, project, wh, nom):
+        """Пусто У НАС ≠ пусто у WB: без подтверждения состав не гасим.
+
+        Свежая поставка, чьи задания ещё не синкнулись, тоже отдаёт пустой
+        список. Отменить её значило бы убить живое зеркало по таймингу синка,
+        поэтому гейт — ТОЛЬКО подтверждённый ноль (`_dds_wb_orders == 0`).
+        """
+        wb_wh = await _mk_fbs_wh(db_session, project.id, wh.id)
+        supply_id = await _mk_supply(db_session, project.id)
+        order_id = await _mk_order(db_session, project.id, wb_wh, supply_id, nom)
+
+        await sync_fbs_assembly_mirror(db_session, project.id)
+
+        order = (
+            await db_session.execute(
+                select(WbFbsOrder).where(
+                    WbFbsOrder.project_id == project.id, WbFbsOrder.wb_order_id == order_id
+                )
+            )
+        ).scalar_one()
+        order.supply_id = "WB-GI-ELSEWHERE"
+        await db_session.commit()  # маркер НЕ ставим — состав не проверен
+
+        await sync_fbs_assembly_mirror(db_session, project.id)
+        req = await _mirror_of(db_session, project.id, supply_id)
+        assert req.status == AssemblyStatus.IN_PROGRESS.value
+
     async def test_all_orders_cancelled_cancels_mirror(self, db_session, project, wh, nom):
         """Effective cancel: WB-отмена при supplierStatus=new тоже гасит зеркало."""
         wb_wh = await _mk_fbs_wh(db_session, project.id, wh.id)

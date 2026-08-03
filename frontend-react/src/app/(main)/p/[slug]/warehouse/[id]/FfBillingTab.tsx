@@ -1,8 +1,13 @@
 'use client';
 /**
  * Вкладка «Тарифы ФФ» на странице ФФ-склада:
- *   1) тарифы 5 услуг ФФ (текущая ставка + история, новая ставка закрывает старую на бэке);
+ *   1) тарифы 6 услуг ФФ (текущая ставка + история, новая ставка закрывает старую на бэке);
  *   2) блок «Хранение по дням» — посуточные срезы штуки/короба/паллеты × ставка = ₽.
+ *
+ * У LOADING и TRANSFER_ASSEMBLY единицу выбирает пользователь (₽/паллета или
+ * ₽/короб) — склад биллит по-своему, а «Сборка переезда» ещё и должна совпасть
+ * с единицей самого переезда, иначе его стоимость не посчитается (бэк намеренно
+ * не пересчитывает короба в паллеты).
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
@@ -13,13 +18,23 @@ import type { FfServiceType, FfStorageDailyRow, FfTariffRow, FfTariffUnit } from
 
 // ─── Справочник услуг ───────────────────────────────────────────────────────
 
-const SERVICES: { type: FfServiceType; label: string; unitLabel: string }[] = [
+/** hint — подсказка под названием услуги (когда единица выбирается вручную). */
+const SERVICES: { type: FfServiceType; label: string; unitLabel: string; hint?: string }[] = [
     { type: 'PALLETIZING',    label: 'Паллетирование',    unitLabel: '₽/паллета' },
     { type: 'BOX_PROCESSING', label: 'Обработка коробки', unitLabel: '₽/короб' },
     { type: 'STORAGE',        label: 'Хранение',          unitLabel: '₽/паллета/день' },
     { type: 'TRUCK_UNLOADING', label: 'Выгрузка фуры',    unitLabel: '₽/машина' },
     { type: 'LOADING',        label: 'Погрузка',          unitLabel: '' }, // единица — переключателем (паллета/короб)
+    {
+        type: 'TRANSFER_ASSEMBLY',
+        label: 'Сборка переезда',
+        unitLabel: '',
+        hint: 'Ставка склада-источника переезда',
+    },
 ];
+
+/** Услуги, у которых единицу выбирает пользователь (контракт: UNIT_SERVICES бэка). */
+const UNIT_SERVICES: FfServiceType[] = ['LOADING', 'TRANSFER_ASSEMBLY'];
 
 const UNIT_LABEL: Record<FfTariffUnit, string> = { PALLET: '₽/паллета', BOX: '₽/короб' };
 
@@ -107,12 +122,12 @@ export default function FfBillingTab({ warehouseId }: { warehouseId: number }) {
 function ServiceTariffRow({
     service, tariffs, warehouseId, onChanged,
 }: {
-    service: { type: FfServiceType; label: string; unitLabel: string };
+    service: { type: FfServiceType; label: string; unitLabel: string; hint?: string };
     tariffs: FfTariffRow[];
     warehouseId: number;
     onChanged: () => void;
 }) {
-    const isLoading_ = service.type === 'LOADING';
+    const hasUnit = UNIT_SERVICES.includes(service.type);
     const active = activeTariff(tariffs, service.type);
 
     const [showForm, setShowForm] = useState(false);
@@ -139,7 +154,7 @@ function ServiceTariffRow({
         try {
             await api.createFfTariff(warehouseId, {
                 service_type: service.type,
-                unit: isLoading_ ? unitInput : null,
+                unit: hasUnit ? unitInput : null,
                 rate,
                 valid_from: validFrom || null,
             });
@@ -164,7 +179,7 @@ function ServiceTariffRow({
         }
     };
 
-    const unitLabel = isLoading_
+    const unitLabel = hasUnit
         ? (active?.unit ? UNIT_LABEL[active.unit] : 'паллета/короб')
         : service.unitLabel;
 
@@ -174,6 +189,9 @@ function ServiceTariffRow({
                 <div style={{ minWidth: 200 }}>
                     <div style={{ fontSize: 14, fontWeight: 600 }}>{service.label}</div>
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{unitLabel}</div>
+                    {service.hint && (
+                        <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{service.hint}</div>
+                    )}
                 </div>
                 <div style={{ flex: 1, minWidth: 160 }}>
                     {active ? (
@@ -223,7 +241,7 @@ function ServiceTariffRow({
                             autoFocus
                         />
                     </div>
-                    {isLoading_ && (
+                    {hasUnit && (
                         <div>
                             <label className="form-label" style={{ fontSize: 12 }}>Единица</label>
                             <select
@@ -262,7 +280,7 @@ function ServiceTariffRow({
                     {history.map(t => (
                         <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '4px 0', fontSize: 13 }}>
                             <span style={{ fontWeight: 500, minWidth: 100 }}>
-                                {formatNumber(t.rate)} ₽{isLoading_ && t.unit ? ` (${t.unit === 'PALLET' ? 'паллета' : 'короб'})` : ''}
+                                {formatNumber(t.rate)} ₽{hasUnit && t.unit ? ` (${t.unit === 'PALLET' ? 'паллета' : 'короб'})` : ''}
                             </span>
                             <span style={{ color: 'var(--color-text-muted)' }}>
                                 {formatDate(t.valid_from)} — {t.valid_to ? formatDate(t.valid_to) : 'сейчас'}

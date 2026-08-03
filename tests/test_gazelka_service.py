@@ -410,7 +410,7 @@ def test_row_from_plan_planned():
 
 
 def test_row_from_plan_linked_badge():
-    row = _row_from_plan(_PLAN, _MKTS, {"313621": (42, "ASM-431", "SHIPPED")}, editable=True)
+    row = _row_from_plan(_PLAN, _MKTS, {"313621": ("assembly", 42, "ASM-431", "SHIPPED")}, editable=True)
     assert row.linked_assembly_id == 42
     assert row.linked_assembly_number == "ASM-431"
     assert row.linked_assembly_status == "Отгружена"  # статус нашей сборки
@@ -464,7 +464,7 @@ def test_attach_suggestion_by_wb_number():
 
 
 def test_attach_suggestion_skipped_when_already_linked():
-    row = _row_from_plan(_PLAN, _MKTS, {"313621": (1, "ASM-1", "READY")}, editable=True)
+    row = _row_from_plan(_PLAN, _MKTS, {"313621": ("assembly", 1, "ASM-1", "READY")}, editable=True)
     _attach_suggestion(row, _PLAN, {"40299154": (7, "ASM-700")})
     assert row.suggested_assembly_id is None  # уже связана — подсказку не даём
 
@@ -901,7 +901,7 @@ async def test_sync_states_backfills_cost_for_already_shipped(monkeypatch):
     """Отгружена ДО фичи (нет тарифа в снимке) + заявка ещё в кабенете → бэкфилл стоимости."""
     plan = {"id": "330277", "status": "31", "route_id": "5", "rate": "14 266", "delivery_date": "2026-07-25"}
     apply_mock, ship_mock, pass_mock, backfill_mock = _patch_sync(
-        monkeypatch, plan, {"330277": (983, "ASM-810", "SHIPPED")}
+        monkeypatch, plan, {"330277": ("assembly", 983, "ASM-810", "SHIPPED")}
     )
     apply_mock.return_value = None  # уже отгружена → apply no-op
     ship_mock.side_effect = ValueError("SHIPPED -> SHIPPED")  # уже отгружена
@@ -922,7 +922,7 @@ async def test_sync_states_backfills_from_completed_list(monkeypatch):
     apply_mock, ship_mock, pass_mock, backfill_mock = _patch_sync(
         monkeypatch,
         {"id": "999", "status": "2"},  # активных нет
-        {"330662": (945, "ASM-774", "SHIPPED")},  # завершённая связана
+        {"330662": ("assembly", 945, "ASM-774", "SHIPPED")},  # завершённая связана
         completed_plans=[completed_plan],
     )
     backfill_mock.return_value = True
@@ -949,7 +949,7 @@ async def test_list_completed_from_portal(monkeypatch):
         gazelka_service, "_client_from_key",
         lambda key: _FakeActiveClient({"plans": []}, None, completed),
     )
-    monkeypatch.setattr(gazelka_service, "_linked_map", AsyncMock(return_value={"331751": (983, "ASM-810", "SHIPPED")}))
+    monkeypatch.setattr(gazelka_service, "_linked_map", AsyncMock(return_value={"331751": ("assembly", 983, "ASM-810", "SHIPPED")}))
     monkeypatch.setattr(gazelka_service, "_assembly_supply_index", AsyncMock(return_value={}))
 
     res = await gazelka_service.list_completed(MagicMock(), 4)
@@ -971,7 +971,7 @@ async def test_sync_states_autolink_skips_already_linked_assembly(monkeypatch):
     _patch_sync(
         monkeypatch,
         {"id": "999", "status": "2"},
-        {"555": (945, "ASM-774", None)},  # 945 уже связана с заявкой 555
+        {"555": ("assembly", 945, "ASM-774", None)},  # 945 уже связана с заявкой 555
         planned_plans=[planned],
         supply_idx={"40842600": (945, "ASM-774")},
     )

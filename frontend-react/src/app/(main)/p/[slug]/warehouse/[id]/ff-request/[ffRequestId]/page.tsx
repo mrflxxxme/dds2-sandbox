@@ -1,5 +1,6 @@
 'use client';
 import React, { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
@@ -61,10 +62,17 @@ export default function FfRequestDetailPage() {
         return () => controller.abort();
     }, [warehouseId, ffRequestId]);
 
-    // Назад — на вкладку склада по kind заявки; пока kind неизвестен — просто на склад
-    const backUrl = detail && (detail.kind === 'assembly' || detail.kind === 'inbound')
-        ? `/p/${slug}/warehouse/${warehouseId}?tab=${detail.kind === 'assembly' ? 'ff-assembly' : 'ff-inbound'}`
-        : `/p/${slug}/warehouse/${warehouseId}`;
+    // Назад — на вкладку «Фулфилмент» склада, в под-вкладку по kind заявки.
+    // kind=return и недозагруженная деталка раньше падали в голый URL склада —
+    // юзер улетал в «Приёмки» раздела Склад вместо ФФ, откуда пришёл.
+    const backTab = detail?.kind === 'assembly'
+        ? 'ff-assembly'
+        : detail?.kind === 'inbound'
+            ? 'ff-inbound'
+            : detail?.kind === 'return'
+                ? 'ff-return'
+                : 'fulfillment';
+    const backUrl = `/p/${slug}/warehouse/${warehouseId}?tab=${backTab}`;
     const goBack = () => router.push(backUrl);
 
     // Значение динамического поля: похожее на ISO-дату — через formatDate, иначе как есть
@@ -193,6 +201,17 @@ export default function FfRequestDetailPage() {
     };
 
     const hasMatch = d.match !== null;
+
+    // Мульти-связка: сёстры той же машины (N заявок ФФ → один наш документ).
+    // groupCount > 1 → сверка построена по СУММЕ составов группы (бэк).
+    const siblings = d.sibling_requests ?? [];
+    const groupCount = d.mismatch_group_numbers?.length ?? 0;
+    // «2 заявки» / «5 заявок» — счётная форма для подписи «У ФФ (...)»
+    const reqWord = (n: number) => {
+        if (n % 10 === 1 && n % 100 !== 11) return 'заявка';
+        if (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)) return 'заявки';
+        return 'заявок';
+    };
 
     const productCols: Column[] = [
         { key: 'barcode', label: 'ШК', render: (v: string | null) => v || '—' },
@@ -387,6 +406,29 @@ export default function FfRequestDetailPage() {
                 )}
             </div>
 
+            {/* Заявки этой машины (мульти-связка: N заявок ФФ → один наш документ) */}
+            {siblings.length > 0 && (
+                <div className="glass-card" style={{ padding: 16, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Заявки этой машины:</span>
+                    <span className="badge badge-info" style={{ fontSize: 12, padding: '4px 10px' }} title="Текущая заявка">
+                        {d.number || d.external_id}
+                        {d.total_qty ? ` · ${formatNumber(d.total_qty, 0)} шт` : ''}
+                    </span>
+                    {siblings.map(s => (
+                        <Link
+                            key={s.id}
+                            href={`/p/${slug}/warehouse/${warehouseId}/ff-request/${s.id}`}
+                            className="badge badge-secondary"
+                            style={{ fontSize: 12, padding: '4px 10px', textDecoration: 'none' }}
+                            title="Открыть заявку группы"
+                        >
+                            {s.number || `#${s.id}`}
+                            {s.total_qty != null ? ` · ${formatNumber(s.total_qty, 0)} шт` : ''}
+                        </Link>
+                    ))}
+                </div>
+            )}
+
             {/* Поля заявки */}
             {d.fields.length > 0 && (
                 <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
@@ -407,15 +449,15 @@ export default function FfRequestDetailPage() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                         {d.match.matched ? (
                             <span className="badge badge-success" style={{ fontSize: 13, padding: '4px 12px' }}>
-                                ✓ Состав совпадает с {d.linked_number}
+                                ✓ Состав совпадает с {d.linked_number}{groupCount > 1 ? ` (по ${groupCount} заявкам)` : ''}
                             </span>
                         ) : (
                             <span className="badge badge-danger" style={{ fontSize: 13, padding: '4px 12px' }}>
-                                Расхождение с {d.linked_number}: {formatNumber(d.match.mismatches.length, 0)} поз.
+                                Расхождение с {d.linked_number}{groupCount > 1 ? ` (по ${groupCount} заявкам машины)` : ''}: {formatNumber(d.match.mismatches.length, 0)} поз.
                             </span>
                         )}
                         <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                            У ФФ: {formatNumber(d.match.ff_total, 0)} шт / {formatNumber(d.match.ff_positions, 0)} поз. ·
+                            У ФФ{groupCount > 1 ? ` (${groupCount} ${reqWord(groupCount)})` : ''}: {formatNumber(d.match.ff_total, 0)} шт / {formatNumber(d.match.ff_positions, 0)} поз. ·
                             {' '}В нашей заявке: {formatNumber(d.match.our_total, 0)} шт / {formatNumber(d.match.our_positions, 0)} поз.
                         </span>
                     </div>

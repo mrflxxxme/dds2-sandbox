@@ -1,16 +1,43 @@
 # ruff: noqa: RUF001, RUF002, RUF003
-"""Тесты ядра migfull-сервиса: опись, резолв склада, cookie-сессия (без БД/сети)."""
+"""Тесты ядра migfull-сервиса: опись, резолв склада, cookie-сессия.
+
+Плюс регрессия основного пути «заявка на отгрузку ИЗ СБОРКИ» (портал замокан):
+у сборки и перемещения общий контур ``_build_draft`` / ``_send``, и сборочная
+сторона обязана остаться дословно прежней — шапка, опись, audit, связь.
+"""
+
+import uuid
+from datetime import date
+from decimal import Decimal
 
 import pytest
+import pytest_asyncio
+from sqlalchemy import select
 
 from backend.integrations.migfull_portal_client import MigfullPortalAuthError
+from backend.models import (
+    FulfillmentRequest,
+    FulfillmentStock,
+    IntegrationKey,
+    MigfullShipmentOrder,
+    MigfullShipmentStatus,
+    Nomenclature,
+    Warehouse,
+)
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+from backend.models.fulfillment import FfRequestKind
+from backend.schemas.migfull_portal import MigfullSendRequest
 from backend.services import migfull_portal_service
 from backend.services.migfull_portal_service import (
+    MigfullPortalServiceError,
     _destinations_from_mirror_rows,
     _with_portal_session,
     classify_opis_lines,
     resolve_destination,
 )
+from backend.utils.crypto import encrypt
+from tests.test_migfull_portal_inbound import EAN, GUID, ITF
+from tests.test_migfull_portal_transfer import FakeShipmentClient, _use_fake_shipment_client
 
 # Справочник как из read-API: ВСЕ склады помечены delivery_type='direct' (по историческим
 # отгрузкам), хотя портал отдаёт их и для pickup с тем же numeric id.
@@ -229,3 +256,154 @@ async def test_stale_cache_ttl_forces_login(_fresh_session_cache):
 
     assert await _with_portal_session(client, op) == "ok"
     assert client.logins == 1 and client.restored is None  # TTL истёк — кэш не использован
+
+
+# ─── Регрессия сборочной стороны (общий контур с перемещением) ────────────────
+
+
+@pytest_asyncio.fixture
+async def asm_env(db_session, project):
+    """Склад «Натали» + портальный ключ + готовая сборка на WB-склад (40 шт, короб 5)."""
+    natali = Warehouse(project_id=project.id, name="натали", warehouse_type="FULFILLMENT")
+    db_session.add(natali)
+    await db_session.flush()
+
+    db_session.add(
+        IntegrationKey(
+            project_id=project.id,
+            service="migfull_portal",
+            encrypted_key=encrypt("portal-pass"),
+            config={"login": "test@example.com"},
+            warehouse_id=natali.id,
+            is_active=True,
+        )
+    )
+    nom = Nomenclature(project_id=project.id, barcode=EAN, article_seller="ELKA")
+    db_session.add(nom)
+    await db_session.flush()
+
+    assembly = AssemblyRequest(
+        project_id=project.id,
+        warehouse_id=natali.id,
+        number=f"ASM-{uuid.uuid4().hex[:5]}",
+        status=AssemblyStatus.READY.value,
+        wb_warehouse_name_manual="Екатеринбург Перспективный",
+        delivery_date=date(2026, 8, 20),
+        pallets_count=1,
+        pallet_weight_kg=Decimal("10.00"),
+    )
+    db_session.add(assembly)
+    await db_session.flush()
+    db_session.add(
+        AssemblyRequestItem(
+            project_id=project.id,
+            assembly_request_id=assembly.id,
+            nomenclature_id=nom.id,
+            barcode=EAN,
+            quantity=40,
+        )
+    )
+    db_session.add(
+        FulfillmentStock(
+            project_id=project.id,
+            warehouse_id=natali.id,
+            provider="migfull",
+            barcode=ITF,
+            name="ELKA короб 5 шт.",
+            base_barcode=EAN,
+            units_per_box=5,
+        )
+    )
+    await db_session.commit()
+
+    from types import SimpleNamespace
+
+    return SimpleNamespace(project_id=project.id, warehouse=natali, assembly=assembly)
+
+
+async def test_assembly_draft_prefill_and_opis(db_session, asm_env):
+    draft = await migfull_portal_service.build_draft(db_session, asm_env.project_id, asm_env.assembly.id)
+
+    assert draft.eligible is True
+    assert draft.already_sent is False
+    assert draft.prefill.assembly_number == asm_env.assembly.number
+    assert draft.prefill.transfer_number is None  # источник — сборка, не переезд
+    assert draft.prefill.shipment_date == date(2026, 8, 20)
+    assert draft.prefill.filter_delivery_type == "pickup"
+    assert draft.prefill.wb_warehouse_name == "Екатеринбург Перспективный"
+    assert asm_env.assembly.number in (draft.prefill.notes or "")
+    # 40 шт коробом по 5 → 8 коробов ITF14
+    assert [(ln.barcode, ln.quantity, ln.is_box) for ln in draft.opis_lines] == [(ITF, 8, True)]
+    assert draft.total_boxes == 8 and draft.total_pieces == 40
+    # WB-склад в справочнике Натали не нашёлся (зеркала отгрузок нет) — предупреждаем.
+    assert any("не распознан" in w for w in draft.warnings)
+
+
+async def test_assembly_send_header_audit_and_link(db_session, asm_env, monkeypatch):
+    fake = FakeShipmentClient()
+    _use_fake_shipment_client(monkeypatch, fake)
+
+    res = await migfull_portal_service.send_shipment(
+        db_session, asm_env.project_id, asm_env.assembly.id, MigfullSendRequest()
+    )
+    assert res.ok is True
+    header = fake.created_headers[0]
+    assert header["marketplace_id"] == "2"
+    assert header["shipment_type"] == "fbo"
+    assert header["shipment_date"] == "2026-08-20"
+    assert header["filter_delivery_type"] == "pickup"
+    assert fake.uploads[0][1] == f"opis_{asm_env.assembly.number}.xlsx"
+
+    order = (
+        await db_session.execute(
+            select(MigfullShipmentOrder).where(MigfullShipmentOrder.project_id == asm_env.project_id)
+        )
+    ).scalar_one()
+    assert order.status == MigfullShipmentStatus.SENT
+    assert order.assembly_request_id == asm_env.assembly.id
+    assert order.stock_transfer_id is None
+
+    ff = (
+        await db_session.execute(
+            select(FulfillmentRequest).where(
+                FulfillmentRequest.project_id == asm_env.project_id,
+                FulfillmentRequest.external_id == GUID,
+            )
+        )
+    ).scalar_one()
+    assert ff.assembly_request_id == asm_env.assembly.id
+    assert ff.stock_transfer_id is None
+    assert ff.kind == FfRequestKind.ASSEMBLY.value
+    assert ff.warehouse_id == asm_env.warehouse.id
+    assert ff.dest_warehouse == "Екатеринбург Перспективный"
+    assert ff.total_qty == 40
+
+
+async def test_assembly_resend_blocked_and_cancelled_rejected(db_session, asm_env, monkeypatch):
+    fake = FakeShipmentClient()
+    _use_fake_shipment_client(monkeypatch, fake)
+    await migfull_portal_service.send_shipment(
+        db_session, asm_env.project_id, asm_env.assembly.id, MigfullSendRequest()
+    )
+    with pytest.raises(MigfullPortalServiceError) as exc:
+        await migfull_portal_service.send_shipment(
+            db_session, asm_env.project_id, asm_env.assembly.id, MigfullSendRequest()
+        )
+    assert exc.value.status_code == 409
+    assert "сборки" in str(exc.value)
+    assert len(fake.created_headers) == 1
+
+    asm_env.assembly.status = AssemblyStatus.CANCELLED.value
+    await db_session.commit()
+    with pytest.raises(MigfullPortalServiceError) as exc:
+        await migfull_portal_service.send_shipment(
+            db_session, asm_env.project_id, asm_env.assembly.id, MigfullSendRequest(force_resend=True)
+        )
+    assert exc.value.status_code == 400
+    assert "отменённую сборку" in str(exc.value)
+
+
+async def test_assembly_missing_is_404(db_session, asm_env):
+    with pytest.raises(MigfullPortalServiceError) as exc:
+        await migfull_portal_service.build_draft(db_session, asm_env.project_id, 987654321)
+    assert exc.value.status_code == 404

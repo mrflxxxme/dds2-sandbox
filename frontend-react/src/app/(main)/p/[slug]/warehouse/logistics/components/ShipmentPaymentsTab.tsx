@@ -163,13 +163,21 @@ export default function ShipmentPaymentsTab() {
         setBusy(false);
     };
 
+    // Строка ведёт на НАШ документ забора: заявка на сборку либо перемещение
+    // (у забора переезда assembly_request_id пуст — без этой ветки строка была
+    // бы некликабельной).
     const openShipment = (row: ShippableShipmentRow) => {
         if (row.assembly_request_id != null) router.push(`/p/${slug}/warehouse/assembly/${row.assembly_request_id}`);
+        else if (row.stock_transfer_id != null) router.push(`/p/${slug}/warehouse/transfers/${row.stock_transfer_id}`);
     };
 
     const handleExport = () => {
         exportToExcel(rows.map(r => ({
             '№ отгрузки': r.number,
+            // Тип документа отдельной колонкой: в выгрузке бейджа нет, а без
+            // него забор переезда неотличим от забора заявки — «ФБО поставка»
+            // и «Направление» у него пустые ровно потому, что их не бывает.
+            'Тип': r.stock_transfer_id != null ? 'Перемещение' : 'Заявка',
             'ФБО поставка': r.wb_supply_number ?? '',
             'Направление': r.destination ?? '',
             'Склад забора': r.source_warehouse ?? '',
@@ -239,6 +247,7 @@ export default function ShipmentPaymentsTab() {
         <div>
             <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
                 Заборы (отгрузки) — создайте заявку на оплату перевозчику на основе забора.
+                {' '}Заборы перемещений между нашими складами идут здесь же, с тегом «📦 Перемещение».
             </div>
 
             {/* Загрузить счёт → распознать → подобрать заборы перевозчика по ИНН + сумме. */}
@@ -353,15 +362,46 @@ export default function ShipmentPaymentsTab() {
                             <tbody>
                                 {sortedRows.map(r => {
                                     const sel = selected.has(r.outbound_shipment_id);
+                                    // Наш документ забора: заявка на сборку либо перемещение.
+                                    // Без него открывать нечего — кнопка не притворяется ссылкой.
+                                    const canOpen = r.assembly_request_id != null || r.stock_transfer_id != null;
                                     return (
                                         <tr key={r.outbound_shipment_id} style={{ borderBottom: '1px solid var(--color-border)', background: sel ? 'rgba(0,122,255,0.06)' : undefined }}>
                                             <td style={{ padding: '8px 8px' }}>
                                                 <input type="checkbox" checked={sel} onChange={() => toggle(r.outbound_shipment_id)} style={{ cursor: 'pointer' }} />
                                             </td>
                                             <td style={{ padding: '8px 8px' }}>
-                                                <button onClick={() => openShipment(r)} title="Открыть заявку" style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--color-accent)', fontWeight: 600, fontSize: 13 }}>
-                                                    {r.number} ↗
+                                                <button
+                                                    onClick={() => openShipment(r)}
+                                                    disabled={!canOpen}
+                                                    title={r.assembly_request_id != null
+                                                        ? 'Открыть заявку'
+                                                        : r.stock_transfer_id != null
+                                                            ? 'Открыть перемещение'
+                                                            : 'Забор без нашего документа — открывать нечего'}
+                                                    style={{
+                                                        background: 'none', border: 'none', padding: 0, fontWeight: 600, fontSize: 13,
+                                                        cursor: canOpen ? 'pointer' : 'default',
+                                                        color: canOpen ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                                                    }}
+                                                >
+                                                    {r.number}{canOpen ? ' ↗' : ''}
                                                 </button>
+                                                {/* Тег переезда — дословно тот же, что в Листе логиста
+                                                    (TransferWorkRow.TransferTag): один и тот же документ
+                                                    обязан выглядеть одинаково на обоих экранах. Без него
+                                                    забор переезда в списке неотличим от забора заявки, а
+                                                    пустые «ФБО поставка» и «Направление» у него читаются
+                                                    как недозаполненные данные, а не как «их не бывает». */}
+                                                {r.stock_transfer_id != null && (
+                                                    <span
+                                                        className="badge badge-secondary"
+                                                        style={{ fontSize: 11, marginLeft: 6 }}
+                                                        title="Забор перемещения между нашими складами: маркетплейса и поставки WB у него нет"
+                                                    >
+                                                        📦 Перемещение
+                                                    </span>
+                                                )}
                                             </td>
                                             <td style={{ padding: '8px 8px', fontFamily: 'monospace', fontSize: 12 }}>{r.wb_supply_number ?? '—'}</td>
                                             <td style={{ padding: '8px 8px', color: 'var(--color-text-muted)' }}>{r.destination ?? '—'}</td>

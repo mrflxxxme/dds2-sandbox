@@ -212,6 +212,13 @@ class MigfullClient:
         return await self._fetch_paginated("submissions")
 
     @retry_with_backoff(max_retries=3)
+    async def fetch_returns(self) -> list[dict]:
+        """Все возвраты со склада ФФ: reference, статус, notes; строки состава
+        (incoming_lines/outgoing_lines) ВСТРОЕНЫ в список — отдельного
+        /returns/{guid}/lines может не существовать, на него не полагаемся."""
+        return await self._fetch_paginated("returns")
+
+    @retry_with_backoff(max_retries=3)
     async def fetch_shipment_lines(self, guid: str, line_type: str) -> list[dict]:
         """Строки отгрузки: line_type = planned | shipped; product вложен в строку."""
         return await self._fetch_paginated(
@@ -244,7 +251,8 @@ class MigfullClient:
             if not isinstance(did, int) or did in out:
                 continue
             meta = by_guid.get(s.get("destination_marketplace_guid")) or {}
-            dm = s.get("destination_marketplace") if isinstance(s.get("destination_marketplace"), dict) else {}
+            dm_raw = s.get("destination_marketplace")
+            dm: dict = dm_raw if isinstance(dm_raw, dict) else {}
             name = meta.get("name") or dm.get("name")
             if not name:
                 continue

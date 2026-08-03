@@ -1895,3 +1895,50 @@ async def test_prod_orders_without_marker_stay_visible(db_session, env, monkeypa
     }
     listed = await orders_service.list_orders(db_session, env.project_id)
     assert listed["total"] == 1
+
+
+# ─── Привязка задания к поставке (`supply_id`) ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sync_links_order_to_supply_from_payload(db_session, env, monkeypatch):
+    """WB кладёт `supplyId` в payload задания — синк обязан донести его в колонку.
+
+    Прод-баг 02.08.2026 (`WB-GI-260717413`, склад ЕКБ): поставка на сборке
+    показывала 5 заданий вместо 203. У 2511 заданий проекта `supplyId` лежал
+    в `raw`, а колонка была NULL: upsert намеренно не трогал `supply_id`, а
+    единственный, кто её писал (`_pull_missing_order_ids`), берёт активную
+    поставку в кандидаты только при `orders_count == 0` — привязав первое
+    задание, поставка выпадала из досинка навсегда.
+    """
+    # Задание известно ДО того, как его положили в поставку.
+    _patch_client(monkeypatch, FakeFbsClient(new_orders=[_raw_order(7101)]))
+    await orders_service.sync_new_orders(db_session, env.project_id)
+    rows = await _orders(db_session, env.project_id)
+    assert rows[0].supply_id is None
+
+    # Следующий прогон приносит то же задание, но уже с поставкой.
+    _patch_client(monkeypatch, FakeFbsClient(new_orders=[_raw_order(7101, supplyId=SUPPLY_ID)]))
+    await orders_service.sync_new_orders(db_session, env.project_id)
+
+    db_session.expire_all()
+    rows = await _orders(db_session, env.project_id)
+    assert len(rows) == 1
+    assert rows[0].supply_id == SUPPLY_ID
+
+
+@pytest.mark.asyncio
+async def test_sync_never_erases_known_supply_link(db_session, env, monkeypatch):
+    """Payload БЕЗ `supplyId` привязку не снимает — заполняем, но не затираем.
+
+    Наш `add_orders` проставляет `supply_id` сразу, а зеркало WB догоняет
+    позже: голое присваивание из payload'а сбрасывало бы свежую привязку.
+    """
+    await _seed_order(db_session, env.project_id, 7102, supply_id=SUPPLY_ID)
+
+    _patch_client(monkeypatch, FakeFbsClient(new_orders=[_raw_order(7102)]))
+    await orders_service.sync_new_orders(db_session, env.project_id)
+
+    db_session.expire_all()
+    rows = await _orders(db_session, env.project_id)
+    assert rows[0].supply_id == SUPPLY_ID

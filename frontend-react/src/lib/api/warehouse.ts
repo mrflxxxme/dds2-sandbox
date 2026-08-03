@@ -3,6 +3,7 @@ import { ApiClient } from './client';
 import type {
     AcceptanceCheckRequest,
     InTransitResponse,
+    ExpectedVehicleRow,
     AcceptanceCheckResponse,
     AcceptanceLimitsResponse,
     SupplyAcceptanceSlotsResponse,
@@ -36,6 +37,7 @@ import type {
     AssemblyHistoryEntry,
     AssemblyPickupCostHistoryEntry,
     AssemblyListResponse,
+    AssemblyFfCandidate,
     AssemblyRequest,
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
@@ -87,6 +89,13 @@ import type {
     StockSummaryRow,
     UnifiedStockRow,
     StockTransfer,
+    StockTransferStatus,
+    TransferAssignVehiclePayload,
+    TransferFfLink,
+    TransferFfSide,
+    TransferLogisticsReport,
+    TransferUpdatePayload,
+    AssemblyToTransferResponse,
     Warehouse,
     WarehouseStockRow,
     WbFboSupply,
@@ -94,6 +103,18 @@ import type {
     WbFboSupplyListResponse,
     MessageResponse,
 } from '@/types/api';
+
+/**
+ * Путь заявки на отгрузку у Натали по источнику состава. У переезда сегмент
+ * `transfer` уже занят ПРИЁМКОЙ (migfullInbound*), поэтому отгрузочные ручки
+ * живут с префиксом `shipment-`.
+ */
+const shipmentPath = (
+    source: import('@/types/api').MigfullShipmentSource,
+    tail: 'draft' | 'send',
+) => (source.kind === 'transfer'
+    ? `/api/v1/migfull-portal/transfer/${source.id}/shipment-${tail}`
+    : `/api/v1/migfull-portal/assembly/${source.id}/${tail}`);
 
 export function addWarehouseMethods(api: ApiClient) {
     return {
@@ -138,7 +159,7 @@ export function addWarehouseMethods(api: ApiClient) {
         },
 
         // ─── Stock ───────────────────────────────────────────────────
-        getExpectedVehicles(warehouseId: number) { return api.request<any[]>('GET', `/api/v1/warehouse/${warehouseId}/expected-vehicles`); },
+        getExpectedVehicles(warehouseId: number) { return api.request<ExpectedVehicleRow[]>('GET', `/api/v1/warehouse/${warehouseId}/expected-vehicles`); },
         getWarehouseStock(warehouseId: number, excludeAssemblyId?: number) {
             // excludeAssemblyId: экран редактирования сборки — её собственный резерв не вычитается из available
             const params = new URLSearchParams();
@@ -181,17 +202,217 @@ export function addWarehouseMethods(api: ApiClient) {
         cancelShipment(shipmentId: number) { return api.request<OutboundShipment>('POST', `/api/v1/warehouse/shipments/${shipmentId}/cancel`); },
 
         // ─── Stock Transfers ─────────────────────────────────────────
-        getTransfers(inTransitOnly = false, warehouseId?: number) {
+        /**
+         * Список перемещений. `status`/`hasVehicle` — срез Листа логиста
+         * (`status=READY` — переезды, ждущие машину: машина назначается именно
+         * из READY, и после назначения переезд уходит в VEHICLE_ASSIGNED).
+         */
+        getTransfers(
+            inTransitOnly = false,
+            warehouseId?: number,
+            opts?: {
+                status?: StockTransferStatus;
+                /**
+                 * Несколько статусов одним запросом (`status_in=SHIPPED,DELIVERED`).
+                 * Нужен срезу «уехало, а денег нет»: раньше каждый статус стоил
+                 * отдельного round-trip, и три среза Листа логиста давали три запроса.
+                 */
+                statuses?: StockTransferStatus[];
+                hasVehicle?: boolean;
+                /** false — стоимость забора не заполнена (переезд не доехал до оплат). */
+                hasPickupCost?: boolean;
+                /** Локальный архив: не задан — все, false — рабочие, true — архив. */
+                archived?: boolean;
+            },
+        ) {
             const qs = new URLSearchParams({ in_transit: String(inTransitOnly) });
             if (warehouseId !== undefined) qs.set('warehouse_id', String(warehouseId));
+            if (opts?.status) qs.set('status', opts.status);
+            if (opts?.statuses?.length) qs.set('status_in', opts.statuses.join(','));
+            if (opts?.hasVehicle !== undefined) qs.set('has_vehicle', String(opts.hasVehicle));
+            if (opts?.hasPickupCost !== undefined) qs.set('has_pickup_cost', String(opts.hasPickupCost));
+            if (opts?.archived !== undefined) qs.set('archived', String(opts.archived));
             return api.request<StockTransfer[]>('GET', `/api/v1/warehouse/transfers?${qs.toString()}`);
         },
-        createTransfer(data: { from_warehouse_id: number; to_warehouse_id: number; comment?: string; is_defect?: boolean; defect_reason?: string; items: { barcode: string; quantity: number }[] }) {
+        /**
+         * Создание перемещения.
+         *
+         * 🔴 Семантика транспортной единицы здесь ДРУГАЯ, чем в assign-vehicle:
+         * `shipped_as_boxes` — обычный bool с дефолтом false («паллеты»), а не
+         * трёхзначный «null = не трогать». На создании трогать нечего: значения
+         * ещё нет. Количество и вес по-прежнему опциональны — переезд можно
+         * завести и без транспортной оценки.
+         */
+        createTransfer(data: {
+            from_warehouse_id: number;
+            to_warehouse_id: number;
+            comment?: string;
+            is_defect?: boolean;
+            defect_reason?: string;
+            items: { barcode: string; quantity: number }[];
+            pallets_count?: number | null;
+            pallet_weight_kg?: number | null;
+            shipped_as_boxes?: boolean;
+        }) {
             return api.request<StockTransfer>('POST', '/api/v1/warehouse/transfers', data);
         },
-        sendTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/send`); },
+        /**
+         * GET /warehouse/transfers/logistics-report — стоимость логистики переездов
+         * между складами. Отдельный отчёт: маршруты переездов несопоставимы с
+         * отгрузками на WB и в обычные отчёты логистики не попадают.
+         */
+        getTransferLogisticsReport(params?: {
+            date_from?: string;
+            date_to?: string;
+            group_by?: 'day' | 'week' | 'month';
+            from_warehouse_id?: number;
+            to_warehouse_id?: number;
+            counterparty_id?: number;
+        }) {
+            const qs = new URLSearchParams();
+            if (params?.date_from) qs.set('date_from', params.date_from);
+            if (params?.date_to) qs.set('date_to', params.date_to);
+            if (params?.group_by) qs.set('group_by', params.group_by);
+            if (params?.from_warehouse_id != null) qs.set('from_warehouse_id', String(params.from_warehouse_id));
+            if (params?.to_warehouse_id != null) qs.set('to_warehouse_id', String(params.to_warehouse_id));
+            if (params?.counterparty_id != null) qs.set('counterparty_id', String(params.counterparty_id));
+            const q = qs.toString();
+            return api.request<TransferLogisticsReport>('GET', `/api/v1/warehouse/transfers/logistics-report${q ? `?${q}` : ''}`);
+        },
+        /** GET /warehouse/transfers/{id} — одно перемещение (деталка переезда). */
+        getTransfer(transferId: number) {
+            return api.request<StockTransfer>('GET', `/api/v1/warehouse/transfers/${transferId}`);
+        },
+        /**
+         * PUT /warehouse/transfers/{id} — правка ЧЕРНОВИКА (маршрут, комментарий,
+         * брак, транспортная единица, состав).
+         *
+         * 🔴 `items` — ПОЛНАЯ замена состава (null — не трогать), а
+         * `shipped_as_boxes` — обычный bool, как на создании, а НЕ трёхзначный
+         * «null = не трогать» из assign-vehicle: форма правки всегда видит
+         * текущее значение и всегда знает, что слать.
+         *
+         * Только до отгрузки — PENDING / IN_PROGRESS / READY (см.
+         * TRANSFER_EDITABLE_STATUSES в lib/transfer.ts): после SHIPPED сток уже
+         * списан, и бэкенд отвечает 400 с русским текстом (показывать как есть).
+         * Ответ — полная схема с items и ff_links, так что перезапрашивать
+         * карточку после сохранения не нужно.
+         */
+        updateTransfer(transferId: number, data: TransferUpdatePayload) {
+            return api.request<StockTransfer>('PUT', `/api/v1/warehouse/transfers/${transferId}`, data);
+        },
+        /**
+         * GET /warehouse/transfers/{id}/ff-candidates?side=source|dest — свободные
+         * заявки ФФ для связки с переездом: `source` — сборки склада-ИСТОЧНИКА,
+         * `dest` — приёмки склада-ПОЛУЧАТЕЛЯ. Уже занятые чужими документами не
+         * приходят. Пустой ответ — норма: у транзитных складов ФФ-интеграции нет.
+         */
+        getTransferFfCandidates(transferId: number, side: TransferFfSide) {
+            return api.request<TransferFfLink[]>('GET', `/api/v1/warehouse/transfers/${transferId}/ff-candidates?side=${side}`);
+        },
+        /**
+         * POST /warehouse/transfers/{id}/ready — «Готов»: ФФ собрал переезд.
+         * Только из PENDING / IN_PROGRESS. Сток не двигает.
+         */
+        markTransferReady(transferId: number) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/ready`);
+        },
+        /**
+         * POST /warehouse/transfers/{id}/send — «Отправить» (READY / VEHICLE_ASSIGNED
+         * → SHIPPED). ДВИГАЕТ СТОК: списывает со склада-источника и вешает транзит
+         * на получателя, поэтому после него правка закрыта.
+         */
+        /**
+         * `allowNoLogistics` — явное «везём без оформления»: единственный вызов,
+         * которому разрешено отправить READY-переезд без машины/перевозчика/
+         * стоимости. Нужен форме «создать и увезти» на карточке склада, где
+         * кладовщик оформляет уже состоявшуюся переброску. Из Листа логиста НЕ
+         * передаётся: там переезд обязан доехать до оплат.
+         */
+        sendTransfer(transferId: number, opts?: { allowNoLogistics?: boolean }) {
+            return api.request<StockTransfer>(
+                'POST',
+                `/api/v1/warehouse/transfers/${transferId}/send`,
+                { allow_no_logistics: opts?.allowNoLogistics ?? false },
+            );
+        },
+        /** POST /warehouse/transfers/{id}/complete — «Принять» (SHIPPED → DELIVERED): приход на получателе. */
         completeTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/complete`); },
+        /**
+         * POST /warehouse/transfers/{id}/return — «Вернуть на склад»
+         * (SHIPPED / DELIVERED → RETURNED): получатель не принял, товар
+         * возвращается на склад-ИСТОЧНИК. Двигает сток — спрашивать подтверждение.
+         */
+        returnTransfer(transferId: number, comment?: string) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/return`, { comment: comment || null });
+        },
+        /** POST /warehouse/transfers/{id}/close — «Закрыть» (RETURNED / DELIVERED → CLOSED), терминал. */
+        closeTransfer(transferId: number, comment?: string) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/close`, { comment: comment || null });
+        },
         cancelTransfer(transferId: number) { return api.request<MessageResponse>('DELETE', `/api/v1/warehouse/transfers/${transferId}`); },
+        /**
+         * POST /warehouse/transfers/{id}/assign-vehicle — машина и логистика переезда.
+         * READY → VEHICLE_ASSIGNED (из VEHICLE_ASSIGNED — замена реквизитов, статус
+         * не меняется). До READY назначать нечего: ФФ ещё не собрал.
+         */
+        assignTransferVehicle(transferId: number, data: TransferAssignVehiclePayload) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/assign-vehicle`, data);
+        },
+        /**
+         * POST /warehouse/transfers/assign-vehicle-bulk — одна машина на N переездов
+         * (три переезда на «транзит Питер» едут одной газелью). В отличие от заявок
+         * реквизиты ОБЩИЕ на все: `{ids, payload}`, пер-строчных дат/стоимостей нет.
+         * Первый отказ роняет весь вызов — частичное назначение логист бы не заметил.
+         */
+        assignTransferVehicleBulk(ids: number[], payload: TransferAssignVehiclePayload) {
+            return api.request<StockTransfer[]>('POST', '/api/v1/warehouse/transfers/assign-vehicle-bulk', { ids, payload });
+        },
+        /**
+         * POST/DELETE /warehouse/transfers/{id}/archive — локальный архив.
+         * Статус и сток не трогает: переезд просто уходит из рабочих списков,
+         * оставаясь в отчётах и в «Оплатах».
+         */
+        archiveTransfer(transferId: number) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/archive`);
+        },
+        unarchiveTransfer(transferId: number) {
+            return api.request<StockTransfer>('DELETE', `/api/v1/warehouse/transfers/${transferId}/archive`);
+        },
+        /** POST /warehouse/transfers/{id}/unassign-vehicle — снять машину: VEHICLE_ASSIGNED → READY. */
+        unassignTransferVehicle(transferId: number) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/unassign-vehicle`);
+        },
+        /**
+         * POST /warehouse/transfers/{id}/logistics — перевозчик и стоимость на
+         * УЖЕ УЕХАВШЕМ переезде (SHIPPED / DELIVERED / RETURNED / CLOSED).
+         *
+         * 🔴 Это НЕ `assign-vehicle`: статус не меняется, сток не двигается.
+         * Единственный способ дать логистику старым переездам (TR-1…TR-31 уехали
+         * до появления машины на перемещении и потому не имеют забора — их нет
+         * ни во вкладке «Переезды», ни в «Оплатах»). Вызов создаёт/обновляет
+         * забор `OutboundShipment`, через который переезд и попадает в деньги.
+         * Тело — тот же контракт, что у назначения машины.
+         */
+        setTransferLogistics(transferId: number, data: TransferAssignVehiclePayload) {
+            return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/logistics`, data);
+        },
+        /**
+         * POST /warehouse/transfers/logistics-bulk — одна машина на N уехавших
+         * переездов (`{ids, payload}`). Атомарен: первый отказ откатывает всё.
+         */
+        setTransferLogisticsBulk(ids: number[], payload: TransferAssignVehiclePayload) {
+            return api.request<StockTransfer[]>('POST', '/api/v1/warehouse/transfers/logistics-bulk', { ids, payload });
+        },
+        /**
+         * POST /warehouse/assembly/{id}/to-transfer — переделать заявку на сборку
+         * в переезд между складами. move_ff_links=false (дефолт) — зеркала ФФ
+         * остаются историей заявки. При списанном стоке бэкенд вернёт 400 с
+         * текстом про количество списанных единиц — показывать как ошибку формы.
+         */
+        convertAssemblyToTransfer(assemblyId: number, data: { to_warehouse_id: number; comment?: string; move_ff_links?: boolean }) {
+            return api.request<AssemblyToTransferResponse>('POST', `/api/v1/warehouse/assembly/${assemblyId}/to-transfer`, data);
+        },
 
         // ─── Defects ─────────────────────────────────────────────────
         getDefectStock(warehouseId: number) { return api.request<WarehouseStockRow[]>('GET', `/api/v1/warehouse/${warehouseId}/defects`); },
@@ -426,6 +647,24 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         getAssemblyFfMismatch(id: number) {
             return api.request<FfMismatchDetail>('GET', `/api/v1/warehouse/assembly/${id}/ff-mismatch`);
+        },
+        /**
+         * GET /warehouse/assembly/{id}/ff-candidates — свободные заявки ФФ склада
+         * ЭТОЙ сборки для связки (слот `fulfillment_requests.assembly_request_id`).
+         * Занятые другими документами не приходят.
+         *
+         * Ответ намеренно той же формы, что у переезда (`AssemblyFfCandidate` —
+         * это `TransferFfLink` без `side`: сторон маршрута у сборки нет).
+         * Связывает их одна и та же модалка, и разъехавшиеся формы ответа
+         * заставили бы её ветвиться на разборе данных, а не только на подписях.
+         *
+         * Работает и для учётного зеркала FBS (kind=fbs): его поле «FBO поставка»
+         * занято поставкой WB-GI из синка, и связь с документом ФФ у неё живёт
+         * ТОЛЬКО здесь. Пустой ответ — норма: у склада без ФФ-интеграции (или
+         * когда всё уже связано) связывать нечего.
+         */
+        getAssemblyFfCandidates(assemblyId: number) {
+            return api.request<AssemblyFfCandidate[]>('GET', `/api/v1/warehouse/assembly/${assemblyId}/ff-candidates`);
         },
         updateAssemblyRequest(id: number, data: AssemblyRequestUpdate) {
             return api.request<AssemblyRequest>('PUT', `/api/v1/warehouse/assembly/${id}`, data);
@@ -938,6 +1177,19 @@ export function addWarehouseMethods(api: ApiClient) {
         sendToGazelka(assemblyId: number, body: import('@/types/api').GazelkaSendRequest) {
             return api.request<import('@/types/api').GazelkaSendResult>('POST', `/api/v1/gazelka/assembly/${assemblyId}/send`, body);
         },
+        /**
+         * GET /gazelka/transfer/{id}/draft — то же окно, но для ПЕРЕЕЗДА между
+         * нашими складами. Отличия предзаполнения: `is_marketplace='no'`,
+         * маркетплейса и № поставки нет, адрес доставки — свободным текстом
+         * (склада получателя в dropdown портала не существует).
+         */
+        getGazelkaTransferDraft(transferId: number) {
+            return api.request<import('@/types/api').GazelkaDraft>('GET', `/api/v1/gazelka/transfer/${transferId}/draft`);
+        },
+        /** POST /gazelka/transfer/{id}/send — РЕАЛЬНОЕ создание заказа у перевозчика. */
+        sendTransferToGazelka(transferId: number, body: import('@/types/api').GazelkaSendRequest) {
+            return api.request<import('@/types/api').GazelkaSendResult>('POST', `/api/v1/gazelka/transfer/${transferId}/send`, body);
+        },
         getGazelkaPlanned() {
             return api.request<import('@/types/api').GazelkaOrderList>('GET', '/api/v1/gazelka/planned');
         },
@@ -960,20 +1212,30 @@ export function addWarehouseMethods(api: ApiClient) {
             const url = URL.createObjectURL(blob);
             window.open(url, '_blank');
         },
-        getGazelkaMatchCandidates(search?: string) {
+        getGazelkaMatchCandidates(search?: string, kind?: import('@/types/api').GazelkaLinkKind) {
             const qs = new URLSearchParams();
             if (search) qs.set('search', search);
+            if (kind) qs.set('kind', kind);
             const tail = qs.toString();
             return api.request<import('@/types/api').GazelkaMatchCandidate[]>(
                 'GET',
                 `/api/v1/gazelka/match-candidates${tail ? `?${tail}` : ''}`,
             );
         },
-        matchGazelkaOrder(planId: number, assemblyId: number) {
+        /**
+         * Ручная связка заказа портала с нашим документом. `kind` решает, в какое
+         * поле уедет id: заказ Газельки закрывает ЛИБО сборку, ЛИБО переезд —
+         * обе ссылки сразу запрещены CHECK'ом в БД.
+         */
+        matchGazelkaOrder(
+            planId: number,
+            entityId: number,
+            kind: import('@/types/api').GazelkaLinkKind = 'assembly',
+        ) {
             return api.request<import('@/types/api').GazelkaMatchResult>(
                 'POST',
                 `/api/v1/gazelka/order/${planId}/match`,
-                { assembly_id: assemblyId },
+                kind === 'transfer' ? { transfer_id: entityId } : { assembly_id: entityId },
             );
         },
         unmatchGazelkaOrder(planId: number) {
@@ -987,10 +1249,14 @@ export function addWarehouseMethods(api: ApiClient) {
         migfullPortalConfig() {
             return api.request<import('@/types/api').MigfullPortalConfig>('GET', '/api/v1/migfull-portal/config');
         },
-        migfullPortalDraft(assemblyId: number) {
+        // Два источника состава заявки на отгрузку: наша сборка (`assembly`) и
+        // перемещение, у которого Натали — склад-ИСТОЧНИК (`transfer`). Контракт
+        // запроса/ответа общий, различается только путь, поэтому методы принимают
+        // источник целиком (как migfullInbound* для приёмки).
+        migfullPortalDraft(source: import('@/types/api').MigfullShipmentSource) {
             return api.request<import('@/types/api').MigfullDraftResponse>(
                 'GET',
-                `/api/v1/migfull-portal/assembly/${assemblyId}/draft`,
+                shipmentPath(source, 'draft'),
             );
         },
         /**
@@ -999,11 +1265,14 @@ export function addWarehouseMethods(api: ApiClient) {
          * схлопывает статус в текст ошибки, поэтому здесь тегируем 409 в .code='conflict',
          * чтобы модалка показала подтверждение и переслала с force_resend=true.
          */
-        async migfullPortalSend(assemblyId: number, body: import('@/types/api').MigfullSendRequest) {
+        async migfullPortalSend(
+            source: import('@/types/api').MigfullShipmentSource,
+            body: import('@/types/api').MigfullSendRequest,
+        ) {
             try {
                 return await api.request<import('@/types/api').MigfullSendResult>(
                     'POST',
-                    `/api/v1/migfull-portal/assembly/${assemblyId}/send`,
+                    shipmentPath(source, 'send'),
                     body,
                 );
             } catch (e) {

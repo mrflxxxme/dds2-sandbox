@@ -4,34 +4,50 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
+import {
+    TRANSFER_STATUS_MAP,
+    canCompleteTransfer,
+    canEditTransfer,
+    ffLinkLabel,
+    splitTransferFfLinks,
+    transferReceiveProgress,
+    transferSkuCount,
+    transferUnits,
+} from '@/lib/transfer';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type {
     Warehouse, InboundReceipt, OutboundShipment, AssemblyRequest,
-    WarehouseStockRow, StockMovement, StockTransfer, DeliveryTimesResponse,
+    WarehouseStockRow, StockMovement, StockTransfer, StockTransferStatus, DeliveryTimesResponse,
     DefectMarkOperation, VehicleStatus,
     FulfillmentStatus, FulfillmentProviderId, FfStocksResponse, FfStockRow, FfBoxPack, FfNomenclatureOption, FfRequestRow, FfRequestKind, FfStatusEvent, FfSyncRun, FfUnlinkedAssembly,
-    FfBulkCreateResult, FfBulkCreateAssemblyResult,
+    FfBulkCreateResult, FfBulkCreateAssemblyResult, FfRepackCandidate, FfRepackCandidatesOut,
+    ExpectedVehicleRow,
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 import Toast from '@/components/Toast';
+import TransferFfLinkModal from '@/components/TransferFfLinkModal';
 import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffSkippedNotice, ffStageBadge, ffStatusBadge, ffStatusLabel, ffEventBadge, ffEventSummary } from './ff-shared';
 import FfBillingTab from './FfBillingTab';
+import MigfullInboundModal from './MigfullInboundModal';
 import { FfMismatchModal } from '@/components/FfMismatchModal';
+// Тег «📦 Перемещение» — общий с Листом логиста: переезд в чужом списке
+// помечается ОДНИМ и тем же бейджем, а не похожим локальным.
+import { TransferTag } from '../logistics/components/TransferWorkRow';
 import { whNamesMatch } from '@/lib/utils/ffLinkCandidates';
 
 /* ─── Transfers helpers (общие для страницы и вкладки) ───────────────────── */
 
-const TRANSFER_STATUS_LABELS: Record<string, string> = {
-    DRAFT: 'Черновик',
-    IN_TRANSIT: 'В пути',
-    COMPLETED: 'Завершено',
-};
+// Подписи статусов — ОБЩИЕ (lib/transfer.ts). Своя копия здесь уже разъезжалась
+// с остальными экранами («Завершено» против «Принято»), и пользователь читал
+// два разных слова про один и тот же документ.
+const transferStatusLabel = (s: string) => TRANSFER_STATUS_MAP[s as StockTransferStatus]?.label ?? s;
 
-// Требуют действия: входящие «в пути» (принять) + исходящие черновики (отправить/удалить)
+// Требуют действия: входящие в пути (принять) + исходящие до отгрузки
+// (собрать / отправить / удалить).
 function countActionableTransfers(transfers: StockTransfer[], warehouseId: number): number {
     return transfers.filter(t =>
-        (t.status === 'IN_TRANSIT' && t.to_warehouse_id === warehouseId) ||
-        (t.status === 'DRAFT' && t.from_warehouse_id === warehouseId)
+        (canCompleteTransfer(t.status) && t.to_warehouse_id === warehouseId) ||
+        (canEditTransfer(t.status) && t.from_warehouse_id === warehouseId)
     ).length;
 }
 
@@ -41,20 +57,21 @@ type WarehouseTab = 'all' | 'receipts' | 'shipments' | 'assemblies' | 'transfers
 const WAREHOUSE_TABS: WarehouseTab[] = ['all', 'receipts', 'shipments', 'assemblies', 'transfers', 'stock', 'defects', 'delivery', 'requisites', 'fulfillment', 'ffbilling'];
 
 // Под-вкладки раздела «Фулфилмент» — вложенная навигация внутри одной вкладки.
-type FfSubTab = 'stocks' | 'boxes' | 'assembly' | 'inbound' | 'history' | 'sync';
+type FfSubTab = 'stocks' | 'boxes' | 'assembly' | 'inbound' | 'return' | 'history' | 'sync';
 // boxes (сопоставление короб→россыпь) — только для migfull («Натали»); фильтруется по провайдеру.
 const FF_SUB_TABS: { key: FfSubTab; label: string; migfullOnly?: boolean }[] = [
     { key: 'stocks', label: 'Остатки' },
     { key: 'boxes', label: 'Сопоставление', migfullOnly: true },
     { key: 'assembly', label: 'Сборка' },
     { key: 'inbound', label: 'Приёмки' },
+    { key: 'return', label: 'Возвраты' },
     { key: 'history', label: 'История' },
     { key: 'sync', label: 'Синхронизация' },
 ];
 // Старые deep-ссылки ?tab=ff-* → раздел «Фулфилмент» + нужная под-вкладка (back-compat).
 const FF_TAB_ALIASES: Record<string, FfSubTab> = {
     'ff-stocks': 'stocks', 'ff-boxes': 'boxes', 'ff-assembly': 'assembly', 'ff-inbound': 'inbound',
-    'ff-history': 'history', 'ff-sync': 'sync',
+    'ff-return': 'return', 'ff-history': 'history', 'ff-sync': 'sync',
 };
 
 export default function WarehouseDetailPage() {
@@ -127,6 +144,9 @@ export default function WarehouseDetailPage() {
     useEffect(() => { load(); }, [load]);
 
     const ffConnected = ffStatus?.connected === true;
+    // Сигнал «связали заявки из карточки машины» → вкладки ФФ перезагружаются:
+    // модалка живёт в блоке машин и иначе список заявок не узнаёт о связке.
+    const [ffLinkTick, setFfLinkTick] = useState(0);
 
     // Если интеграцию отключили, а открыта ФФ-вкладка — возвращаемся на «Реквизиты».
     // Пока статус не загружен (ffStatus === null) — не сбрасываем: иначе ?tab=ff-* проигрывает гонку загрузке статуса.
@@ -180,7 +200,7 @@ export default function WarehouseDetailPage() {
             </div>
 
             {/* Expected vehicles */}
-            <ExpectedVehicles warehouseId={warehouseId} slug={slug} />
+            <ExpectedVehicles warehouseId={warehouseId} slug={slug} ffConnected={ffConnected} onFfLinked={() => setFfLinkTick(t => t + 1)} />
 
             {/* Tabs with counts */}
             <div style={{ display: 'flex', gap: 4, marginBottom: 20, borderBottom: '1px solid var(--color-border)', paddingBottom: 0 }}>
@@ -250,7 +270,7 @@ export default function WarehouseDetailPage() {
             {tab === 'defects' && <DefectsTab warehouseId={warehouseId} onCountChange={setDefectCount} />}
             {tab === 'delivery' && <DeliveryTab warehouseId={warehouseId} />}
             {tab === 'fulfillment' && ffConnected && (
-                <FulfillmentTabs warehouseId={warehouseId} slug={slug} sub={ffSub} onSubChange={setFfSub} provider={ffStatus?.provider ?? null} />
+                <FulfillmentTabs warehouseId={warehouseId} slug={slug} sub={ffSub} onSubChange={setFfSub} provider={ffStatus?.provider ?? null} externalTick={ffLinkTick} />
             )}
             {tab === 'ffbilling' && isFulfillment && <FfBillingTab warehouseId={warehouseId} />}
             {tab === 'requisites' && (
@@ -730,15 +750,51 @@ const NEXT_VEHICLE_ACTION: Record<string, { status: string; label: string; color
     // DISPATCHED: приёмка через InboundReceipt (таб "Приёмки")
 };
 
-function ExpectedVehicles({ warehouseId, slug }: { warehouseId: number; slug: string }) {
+function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { warehouseId: number; slug: string; ffConnected: boolean; onFfLinked?: () => void }) {
     const router = useRouter();
-    const [vehicles, setVehicles] = useState<any[]>([]);
+    const [vehicles, setVehicles] = useState<ExpectedVehicleRow[]>([]);
+    // Переезды, которые физически едут НА этот склад. Второй источник блока:
+    // машина из Китая и переезд с соседнего склада — для приёмщика одно и то же
+    // («что к нам едет»), а найти переезд на карточке склада раньше было негде:
+    // вкладка «Фулфилмент → Приёмки» — зеркало документов провайдера (PVB-…),
+    // нашего TR-… там не бывает по определению.
+    const [incomingTransfers, setIncomingTransfers] = useState<StockTransfer[]>([]);
+    // Модалка «Связать заявки ФФ» — машина, к чьей приёмке привязываем
+    const [linkFor, setLinkFor] = useState<ExpectedVehicleRow | null>(null);
+    // Модалка «Создать поставку у Натали» — машина, из чьей приёмки создаём
+    const [natPushFor, setNatPushFor] = useState<ExpectedVehicleRow | null>(null);
+    // Те же две модалки, но для переезда: он здесь полноправная ожидаемая
+    // поставка, а не карточка-указатель, и действия у него те же.
+    const [transferLinkFor, setTransferLinkFor] = useState<StockTransfer | null>(null);
+    const [transferNatPushFor, setTransferNatPushFor] = useState<StockTransfer | null>(null);
+    // Склад migfull-портала (кнопка «Создать поставку у Натали» — только на нём)
+    const [migfullWhId, setMigfullWhId] = useState<number | null>(null);
+    const [toast, setToast] = useState('');
 
     const loadVehicles = useCallback(() => {
         api.getExpectedVehicles(warehouseId).then(setVehicles).catch(() => {});
     }, [warehouseId]);
 
+    // SHIPPED — «уже уехал и физически едет»; серверный срез по статусу, чтобы
+    // не тянуть весь список переездов склада. `warehouse_id` у бэкенда — это
+    // «источник ИЛИ получатель», поэтому направление доотсекаем здесь: исходящие
+    // к нам не едут и в «ожидаемых» им не место.
+    const loadIncomingTransfers = useCallback(() => {
+        api.getTransfers(false, warehouseId, { status: 'SHIPPED' })
+            .then(rows => setIncomingTransfers(rows.filter(t => t.to_warehouse_id === warehouseId)))
+            .catch(() => { /* необязательный источник — блок не падает из-за него */ });
+    }, [warehouseId]);
+
     useEffect(() => { loadVehicles(); }, [loadVehicles]);
+    useEffect(() => { loadIncomingTransfers(); }, [loadIncomingTransfers]);
+
+    useEffect(() => {
+        let cancelled = false;
+        api.migfullPortalConfig()
+            .then(c => { if (!cancelled) setMigfullWhId(c.configured ? c.warehouse_id : null); })
+            .catch(() => { /* портал не подключён — кнопки просто нет */ });
+        return () => { cancelled = true; };
+    }, []);
 
     const handleAction = async (e: React.MouseEvent, orderNo: string, nextStatus: string) => {
         e.stopPropagation();
@@ -750,12 +806,14 @@ function ExpectedVehicles({ warehouseId, slug }: { warehouseId: number; slug: st
         }
     };
 
-    if (vehicles.length === 0) return null;
+    // Пусто — только когда пусто И то, и другое: блок про «что к нам едет»,
+    // а едет к нам и машина, и переезд.
+    if (vehicles.length === 0 && incomingTransfers.length === 0) return null;
 
     return (
         <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span>🚛</span> Ожидаемые поставки ({vehicles.length})
+                <span>🚛</span> Ожидаемые поставки ({formatNumber(vehicles.length + incomingTransfers.length, 0)})
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
                 {vehicles.map(v => {
@@ -803,9 +861,416 @@ function ExpectedVehicles({ warehouseId, slug }: { warehouseId: number; slug: st
                                     <span style={{ fontSize: 11, color: 'var(--color-success)', fontWeight: 600 }}>→ Приёмки</span>
                                 ) : null}
                             </div>
+                            {/* Уже связанные заявки ФФ — «Связать»/«Создать поставку»
+                                читаются в контексте, а не как непройденный шаг. */}
+                            {(v.linked_ff_numbers?.length ?? 0) > 0 && (
+                                <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Заявки ФФ:</span>
+                                    {v.linked_ff_numbers!.map(n => (
+                                        <span key={n} className="badge badge-success" style={{ fontSize: 11, padding: '2px 8px' }}>
+                                            {n}
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                            {v.receipt_id != null && (ffConnected || migfullWhId === warehouseId) && (
+                                <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                    {ffConnected && (
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            style={{ fontSize: 11, padding: '3px 10px' }}
+                                            onClick={e => { e.stopPropagation(); setLinkFor(v); }}
+                                            title="Связать несвязанные заявки ФФ (kind=приёмка) с нашей приёмкой этой машины"
+                                        >
+                                            Связать заявки ФФ
+                                        </button>
+                                    )}
+                                    {migfullWhId === warehouseId && (
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            style={{ fontSize: 11, padding: '3px 10px' }}
+                                            onClick={e => { e.stopPropagation(); setNatPushFor(v); }}
+                                            title="Создать поставку (приёмку) в WMS Натали из состава приёмки этой машины"
+                                        >
+                                            Создать поставку у Натали
+                                        </button>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     );
                 })}
+                {incomingTransfers.map(t => {
+                    // «Принято X из Y» — порционный приём: без этой цифры
+                    // «доехало всё» не отличить от «доехала половина».
+                    const progress = transferReceiveProgress(t);
+                    const dest = splitTransferFfLinks(t.ff_links).dest;
+                    return (
+                        <div
+                            key={`transfer-${t.id}`}
+                            onClick={() => router.push(`/p/${slug}/warehouse/transfers/${t.id}`)}
+                            style={{
+                                padding: '12px 14px', borderRadius: 12,
+                                border: '1px solid var(--color-border)',
+                                cursor: 'pointer', transition: 'all 0.15s',
+                            }}
+                            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--color-primary)'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
+                            onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--color-border)'; e.currentTarget.style.transform = ''; }}
+                        >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 600, fontSize: 13 }}>
+                                    {/* Иконка и бейдж — единственное, чем переезд
+                                        отличается от машины: у машины 🚛 и своя
+                                        шкала статусов, у переезда 📦 и общий
+                                        словарь TRANSFER_STATUS_MAP. */}
+                                    <span>📦</span>
+                                    <Link
+                                        href={`/p/${slug}/warehouse/transfers/${t.id}`}
+                                        onClick={e => e.stopPropagation()}
+                                        style={{ color: 'inherit', textDecoration: 'none' }}
+                                    >
+                                        {t.number}
+                                    </Link>
+                                </span>
+                                <span
+                                    className={`badge ${TRANSFER_STATUS_MAP[t.status]?.className ?? 'badge-secondary'}`}
+                                    style={{ fontSize: 10, padding: '2px 8px' }}
+                                >
+                                    {transferStatusLabel(t.status)}
+                                </span>
+                            </div>
+                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>
+                                {t.from_warehouse_name || `#${t.from_warehouse_id}`} → {t.to_warehouse_name || `#${t.to_warehouse_id}`}
+                            </div>
+                            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                <span>{formatNumber(transferSkuCount(t), 0)} SKU / {formatNumber(transferUnits(t), 0)} шт</span>
+                                {t.shipped_at && (
+                                    <span style={{ color: 'var(--color-text)' }}>📅 {formatDate(t.shipped_at)}</span>
+                                )}
+                            </div>
+                            {progress && (
+                                <div style={{
+                                    marginTop: 4, fontSize: 12, fontWeight: 600,
+                                    color: progress.received >= progress.total ? 'var(--color-success)' : 'var(--color-text-muted)',
+                                }}>
+                                    Принято {formatNumber(progress.received, 0)} из {formatNumber(progress.total, 0)}
+                                </div>
+                            )}
+                            {dest.length > 0 && (
+                                <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Заявки ФФ:</span>
+                                    {dest.map(l => (
+                                        <span key={l.id} className="badge badge-success" style={{ fontSize: 11, padding: '2px 8px' }}>
+                                            {ffLinkLabel(l)}
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                            {(ffConnected || migfullWhId === warehouseId) && (
+                                <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                    {ffConnected && (
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            style={{ fontSize: 11, padding: '3px 10px' }}
+                                            onClick={e => { e.stopPropagation(); setTransferLinkFor(t); }}
+                                            title="Связать заявки ФФ приёмки на складе-получателе с этим переездом"
+                                        >
+                                            Связать заявки ФФ
+                                        </button>
+                                    )}
+                                    {migfullWhId === warehouseId && (
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            style={{ fontSize: 11, padding: '3px 10px' }}
+                                            onClick={e => { e.stopPropagation(); setTransferNatPushFor(t); }}
+                                            title="Создать поставку (приёмку) в WMS Натали из состава этого переезда"
+                                        >
+                                            Создать поставку у Натали
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    );
+                })}
+            </div>
+
+            {linkFor && linkFor.receipt_id != null && (
+                <FfVehicleLinkModal
+                    warehouseId={warehouseId}
+                    vehicle={linkFor}
+                    onClose={() => setLinkFor(null)}
+                    onLinked={linkedNumbers => {
+                        setLinkFor(null);
+                        setToast(`Связано с приёмкой машины ${linkFor.order_no}: ${linkedNumbers.join(', ')}`);
+                        loadVehicles();
+                        onFfLinked?.();  // вкладки ФФ перезагружают списки
+                    }}
+                    onUnlinked={() => {
+                        loadVehicles();
+                        onFfLinked?.();
+                    }}
+                />
+            )}
+            {natPushFor && natPushFor.receipt_id != null && (
+                <MigfullInboundModal
+                    source={{ kind: 'receipt', id: natPushFor.receipt_id }}
+                    sourceLabel={`Машина ${natPushFor.order_no}`}
+                    onClose={() => setNatPushFor(null)}
+                    onSuccess={res => {
+                        setToast(`Поставка у Натали создана: ${res.shipment_number || res.shipment_guid || '—'}`);
+                        loadVehicles();
+                        onFfLinked?.();  // вкладки ФФ перезагружают списки (PVB прилетит синком уже связанной)
+                    }}
+                />
+            )}
+            {/* Переезд связываем ТОЙ ЖЕ модалкой, что и его карточка: сторона
+                `dest` — приёмка у склада-получателя, то есть у этого склада. */}
+            {transferLinkFor && (
+                <TransferFfLinkModal
+                    transferId={transferLinkFor.id}
+                    transferNumber={transferLinkFor.number}
+                    side="dest"
+                    warehouseId={transferLinkFor.to_warehouse_id}
+                    warehouseName={transferLinkFor.to_warehouse_name ?? null}
+                    onClose={() => setTransferLinkFor(null)}
+                    onLinked={() => {
+                        setToast(`Заявки ФФ связаны с переездом ${transferLinkFor.number}`);
+                        loadIncomingTransfers();  // ff_links приходят и в списке — бейджи обновятся
+                        onFfLinked?.();           // вкладки ФФ перезагружают списки
+                    }}
+                />
+            )}
+            {transferNatPushFor && (
+                <MigfullInboundModal
+                    source={{ kind: 'transfer', id: transferNatPushFor.id }}
+                    sourceLabel={`Перемещение ${transferNatPushFor.number}`}
+                    onClose={() => setTransferNatPushFor(null)}
+                    onSuccess={res => {
+                        setToast(`Поставка у Натали создана: ${res.shipment_number || res.shipment_guid || '—'}`);
+                        loadIncomingTransfers();
+                        onFfLinked?.();
+                    }}
+                />
+            )}
+            {toast && <Toast message={toast} onClose={() => setToast('')} />}
+        </div>
+    );
+}
+
+/* ─── Модалка «Связать заявки ФФ» с приёмкой машины (мульти-выбор) ────────── */
+
+function FfVehicleLinkModal({ warehouseId, vehicle, onClose, onLinked, onUnlinked }: {
+    warehouseId: number;
+    /** машина (receipt_id — наша приёмка, цель связки) */
+    vehicle: ExpectedVehicleRow;
+    onClose: () => void;
+    /** успешно связали все выбранные: номера заявок (для тоста родителя) */
+    onLinked: (linkedNumbers: string[]) => void;
+    /** отвязали заявку из списка модалки — родитель обновляет карточки/вкладки */
+    onUnlinked?: () => void;
+}) {
+    const [rows, setRows] = useState<FfRequestRow[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [selected, setSelected] = useState<Set<number>>(new Set());
+    const [rowErrors, setRowErrors] = useState<Record<number, string>>({});
+    const [acting, setActing] = useState(false);
+    // Поиск по номеру/стадии — заявок бывают десятки, глазами не найти.
+    const [search, setSearch] = useState('');
+
+    useEffect(() => {
+        const controller = new AbortController();
+        setLoading(true);
+        setError('');
+        api.getFulfillmentRequests(warehouseId, 'inbound')
+            .then(r => {
+                if (controller.signal.aborted) return;
+                // Свободные приёмки ФФ + УЖЕ связанные с приёмкой ЭТОЙ машины
+                // (управление связкой в одном месте: видно что привязано, есть
+                // «Отвязать»); чужие связки/перемещения/пары вскрытия — мимо.
+                setRows(r.filter(x =>
+                    !x.archived
+                    && x.stock_transfer_id == null
+                    && x.repack_return_id == null
+                    && (x.inbound_receipt_id == null || x.inbound_receipt_id === vehicle.receipt_id)
+                ));
+            })
+            .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка загрузки заявок ФФ'); })
+            .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+        return () => controller.abort();
+    }, [warehouseId]);
+
+    const toggle = (id: number) => {
+        setSelected(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    };
+
+    const handleLink = async () => {
+        if (vehicle.receipt_id == null || selected.size === 0) return;
+        setActing(true);
+        setError('');
+        // Последовательно, ошибки — по-заявочно (мульти-связка N→1 разрешена бэком для migfull)
+        const errs: Record<number, string> = {};
+        const linked: string[] = [];
+        const okIds = new Set<number>();
+        for (const row of rows.filter(r => selected.has(r.id))) {
+            try {
+                await api.linkFulfillmentRequest(warehouseId, row.id, { inbound_receipt_id: vehicle.receipt_id });
+                linked.push(row.number || row.external_id);
+                okIds.add(row.id);
+            } catch (e: unknown) {
+                errs[row.id] = e instanceof Error ? e.message : 'Ошибка связывания';
+            }
+        }
+        setActing(false);
+        if (Object.keys(errs).length === 0) {
+            onLinked(linked);
+            return;
+        }
+        // Частичный успех: связанные убираем из списка, ошибки показываем в строках
+        setRowErrors(errs);
+        if (okIds.size > 0) {
+            setRows(prev => prev.filter(r => !okIds.has(r.id)));
+            setSelected(prev => new Set([...prev].filter(id => !okIds.has(id))));
+        }
+        setError(linked.length > 0
+            ? `Связано: ${linked.join(', ')}. Остальные — с ошибками (см. строки)`
+            : 'Связать не удалось — ошибки указаны в строках');
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-card modal-card-wide modal-card-solid" onClick={e => e.stopPropagation()}>
+                <h2 className="modal-title" style={{ marginBottom: 8 }}>
+                    Связать заявки ФФ — {vehicle.order_no}
+                </h2>
+                <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                    Выбранные заявки ФФ (приёмки) будут связаны с нашей приёмкой этой машины.
+                    Можно выбрать несколько — например, штуки и короба одной поставки.
+                </p>
+
+                {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
+
+                {!loading && rows.length > 0 && (
+                    <input
+                        className="form-input"
+                        style={{ marginBottom: 12, fontSize: 13 }}
+                        placeholder="Поиск по номеру или стадии…"
+                        value={search}
+                        onChange={e => setSearch(e.target.value)}
+                        autoFocus
+                    />
+                )}
+
+                {loading ? (
+                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка...</div>
+                ) : rows.length === 0 ? (
+                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                        Несвязанных заявок ФФ (приёмок) нет
+                    </div>
+                ) : rows.filter(r => !search
+                    || (r.number || '').toLowerCase().includes(search.toLowerCase())
+                    || (r.stage_title || r.status || '').toLowerCase().includes(search.toLowerCase())
+                ).length === 0 ? (
+                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                        Ничего не найдено по «{search}»
+                    </div>
+                ) : (
+                    <div className="ff-link-list">
+                        {rows.filter(r => !search
+                            || (r.number || '').toLowerCase().includes(search.toLowerCase())
+                            || (r.stage_title || r.status || '').toLowerCase().includes(search.toLowerCase())
+                        ).map(row => {
+                            // Уже связана с приёмкой ЭТОЙ машины: вместо чекбокса —
+                            // метка и «Отвязать» (управление связкой в одном месте).
+                            const isLinked = row.inbound_receipt_id === vehicle.receipt_id;
+                            return (
+                            <label key={row.id} className="ff-link-row" style={{ cursor: isLinked ? 'default' : 'pointer' }}>
+                                {isLinked ? (
+                                    <span className="badge badge-success" style={{ fontSize: 11, padding: '2px 8px' }}>✓</span>
+                                ) : (
+                                    <input
+                                        type="checkbox"
+                                        checked={selected.has(row.id)}
+                                        onChange={() => toggle(row.id)}
+                                        disabled={acting}
+                                    />
+                                )}
+                                {/* flex:1 — .ff-link-row даёт space-between, прижимаем контент влево */}
+                                <div className="ff-link-row-main" style={{ flex: 1 }}>
+                                    <div className="ff-link-row-head">
+                                        <span className="ff-link-row-number">{row.number || row.external_id}</span>
+                                        {isLinked && (
+                                            <span className="badge badge-success" style={{ fontSize: 11, padding: '2px 8px' }}>
+                                                связана
+                                            </span>
+                                        )}
+                                        {(row.stage_title || row.status) && (
+                                            <span className="badge badge-secondary" style={{ fontSize: 11, padding: '2px 8px' }}>
+                                                {row.stage_title || row.status}
+                                            </span>
+                                        )}
+                                        <span className="ff-link-row-meta">
+                                            {row.external_created_at ? `${formatDate(row.external_created_at)} · ` : ''}
+                                            {formatNumber(row.total_qty_units ?? row.total_qty ?? 0, 0)} шт
+                                            {row.total_boxes != null && ` · 📦 ${formatNumber(row.total_boxes, 0)} кор.`}
+                                        </span>
+                                        {/* Мгновенный маркер вида заявки — пара «штучная + коробовая»
+                                            одной машины различима без чтения цифр. */}
+                                        <span
+                                            className={`badge ${row.total_boxes != null ? 'badge-info' : 'badge-secondary'}`}
+                                            style={{ fontSize: 11, padding: '2px 8px' }}
+                                        >
+                                            {row.total_boxes != null ? 'коробами' : 'штучная'}
+                                        </span>
+                                    </div>
+                                    {rowErrors[row.id] && (
+                                        <div style={{ color: 'var(--color-danger)', fontSize: 12, marginTop: 4 }}>{rowErrors[row.id]}</div>
+                                    )}
+                                </div>
+                                {isLinked && (
+                                    <button
+                                        className="btn btn-sm btn-secondary"
+                                        disabled={acting}
+                                        onClick={async e => {
+                                            e.preventDefault();
+                                            setActing(true);
+                                            setRowErrors(prev => ({ ...prev, [row.id]: '' }));
+                                            try {
+                                                await api.unlinkFulfillmentRequest(warehouseId, row.id);
+                                                setRows(prev => prev.map(x => x.id === row.id
+                                                    ? { ...x, inbound_receipt_id: null }
+                                                    : x));
+                                                onUnlinked?.();
+                                            } catch (err: unknown) {
+                                                setRowErrors(prev => ({
+                                                    ...prev,
+                                                    [row.id]: err instanceof Error ? err.message : 'Ошибка отвязки',
+                                                }));
+                                            } finally {
+                                                setActing(false);
+                                            }
+                                        }}
+                                    >
+                                        Отвязать
+                                    </button>
+                                )}
+                            </label>
+                            );
+                        })}
+                    </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+                    <button className="btn btn-secondary" onClick={onClose} disabled={acting}>Отмена</button>
+                    <button className="btn btn-primary" onClick={handleLink} disabled={acting || selected.size === 0 || rows.length === 0}>
+                        {acting ? 'Связывание...' : `Связать выбранные (${formatNumber(selected.size, 0)})`}
+                    </button>
+                </div>
             </div>
         </div>
     );
@@ -925,8 +1390,21 @@ function AllTab({ warehouseId }: { warehouseId: number }) {
 
 /* ─── Tab: Приёмки ──────────────────────────────────────────────────────── */
 
+/**
+ * Строка списка «Приёмки» — три РАЗНЫХ документа в одном журнале.
+ *
+ * `transfer` появился по канону юзера 01.08.2026: «перемещение это то же самое,
+ * как и обычная приёмка на этом складе». Для склада-получателя входящий переезд
+ * и есть приход — искать его в отдельной вкладке приёмщику незачем. Едут сюда
+ * только уже уехавшие (SHIPPED) и принятые (DELIVERED): до отгрузки
+ * приходовать нечего.
+ *
+ * Тип документа несёт `docType` — от него зависят и словарь статусов (у
+ * переезда свой, TRANSFER_STATUS_MAP), и адрес карточки. Полей, которых у
+ * переезда нет (плановая дата приёмки, пометка брака), не выдумываем.
+ */
 type UnifiedDoc = {
-    docType: 'receipt' | 'mark';
+    docType: 'receipt' | 'mark' | 'transfer';
     id: number;
     number: string;
     status: string;
@@ -940,6 +1418,7 @@ type UnifiedDoc = {
     created_at: string | null;
     receipt?: InboundReceipt;
     mark?: DefectMarkOperation;
+    transfer?: StockTransfer;
 };
 
 function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
@@ -960,11 +1439,19 @@ function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
         setLoading(true);
         setError('');
         try {
-            const [r, transfers, marks] = await Promise.all([
+            // Переезды берём ДВУМЯ серверными срезами по статусу и по складу:
+            // ручка принимает один статус за раз, а `warehouse_id` у неё —
+            // «источник ИЛИ получатель» (направление отсекаем ниже). Прежний
+            // `getTransfers(true)` тянул ВСЕ переезды проекта ради одного
+            // блока брака — здесь он больше не нужен.
+            const [r, shippedIn, deliveredIn, marks] = await Promise.all([
                 api.getReceipts(warehouseId),
-                api.getTransfers(true),
+                api.getTransfers(false, warehouseId, { status: 'SHIPPED' }),
+                api.getTransfers(false, warehouseId, { status: 'DELIVERED' }),
                 api.getDefectMarkOperations(warehouseId),
             ]);
+            const incomingTransfers = [...shippedIn, ...deliveredIn]
+                .filter((t: StockTransfer) => t.to_warehouse_id === warehouseId);
             const receiptDocs: UnifiedDoc[] = r.map((x: InboundReceipt) => {
                 const expected = x.items.reduce((s, it: any) => s + (it.expected_qty || 0), 0);
                 const actual = x.items.reduce((s, it: any) => s + (it.actual_qty || 0), 0);
@@ -1002,15 +1489,45 @@ function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
                     mark: m,
                 };
             });
-            const unified = [...receiptDocs, ...markDocs].sort((a, b) => {
+            // Едет к нам, но ещё не принято — SHIPPED (бывший IN_TRANSIT).
+            const incoming = incomingTransfers.filter((t: StockTransfer) =>
+                t.is_defect && t.status === 'SHIPPED'
+            );
+            // Брак в пути живёт отдельным блоком с кнопкой «Принять» —
+            // дублировать его строкой в журнале не надо. Всё остальное
+            // входящее (включая уже ПРИНЯТЫЙ брак) идёт в общий список.
+            const bannerIds = new Set(incoming.map(t => t.id));
+            const transferDocs: UnifiedDoc[] = incomingTransfers
+                .filter(t => !bannerIds.has(t.id))
+                .map((t: StockTransfer) => {
+                    // «Принято X из Y» есть только у SHIPPED; у DELIVERED приход
+                    // закрыт целиком, и факт равен составу.
+                    const progress = transferReceiveProgress(t);
+                    const units = transferUnits(t);
+                    return {
+                        docType: 'transfer' as const,
+                        id: t.id,
+                        number: t.number,
+                        status: t.status,
+                        is_defect: !!t.is_defect,
+                        is_mark: false,
+                        positions: transferSkuCount(t),
+                        total_qty: units,
+                        actual_qty: t.status === 'DELIVERED' ? units : (progress ? progress.received : null),
+                        // Плановой даты приёмки у переезда нет — вместо неё дата
+                        // отгрузки (день, когда товар уехал к нам).
+                        planned_date: t.shipped_at || null,
+                        reason: (t.is_defect ? t.defect_reason : t.comment) || '—',
+                        created_at: t.created_at || null,
+                        transfer: t,
+                    };
+                });
+            const unified = [...receiptDocs, ...markDocs, ...transferDocs].sort((a, b) => {
                 const ta = a.created_at ? Date.parse(a.created_at) : 0;
                 const tb = b.created_at ? Date.parse(b.created_at) : 0;
                 return tb - ta;
             });
             setDocs(unified);
-            const incoming = transfers.filter((t: StockTransfer) =>
-                t.is_defect && t.to_warehouse_id === warehouseId && t.status === 'IN_TRANSIT'
-            );
             setIncomingDefects(incoming);
             onCountChange(unified.length + incoming.length);
         } catch (e: unknown) {
@@ -1044,6 +1561,19 @@ function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
         return <span style={{ color, background: bg, padding: '2px 8px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>{label}</span>;
     };
 
+    // У переезда СВОЙ словарь статусов (SHIPPED = «В пути», а не «Отгружена»):
+    // подставлять сюда шкалу приёмки значило бы показать сырой SHIPPED.
+    const docStatusBadge = (row: UnifiedDoc) => row.docType === 'transfer'
+        ? (
+            <span
+                className={`badge ${TRANSFER_STATUS_MAP[row.status as StockTransferStatus]?.className ?? 'badge-secondary'}`}
+                style={{ fontSize: 12 }}
+            >
+                {transferStatusLabel(row.status)}
+            </span>
+        )
+        : statusBadge(row.status);
+
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
 
     const cols: Column[] = [
@@ -1052,26 +1582,45 @@ function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
             render: (v: string, row: UnifiedDoc) => (
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                     <span style={{ fontWeight: 600 }}>{v}</span>
+                    {/* Тег — тот же, что в Листе логиста: в общем списке переезд
+                        отличается ровно им, а не отдельной таблицей. */}
+                    {row.docType === 'transfer' && <TransferTag />}
                     {row.is_mark && <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>Пометка брака</span>}
                     {row.is_defect && !row.is_mark && <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>Брак</span>}
                 </span>
             ),
         },
-        { key: 'status', label: 'Статус', render: (v: string) => statusBadge(v) },
+        {
+            key: 'status', label: 'Статус',
+            render: (_: string, row: UnifiedDoc) => docStatusBadge(row),
+            exportValue: (row: UnifiedDoc) => row.docType === 'transfer' ? transferStatusLabel(row.status) : row.status,
+        },
         {
             key: 'positions', label: 'Позиции',
             render: (_: unknown, row: UnifiedDoc) => (
                 <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                    {row.positions} поз., {formatNumber(row.total_qty, 0)} {row.docType === 'mark' ? 'шт.' : 'ожид.'}
+                    {row.positions} поз., {formatNumber(row.total_qty, 0)} {row.docType === 'receipt' ? 'ожид.' : 'шт.'}
                     {row.docType === 'receipt' && row.actual_qty !== null && (
                         <span style={{ color: row.actual_qty < row.total_qty ? '#b45309' : 'var(--color-success)', fontWeight: 600 }}> / {formatNumber(row.actual_qty, 0)} факт</span>
+                    )}
+                    {/* У переезда «факт» — сколько уже зачислено получателю:
+                        приём бывает порционным. */}
+                    {row.docType === 'transfer' && row.actual_qty !== null && (
+                        <span style={{ color: row.actual_qty < row.total_qty ? '#b45309' : 'var(--color-success)', fontWeight: 600 }}> / {formatNumber(row.actual_qty, 0)} принято</span>
                     )}
                 </span>
             ),
         },
         {
             key: 'planned_date', label: 'Плановая дата',
-            render: (_: unknown, row: UnifiedDoc) => row.planned_date ? formatDate(row.planned_date) : '—',
+            render: (_: unknown, row: UnifiedDoc) => {
+                if (!row.planned_date) return '—';
+                // У переезда в этом поле дата ОТГРУЗКИ — подписываем, чтобы
+                // её не прочитали как плановую дату приёмки.
+                return row.docType === 'transfer'
+                    ? `отгружен ${formatDate(row.planned_date)}`
+                    : formatDate(row.planned_date);
+            },
         },
         {
             key: 'reason', label: 'Комментарий / причина',
@@ -1126,6 +1675,9 @@ function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
                         router.push(`/p/${slug}/warehouse/${warehouseId}/receipt/${row.id}`);
                     } else if (row.docType === 'mark') {
                         router.push(`/p/${slug}/warehouse/${warehouseId}/mark-operation/${row.id}`);
+                    } else if (row.docType === 'transfer') {
+                        // Карточка переезда — там же, где все действия над ним.
+                        router.push(`/p/${slug}/warehouse/transfers/${row.id}`);
                     }
                 }}
             />
@@ -1135,6 +1687,25 @@ function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
 
 /* ─── Tab: Отгрузки ─────────────────────────────────────────────────────── */
 
+/**
+ * Строка списка «Отгрузки» — зеркало `UnifiedDoc` приёмок для обратного
+ * направления: наша отгрузка и ИСХОДЯЩИЙ переезд (`from_warehouse_id` = этот
+ * склад) — для склада одно и то же событие «товар уехал».
+ */
+type UnifiedShipmentDoc = {
+    docType: 'shipment' | 'transfer';
+    id: number;
+    number: string;
+    status: string;
+    positions: number;
+    total_qty: number;
+    /** Куда уехало: назначение отгрузки либо склад-получатель переезда. */
+    destination: string;
+    shipped_date: string | null;
+    created_at: string | null;
+    is_defect: boolean;
+};
+
 function ShipmentsTab({ warehouseId, warehouseType, onCountChange }: {
     warehouseId: number;
     warehouseType: string;
@@ -1143,7 +1714,7 @@ function ShipmentsTab({ warehouseId, warehouseType, onCountChange }: {
     const params = useParams();
     const router = useRouter();
     const slug = params.slug as string;
-    const [shipments, setShipments] = useState<OutboundShipment[]>([]);
+    const [shipments, setShipments] = useState<UnifiedShipmentDoc[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
@@ -1151,9 +1722,47 @@ function ShipmentsTab({ warehouseId, warehouseType, onCountChange }: {
         setLoading(true);
         setError('');
         try {
-            const r = await api.getShipments(warehouseId);
-            setShipments(r);
-            onCountChange(r.length);
+            // Переезды — два серверных среза по статусу (ручка принимает один
+            // статус за раз), направление «от нас» отсекаем здесь: у бэкенда
+            // `warehouse_id` — это «источник ИЛИ получатель».
+            const [r, shippedOut, deliveredOut] = await Promise.all([
+                api.getShipments(warehouseId),
+                api.getTransfers(false, warehouseId, { status: 'SHIPPED' }),
+                api.getTransfers(false, warehouseId, { status: 'DELIVERED' }),
+            ]);
+            const shipmentDocs: UnifiedShipmentDoc[] = r.map((x: OutboundShipment) => ({
+                docType: 'shipment',
+                id: x.id,
+                number: x.number,
+                status: x.status,
+                positions: x.items.length,
+                total_qty: x.items.reduce((s: number, it: { quantity: number }) => s + it.quantity, 0),
+                destination: x.destination || '—',
+                shipped_date: x.shipped_date || null,
+                created_at: x.created_at || null,
+                is_defect: false,
+            }));
+            const transferDocs: UnifiedShipmentDoc[] = [...shippedOut, ...deliveredOut]
+                .filter((t: StockTransfer) => t.from_warehouse_id === warehouseId)
+                .map((t: StockTransfer) => ({
+                    docType: 'transfer' as const,
+                    id: t.id,
+                    number: t.number,
+                    status: t.status,
+                    positions: transferSkuCount(t),
+                    total_qty: transferUnits(t),
+                    destination: t.to_warehouse_name || `#${t.to_warehouse_id}`,
+                    shipped_date: t.shipped_at || null,
+                    created_at: t.created_at || null,
+                    is_defect: !!t.is_defect,
+                }));
+            const unified = [...shipmentDocs, ...transferDocs].sort((a, b) => {
+                const ta = a.created_at ? Date.parse(a.created_at) : 0;
+                const tb = b.created_at ? Date.parse(b.created_at) : 0;
+                return tb - ta;
+            });
+            setShipments(unified);
+            onCountChange(unified.length);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
@@ -1179,14 +1788,38 @@ function ShipmentsTab({ warehouseId, warehouseType, onCountChange }: {
     }
 
     const cols: Column[] = [
-        { key: 'number', label: '№' },
-        { key: 'status', label: 'Статус', render: (v: string) => statusBadge(v) },
         {
-            key: 'items', label: 'Позиции',
-            render: (_: unknown, row: OutboundShipment) => {
-                const qty = row.items.reduce((s: number, it: { quantity: number }) => s + it.quantity, 0);
-                return <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{row.items.length} поз., {formatNumber(qty)} шт.</span>;
-            },
+            key: 'number', label: '№',
+            render: (v: string, row: UnifiedShipmentDoc) => (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontWeight: 600 }}>{v}</span>
+                    {row.docType === 'transfer' && <TransferTag />}
+                    {row.is_defect && <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>Брак</span>}
+                </span>
+            ),
+        },
+        {
+            key: 'status', label: 'Статус',
+            // У переезда свой словарь ступеней — общий с его карточкой и Листом логиста.
+            render: (v: string, row: UnifiedShipmentDoc) => row.docType === 'transfer'
+                ? (
+                    <span
+                        className={`badge ${TRANSFER_STATUS_MAP[row.status as StockTransferStatus]?.className ?? 'badge-secondary'}`}
+                        style={{ fontSize: 12 }}
+                    >
+                        {transferStatusLabel(row.status)}
+                    </span>
+                )
+                : statusBadge(v),
+            exportValue: (row: UnifiedShipmentDoc) => row.docType === 'transfer' ? transferStatusLabel(row.status) : row.status,
+        },
+        {
+            key: 'positions', label: 'Позиции',
+            render: (_: unknown, row: UnifiedShipmentDoc) => (
+                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                    {formatNumber(row.positions, 0)} поз., {formatNumber(row.total_qty, 0)} шт.
+                </span>
+            ),
         },
         { key: 'destination', label: 'Назначение' },
         { key: 'shipped_date', label: 'Дата отгрузки', format: 'date' },
@@ -1197,7 +1830,17 @@ function ShipmentsTab({ warehouseId, warehouseType, onCountChange }: {
         <>
             {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
 
-            <TanStackDataTable columns={cols} data={shipments} emptyText="Нет отгрузок" emptyIcon="📤" onRowClick={(row) => router.push(`/p/${slug}/warehouse/${warehouseId}/shipment/${row.id}`)} />
+            <TanStackDataTable
+                columns={cols}
+                data={shipments}
+                emptyText="Нет отгрузок"
+                emptyIcon="📤"
+                onRowClick={(row: UnifiedShipmentDoc) => router.push(
+                    row.docType === 'transfer'
+                        ? `/p/${slug}/warehouse/transfers/${row.id}`
+                        : `/p/${slug}/warehouse/${warehouseId}/shipment/${row.id}`,
+                )}
+            />
         </>
     );
 }
@@ -1273,15 +1916,29 @@ function AssembliesTab({ warehouseId, slug, onCountChange }: {
 
 /* ─── Tab: Перемещения ──────────────────────────────────────────────────── */
 
+/**
+ * Список перемещений склада — ТОЛЬКО список.
+ *
+ * Кнопок переходов («Готов» / «Отправить» / «Принять» / отмена) здесь нет
+ * намеренно (канон юзера 01.08.2026: «всё то же самое, как с отгрузкой и
+ * приёмкой»). Приёмки и отгрузки на этом же экране — тоже списки, а действия
+ * живут на карточке документа. Статусная цепочка переезда — зеркало заявки на
+ * сборку, с таблицей разрешённых переходов и движениями стока на двух из них;
+ * дублировать её кнопками в чужом списке значит завести второй путь мимо
+ * гардов. Место действий над переездом — его карточка (и Лист логиста для
+ * машины), ровно поэтому же оттуда убрано назначение машины.
+ */
 function TransfersTab({ warehouseId, onCountChange }: {
     warehouseId: number;
     onCountChange: (n: number) => void;
 }) {
+    const params = useParams();
+    const router = useRouter();
+    const slug = params.slug as string;
     const [transfers, setTransfers] = useState<StockTransfer[]>([]);
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-    const [actingId, setActingId] = useState<number | null>(null);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -1304,62 +1961,27 @@ function TransfersTab({ warehouseId, onCountChange }: {
 
     const whName = (id: number) => warehouses.find(w => w.id === id)?.name || `#${id}`;
 
-    const handleSend = async (t: StockTransfer) => {
-        if (!confirm(`Отправить ${t.number}? Товар спишется со склада-источника.`)) return;
-        setActingId(t.id);
-        try {
-            await api.sendTransfer(t.id);
-            await load();
-        } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка отправки');
-        } finally {
-            setActingId(null);
-        }
-    };
-
-    const handleAccept = async (t: StockTransfer) => {
-        if (!confirm(`Принять ${t.number}? Товар зачислится на этот склад.`)) return;
-        setActingId(t.id);
-        try {
-            await api.completeTransfer(t.id);
-            await load();
-        } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка приёмки');
-        } finally {
-            setActingId(null);
-        }
-    };
-
-    const handleCancel = async (t: StockTransfer) => {
-        if (!confirm(`Удалить черновик ${t.number}?`)) return;
-        setActingId(t.id);
-        try {
-            await api.cancelTransfer(t.id);
-            await load();
-        } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка удаления');
-        } finally {
-            setActingId(null);
-        }
-    };
-
+    // Цвет — по классу из общего словаря, а не по своему списку статусов:
+    // иначе каждая новая ступень приезжала бы сюда бесцветной.
     const statusBadge = (s: string) => {
-        const styleMap: Record<string, { bg: string; color: string }> = {
-            DRAFT: { bg: 'rgba(0,0,0,0.06)', color: 'var(--color-text-muted)' },
-            IN_TRANSIT: { bg: 'rgba(245,158,11,0.1)', color: '#b45309' },
-            COMPLETED: { bg: 'rgba(34,197,94,0.1)', color: '#16a34a' },
-        };
-        const label = TRANSFER_STATUS_LABELS[s] || s;
-        const { bg, color } = styleMap[s] || { bg: 'transparent', color: 'inherit' };
-        return <span style={{ color, background: bg, padding: '2px 8px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>{label}</span>;
+        const cls = TRANSFER_STATUS_MAP[s as StockTransferStatus]?.className ?? 'badge-secondary';
+        return <span className={`badge ${cls}`} style={{ fontSize: 12 }}>{transferStatusLabel(s)}</span>;
     };
 
     const directionText = (row: StockTransfer) => row.from_warehouse_id === warehouseId
         ? `Исходящее → ${whName(row.to_warehouse_id)}`
         : `Входящее ← ${whName(row.from_warehouse_id)}`;
+    // Состав в ответе СПИСКА перемещений больше не приходит (его убрали —
+    // тянул мегабайты ради двух чисел); считаем через общие хелперы, которые
+    // берут готовые units_total/sku_count, а на состав падают только в деталке.
     const itemsText = (row: StockTransfer) => {
-        const qty = row.items.reduce((s: number, it: { quantity: number }) => s + it.quantity, 0);
-        return `${row.items.length} поз., ${formatNumber(qty)} шт.`;
+        const base = `${formatNumber(transferSkuCount(row), 0)} поз., ${formatNumber(transferUnits(row))} шт.`;
+        // «Принято X из Y» — только у уехавшего и только в списке (бэкенд
+        // считает received_units именно там). Приёмщику это главное число.
+        const progress = transferReceiveProgress(row);
+        return progress
+            ? `${base} · принято ${formatNumber(progress.received, 0)} из ${formatNumber(progress.total, 0)}`
+            : base;
     };
 
     const cols: Column[] = [
@@ -1372,7 +1994,7 @@ function TransfersTab({ warehouseId, onCountChange }: {
         {
             key: 'status', label: 'Статус',
             render: (v: string) => statusBadge(v),
-            exportValue: (row: StockTransfer) => TRANSFER_STATUS_LABELS[row.status] || row.status,
+            exportValue: (row: StockTransfer) => transferStatusLabel(row.status),
         },
         {
             key: 'is_defect', label: 'Тип',
@@ -1390,33 +2012,6 @@ function TransfersTab({ warehouseId, onCountChange }: {
         },
         { key: 'comment', label: 'Комментарий' },
         { key: 'created_at', label: 'Создано', format: 'date' },
-        {
-            key: 'id', label: '', align: 'center',
-            exportValue: () => '',
-            render: (_v: number, row: StockTransfer) => {
-                const acting = actingId === row.id;
-                if (row.status === 'DRAFT' && row.from_warehouse_id === warehouseId) {
-                    return (
-                        <span style={{ display: 'inline-flex', gap: 6 }}>
-                            <button className="btn btn-sm btn-primary" onClick={() => handleSend(row)} disabled={acting}>
-                                {acting ? '...' : 'Отправить'}
-                            </button>
-                            <button className="btn btn-sm btn-danger" onClick={() => handleCancel(row)} disabled={acting} title="Удалить черновик">
-                                ×
-                            </button>
-                        </span>
-                    );
-                }
-                if (row.status === 'IN_TRANSIT' && row.to_warehouse_id === warehouseId) {
-                    return (
-                        <button className="btn btn-sm btn-success" onClick={() => handleAccept(row)} disabled={acting}>
-                            {acting ? '...' : 'Принять'}
-                        </button>
-                    );
-                }
-                return null;
-            },
-        },
     ];
 
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
@@ -1431,6 +2026,7 @@ function TransfersTab({ warehouseId, onCountChange }: {
                 emptyText="Нет перемещений"
                 emptyIcon="🔄"
                 exportName="transfers"
+                onRowClick={(row: StockTransfer) => router.push(`/p/${slug}/warehouse/transfers/${row.id}`)}
             />
         </>
     );
@@ -1596,7 +2192,7 @@ function DefectsTab({ warehouseId, onCountChange }: {
             });
             setStock(enriched);
             const outgoing = transfers.filter((t: StockTransfer) =>
-                t.is_defect && t.from_warehouse_id === warehouseId && t.status === 'IN_TRANSIT'
+                t.is_defect && t.from_warehouse_id === warehouseId && t.status === 'SHIPPED'
             );
             setOutgoingTransfers(outgoing);
             setDefectShipments(shipments);
@@ -1953,13 +2549,15 @@ function DeliveryTab({ warehouseId }: { warehouseId: number }) {
 /* ─── Раздел «Фулфилмент»: одна вкладка с вложенными под-вкладками ───────── */
 
 function FulfillmentTabs({
-    warehouseId, slug, sub, onSubChange, provider,
+    warehouseId, slug, sub, onSubChange, provider, externalTick = 0,
 }: {
     warehouseId: number;
     slug: string;
     sub: FfSubTab;
     onSubChange: (s: FfSubTab) => void;
     provider: string | null;
+    /** Внешний сигнал перезагрузки (связка из карточки машины). */
+    externalTick?: number;
 }) {
     // Вкладка «Сопоставление» (короба) — только для migfull; на других провайдерах прячем.
     const tabs = FF_SUB_TABS.filter(t => !t.migfullOnly || provider === 'migfull');
@@ -1979,8 +2577,9 @@ function FulfillmentTabs({
             </div>
             {activeSub === 'stocks' && <FfStocksTab warehouseId={warehouseId} provider={provider} />}
             {activeSub === 'boxes' && <FfBoxPacksTab warehouseId={warehouseId} />}
-            {activeSub === 'assembly' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="assembly" />}
-            {activeSub === 'inbound' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="inbound" />}
+            {activeSub === 'assembly' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="assembly" externalTick={externalTick} />}
+            {activeSub === 'inbound' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="inbound" externalTick={externalTick} />}
+            {activeSub === 'return' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="return" externalTick={externalTick} />}
             {activeSub === 'history' && <FfHistoryTab warehouseId={warehouseId} slug={slug} />}
             {activeSub === 'sync' && <FfSyncTab warehouseId={warehouseId} />}
         </>
@@ -2736,7 +3335,34 @@ function FfSyncTab({ warehouseId }: { warehouseId: number }) {
 
 /* ─── Tabs: ФФ сборка / ФФ приёмки ──────────────────────────────────────── */
 
-function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug: string; kind: FfRequestKind }) {
+/* Бейджи «вскрытие коробов» (migfull, «Натали»): вскрытие оформляется парой документов
+   «Возврат» (короба) + «Поступление» (россыпь) — сток не двигается, это переупаковка. */
+/**
+ * Строка в паре «вскрытия»: у ПОСТУПЛЕНИЯ заполнен repack_return_id, у
+ * ВОЗВРАТА — только зеркальный repack_pair_number (само поле пары живёт на
+ * стороне поступления). Проверка одного repack_return_id теряла бейдж и
+ * оставляла кнопку «Связать вскрытие» на уже связанном возврате.
+ */
+function ffRepackPaired(row: FfRequestRow): boolean {
+    return row.repack_return_id != null || !!row.repack_pair_number;
+}
+
+/**
+ * Код прогресса приёмки для фильтра: accepting — принимается, done — принято
+ * всё, over — сверх заявки, idle — не начато. null — прогресс неприменим
+ * (закрыта / нет данных факта).
+ */
+function ffProgressCode(row: FfRequestRow): 'accepting' | 'done' | 'over' | 'idle' | null {
+    if (row.is_completed || row.accepted_qty == null) return null;
+    const acc = row.accepted_qty;
+    if (acc === 0) return 'idle';
+    const planned = row.total_qty_units ?? row.total_qty;
+    if (planned == null) return 'accepting';
+    if (acc > planned) return 'over';
+    return acc === planned ? 'done' : 'accepting';
+}
+
+function FfRequestsTab({ warehouseId, slug, kind, externalTick = 0 }: { warehouseId: number; slug: string; kind: FfRequestKind; externalTick?: number }) {
     const [rows, setRows] = useState<FfRequestRow[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -2747,12 +3373,18 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
     // Фильтры по статусам (клиентские, из загруженных строк)
     const [stageFilter, setStageFilter] = useState('');
     const [statusFilter, setStatusFilter] = useState('');
+    // Срез по типу операции: вскрытие коробов / обычные / возврат без пары.
+    const [opFilter, setOpFilter] = useState('');
+    // Срез по живому прогрессу приёмки (см. ffProgressCode).
+    const [progressFilter, setProgressFilter] = useState('');
     // Toast успеха + несмахиваемое предупреждение (пропущенные ШК при создании заявки)
     const [toast, setToast] = useState('');
     const [notice, setNotice] = useState('');
 
     // Модал «Связать» (общий пикер — ff-shared)
     const [linkFor, setLinkFor] = useState<FfRequestRow | null>(null);
+    // Модал «Связать вскрытие» — возврат, для которого подбираем поступление-пару
+    const [repackFor, setRepackFor] = useState<FfRequestRow | null>(null);
 
     // Массовый выбор строк (для архива/возврата) — id видимых заявок
     const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -2765,7 +3397,7 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
     const [mismatchForAssembly, setMismatchForAssembly] = useState<number | null>(null);
 
     // Смена вида/фильтра/перезагрузка — сбросить выбор (id устаревают)
-    useEffect(() => { setSelected(new Set()); }, [warehouseId, kind, showArchived, stageFilter, statusFilter, reloadTick]);
+    useEffect(() => { setSelected(new Set()); }, [warehouseId, kind, showArchived, stageFilter, statusFilter, opFilter, progressFilter, reloadTick]);
 
     // Реверс-линк связал ФФ-заявку с нашей сборкой → обновляем обе таблицы
     const handleReverseLinked = useCallback((ffNumber: string, assemblyNumber: string) => {
@@ -2790,7 +3422,7 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка'); })
             .finally(() => { if (!controller.signal.aborted) setLoading(false); });
         return () => controller.abort();
-    }, [warehouseId, kind, showArchived, reloadTick]);
+    }, [warehouseId, kind, showArchived, reloadTick, externalTick]);
 
     const handleUnlink = async (row: FfRequestRow) => {
         if (!confirm(`Отвязать заявку ${row.number || row.external_id} от документа ${row.linked_number}?`)) return;
@@ -2801,6 +3433,25 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             setRows(prev => prev.map(r => r.id === updated.id ? updated : r));
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка отвязки');
+        } finally {
+            setActingId(null);
+        }
+    };
+
+    // Разорвать пару «вскрытие коробов». DELETE зовётся с id ВОЗВРАТА:
+    // на строке поступления пара-возврат лежит в repack_return_id.
+    const handleRepackUnlink = async (row: FfRequestRow) => {
+        const returnId = row.kind === 'return' ? row.id : row.repack_return_id;
+        if (returnId == null) return;
+        if (!confirm(`Разорвать пару «вскрытие коробов» у заявки ${row.number || row.external_id}?`)) return;
+        setActingId(row.id);
+        setError('');
+        try {
+            await api.unlinkFfRepackPair(warehouseId, returnId);
+            setToast('Пара «вскрытие коробов» разорвана');
+            setReloadTick(t => t + 1);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка отвязки пары');
         } finally {
             setActingId(null);
         }
@@ -2865,6 +3516,20 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
         }
         return m;
     }, [rows]);
+    // Группа приёмок одной машины: {inbound_receipt_id: [номера заявок]} —
+    // машина порождает пару «штучная + коробовая», и без метки строки выглядят
+    // несвязанными (кейс V-0035: PVB-0000128 + PVB-0000129).
+    const inboundSiblings = useMemo(() => {
+        const m = new Map<number, string[]>();
+        for (const r of rows) {
+            if (r.inbound_receipt_id != null && r.number) {
+                const arr = m.get(r.inbound_receipt_id) ?? [];
+                arr.push(r.number);
+                m.set(r.inbound_receipt_id, arr);
+            }
+        }
+        return m;
+    }, [rows]);
 
     const cols: Column[] = [
         {
@@ -2896,32 +3561,156 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             key: 'external_created_at', label: 'Создана',
             render: (v: string | null) => (v ? formatDate(v) : '—'),
         },
-        { key: 'type_name', label: 'Тип', render: (v: string | null) => v || '—' },
-        // Только для сборки: склад отгрузки МП и заявленное кол-во (из деталки skladbot)
+        // Тип показывает ОПЕРАЦИЮ, а не константу провайдера: «Приёмка» у всех
+        // строк не говорила ничего, а бейджи типов в «Стадии» налезали друг на
+        // друга. Вскрытие/перемещение различимы прямо здесь.
+        {
+            key: 'type_name', label: 'Тип',
+            render: (v: string | null, row: FfRequestRow) => {
+                if (ffRepackPaired(row)) {
+                    return (
+                        <span
+                            style={{ fontWeight: 600, color: 'var(--color-accent)' }}
+                            title={`Вскрытие коробов — пара ${row.repack_pair_number || '…'}: внутренняя переупаковка ФФ, сток не двигается`}
+                        >
+                            Вскрытие коробов
+                        </span>
+                    );
+                }
+                if (kind === 'inbound' && row.stock_transfer_id != null) {
+                    return (
+                        <span
+                            style={{ fontWeight: 600 }}
+                            title={`Приёмка внутреннего перемещения с нашего склада${row.linked_number ? ` (${row.linked_number})` : ''} — это не закупка`}
+                        >
+                            Перемещение
+                        </span>
+                    );
+                }
+                // Приход машины: наша приёмка рождена отгрузкой V-… — это
+                // импорт из Китая, а не разовая приёмка от ФФ.
+                if (row.vehicle_order_no) {
+                    return (
+                        <span
+                            style={{ fontWeight: 600 }}
+                            title={`Приход машины ${row.vehicle_order_no} — приёмка ${row.linked_number || ''} создана отгрузкой машины`}
+                        >
+                            🚛 {row.vehicle_order_no}
+                        </span>
+                    );
+                }
+                return v || '—';
+            },
+            exportValue: (row: FfRequestRow) => ffRepackPaired(row)
+                ? 'Вскрытие коробов'
+                : (kind === 'inbound' && row.stock_transfer_id != null
+                    ? 'Перемещение'
+                    : (row.vehicle_order_no ? `Приход машины ${row.vehicle_order_no}` : row.type_name || '')),
+        },
+        // Только для сборки: склад отгрузки МП (из деталки skladbot)
         ...(kind === 'assembly' ? [
             {
                 key: 'dest_warehouse', label: 'Склад отгрузки',
                 render: (v: string | null) => v || '—',
                 exportValue: (row: FfRequestRow) => row.dest_warehouse || '',
             } as Column,
-            {
-                key: 'total_qty', label: 'Кол-во товаров', align: 'right',
-                render: (v: number | null) => (v == null ? '—' : formatNumber(v, 0)),
-                exportValue: (row: FfRequestRow) => row.total_qty ?? '',
-            } as Column,
-            // Кол-во в штуках россыпи (пересчёт коробов) — только когда есть (Натали/migfull)
-            ...(hasUnits ? [{
-                key: 'total_qty_units', label: 'Кол-во (шт)', align: 'right',
-                render: (v: number | null) => (v == null ? '—' : formatNumber(v, 0)),
-                exportValue: (row: FfRequestRow) => row.total_qty_units ?? '',
-            } as Column] : []),
         ] : []),
+        // Заявленное кол-во — во всех под-вкладках (сборка / приёмки / возвраты).
+        // Возврат с коробами: «штук россыпи · N кор.» — сырое кол-во строк
+        // смешивает короба и штуки (603 «кол-во» = 600 коробов + 3 шт) и
+        // читалось как штуки. Живой прогресс приёмки живёт в «Стадии».
+        {
+            key: 'total_qty', label: 'Кол-во, шт', align: 'right',
+            // Единый канон: главное число — ВСЕГДА штуки (пересчёт коробов, когда
+            // есть карта кратности), «· N кор.» — подпись. Сырые кол-ва смешивали
+            // короба со штуками («заявлен 1» = 1 короб) — сравнивать нельзя было.
+            // Три визуальных состояния — «коробами или штуками» видно сразу:
+            //   «X шт»            — состав подтверждённо штучный;
+            //   «X шт · 📦 N кор.» — в составе короба (пересчитаны в штуки);
+            //   «X ?»             — единицы не определены (нет карты кратности) —
+            //                       сырое число строк, может смешивать короба и штуки.
+            render: (v: number | null, row: FfRequestRow) => {
+                const units = kind === 'assembly' ? null : row.total_qty_units;
+                if (kind !== 'assembly' && units != null) {
+                    return (
+                        <span style={{ whiteSpace: 'nowrap' }}>
+                            <span>{formatNumber(units, 0)}</span>
+                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}> шт</span>
+                            {row.total_boxes != null && (
+                                <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                    {' '}· 📦 {formatNumber(row.total_boxes, 0)} кор.
+                                </span>
+                            )}
+                        </span>
+                    );
+                }
+                if (v == null) return '—';
+                // Без суффикса «шт» = единицы не подтверждены (сырое число строк) —
+                // тихий сигнал вместо оранжевого «?» на каждой свежей приёмке.
+                return (
+                    <span
+                        style={{ whiteSpace: 'nowrap' }}
+                        title={kind !== 'assembly'
+                            ? 'Единицы не подтверждены: у части SKU нет карты кратности — число по строкам документа'
+                            : undefined}
+                    >
+                        {formatNumber(v, 0)}
+                    </span>
+                );
+            },
+            exportValue: (row: FfRequestRow) =>
+                (kind === 'assembly' ? row.total_qty : row.total_qty_units ?? row.total_qty) ?? '',
+        } as Column,
+        // Кол-во в штуках россыпи (пересчёт коробов) — только сборка и только когда есть (Натали/migfull)
+        ...(kind === 'assembly' && hasUnits ? [{
+            key: 'total_qty_units', label: 'Кол-во (шт)', align: 'right',
+            render: (v: number | null) => (v == null ? '—' : formatNumber(v, 0)),
+            exportValue: (row: FfRequestRow) => row.total_qty_units ?? '',
+        } as Column] : []),
         {
             key: 'stage_title', label: 'Стадия',
             render: (v: string | null, row: FfRequestRow) => (
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span>{v || row.status || '—'}</span>
                     {ffStageBadge(row)}
+                    {/* Живой факт приёмки Натали (received-строки, тянет синк) —
+                        В ШТУКАХ, как и заявленное. Три состояния: частично (info),
+                        всё (success), сверх заявки (warning). «Принято 0» не
+                        показываем — шум на каждой активной строке. */}
+                    {kind === 'inbound' && !row.is_completed && (row.accepted_qty ?? 0) > 0 && (() => {
+                        const acc = row.accepted_qty as number;
+                        const planned = row.total_qty_units ?? row.total_qty;
+                        const over = planned != null && acc > planned;
+                        const full = planned != null && acc === planned;
+                        const badge = over ? 'badge-warning' : full ? 'badge-success' : 'badge-info';
+                        const label = planned == null
+                            ? `принято ${formatNumber(acc, 0)}`
+                            : over
+                                ? `принято ${formatNumber(acc, 0)} из ${formatNumber(planned, 0)} — сверх заявки`
+                                : full
+                                    ? `принято всё · ${formatNumber(acc, 0)}`
+                                    : `принято ${formatNumber(acc, 0)} из ${formatNumber(planned, 0)}`;
+                        return (
+                            <span
+                                className={`badge ${badge}`}
+                                style={{ fontSize: 11, padding: '2px 8px' }}
+                                title="Принято фактически (в штуках) — живой прогресс приёмки ФФ, обновляется синхронизацией"
+                            >
+                                {label}
+                            </span>
+                        );
+                    })()}
+                    {/* Тип операции живёт в колонке «Тип», отвязка — в «Связи».
+                        Здесь только предупреждение возврата без пары. */}
+                    {kind === 'return' && !ffRepackPaired(row) && row.repack_unpaired && (
+                        <span
+                            className="badge badge-warning"
+                            style={{ fontSize: 11, padding: '2px 8px' }}
+                            title="Поступления-пары нет — возможно, реальный возврат товара со склада ФФ. Проверьте и оформите приход вручную, если товар едет к вам"
+                        >
+                            Без пары
+                        </span>
+                    )}
                 </span>
             ),
             exportValue: (row: FfRequestRow) => row.stage_title || row.status || '',
@@ -2935,8 +3724,27 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             key: 'linked_number', label: 'Связь',
             render: (_: unknown, row: FfRequestRow) => {
                 const acting = actingId === row.id;
+                // Пара «вскрытия» — тоже связь: номер парного документа + отвязка.
+                if (ffRepackPaired(row)) {
+                    return (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <span
+                                style={{ fontWeight: 600 }}
+                                title={kind === 'return' ? 'Поступление-пара вскрытия' : 'Возврат-пара вскрытия'}
+                            >
+                                {row.repack_pair_number || '—'}
+                            </span>
+                            <button className="btn btn-sm btn-secondary" onClick={() => handleRepackUnlink(row)} disabled={acting}>
+                                {acting ? '...' : 'Отвязать'}
+                            </button>
+                        </span>
+                    );
+                }
                 if (row.linked_number) {
                     const siblings = row.assembly_request_id != null ? (linkedCount.get(row.assembly_request_id) ?? 0) : 0;
+                    const inbGroup = row.inbound_receipt_id != null
+                        ? (inboundSiblings.get(row.inbound_receipt_id) ?? [])
+                        : [];
                     return (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                             {row.assembly_request_id != null ? (
@@ -2957,6 +3765,16 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                                     title={`Сборка ${row.linked_number}: на неё в ФФ «Натали» заведено ${formatNumber(siblings, 0)} заявок — все относятся к одной нашей сборке`}
                                 >
                                     заявок на сборку: {formatNumber(siblings, 0)}
+                                </span>
+                            )}
+                            {/* Группа одной машины: пара «штучная + коробовая» видна как целое */}
+                            {inbGroup.length > 1 && (
+                                <span
+                                    className="badge badge-info"
+                                    style={{ fontSize: 11, padding: '2px 8px' }}
+                                    title={`${row.linked_number}: заявки одной машины — ${inbGroup.join(', ')}`}
+                                >
+                                    🚛 {formatNumber(inbGroup.length, 0)} заявки машины
                                 </span>
                             )}
                             {row.linked_status && (
@@ -2987,9 +3805,23 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 }
                 return (
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                        <button className="btn btn-sm btn-secondary" onClick={() => setLinkFor(row)} disabled={acting}>
-                            Связать
-                        </button>
+                        {/* Возврат с нашим документом не связывается (бэк отвергнет) —
+                            для него ручная связка пары «вскрытие коробов» */}
+                        {kind !== 'return' && (
+                            <button className="btn btn-sm btn-secondary" onClick={() => setLinkFor(row)} disabled={acting}>
+                                Связать
+                            </button>
+                        )}
+                        {kind === 'return' && !ffRepackPaired(row) && (
+                            <button
+                                className="btn btn-sm btn-secondary"
+                                title="Подобрать поступление-пару «вскрытие коробов» (ФФ вскрыл короба под FBS)"
+                                onClick={() => setRepackFor(row)}
+                                disabled={acting}
+                            >
+                                Связать вскрытие
+                            </button>
+                        )}
                         {kind === 'assembly' && row.assembly_request_id == null && (
                             <button
                                 className="btn btn-sm btn-primary"
@@ -3038,10 +3870,60 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
     const filteredRows = useMemo(
         () => rows.filter(r =>
             (!stageFilter || (r.stage_title || r.status || '') === stageFilter)
-            && (!statusFilter || ffStatusLabel(r) === statusFilter),
+            && (!statusFilter || ffStatusLabel(r) === statusFilter)
+            && (!opFilter
+                || (opFilter === 'repack' && ffRepackPaired(r))
+                || (opFilter === 'transfer' && r.stock_transfer_id != null)
+                || (opFilter === 'vehicle' && !!r.vehicle_order_no && !ffRepackPaired(r))
+                || (opFilter.startsWith('veh:') && r.vehicle_order_no === opFilter.slice(4))
+                || (opFilter === 'plain'
+                    && !ffRepackPaired(r) && !r.repack_unpaired
+                    && r.stock_transfer_id == null && !r.vehicle_order_no)
+                || (opFilter === 'unpaired' && !!r.repack_unpaired))
+            && (!progressFilter || ffProgressCode(r) === progressFilter),
         ),
-        [rows, stageFilter, statusFilter],
+        [rows, stageFilter, statusFilter, opFilter, progressFilter],
     );
+
+    // Чипы срезов со счётчиками — только осмысленные для вкладки и с данными.
+    const opChips = useMemo(() => {
+        if (kind === 'assembly') return [] as Array<[string, string, number]>;
+        const paired = rows.filter(r => ffRepackPaired(r)).length;
+        const unpaired = rows.filter(r => !!r.repack_unpaired).length;
+        const transfers = rows.filter(r => r.stock_transfer_id != null && !ffRepackPaired(r)).length;
+        const vehicleRows = rows.filter(r => !!r.vehicle_order_no && !ffRepackPaired(r));
+        const plain = rows.length - paired - unpaired - transfers - vehicleRows.length;
+        const chips: Array<[string, string, number]> = [['', 'Все', rows.length]];
+        if (paired) chips.push(['repack', 'Вскрытие коробов', paired]);
+        if (vehicleRows.length) chips.push(['vehicle', 'Приход машин', vehicleRows.length]);
+        if (transfers) chips.push(['transfer', 'Перемещения', transfers]);
+        if (plain && (paired || unpaired || transfers || vehicleRows.length)) {
+            chips.push(['plain', 'Обычные', plain]);
+        }
+        if (kind === 'return' && unpaired) chips.push(['unpaired', 'Без пары', unpaired]);
+        // Отбор по КОНКРЕТНОЙ машине: у склада их немного, а искать «всё по
+        // V-0035» — самый частый вопрос при разборе прихода.
+        const byVehicle = new Map<string, number>();
+        for (const r of vehicleRows) byVehicle.set(r.vehicle_order_no!, (byVehicle.get(r.vehicle_order_no!) ?? 0) + 1);
+        for (const [no, n] of Array.from(byVehicle.entries()).sort((a, b) => a[0] < b[0] ? 1 : -1)) {
+            chips.push([`veh:${no}`, `🚛 ${no}`, n]);
+        }
+        return chips.length > 1 ? chips : [];
+    }, [rows, kind]);
+    const progressChips = useMemo(() => {
+        if (kind !== 'inbound') return [] as Array<[string, string, number]>;
+        const by = { accepting: 0, done: 0, over: 0, idle: 0 } as Record<string, number>;
+        for (const r of rows) {
+            const c = ffProgressCode(r);
+            if (c) by[c] += 1;
+        }
+        const chips: Array<[string, string, number]> = [];
+        if (by.accepting) chips.push(['accepting', 'Принимается', by.accepting]);
+        if (by.done) chips.push(['done', 'Принято всё', by.done]);
+        if (by.over) chips.push(['over', 'Сверх заявки', by.over]);
+        if (by.idle) chips.push(['idle', 'Не начато', by.idle]);
+        return chips;
+    }, [rows, kind]);
 
     // Массовый выбор/архив видимых заявок
     const selectedCount = useMemo(() => filteredRows.filter(r => selected.has(r.id)).length, [filteredRows, selected]);
@@ -3108,7 +3990,7 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
         </div>
     );
 
-    const statusFilters = (stageOptions.length > 1 || statusOptions.length > 1) ? (
+    const statusFilters = (stageOptions.length > 1 || statusOptions.length > 1 || opChips.length > 0 || progressChips.length > 0) ? (
         <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
             <select className="form-input" style={{ maxWidth: 240, fontSize: 13 }} value={stageFilter} onChange={e => setStageFilter(e.target.value)}>
                 <option value="">Стадия: все</option>
@@ -3118,8 +4000,27 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 <option value="">Статус ФФ: все</option>
                 {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
-            {(stageFilter || statusFilter) && (
-                <button className="btn btn-sm btn-secondary" onClick={() => { setStageFilter(''); setStatusFilter(''); }}>Сбросить</button>
+            {/* Срезы — селектами в один ряд со «Стадией»/«Статусом ФФ»: чипы
+                разрастались в два ряда кнопок и читались как шум. */}
+            {opChips.length > 0 && (
+                <select className="form-input" style={{ maxWidth: 220, fontSize: 13 }} value={opFilter} onChange={e => setOpFilter(e.target.value)}>
+                    {opChips.map(([code, label, n]) => (
+                        <option key={`op-${code}`} value={code}>
+                            {code === '' ? 'Тип: все' : `${label} · ${formatNumber(n, 0)}`}
+                        </option>
+                    ))}
+                </select>
+            )}
+            {progressChips.length > 0 && (
+                <select className="form-input" style={{ maxWidth: 220, fontSize: 13 }} value={progressFilter} onChange={e => setProgressFilter(e.target.value)}>
+                    <option value="">Приёмка: вся</option>
+                    {progressChips.map(([code, label, n]) => (
+                        <option key={`pr-${code}`} value={code}>{label} · {formatNumber(n, 0)}</option>
+                    ))}
+                </select>
+            )}
+            {(stageFilter || statusFilter || opFilter || progressFilter) && (
+                <button className="btn btn-sm btn-secondary" onClick={() => { setStageFilter(''); setStatusFilter(''); setOpFilter(''); setProgressFilter(''); }}>Сбросить</button>
             )}
             <span style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--color-text-muted)' }}>
                 Показано: {formatNumber(filteredRows.length, 0)} из {formatNumber(rows.length, 0)}
@@ -3149,15 +4050,17 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             <TanStackDataTable
                 columns={cols}
                 data={filteredRows}
-                emptyText={(stageFilter || statusFilter)
-                    ? 'Нет заявок с выбранным статусом'
+                emptyText={(stageFilter || statusFilter || opFilter || progressFilter)
+                    ? 'Нет заявок под выбранные фильтры'
                     : (showArchived
                         ? 'Архив пуст'
                         : (kind === 'assembly'
                             ? 'Нет заявок на сборку — выполните синхронизацию во вкладке «Реквизиты»'
-                            : 'Нет заявок на приёмку — выполните синхронизацию во вкладке «Реквизиты»'))}
-                emptyIcon={showArchived ? '🗄️' : (kind === 'assembly' ? '🧰' : '📥')}
-                exportName={kind === 'assembly' ? 'ff_assembly_requests' : 'ff_inbound_requests'}
+                            : (kind === 'return'
+                                ? 'Нет возвратов — выполните синхронизацию во вкладке «Реквизиты»'
+                                : 'Нет заявок на приёмку — выполните синхронизацию во вкладке «Реквизиты»')))}
+                emptyIcon={showArchived ? '🗄️' : (kind === 'assembly' ? '🧰' : (kind === 'return' ? '↩️' : '📥'))}
+                exportName={kind === 'assembly' ? 'ff_assembly_requests' : (kind === 'return' ? 'ff_return_requests' : 'ff_inbound_requests')}
             />
 
             {toast && <Toast message={toast} onClose={() => setToast('')} />}
@@ -3177,6 +4080,19 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                         // Связали ФФ-заявку с нашей сборкой → эта сборка покидает блок «без связи»
                         if (kind === 'assembly') setUnlinkedReloadTick(t => t + 1);
                         setLinkFor(null);
+                    }}
+                />
+            )}
+
+            {repackFor && (
+                <FfRepackLinkModal
+                    warehouseId={warehouseId}
+                    request={repackFor}
+                    onClose={() => setRepackFor(null)}
+                    onLinked={pairNumber => {
+                        setToast(`Возврат ${repackFor.number || repackFor.external_id} связан с поступлением ${pairNumber}`);
+                        setRepackFor(null);
+                        setReloadTick(t => t + 1);
                     }}
                 />
             )}
@@ -3640,6 +4556,112 @@ function FfReverseLinkModal({ warehouseId, assembly, onClose, onLinked }: {
                             </div>
                         )}
                     </>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+                    <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+/* ─── Модал «Связать вскрытие»: поступление-пара для возврата (migfull) ──── */
+
+function FfRepackLinkModal({ warehouseId, request, onClose, onLinked }: {
+    warehouseId: number;
+    /** возврат (kind=return) без пары, для которого подбираем поступление */
+    request: FfRequestRow;
+    onClose: () => void;
+    /** успешно связали: номер выбранного поступления (для тоста родителя) */
+    onLinked: (pairNumber: string) => void;
+}) {
+    const [data, setData] = useState<FfRepackCandidatesOut | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [acting, setActing] = useState(false);
+
+    useEffect(() => {
+        const controller = new AbortController();
+        setLoading(true);
+        setError('');
+        api.getFfRepackCandidates(warehouseId, request.id)
+            .then(r => { if (!controller.signal.aborted) setData(r); })
+            .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка загрузки кандидатов'); })
+            .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+        return () => controller.abort();
+    }, [warehouseId, request.id]);
+
+    const handleLink = async (c: FfRepackCandidate) => {
+        setActing(true);
+        setError('');
+        try {
+            await api.linkFfRepackPair(warehouseId, request.id, c.id);
+            onLinked(c.number || String(c.id));
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка связывания пары');
+            setActing(false);
+        }
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-card modal-card-wide modal-card-solid" onClick={e => e.stopPropagation()}>
+                <h2 className="modal-title" style={{ marginBottom: 8 }}>
+                    Вскрытие коробов — {data?.return_number || request.number || request.external_id}
+                </h2>
+                <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                    Возврат: {data == null
+                        ? '…'
+                        : (data.return_units != null
+                            ? <b style={{ color: 'var(--color-text)' }}>{formatNumber(data.return_units, 0)} шт россыпи</b>
+                            : 'состав не разрешён')}
+                    {' '}· выберите поступление-пару — вместе они означают переупаковку, сток не двигается.
+                </p>
+
+                {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
+
+                {loading ? (
+                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка...</div>
+                ) : (data?.candidates.length ?? 0) === 0 ? (
+                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                        Кандидатов не найдено (окно ±14 дней)
+                    </div>
+                ) : (
+                    <div className="ff-link-list">
+                        {data!.candidates.map(c => (
+                            <div key={c.id} className="ff-link-row">
+                                <div className="ff-link-row-main">
+                                    <div className="ff-link-row-head">
+                                        <span className="ff-link-row-number">{c.number || '—'}</span>
+                                        {c.status && (
+                                            <span className="badge badge-secondary" style={{ fontSize: 11, padding: '2px 8px' }}>{c.status}</span>
+                                        )}
+                                        {c.exact ? (
+                                            <span
+                                                className="badge badge-success"
+                                                style={{ fontSize: 11, padding: '2px 8px' }}
+                                                title="Состав совпал точно — такой кандидат авто-матчер пометил бы сам"
+                                            >
+                                                точное
+                                            </span>
+                                        ) : (
+                                            <span className="badge badge-info" style={{ fontSize: 11, padding: '2px 8px' }} title="Пересечение состава с возвратом, % от большей стороны">
+                                                совпадение {formatNumber(c.overlap_pct, 0)}%
+                                            </span>
+                                        )}
+                                        <span className="ff-link-row-meta">
+                                            {c.external_created_at ? `${formatDate(c.external_created_at)} · ` : ''}
+                                            {formatNumber(c.units_sum, 0)} шт
+                                        </span>
+                                    </div>
+                                </div>
+                                <button className="btn btn-sm btn-primary" onClick={() => handleLink(c)} disabled={acting}>
+                                    {acting ? '...' : 'Связать'}
+                                </button>
+                            </div>
+                        ))}
+                    </div>
                 )}
 
                 <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
