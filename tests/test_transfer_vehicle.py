@@ -686,7 +686,9 @@ class TestConvertAssemblyToTransfer:
 
 
 class TestConvertFfLinks:
-    async def _mirror(self, db_session, project, warehouse, assembly) -> FulfillmentRequest:
+    async def _mirror(
+        self, db_session, project, warehouse, assembly, *, is_completed: bool = False
+    ) -> FulfillmentRequest:
         req = FulfillmentRequest(
             project_id=project.id,
             warehouse_id=warehouse.id,
@@ -694,17 +696,25 @@ class TestConvertFfLinks:
             external_id=f"ff-{_uid()}",
             kind="assembly",
             assembly_request_id=assembly.id,
+            is_completed=is_completed,
         )
         db_session.add(req)
         await db_session.commit()
         return req
 
     @pytest.mark.asyncio
-    async def test_links_stay_on_assembly_by_default(
+    async def test_completed_links_stay_on_assembly_by_default(
         self, db_session, project, src_wh, dst_wh, barcode
     ):
-        assembly = await _assembly(db_session, project, src_wh, barcode, 25)
-        mirror = await self._mirror(db_session, project, src_wh, assembly)
+        """ЗАВЕРШЁННАЯ заявка провайдера — история этой сборки, она и остаётся.
+
+        Заявка НЕ терминальная (её переделка отменит) — проверяем именно гейт
+        завершённости, а не отсутствие отмены.
+        """
+        assembly = await _assembly(
+            db_session, project, src_wh, barcode, 25, status=AssemblyStatus.READY.value
+        )
+        mirror = await self._mirror(db_session, project, src_wh, assembly, is_completed=True)
         result = await convert_assembly_to_transfer(
             db_session, project.id, assembly.id, AssemblyToTransfer(to_warehouse_id=dst_wh.id)
         )
@@ -712,6 +722,50 @@ class TestConvertFfLinks:
         await db_session.refresh(mirror)
         assert mirror.assembly_request_id == assembly.id
         assert mirror.stock_transfer_id is None
+
+    @pytest.mark.asyncio
+    async def test_live_link_moves_even_without_flag(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """НЕЗАВЕРШЁННАЯ заявка провайдера уезжает на переезд без всякой галки.
+
+        Прод 03.08.2026: ASM-770 → TR-32. Переделка ОТМЕНЯЕТ заявку, а заявка
+        ФФ 1036 («Ожидает отгрузки», is_completed=false) осталась висеть на
+        отменённом документе — живой TR-32 при этом остался без связки.
+        Незакрытую работу провайдера нельзя оставлять на отменённой заявке:
+        физически её выполняют под этот самый переезд.
+        """
+        assembly = await _assembly(
+            db_session, project, src_wh, barcode, 25, status=AssemblyStatus.READY.value
+        )
+        mirror = await self._mirror(db_session, project, src_wh, assembly)  # is_completed=False
+        result = await convert_assembly_to_transfer(
+            db_session, project.id, assembly.id, AssemblyToTransfer(to_warehouse_id=dst_wh.id)
+        )
+        assert result.ff_links_moved == 1
+        await db_session.refresh(mirror)
+        assert mirror.assembly_request_id is None
+        assert mirror.stock_transfer_id == result.transfer_id
+
+    @pytest.mark.asyncio
+    async def test_live_link_stays_when_assembly_not_cancelled(
+        self, db_session, project, src_wh, dst_wh, barcode
+    ):
+        """Терминальную заявку переделка НЕ отменяет — её связки остаются при ней.
+
+        Правило «живое уезжает» держится на факте отмены: документ гасят, значит
+        открытую работу нельзя оставлять на нём. Закрытая заявка живёт дальше как
+        история, и отбирать у неё связку не за что.
+        """
+        assembly = await _assembly(db_session, project, src_wh, barcode, 25)  # CLOSED
+        mirror = await self._mirror(db_session, project, src_wh, assembly)
+        result = await convert_assembly_to_transfer(
+            db_session, project.id, assembly.id, AssemblyToTransfer(to_warehouse_id=dst_wh.id)
+        )
+        assert result.assembly_cancelled is False
+        assert result.ff_links_moved == 0
+        await db_session.refresh(mirror)
+        assert mirror.assembly_request_id == assembly.id
 
     @pytest.mark.asyncio
     async def test_links_moved_when_requested(self, db_session, project, src_wh, dst_wh, barcode):
