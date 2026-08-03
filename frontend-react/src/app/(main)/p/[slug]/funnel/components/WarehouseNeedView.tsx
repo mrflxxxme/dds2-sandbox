@@ -929,7 +929,7 @@ export function WarehouseNeedView() {
             {checkedCount > 0 && (
                 <div style={{
                     position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 100,
-                    background: 'rgba(255,255,255,0.95)', backdropFilter: 'blur(12px)',
+                    background: 'rgba(255,255,255,0.95)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)',
                     borderTop: '1px solid var(--color-border)',
                     padding: '12px 24px',
                     display: 'flex', alignItems: 'center', gap: 16,

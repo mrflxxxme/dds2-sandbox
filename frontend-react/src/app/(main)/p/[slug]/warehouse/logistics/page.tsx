@@ -2213,6 +2213,7 @@ export default function LogisticsPage() {
                     right: 0,
                     background: 'rgba(30, 30, 30, 0.95)',
                     backdropFilter: 'blur(8px)',
+                    WebkitBackdropFilter: 'blur(8px)',
                     color: '#fff',
                     padding: '12px 24px',
                     display: 'flex',

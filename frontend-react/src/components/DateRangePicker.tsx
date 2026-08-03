@@ -194,6 +194,10 @@ export default function DateRangePicker({ availableDates, from, to, onApply }: P
                     border-radius: 12px;
                     box-shadow: 0 12px 40px rgba(0,0,0,0.12);
                     padding: 10px 12px 12px;
+                    /* Сырая строка в JSX мимо Lightning CSS — префикс сам не допишется,
+                       на Safari < 18 размытия не было бы. Порядок «-webkit- → стандартное»
+                       как в globals.css (см. комментарий над .glass-card). */
+                    -webkit-backdrop-filter: blur(20px);
                     backdrop-filter: blur(20px);
                 }
                 .drp2-presets {
