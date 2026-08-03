@@ -17,7 +17,7 @@ import { formatNumber, pluralRu } from '@/lib/utils';
 import { exportToExcel } from '@/lib/utils';
 import WbThumb from '@/components/WbThumb';
 import { wbProductUrl } from '@/lib/wbMedia';
-import type { FbsMatrix, FbsMatrixRow, FbsMatrixWarehouse } from '@/types/api';
+import type { FbsMatrix, FbsMatrixRow, FbsMatrixWarehouse, FbsFboWarehouseTotal } from '@/types/api';
 
 const TREND_OPTIONS = [7, 14, 30] as const;
 
@@ -243,6 +243,136 @@ function Margin({ pct }: { pct: number | null | undefined }) {
     return <span style={{ color, fontWeight: 600 }}>{formatNumber(pct, 1)}%</span>;
 }
 
+/**
+ * Селектор «какие склады WB считать в колонке FBO».
+ *
+ * WB продолжает отдавать остаток сгоревших/потерянных складов как живой —
+ * колонка FBO из-за них завышается, а гейт «отдаём только то, чего нет на FBO»
+ * ложно придерживает трансляцию. Снятая галочка уходит в 🔥-список «остатки не
+ * учитывать» (тот же, что на вкладке «Сборка»): и колонка FBO, и гейт сразу
+ * перестают верить остатку такого склада.
+ *
+ * Список приходит с бэкенда со ВСЕМИ складами (в т.ч. снятыми, `counted=false`)
+ * и их остатком — иначе снятый склад пропал бы из виду и его нельзя было бы
+ * вернуть, а фантомную цифру не с чем сопоставить.
+ */
+function FboWarehouseFilter({ warehouses, onSaved }: {
+    warehouses: FbsFboWarehouseTotal[];
+    onSaved: () => void;
+}) {
+    const [open, setOpen] = useState(false);
+    const [sel, setSel] = useState<Set<string>>(new Set());
+    const [saving, setSaving] = useState(false);
+    const [err, setErr] = useState('');
+
+    // Пересинхронизируемся с сервером при каждой перезагрузке матрицы: источник
+    // истины — `counted` из свежего ответа, локальные правки живут до Сохранить.
+    useEffect(() => {
+        setSel(new Set(warehouses.filter(w => w.counted).map(w => w.name)));
+    }, [warehouses]);
+
+    const offCount = warehouses.filter(w => !sel.has(w.name)).length;
+    const dirty = warehouses.some(w => w.counted !== sel.has(w.name));
+
+    const toggle = (name: string) => setSel(prev => {
+        const next = new Set(prev);
+        if (next.has(name)) next.delete(name); else next.add(name);
+        return next;
+    });
+
+    const save = async () => {
+        setSaving(true);
+        setErr('');
+        try {
+            // 🔥-список глобальный: в нём могут быть склады с нулевым остатком,
+            // которых сейчас нет в матрице. Их нельзя потерять при записи —
+            // сохраняем всё, что вне этого селектора, и добавляем снятые здесь.
+            const current = await api.getStockIgnoredWarehouses();
+            const names = warehouses.map(w => w.name);
+            const uncheckedHere = names.filter(n => !sel.has(n));
+            const preserved = current.filter(n => !names.includes(n));
+            await api.setStockIgnoredWarehouses(Array.from(new Set([...preserved, ...uncheckedHere])));
+            setOpen(false);
+            onSaved();
+        } catch (e: unknown) {
+            setErr(e instanceof Error ? e.message : 'Не удалось сохранить');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    if (!warehouses.length) return null;
+
+    return (
+        <div style={{ position: 'relative' }}>
+            <button
+                className={`btn btn-sm ${offCount > 0 ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setOpen(o => !o)}
+                title="Какие склады WB учитывать в колонке FBO. Снятые не считаем — WB отдаёт их остаток как живой, хотя склад сгорел/потерян."
+            >
+                🏬 Склады FBO{offCount > 0 ? ` · −${formatNumber(offCount, 0)}` : ''}
+            </button>
+            {open && (
+                <>
+                    {/* перехват клика вне панели */}
+                    <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={() => setOpen(false)} />
+                    <div style={{
+                        position: 'absolute', top: 'calc(100% + 6px)', left: 0, zIndex: 41,
+                        width: 320, maxHeight: 440, overflowY: 'auto',
+                        background: 'var(--color-bg-card)', border: '1px solid var(--color-border)',
+                        borderRadius: 12, padding: 12, boxShadow: 'var(--shadow-glass-hover)',
+                    }}>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                            Отметьте живые склады WB. Снятые не считаются в FBO — их остаток
+                            WB отдаёт как живой, хотя склад сгорел/потерян.
+                        </div>
+                        <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                            <button className="btn btn-secondary btn-sm" onClick={() => setSel(new Set(warehouses.map(w => w.name)))}>Все</button>
+                            <button className="btn btn-secondary btn-sm" onClick={() => setSel(new Set())}>Никакие</button>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            {warehouses.map(w => {
+                                const on = sel.has(w.name);
+                                return (
+                                    <label key={w.name} style={{
+                                        display: 'flex', alignItems: 'center', gap: 8,
+                                        padding: '6px 8px', borderRadius: 8, cursor: 'pointer',
+                                        background: on ? 'transparent' : 'rgba(249,115,22,0.12)',
+                                    }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={on}
+                                            onChange={() => toggle(w.name)}
+                                            style={{ accentColor: 'var(--color-accent)' }}
+                                        />
+                                        <span style={{
+                                            flex: 1, fontSize: 13,
+                                            textDecoration: on ? 'none' : 'line-through',
+                                            color: on ? 'var(--color-text)' : 'var(--color-text-muted)',
+                                        }}>
+                                            {w.name}
+                                        </span>
+                                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                            {formatNumber(w.qty, 0)}
+                                        </span>
+                                    </label>
+                                );
+                            })}
+                        </div>
+                        {err && <div style={{ color: 'var(--color-danger)', fontSize: 12, marginTop: 8 }}>{err}</div>}
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
+                            <button className="btn btn-secondary btn-sm" onClick={() => setOpen(false)}>Отмена</button>
+                            <button className="btn btn-primary btn-sm" onClick={save} disabled={saving || !dirty}>
+                                {saving ? 'Сохранение…' : 'Сохранить'}
+                            </button>
+                        </div>
+                    </div>
+                </>
+            )}
+        </div>
+    );
+}
+
 export default function FbsMatrixTab({ refreshTick }: { refreshTick: number }) {
     const [data, setData] = useState<FbsMatrix | null>(null);
     const [loading, setLoading] = useState(true);
@@ -294,6 +424,7 @@ export default function FbsMatrixTab({ refreshTick }: { refreshTick: number }) {
     // useMemo, а не `?? []`: новый литерал на каждый рендер пересобирал бы
     // фильтрацию строк вхолостую (react-hooks/exhaustive-deps).
     const warehouses = useMemo(() => data?.warehouses ?? [], [data]);
+    const fboWarehouses = useMemo(() => data?.fbo_warehouses ?? [], [data]);
 
     /** Варианты разрезов берём из самих строк — ровно то, что есть в матрице. */
     const facets = useMemo(() => {
@@ -462,6 +593,7 @@ export default function FbsMatrixTab({ refreshTick }: { refreshTick: number }) {
                     <option value="">предмет: все</option>
                     {facets.subjects.map(s => <option key={s} value={s}>{s}</option>)}
                 </select>
+                <FboWarehouseFilter warehouses={fboWarehouses} onSaved={() => load()} />
                 <div className="sc-matrix-mode-toggle">
                     {TREND_OPTIONS.map(d => (
                         <button
