@@ -338,7 +338,7 @@ export default function DefectActionPage() {
                                         borderBottom: '1px solid var(--color-border)',
                                         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                                     }}
-                                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-hover)')}
+                                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-hover)')}
                                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                                 >
                                     <span style={{ fontWeight: 500 }}>{nom.label(n)}</span>

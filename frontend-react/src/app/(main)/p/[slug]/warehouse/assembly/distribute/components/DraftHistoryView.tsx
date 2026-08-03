@@ -88,7 +88,7 @@ export default function DraftHistoryView({ draftId, onReverted }: Props) {
     // loading/error-плейсхолдеры — только при пустом списке, чтобы refresh после
     // отката не бланкал уже показанную историю.
     if (loading && events.length === 0) {
-        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>Загрузка истории…</div>;
+        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка истории…</div>;
     }
     if (error && events.length === 0) {
         return (
@@ -106,7 +106,7 @@ export default function DraftHistoryView({ draftId, onReverted }: Props) {
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, gap: 12, flexWrap: 'wrap' }}>
                 <div>
                     <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--color-text)' }}>🕘 История изменений черновика</div>
-                    <div style={{ fontSize: 12, color: 'var(--color-muted)', marginTop: 2 }}>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2 }}>
                         Дозабор из предброни, запись ручной раскладки и создание заявок. Откат возвращает черновик к снимку до события.
                     </div>
                 </div>
@@ -114,7 +114,7 @@ export default function DraftHistoryView({ draftId, onReverted }: Props) {
             </div>
 
             {events.length === 0 ? (
-                <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-muted)', fontSize: 14 }}>
+                <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 14 }}>
                     Событий пока нет — история появится после дозабора из предброни, записи ручной раскладки или создания заявок.
                 </div>
             ) : (
@@ -148,12 +148,12 @@ export default function DraftHistoryView({ draftId, onReverted }: Props) {
                                     {ev.summary && (
                                         <div style={{ fontSize: 13, color: 'var(--color-text-dim)', marginTop: 3 }}>{ev.summary}</div>
                                     )}
-                                    <div style={{ fontSize: 12, color: 'var(--color-muted)', marginTop: 4 }}>
+                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
                                         {formatDateTime(ev.created_at)}
                                         {ev.created_by ? ` · ${ev.created_by}` : ''}
                                     </div>
                                     {reverted && (
-                                        <div style={{ fontSize: 12, color: 'var(--color-muted)', marginTop: 2 }}>
+                                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2 }}>
                                             ↩︎ Откачено {formatDateTime(ev.reverted_at)}{ev.reverted_by ? ` · ${ev.reverted_by}` : ''}
                                         </div>
                                     )}

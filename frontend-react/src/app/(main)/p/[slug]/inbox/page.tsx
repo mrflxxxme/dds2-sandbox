@@ -366,7 +366,7 @@ function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign, onAs
                                     <tr>
                                         <th style={{ width: 32, textAlign: 'center' }}>
                                             <input type="checkbox" checked={allChecked} onChange={toggleAll}
-                                                style={{ cursor: 'pointer', accentColor: 'var(--color-primary)' }} />
+                                                style={{ cursor: 'pointer', accentColor: 'var(--color-accent)' }} />
                                         </th>
                                         <th>Дата</th>
                                         <th>Сумма</th>
@@ -379,7 +379,7 @@ function CpBlock({ group, total, cats, isOpen, onToggle, allTxns, onAssign, onAs
                                             <td style={{ textAlign: 'center' }}>
                                                 <input type="checkbox" checked={selectedIds.has(t.txn_id)}
                                                     onChange={() => toggleOne(t.txn_id)}
-                                                    style={{ cursor: 'pointer', accentColor: 'var(--color-primary)' }} />
+                                                    style={{ cursor: 'pointer', accentColor: 'var(--color-accent)' }} />
                                             </td>
                                             <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{formatDate(t.date)}</td>
                                             <td style={{ fontWeight: 600, whiteSpace: 'nowrap', color: t.income > 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>

@@ -312,14 +312,14 @@ export function TransferWorkTableRow(props: TransferWorkProps) {
                         type="checkbox"
                         checked={checked}
                         onChange={() => onToggle(transfer.id)}
-                        style={{ width: 16, height: 16, accentColor: 'var(--color-primary)', cursor: 'pointer' }}
+                        style={{ width: 16, height: 16, accentColor: 'var(--color-accent)', cursor: 'pointer' }}
                     />
                 )}
             </td>
             <td onClick={e => e.stopPropagation()}>
                 <Link
                     href={`/p/${slug}/warehouse/transfers/${transfer.id}`}
-                    style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-primary)' }}
+                    style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-accent)' }}
                 >
                     {transfer.number}
                 </Link>
@@ -393,7 +393,7 @@ export function TransferWorkCard(props: TransferWorkProps) {
                 // полосы у переезда НЕТ: у заявки она означает совместную
                 // поставку (особый случай), а тип документа и так виден по тегу.
                 border: checked
-                    ? '2px solid var(--color-primary)'
+                    ? '2px solid var(--color-accent)'
                     : isStuck ? `2px solid var(--color-${stuckDays! >= stuckThresholdDays * 2 ? 'danger' : 'warning'})` : undefined,
                 cursor: selectable ? 'pointer' : undefined,
             }}
@@ -407,7 +407,7 @@ export function TransferWorkCard(props: TransferWorkProps) {
                             checked={checked}
                             onChange={() => onToggle(transfer.id)}
                             onClick={e => e.stopPropagation()}
-                            style={{ width: 18, height: 18, accentColor: 'var(--color-primary)', cursor: 'pointer' }}
+                            style={{ width: 18, height: 18, accentColor: 'var(--color-accent)', cursor: 'pointer' }}
                         />
                     )}
                     <Link

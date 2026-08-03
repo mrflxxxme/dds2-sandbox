@@ -19,6 +19,7 @@ from backend.database import get_db
 from backend.integrations.resilience import CircuitOpenError, RateLimitError
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.rbac import require_page
 from backend.schemas.common import DeleteResponse
 from backend.schemas.reviews import (
     CardItem,
@@ -65,7 +66,14 @@ from backend.utils.rate_limit import rate_limit_write
 
 logger = logging.getLogger("dds.routers.reviews")
 
-router = APIRouter(prefix="/reviews", tags=["Reviews"])
+# `/replies/send` публикует ПУБЛИЧНЫЙ ответ в карточке WB, а агенты отвечают
+# пачками — внешнее состояние, которое видят покупатели, и откатить его нельзя.
+# Гейт на роутере, чтобы новая ручка отзывов была закрыта по умолчанию.
+router = APIRouter(
+    prefix="/reviews",
+    tags=["Reviews"],
+    dependencies=[Depends(require_page("reviews"))],
+)
 
 
 @router.get("", response_model=ReviewsListResponse)

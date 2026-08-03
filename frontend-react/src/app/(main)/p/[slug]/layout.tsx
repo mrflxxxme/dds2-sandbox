@@ -163,6 +163,7 @@ const navGroups: { title: string; section: string; items: NavItem[] }[] = [
             { href: '/ads-manager', label: 'Управление рекламой', icon: '📢', pageKey: 'ads-manager' },
             { href: '/card-exchange', label: 'Биржа карточек', icon: '🃏', pageKey: 'card-exchange' },
             { href: '/ab-tests', label: 'АБ-тесты фото', icon: '🧪', pageKey: 'ab-tests' },
+            { href: '/design-tasks', label: 'Дизайн карточек', icon: '🎨', pageKey: 'design-tasks' },
             { href: '/pricing', label: 'Ценообразование', icon: '💲', pageKey: 'funnel' },
             { href: '/trends', label: 'Метрики и тренды', icon: '📈', pageKey: 'trends' },
             { href: '/order-geography', label: 'Куда заказывают', icon: '🗺️', pageKey: 'geography' },

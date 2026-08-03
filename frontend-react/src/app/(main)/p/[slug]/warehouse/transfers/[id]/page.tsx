@@ -1063,7 +1063,7 @@ function EditableInfoField({
                 >
                     {displayValue || '—'}
                     {editable && (
-                        <span style={{ color: 'var(--color-primary, #3b82f6)', fontSize: 13, opacity: 0.6 }}>✎</span>
+                        <span style={{ color: 'var(--color-accent)', fontSize: 13, opacity: 0.6 }}>✎</span>
                     )}
                 </div>
             )}

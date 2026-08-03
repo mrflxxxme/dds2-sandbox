@@ -64,3 +64,7 @@ docker/cryptopro/linux-amd64_deb/
 
 # Рабочий каталог сессий: черновики, дампы, куки — в репозиторий не идёт
 scratchpad/
+
+# Служебные каталоги агент-тулинга (claude-flow, oh-my-claudecode)
+.claude-flow/
+.omc/

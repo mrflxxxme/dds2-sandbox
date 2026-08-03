@@ -82,6 +82,15 @@ export function TelegramBot() {
         }
     };
 
+    const handleToggleDesign = async (id: number, current: boolean) => {
+        try {
+            await api.toggleTelegramDesignNotify(id, !current);
+            setChats(prev => prev.map(c => c.id === id ? { ...c, design_notify_enabled: !current } : c));
+        } catch (e: any) {
+            setMsg(e.message);
+        }
+    };
+
     const handleSetBoard = async (id: number, enabled: boolean, warehouseId: number | null) => {
         try {
             await api.setTelegramFfBoard(id, enabled, warehouseId);
@@ -146,6 +155,18 @@ export function TelegramBot() {
                     title="Алерт раз в 2ч, если у поставки (машина назначена/в пути) не сходятся дата, паллеты или пропуск"
                 >
                     {row.supply_notify_enabled ? '🚚 Вкл' : '🚚 Выкл'}
+                </button>
+            ),
+        },
+        {
+            key: 'design_notify_enabled', label: 'Дизайн-уведомления',
+            render: (_v: any, row: any) => (
+                <button
+                    className={`btn btn-sm ${row.design_notify_enabled ? 'btn-success' : 'btn-secondary'}`}
+                    onClick={() => handleToggleDesign(row.id, row.design_notify_enabled)}
+                    title="Утренняя сводка задач дизайна карточек в 09:00 МСК (новые/в работе/просроченные)"
+                >
+                    {row.design_notify_enabled ? '🎨 Вкл' : '🎨 Выкл'}
                 </button>
             ),
         },

@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import PageHeader from '@/components/PageHeader';
@@ -10,9 +10,10 @@ import type { AdsManagerCampaign } from '@/types/api';
 
 /** Форма нового теста: артикул → кампания (из списка, с фильтром по артикулу) → параметры.
  *  После создания черновика фото загружаются на странице теста. */
-export default function AbTestCreatePage() {
+function AbTestCreatePageInner() {
     const params = useParams<{ slug: string }>();
     const router = useRouter();
+    const searchParams = useSearchParams();
 
     const [campaigns, setCampaigns] = useState<AdsManagerCampaign[]>([]);
     const [loading, setLoading] = useState(true);
@@ -44,6 +45,21 @@ export default function AbTestCreatePage() {
         void load();
     }, [load]);
 
+    // Префилл из query при переходе из модуля дизайна: ?nm_id=…&from_design_task=DES-4.
+    // useSearchParams пуст на первом рендере до гидратации — применяем один раз, когда параметры
+    // появились, и не затираем то, что пользователь уже ввёл (StrictMode монтирует эффект дважды).
+    const prefillNmId = searchParams.get('nm_id') ?? '';
+    const fromDesignTask = searchParams.get('from_design_task') ?? '';
+    const prefilledRef = useRef(false);
+
+    useEffect(() => {
+        if (prefilledRef.current) return;
+        if (!prefillNmId && !fromDesignTask) return;
+        prefilledRef.current = true;
+        if (prefillNmId) setNmId(prefillNmId.replace(/\D/g, ''));
+        if (fromDesignTask) setComment(`Из задачи дизайна ${fromDesignTask}`);
+    }, [prefillNmId, fromDesignTask]);
+
     const nm = Number(nmId);
     const matching = useMemo(() => {
         if (!nm) return [];
@@ -73,7 +89,7 @@ export default function AbTestCreatePage() {
         }
     }, [nm, campaignId, comment, viewsPerRound, roundMinutes, targetViews, maxDays, params.slug, router]);
 
-    const labelStyle = { display: 'block', fontSize: 13, color: 'var(--color-muted)', marginBottom: 6 } as const;
+    const labelStyle = { display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 } as const;
     const inputStyle = {
         width: '100%', padding: '10px 12px', borderRadius: 12,
         border: '1px solid var(--color-border)', background: 'transparent', color: 'var(--color-text)', fontSize: 14,
@@ -84,7 +100,7 @@ export default function AbTestCreatePage() {
             <PageHeader title="🧪 Новый АБ-тест фото" subtitle="Артикул → рекламная кампания → параметры. Фото загрузите на следующем шаге." />
 
             <div className="glass-card" style={{ marginBottom: 16, background: 'var(--color-bg-card)', borderLeft: '3px solid var(--color-warning)' }}>
-                <div style={{ fontSize: 13, color: 'var(--color-muted)', lineHeight: 1.6 }}>
+                <div style={{ fontSize: 13, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
                     ⚠️ Не рекомендуем запускать тест на <b>автоматических кампаниях (АРК)</b> — WB отдаёт по ним
                     некорректную статистику, и на кампаниях с зонами <b>«Поиск» и «Полки» одновременно</b> —
                     CTR по таким тестам сравнивать нельзя. Лучший вариант — отдельная аукционная кампания только
@@ -92,7 +108,7 @@ export default function AbTestCreatePage() {
                 </div>
             </div>
 
-            {loading && <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-muted)' }}>Загрузка кампаний…</div>}
+            {loading && <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка кампаний…</div>}
             {error && !loading && (
                 <div className="glass-card" style={{ color: 'var(--color-danger)' }}>
                     {error} <button className="btn btn-sm btn-secondary" onClick={() => void load()}>Повторить</button>
@@ -130,7 +146,7 @@ export default function AbTestCreatePage() {
                                 </option>
                             ))}
                         </select>
-                        <div style={{ fontSize: 12, color: 'var(--color-dim)', marginTop: 4 }}>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
                             Лучше всего — аукционная кампания в «Поиске» только с этим артикулом.
                             Авто (АРК) не рекомендуется: WB отдаёт по ним некорректную статистику.
                         </div>
@@ -153,7 +169,7 @@ export default function AbTestCreatePage() {
                             <label style={labelStyle}>Время круга, мин</label>
                             <input style={inputStyle} type="number" min={15} value={roundMinutes}
                                    onChange={(e) => setRoundMinutes(Number(e.target.value))} />
-                            <div style={{ fontSize: 12, color: 'var(--color-dim)', marginTop: 4 }}>
+                            <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
                                 Фото гарантированно сменится через это время. Рекомендуем 45–60: статистика WB и CDN
                                 обновляются с лагом — короткие круги «смазывают» края
                             </div>
@@ -162,7 +178,7 @@ export default function AbTestCreatePage() {
                             <label style={labelStyle}>Показов на круг (досрочная смена)</label>
                             <input style={inputStyle} type="number" min={100} value={viewsPerRound}
                                    onChange={(e) => setViewsPerRound(Number(e.target.value))} />
-                            <div style={{ fontSize: 12, color: 'var(--color-dim)', marginTop: 4 }}>
+                            <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
                                 Если показы наберутся раньше времени круга — фото сменится досрочно
                             </div>
                         </div>
@@ -170,7 +186,7 @@ export default function AbTestCreatePage() {
                             <label style={labelStyle}>Показов на фото (цель)</label>
                             <input style={inputStyle} type="number" min={1000} step={1000} value={targetViews}
                                    onChange={(e) => setTargetViews(Number(e.target.value))} />
-                            <div style={{ fontSize: 12, color: 'var(--color-dim)', marginTop: 4 }}>
+                            <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
                                 Тест завершится, когда каждое фото наберёт цель
                             </div>
                         </div>
@@ -178,7 +194,7 @@ export default function AbTestCreatePage() {
                             <label style={labelStyle}>Максимум дней</label>
                             <input style={inputStyle} type="number" min={1} max={30} value={maxDays}
                                    onChange={(e) => setMaxDays(Number(e.target.value))} />
-                            <div style={{ fontSize: 12, color: 'var(--color-dim)', marginTop: 4 }}>
+                            <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
                                 Предохранитель: завершить, даже если цель не набрана
                             </div>
                         </div>
@@ -191,7 +207,7 @@ export default function AbTestCreatePage() {
                     </div>
 
                     {selected && (
-                        <div style={{ fontSize: 13, color: 'var(--color-muted)' }}>
+                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
                             Круг: {roundMinutes} мин (досрочно при {formatNumber(viewsPerRound, 0)} показах) ·
                             цель {formatNumber(targetViews, 0)} на фото · до {maxDays} дн.
                         </div>
@@ -210,5 +226,14 @@ export default function AbTestCreatePage() {
                 </div>
             )}
         </PageGuard>
+    );
+}
+
+export default function AbTestCreatePage() {
+    // useSearchParams требует Suspense-границу при статической генерации.
+    return (
+        <Suspense fallback={<div style={{ padding: 40, color: 'var(--color-text-muted)' }}>Загрузка…</div>}>
+            <AbTestCreatePageInner />
+        </Suspense>
     );
 }

@@ -1,0 +1,129 @@
+# DECISIONS-LOG — модуль «Дизайн карточек»
+
+<!-- HEAD-SUMMARY: append-only журнал решений: ратификации архитектора и owned-решения агентов (передняя растяжка, CHARTER §7). Пост-фактум аудит-трейл. Формат записи — CHARTER §11. Руками не переписывать, только дописывать. -->
+
+### 2026-08-02T12:00:00Z | spec | arch · ратифицировано архитектором
+- Fork: Формат спецификации модуля
+- Decision: Пакет в репо `docs/specs/design/` (keystone CHARTER + 8 phase-specs + STATUS + DECISIONS-LOG + CONTRACT после Ф2) по lean-адаптации WIZOR; роли агентов — маппинг на существующий ростер DDS2 без новых агентов
+- Rationale: Явный выбор архитектора (AskUserQuestion, сессия 2026-08-02); DDS2 уже имеет харнесс (CLAUDE.md, /review, /verify) — дублирование создало бы второй центр тяжести
+- Reversibility: reversible
+
+### 2026-08-02T12:00:00Z | spec | arch · ратифицировано архитектором
+- Fork: Маппинг ролей PRD на RBAC DDS2
+- Decision: Через `member_role`: ведущий дизайнер = owner/admin (is_lead); менеджер и дизайнер = editor, различаются полями задачи (автор/исполнитель); руководитель = любой с page-ключом `design-tasks`. Без новых сущностей
+- Rationale: Явный выбор архитектора (сессия 2026-08-02)
+- Reversibility: reversible
+
+### 2026-08-02T12:00:00Z | spec | arch · ратифицировано архитектором
+- Fork: Состав волн и темп
+- Decision: Полный скоуп PRD (оба этапа, включая календарь), asap; в спецификацию заложены оркестрация, тесты-гейты, аудит и правила эскалации: агентам свобода, чувствительные зоны (миграции, models/schemas, rbac, push/деплой) под охраной tripwire §8
+- Rationale: Явный выбор архитектора (сессия 2026-08-02): «делаем агентами + 1 человеком на контроле, asap»
+- Reversibility: reversible
+
+### 2026-08-02T12:00:00Z | spec | arch · ратифицировано архитектором
+- Fork: Срочность задачи — булев «срочно» (точно PRD v4) vs 3 уровня приоритета (ТЗ v1)
+- Decision: Булев `is_urgent` (Р9); подсветка-сигнал, порядок не меняет; уровни → потом миграцией при потребности
+- Rationale: Явный выбор архитектора (сессия 2026-08-02): точно по PRD, меньше ложных градаций
+- Reversibility: reversible
+
+### 2026-08-02T12:00:00Z | spec | impl · 🟡 на ратификацию
+- Fork: Технические решения Р1–Р8, Р10–Р14 (статусная модель, товарная привязка, sort_order, board API, viewed-отметка, TG-уведомления, календарь, dnd, кэш, RBAC-на-бэке, терминология, обязательные поля, нумерация)
+- Decision: Рекомендации агентов сведены в CHARTER §2 со статусом «🟡 на ратификацию»; действуют как рабочие допущения до явного подтверждения архитектора; ратификация (или правки) переводят их в ✅ отдельной записью здесь
+- Rationale: Выведены из PRD v4.0 + исследования кодовой базы (доноры payment_request / ab_photo_tests / draft_staleness_watch) и WIZOR-методологии; архитектором НЕ подтверждались — честный статус вместо приписанной ратификации
+- Reversibility: до Ф0 — reversible; схемные (Р1, Р2, Р14) hard-to-reverse после мержа Ф0 — поэтому подпись Ф0 обязательна ДО мержа (CHARTER §8)
+
+### 2026-08-02T14:00:00Z | spec | arch · ратифицировано архитектором
+- Fork: Ратификация свода Р1–Р8, Р10–Р14
+- Decision: Все технические решения CHARTER §2 ратифицированы без правок («Ратифицирую всё»); статусы переведены в ✅
+- Rationale: Явное подтверждение архитектора (сессия 2026-08-02)
+- Reversibility: см. по-решению
+
+### 2026-08-02T14:00:00Z | spec | arch · ратифицировано архитектором
+- Fork: Контур исполнения и доставки (Р16)
+- Decision: Изолированная песочница: полная private-копия репо в GitHub-профиле архитектора (remote `sandbox`), все коммиты фаз — только туда, в `origin` не пушится ничего; деплоя/хостинга нет; итог — локально запускаемый `docker compose` стек с модулем. Промежуточные подписи Ф0/Ф2 свёрнуты в финальную приёмку; исполнение фаз непрерывное по готовности гейтов
+- Rationale: Директива архитектора 2026-08-02: «тестировать новую сборку изолированно, не затрагивая прод, не пушить в основной репозиторий, не размещать на хостингах»
+- Reversibility: reversible
+
+### 2026-08-02T15:30:00Z | F0 | arch · решение lead
+- Fork: Асимметрия ON_HOLD⇄REVISION в ратифицированном словаре Р1 (HIGH code-ревью: REVISION→ON_HOLD есть, обратного ребра нет — «возврат откуда отложили» для Правок невозможен)
+- Decision: Добавлено ребро ON_HOLD→REVISION; словарь, докстринг, спека F0/CHARTER Р1 и golden-snapshot-тест синхронизированы
+- Rationale: Механика held_from_status (Р1) и PRD «отложенные возвращаются к работе» обещают симметрию; ребро — исправление бага спеки, не смена продуктового поведения. Вынесено архитектору в отчёте пост-фактум
+- Reversibility: reversible (убрать ребро — одна строка + тест)
+
+### 2026-08-02T15:30:00Z | F0 | impl · owned-решения фазы
+- Fork: Свод owned-решений Ф0 и fix-цикла T3-ревью
+- Decision: (1) DB-гарантия изоляции детей: uq (id, project_id) на design_tasks/design_submissions + составные FK (task_id, project_id) у 4 детей и (submission_id, project_id) у файлов; (2) отдельные FK-индексы task_id ×4 + ix_design_tasks_author; (3) три индекса доски — partial WHERE is_deleted=false; (4) partial-unique номера продублирован в модель (анти-autogenerate-дрейф); (5) константы переименованы: DESIGN_BOARD_STATUSES/DESIGN_ACTIVE_STATUSES (коллизия с ab_photo_tests); (6) схемы: URL cap 1000, description 5000, комментарии 2000, nm_id ge=1 lt=2^63, move только в 6 board-статусов; (7) comments relationship без delete-orphan (iron rule 3); (8) docker-compose.sandbox.yml закоммичен как часть деливерабла Р16 (секретов нет)
+- Rationale: Findings T3-ревью (db W1–W3, W6; security 1–3; code M1–M3, L2–L3) — все закрыты до заморозки схемы; полный список в отчётах ревьюеров
+- Reversibility: аддитивные constraint'ы/индексы — reversible до данных; после наполнения (1) hard-to-reverse
+
+### 2026-08-02T17:00:00Z | F1 | arch · решения lead (две развилки ревью)
+- Fork: (а) транзакция+row-lock через MinIO-загрузки (H1 db = H3 code = №1 sec); (б) SVG/mime-обход allowlist (№2 sec, паттерн повторяется в донорах counterparty/payment_requests)
+- Decision: (а) вариант А — короткие транзакции: version_no+строка версии коммитятся до заливки, файлы вне лока, вторая транзакция на строки файлов, окно закрыто гвардом «PENDING с файлами»; (б) вариант Б для модуля design — blocklist +{svg,svgz,html,htm,xhtml,xml,mjs,php}, приоритет расширения над клиентским mime; доноры вне скоупа — заведён отдельный таск в основной репо
+- Rationale: (а) канон learnings (клин пула 2026-07-16), рекомендация двух ревьюеров; (б) stored-XSS вектор дешевле закрыть сейчас; Ф2 обязан добавить attachment+nosniff на download
+- Reversibility: reversible
+
+### 2026-08-02T17:00:00Z | F1 | impl · owned-решения фазы и fix-цикла
+- Fork: Свод owned-решений Ф1
+- Decision: advisory-lock нумерации pg_advisory_xact_lock(0xDE516, project_id) (совместим с PgBouncer, под ним же max(sort_order)); advisory 0xDE517 на move_task (анти-deadlock); read-side вынесен в queries.py (<500 строк); get_board — row_number() OVER (PARTITION BY status) <= 200, ACCEPTED внутри партиции по accepted_at DESC; populate_existing на FOR UPDATE; вердикт бьёт в переданную версию + запрет второй PENDING; вход в REVISION авто-отклоняет текущую PENDING (гвард честный); assign(None) вне NEW/ASSIGNED/ON_HOLD запрещён; notify-диспатч после commit на всех путях переходов; delete_task через soft_delete (author|lead); NEW всегда снимает исполнителя; can_edit автора — все статусы кроме REVIEW и терминалов; MAX_FILES_PER_SUBMISSION=10, суммарно 100 МБ; download закрыт по is_deleted задачи; tracked_share по созданным в окне
+- Rationale: спека F1 + carry-over трёх ревью Ф0/Ф1; детали в отчётах агентов impl-f1/fix-f1
+- Reversibility: reversible
+
+### 2026-08-02T20:30:00Z | F2 | arch · решения lead (fix-цикл до фриза)
+- Fork: Развилки трёх ревью Ф2: (а) /all-projects vs page-гейт Р11; (б) 503-глотание на submissions; (в) minio_path в ответах; (г) пустая PENDING клинит задачу; (д) SVG-MIME; (е) double-submit в переиспользуемую PENDING
+- Decision: (а) Р11 приоритетнее спекового waiver — сквозной экран скоупится по get_effective_pages; (б) HTTPException passthrough, MinIO-down = 503 (канон ретраев фронта); (в) minio_path удалён из Out-схем до фриза (канон counterparty); (г) пустая PENDING переиспользуется повторной сдачей той же version_no; (д) MIME-блок {image/svg+xml, text/html, xhtml, xml} явно; (е) при переиспользовании PENDING файлы ЗАМЕНЯЮТСЯ, не сливаются («повторить сдачу» = чистая сдача)
+- Rationale: Findings api-designer 1–12, code HIGH-1/2, security 1–2; все закрыты до подписи фриза — после стали бы breaking для Ф3
+- Reversibility: reversible
+
+### 2026-08-03T00:15:00Z | F3 | arch+impl · фронт-ядро
+- Fork: M3 ревью — кнопки переходов по агрегату can_change_status давали 403-кнопки; развилка «догадка на фронте vs поле с бэка»
+- Decision: Аддитивный amendment контракта (санкция lead): allowed_transitions[] в DesignTaskDetail, кнопки строятся по нему; H1 required-причина отмены; M1 сравнение дат; M2 фолбэк err.error.message в uploadFormData. Owned Ф3: ?view=list вместо маршрута; canManage() как зеркало is_lead для реордера/viewed (ревью приняло); материалы создания грузятся после POST задачи, сбой не теряет заявку; кнопка ab-test не строилась (Ф6→Ф5)
+- Rationale: §6.9 запрещает выводить права на клиенте; отчёты tm-frontend/frontend-reviewer/fix-f3. Автор в NEW видит {CANCELLED} без ON_HOLD — верно по матрице PRD §7 (менеджер не откладывает)
+- Reversibility: reversible
+
+### 2026-08-03T10:30:00Z | пост-Ф7 | arch+impl · синхронизация с dev и аудит целостности
+- Fork: ветка модуля стояла на базе `main` (b1c999a2), а `origin/dev` ушёл на 163 коммита вперёд — модуль был построен на устаревшем фундаменте; проверка `git merge-tree` предсказала 6 конфликтов
+- Decision: влить `origin/dev` мержем (не rebase — история фаз сохранена), merge-коммит 582a8f92. Разрешения: `rbac.py` — версия dev с механикой наследования, ключ `design-tasks` добавлен в 4 структуры (ALL_PAGES, PAGE_ADDED_AT, PAGES_INHERITABLE, SECTION_PAGES); DOMAIN_INDEX/MAP — объединение строк обеих сторон; память ревьюеров — объединение без потерь; две головы миграций сведены merge-миграцией `dsnmrg_merge_design_dev_heads.py`
+- Rationale: без синхронизации сюрпризы всплыли бы при переносе. Слияние вскрыло молчаливый дефект: `list_tasks_all_projects` звал `get_effective_pages` в старой 2-аргументной форме — в новой сигнатуре это выключает наследование, и бренд выпадал из сквозного экрана у всех, кто получил доступ по наследству. Исправлено. Гейты после мержа: 5949 passed / 0 failed, tsc чист, vitest 108/1502, mypy 16 файлов, conventions PASSED, одна голова миграций
+- Reversibility: merge обратим revert'ом merge-коммита
+
+### 2026-08-03T07:00:00Z | F7 | arch+impl · финальный аудит и закрытие замечаний
+- Fork: аудит Ф7 (APPROVE-WITH-NOTES) оставил 3 замечания: (а) недетерминированный резолв telegram_id при двух привязках; (б) инвариант §6.9 частично — 3 места фронта гейтили по ролям, т.к. ответ доски не содержал флагов; (в) кнопка АБ-теста видна без доступа к разделу ab-tests
+- Decision: (а) ORDER BY user_id, id DESC + limit в обоих местах (свежая привязка выигрывает); (б) вариант «флаги на доске»: DesignBoardResponse.permissions {can_create, can_reorder} + DesignTaskPermissions.can_mark_viewed, usePermissions убран со страницы доски, CONTRACT amended; (в) кнопка = can_create_ab_test && canAccess('ab-tests'). Известный компромисс варианта (б): в режиме списка идёт тихий фоновый GET /board ради флага can_create (кнопка «Новая заявка» в общей шапке); при сбое запроса кнопка просто не показывается
+- Rationale: отчёт audit-f7 + fix-final; 120 тестов затронутых сьют, mypy, tsc, vitest 1436 — зелёные
+- Reversibility: reversible
+
+### 2026-08-03T04:00:00Z | F7-подготовка | arch+impl · устранение расхождений код↔спека
+- Fork: аудит документации нашёл 7 расхождений, главное — мёртвый код: вложения к комментариям реализованы в сервисе и модели, но недостижимы через API (нет multipart-ручки и скачивания)
+- Decision: (1) вложения доведены — `POST /{task_id}/comments/file` (отдельная ручка, зеркало materials: FastAPI не совмещает JSON-body и multipart в одной) + `GET /{task_id}/comments/{comment_id}/file`, CONTRACT amended; (2) verdict_comment сохраняется при приёмке; (3) исправлены врущие десятичные комментарии advisory-локов (910614/910615); (4) актуализированы докстринги «no-op до Ф4»; (5) миграция dsn03 — 4 FK-индекса (правило «FK ⇒ индекс»); (6) get_board потерял неиспользуемые user/member_role, спека F1 синхронизирована. Отклонение принято lead: svg отдаёт 400, а не 415 — консистентность с materials и таблицей ошибок FROZEN-контракта важнее буквы задания
+- Rationale: мёртвый код и врущие комментарии недопустимы в финальной сборке; отчёт docs-domain + fix-doc-findings, 193 теста зелёные
+- Reversibility: reversible; dsn03 аддитивна
+
+### 2026-08-03T03:00:00Z | вне фаз | arch · общерепозиторный CSS-дефект и его первопричина
+- Fork: `var(--color-muted)`/`var(--color-dim)` не существуют в globals.css — приглушённый текст рендерился основным цветом (подтверждено в браузере: переменная возвращает пустую строку)
+- Decision: 50 вхождений в модуле починены; ещё ~160 в 17 файлах остального фронта — отдельной задачей; ПЕРВОПРИЧИНА устранена: `.claude/rules/design.md` описывал палитру как `--color-text/muted/dim`, что провоцировало ошибку — правило исправлено на фактические имена с явным предупреждением
+- Rationale: без правки правила дефект воспроизводился бы в каждом новом компоненте; ревью Ф3 пропустило его, т.к. формально «только var(--color-*)» соблюдено
+- Reversibility: reversible
+
+### 2026-08-03T02:00:00Z | F5 | arch+impl · фронт-2 и находки вне фазы
+- Fork: (а) палитра календаря без assignee_user_id в списочной схеме (контракт заморожен); (б) гейт «данных мало» без счётчика принятых в DesignStatsOut; (в) Э-1 форма /ab-tests/create не читает query префилла; (г) Э-2 в коде Ф3 ~50 вхождений несуществующих CSS-переменных (--color-muted/--color-dim вместо --color-text-muted/--color-text-dim)
+- Decision: (а) цвет по display-имени, зеркальному бэковому _user_names, индекс из сортировки user_id (не хэш); (б) счёт принятых отдельным запросом status=ACCEPTED (приближение сверху), значения не прячем — приглушаем + бейдж; (в) и (г) — санкция lead на точечные правки ВНЕ зоны фазы: чтение query в чужой странице создания АБ-теста и замена переменных во всех файлах модуля (иначе функциональность декоративна, а приглушение текста не работает)
+- Rationale: отчёт tm-frontend-f5b; (г) пропущено ревью Ф3 — формально «только var(--color-*)» соблюдено, существование переменных не проверялось; урок записан для аудита Ф7
+- Reversibility: reversible
+
+### 2026-08-03T00:30:00Z | F6 | arch+impl · АБ-мост
+- Fork: create_test донора требует обязательный campaign_id, которого нет у задачи; транзакционность моста при посредине-упавшем add_variant
+- Decision: Гибрид (санкция lead): POST без campaign_id → 200 {ab_test_id:null, prefill:{...}} — фронт редиректит на предзаполненную форму; с campaign_id → полный мост (файлы принятой версии → варианты). Компенсация половинки: DELETE вариантов + soft_delete теста + проброс исходной ошибки; повтор разблокирован. Схемы DesignAbTestIn/Prefill/Out добавлены в schemas (tripwire, санкция по ТЗ фазы); CONTRACT.md — аддитивный amendment строки ab-test (lead)
+- Rationale: Hints F6; оба варианта спека сохранены без изобретения выбора кампании в модуле
+- Reversibility: reversible
+
+### 2026-08-02T22:30:00Z | F4 | arch+impl · fix-цикл BLOCK-ревью
+- Fork: BLOCK code-ревью Ф4 (CRITICAL: Project без is_deleted в 3+1 местах; сессия через HTTP; тумблер не доведён; N+1)
+- Decision: Все 9 пунктов закрыты: is_deleted-фильтры; двухфазная джоба (сбор в сессии → отправка вне); PATCH /chats/{id}/design-notify c rate_limit_write + поле схемы (санкция lead на tripwire-схему по Р16); батч-IN резолв TG; членство ProjectMember для личных; раздельные антиспам-ключи :digest/:due с захватом после сборки; тесты изоляции/экранирования/пары toggle. Re-review — APPROVE. Deferred решением lead: индекс telegram_bot_users.user_id (батч снял N+1) → потом; _APP_BASE_URL в константу → Ф7
+- Rationale: iron rule 2 + канон learnings (сессия через HTTP); полный отчёт — ревьюер aeabf/fix-агент
+- Reversibility: reversible
+
+### 2026-08-02T19:00:00Z | F2 | impl · owned-решения фазы (роутер + фриз контракта)
+- Fork: Свод owned-решений Ф2 (HTTP-слой, carry-over ревью Ф1)
+- Decision: (1) все write-ручки задачи возвращают свежую DesignTaskDetail (единый формат для UI-рефреша; материалы/комментарии — свой Out-объект, DELETE — 204); (2) маппинг ValueError→404 только по точным текстам {«Задача не найдена», «Версия сдачи не найдена»} (frozenset в роутере), остальные ValueError → 400, PermissionError → 403, HTTPException files.py — сквозной; (3) POST /submissions: роутер создаёт версию сервисом и переводит в REVIEW той же матрицей change_status (гвард видит PENDING с файлами); капы на входе: ≤10 файлов (400), файл ≤20 МБ и суммарно ≤100 МБ (413), порядок проверок каждого файла — донор pr:710; (4) permissions: схема расширена до ПОЛНОГО набора 15 флагов compute_permissions, фильтрация-пересечение в queries.get_task убрана, паритет закреплён тестом; (5) download-ручки: attachment; filename*=UTF-8'' + X-Content-Type-Options: nosniff; download_submission_file получил фильтр по sub_id из URL (честная принадлежность файла версии); (6) добавлен сервис files.delete_material (DesignMaterial — не SoftDelete-модель → жёсткий DELETE строки, право: автор материала | автор заявки | lead; сирота MinIO логируется warning); (7) календарь — queries.list_calendar: окно [1-е числа − 6 дн; последний день + 6 дн], limit 500; (8) /all-projects — queries.list_tasks_all_projects: скоуп подзапросом членства ProjectMember (is_deleted=false у членства и проекта), cap 200, project_name заполняется, обогащение по-проектно с сохранением глобального порядка; (9) member_role — отдельная dependency get_member_role (второй SELECT к ProjectMember за запрос; кэш не нужен при масштабе Р10); (10) комментарии в контракте Ф2 — только текст (DesignCommentIn body 1..2000), вложения комментариев — вне контракта (сервис-хелпер Ф1 остаётся)
+- Rationale: спека F2 + обязательные carry-over ревью Ф1 (полный набор флагов §6.9, nosniff, капы Query, comment в move, порядок проверок файлов); DELETE материала нужен таблице спека, сервиса в Ф1 не было — добавлен в files.py, а не в роутер (правило 8)
+- Reversibility: reversible (кроме пункта 4 после фриза CONTRACT.md — расширение схемы аддитивно, сужение = эскалация)

@@ -79,7 +79,7 @@ export default function AcceptanceBanner({ summary }: { summary: AcceptanceSumma
                 <Chip color="var(--color-danger)">⛔ {formatNumber(summary.droppedQty, 0)} на закрытых</Chip>
             )}
             {summary.checkedAt && (
-                <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--color-muted)' }}>
+                <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--color-text-muted)' }}>
                     {formatDateTime(summary.checkedAt)}
                 </span>
             )}

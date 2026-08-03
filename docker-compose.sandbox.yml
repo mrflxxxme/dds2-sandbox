@@ -1,0 +1,34 @@
+# ─── SANDBOX override (dds2-sandbox) ─────────────────────────────────────────
+# Изолированная песочница модуля «Дизайн карточек» (контур Р16, CHARTER §2).
+# Код запекается в образ (bind-mount'ов нет) — после правок кода пересобирать
+# с --build. Запуск (важно: явные -f, чтобы НЕ подхватился dev
+# docker-compose.override.yml с конфликтующими портами 8000/3000/5432/5433/6379):
+#
+#   docker compose -p dds2-sandbox -f docker-compose.yml -f docker-compose.sandbox.yml up -d --build db pgbouncer redis minio backend
+#
+# Порты сдвинуты (+10000), привязка только к 127.0.0.1:
+#   backend API  → 127.0.0.1:18000
+#   db (postgres)→ 127.0.0.1:15434
+#   frontend     → 127.0.0.1:13000
+# pgbouncer/redis/minio наружу не публикуются (только docker-network).
+
+services:
+  db:
+    # База в docker-compose.yml публикует 127.0.0.1:5434 — занято основным
+    # стеком. !override заменяет список целиком.
+    ports: !override
+      - "127.0.0.1:15434:5432"
+
+  backend:
+    ports:
+      - "127.0.0.1:18000:8000"
+    # Запас памяти под pytest рядом с gunicorn (см. комментарий в
+    # docker-compose.override.yml про OOM на 1024M).
+    deploy:
+      resources:
+        limits:
+          memory: 3072M
+
+  frontend-react:
+    ports:
+      - "127.0.0.1:13000:3000"

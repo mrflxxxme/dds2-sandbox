@@ -44,6 +44,11 @@ from backend.scheduler.jobs.funnel import (
     sync_funnel_hourly,
     sync_nomenclature_all_projects,
 )
+from backend.scheduler.jobs.design_notify import (
+    DIGEST_HOUR_MSK as DESIGN_DIGEST_HOUR_MSK,
+    DIGEST_MINUTE_MSK as DESIGN_DIGEST_MINUTE_MSK,
+    send_design_digests,
+)
 from backend.scheduler.jobs.draft_category_snapshot import snapshot_all_projects_draft_categories
 from backend.scheduler.jobs.draft_staleness_watch import check_all_projects_draft_staleness
 from backend.scheduler.jobs.health_check import health_monitor
@@ -586,6 +591,19 @@ def start_scheduler():
         trigger=CronTrigger(hour=9, minute=0, timezone=MSK),
         id="measurements_digest",
         name="WB measurements daily digest (09:00 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # Утренняя сводка задач дизайна + «срок завтра» исполнителям: чаты с
+    # design_notify_enabled; антиспам-ключ design_digest:{project}:{date} —
+    # повторный запуск в тот же день no-op. Время — конфиг-константы джобы.
+    _scheduler.add_job(
+        send_design_digests,
+        trigger=CronTrigger(hour=DESIGN_DIGEST_HOUR_MSK, minute=DESIGN_DIGEST_MINUTE_MSK, timezone=MSK),
+        id="design_digest",
+        name=f"Design tasks daily digest ({DESIGN_DIGEST_HOUR_MSK:02d}:{DESIGN_DIGEST_MINUTE_MSK:02d} MSK)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=3600,

@@ -14,15 +14,155 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.rbac import require_page_map
 from backend.schemas.tariff import WbTariffSchema, WbTariffUploadResult
 from backend.services import funnel as funnel_service
 from backend.services.funnel.grouping_tree import MAX_CHAIN
 from backend.services.tariff_service import delete_tariff, list_tariffs, upload_tariffs
-from backend.utils.rate_limit import rate_limit_write
+from backend.utils.rate_limit import rate_limit_read_heavy, rate_limit_write
 
 logger = logging.getLogger("dds.funnel")
 
-router = APIRouter(prefix="/funnel")
+# ─── RBAC: раскладка «ручка → ключ каталога» ─────────────────────────────────
+#
+# Роутер один, а разделов, которые в него ходят, семь: страницы исторически
+# читают общий аналитический бэкенд воронки. Поэтому вместо одного `require_page`
+# здесь раскладка по путям (`require_page_map`): чтение — viewer, мутация —
+# editor, ключ — свой у каждой ручки.
+#
+# Источник раскладки — фронт: какие страницы РЕАЛЬНО дёргают ручку (`pageKey` из
+# `frontend-react/src/app/(main)/p/[slug]/layout.tsx`). Несколько ключей = ручку
+# открывают несколько разделов, достаточно любого: `GET /data` нужен и «Воронке»,
+# и «Управлению рекламой», и «Индексу локализации» (ключ geography) — требуй
+# гейт ровно `funnel`, и две страницы из трёх перестали бы грузиться.
+#
+# Ручки без потребителя на фронте (ручные/отладочные — /resync_ads, /backfill,
+# /positions/collect, …) получают ключ своего домена.
+_PFX = "/api/v1/funnel"  # префикс монтирования: main.py (/api/v1) + APIRouter(prefix)
+
+ROUTES_BY_PAGES: dict[tuple[str, ...], tuple[str, ...]] = {
+    # ── «Воронка продаж» (/funnel) ──
+    ("funnel",): (
+        "/sync_status",
+        "/backfill",
+        "/colors",
+        "/tax",
+        "/day-analysis",
+        "/tree",
+        "/dimensions",
+        "/sync_funnel_bg",
+        "/sync_funnel_progress",
+        "/unified_sync",
+        "/unified_sync_progress",
+        "/first_sync",
+        "/first_sync_progress",
+        # Сводка «Проблемные товары» — телеграм-рассылка по данным воронки.
+        "/problem-digest/settings",
+        "/problem-digest/preview",
+        "/problem-digest/send-now",
+    ),
+    # ── Настройка воронки: кнопки живут на /settings, данные — воронкины ──
+    ("funnel", "project-settings"): (
+        "/sync",
+        "/costs",
+        "/cost",
+        "/products",
+        "/tariffs",
+        "/tariffs/upload",
+        "/tariffs/{tariff_id}",
+    ),
+    # ── Себестоимость (/cost и /bulk-cost) ──
+    ("funnel", "cost"): (
+        "/missing_costs",
+        "/costs/bulk",
+    ),
+    # ── Общие чтения: одну ручку открывают несколько разделов ──
+    ("funnel", "ads-manager", "geography"): ("/data",),
+    ("funnel", "ads-manager"): ("/ad_tab", "/ad-article-catalog"),
+    ("funnel", "dashboard"): ("/summary", "/health_check"),
+    ("funnel", "trends", "opiu", "ai-chat"): ("/filters",),
+    ("trends", "dashboard"): ("/anomalies",),
+    ("ads-manager", "ab-tests"): ("/campaigns",),
+    # ── «Метрики и тренды» (/trends) ──
+    ("trends",): ("/trends", "/capital"),
+    # ── «Управление рекламой» (/ads-manager) — здесь живут деньги ──
+    ("ads-manager",): (
+        "/resync_ads",
+        "/ad_glue",
+        "/ad-subjects",
+        "/ad-nms",
+        "/ads/balance",
+        "/ads/snapshot-interval",
+        "/ads/nm-backfill",
+        "/ads/nm-backfill/progress",
+        "/campaigns/create",
+        "/campaigns/autopay/log",
+        "/campaigns/schedule",
+        "/campaigns/schedule/log",
+        "/campaigns/wb-autopay",
+        "/campaigns/budget/ledger",
+        "/campaigns/budget_gaps",
+        "/campaigns/{campaign_id}",
+        "/campaigns/{campaign_id}/autorefill",
+        "/campaigns/{campaign_id}/bid",
+        "/campaigns/{campaign_id}/budget_gap_history",
+        "/campaigns/{campaign_id}/card-bids",
+        "/campaigns/{campaign_id}/clusters",
+        "/campaigns/{campaign_id}/clusters/bid",
+        "/campaigns/{campaign_id}/clusters/bid-bulk",
+        "/campaigns/{campaign_id}/clusters/minus",
+        "/campaigns/{campaign_id}/deposit",
+        "/campaigns/{campaign_id}/history",
+        "/campaigns/{campaign_id}/hourly",
+        "/campaigns/{campaign_id}/intraday",
+        "/campaigns/{campaign_id}/metrics",
+        "/campaigns/{campaign_id}/metrics/by-zone",
+        "/campaigns/{campaign_id}/nms",
+        "/campaigns/{campaign_id}/refresh",
+        "/campaigns/{campaign_id}/rename",
+        "/campaigns/{campaign_id}/state",
+        "/campaigns/{campaign_id}/stop",
+        "/campaigns/{campaign_id}/zone-bid",
+        "/campaigns/{campaign_id}/zones",
+        "/categories",
+        "/categories/clusters",
+        "/positions",
+        "/positions/collect",
+        "/positions/collect-one",
+        "/positions/history",
+        "/positions/progress",
+        "/positions/stop",
+        "/products/{nm_id}/clusters",
+        "/products/{nm_id}/clusters/bid",
+        "/products/{nm_id}/clusters/minus",
+        "/products/{nm_id}/daily",
+        "/sync_campaigns",
+        "/sync_campaigns_progress",
+    ),
+}
+
+#: Путь → ключи. Полноту раскладки держит tests/test_rbac_page_gates.py.
+PAGES_BY_ROUTE: dict[str, tuple[str, ...]] = {
+    f"{_PFX}{path}": pages for pages, paths in ROUTES_BY_PAGES.items() for path in paths
+}
+
+#: POST-ради-тела: карточки по списку предметов не помещаются в query-строку,
+#: но ручка ничего не меняет — оставляем её чтением, иначе viewer с ключом
+#: рекламы теряет выбор товаров при создании кампании.
+READ_PATHS: frozenset[str] = frozenset({"/ad-nms"})
+
+router = APIRouter(
+    prefix="/funnel",
+    dependencies=[
+        Depends(
+            require_page_map(
+                pages_by_route=PAGES_BY_ROUTE,
+                default="funnel",
+                read_paths=READ_PATHS,
+            )
+        )
+    ],
+)
 
 
 # ─── Schemas ─────────────────────────────────────────────────────────────────
@@ -1197,7 +1337,7 @@ class AdNmsRequest(BaseModel):
     subject_ids: list[int]
 
 
-@router.post("/ad-nms")
+@router.post("/ad-nms", dependencies=[Depends(rate_limit_read_heavy)])
 async def ad_nms_ep(
     body: AdNmsRequest,
     project: Project = Depends(get_current_project),

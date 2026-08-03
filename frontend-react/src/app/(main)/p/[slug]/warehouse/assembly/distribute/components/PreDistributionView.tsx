@@ -77,7 +77,7 @@ export default function PreDistributionView() {
 
     // ─── States: loading / error / empty / data ───────────────────────────
     if (loading) {
-        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>Загрузка машин в пути…</div>;
+        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка машин в пути…</div>;
     }
     if (error) {
         return (
@@ -88,14 +88,14 @@ export default function PreDistributionView() {
         );
     }
     if (!vehicles || vehicles.length === 0) {
-        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>Нет машин в пути для предраспределения</div>;
+        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>Нет машин в пути для предраспределения</div>;
     }
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
 
-            <div className="glass-card" style={{ padding: 16, color: 'var(--color-muted)', fontSize: 13 }}>
+            <div className="glass-card" style={{ padding: 16, color: 'var(--color-text-muted)', fontSize: 13 }}>
                 Машины «Таможня» / «Отправлено» везут товар, ещё не принятый на ФФ. «Распределить» открывает
                 экран раскладки груза по WB-складам (как «Потребность по складам»: потребность · приёмка ·
                 целые коробы и паллеты), источник — остатки именно этой машины. Заявки создаются со статусом
@@ -107,7 +107,7 @@ export default function PreDistributionView() {
             <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
                     <thead>
-                        <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-muted)', textAlign: 'left' }}>
+                        <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-muted)', textAlign: 'left' }}>
                             <th style={{ padding: '12px 16px' }}>Машина</th>
                             <th style={{ padding: '12px 16px' }}>Статус</th>
                             <th style={{ padding: '12px 16px' }}>Склад назначения</th>
@@ -129,19 +129,19 @@ export default function PreDistributionView() {
                                             {VEHICLE_STATUS_BADGE[v.status]?.label || v.status}
                                         </span>
                                         {v.status === 'DELIVERED' && v.accepted_date && (
-                                            <div style={{ fontSize: 12, color: 'var(--color-muted)', marginTop: 4 }}>
+                                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
                                                 {formatDate(v.accepted_date)}
                                                 {daysSince(v.accepted_date) === 0 ? ' · сегодня' : ` · ${formatNumber(daysSince(v.accepted_date), 0)} дн. назад`}
                                             </div>
                                         )}
                                     </td>
-                                    <td style={{ padding: '12px 16px', color: v.target_warehouse_name ? 'var(--color-text)' : 'var(--color-muted)' }}>{v.target_warehouse_name || '—'}</td>
-                                    <td style={{ padding: '12px 16px', color: 'var(--color-muted)' }}>{v.eta ? formatDate(v.eta) : '—'}</td>
+                                    <td style={{ padding: '12px 16px', color: v.target_warehouse_name ? 'var(--color-text)' : 'var(--color-text-muted)' }}>{v.target_warehouse_name || '—'}</td>
+                                    <td style={{ padding: '12px 16px', color: 'var(--color-text-muted)' }}>{v.eta ? formatDate(v.eta) : '—'}</td>
                                     <td style={{ padding: '12px 16px', textAlign: 'right' }}>{formatNumber(v.total_qty, 0)}</td>
                                     <td style={{ padding: '12px 16px', textAlign: 'right' }}>{formatNumber(v.sku_count, 0)}</td>
                                     <td style={{ padding: '12px 16px', textAlign: 'right' }}>
                                         {formatNumber(v.distributed_qty, 0)}
-                                        {remaining > 0 && <span style={{ color: 'var(--color-muted)', fontSize: 12 }}> / ост. {formatNumber(remaining, 0)}</span>}
+                                        {remaining > 0 && <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}> / ост. {formatNumber(remaining, 0)}</span>}
                                     </td>
                                     <td style={{ padding: '12px 16px', textAlign: 'right', whiteSpace: 'nowrap' }}>
                                         <button className="btn btn-primary btn-sm" disabled={!v.can_distribute} title={v.can_distribute ? undefined : (v.block_reason || 'Распределение недоступно')} onClick={() => openVehicle(v)}>Распределить</button>

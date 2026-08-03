@@ -27,6 +27,7 @@ from backend.auth import get_current_user
 from backend.database import get_db
 from backend.models import Project, User
 from backend.project_context import get_current_project
+from backend.rbac import require_page
 from backend.schemas.migfull_portal import (
     MigfullDraftResponse,
     MigfullInboundDraftResponse,
@@ -39,7 +40,12 @@ from backend.services import migfull_portal_inbound, migfull_portal_service
 from backend.services.migfull_portal_service import MigfullPortalServiceError
 from backend.utils.rate_limit import rate_limit_write
 
-router = APIRouter(prefix="/migfull-portal", tags=["MigfullPortal"])
+# Как и Газелька: `/send` создаёт реальную заявку во внешнем портале Migfull.
+router = APIRouter(
+    prefix="/migfull-portal",
+    tags=["MigfullPortal"],
+    dependencies=[Depends(require_page("logistics"))],
+)
 
 
 def _actor(user: User) -> str:

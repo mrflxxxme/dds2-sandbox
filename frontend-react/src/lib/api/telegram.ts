@@ -27,6 +27,10 @@ export function addTelegramMethods(api: ApiClient) {
         toggleTelegramSupplyNotify(bindingId: number, enabled: boolean) {
             return api.request<MessageResponse>('PATCH', `/api/v1/telegram/chats/${bindingId}/supply-notify`, { enabled });
         },
+        /** Утренняя сводка дизайн-задач (09:00 МСК) в этот чат (Ф4 модуля «Дизайн карточек»). */
+        toggleTelegramDesignNotify(bindingId: number, enabled: boolean) {
+            return api.request<MessageResponse>('PATCH', `/api/v1/telegram/chats/${bindingId}/design-notify`, { enabled });
+        },
         /** Configure the pinned FF-board: on/off + optional warehouse scope (null = all warehouses). */
         setTelegramFfBoard(bindingId: number, enabled: boolean, warehouseId: number | null) {
             return api.request<MessageResponse>('PATCH', `/api/v1/telegram/chats/${bindingId}/ff-board`, {

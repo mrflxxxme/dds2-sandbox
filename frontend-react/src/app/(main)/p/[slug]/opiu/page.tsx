@@ -204,7 +204,7 @@ export default function OpiuPage() {
                 <div style={{ textAlign: 'center', padding: 40, color: 'var(--color-text-dim)' }}>
                     ⚙️ Отчёт рассчитывается в фоне... Обновление через несколько секунд
                     <div style={{ marginTop: 8 }}>
-                        <div style={{ display: 'inline-block', width: 24, height: 24, border: '3px solid var(--color-border)', borderTopColor: 'var(--color-primary)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+                        <div style={{ display: 'inline-block', width: 24, height: 24, border: '3px solid var(--color-border)', borderTopColor: 'var(--color-accent)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
                     </div>
                     <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
                 </div>
@@ -222,7 +222,8 @@ export default function OpiuPage() {
                     <table className="data-table" style={{ marginBottom: 0, borderCollapse: 'collapse', width: '100%' }}>
                         <thead>
                             <tr>
-                                <th style={{ minWidth: 280, position: 'sticky', left: 0, background: 'var(--color-surface)', zIndex: 2, textAlign: 'left', padding: '10px 12px', borderBottom: '2px solid var(--color-border)' }}>
+                                {/* Фон не задаём: .data-table thead th уже даёт frost-подложку */}
+                                <th style={{ minWidth: 280, position: 'sticky', left: 0, zIndex: 2, textAlign: 'left', padding: '10px 12px', borderBottom: '2px solid var(--color-border)' }}>
                                     СТАТЬЯ
                                 </th>
                                 {/* Year total */}
@@ -273,7 +274,8 @@ export default function OpiuPage() {
                                     <tr key={row.key} style={rowStyle}>
                                         {/* Label */}
                                         <td style={{
-                                            position: 'sticky', left: 0, background: isHighlight ? 'rgba(59,130,246,0.04)' : 'var(--color-surface)',
+                                            // Обе ветки НЕпрозрачны: замороженная колонка едет над цифрами
+                                            position: 'sticky', left: 0, background: isHighlight ? 'color-mix(in srgb, var(--color-accent) 6%, var(--color-bg))' : 'var(--color-bg)',
                                             zIndex: 1, padding: '8px 12px', paddingLeft: 12 + row.level * 20,
                                             cursor: isGroup ? 'pointer' : undefined,
                                             borderBottom: '1px solid var(--color-border)',

@@ -114,7 +114,7 @@ export default function WarehousePage() {
         {
             key: 'vehicles_in_transit', label: 'В пути', align: 'center' as const,
             render: (v: number) => v > 0 ? (
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 10px', borderRadius: 12, background: 'rgba(59,130,246,0.08)', color: 'var(--color-primary)', fontSize: 12, fontWeight: 600 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 10px', borderRadius: 12, background: 'rgba(59,130,246,0.08)', color: 'var(--color-accent)', fontSize: 12, fontWeight: 600 }}>
                     {v} маш.
                 </span>
             ) : null,

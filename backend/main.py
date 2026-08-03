@@ -30,6 +30,7 @@ from backend.routers import (
     card_exchange,
     cost,
     counterparty,
+    design_tasks,
     fbo_supplies,
     ff_billing,
     ff_portal,
@@ -642,6 +643,12 @@ app.include_router(
     ab_tests.router,
     prefix="/api/v1",
     tags=["AB Tests"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    design_tasks.router,
+    prefix="/api/v1",
+    tags=["Design Tasks"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

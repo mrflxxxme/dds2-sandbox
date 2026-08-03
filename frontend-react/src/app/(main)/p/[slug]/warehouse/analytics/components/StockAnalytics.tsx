@@ -209,14 +209,16 @@ export function StockAnalytics() {
         whiteSpace: 'nowrap',
     });
 
+    // Фон не задаём: .data-table thead th уже даёт frost-подложку
     const stickyTh: React.CSSProperties = {
-        position: 'sticky', left: 0, background: 'var(--color-bg-secondary)',
+        position: 'sticky', left: 0,
         zIndex: 2, minWidth: 170, cursor: 'pointer', userSelect: 'none',
         boxShadow: '2px 0 4px rgba(0,0,0,0.05)',
     };
 
+    // У tbody td своего фона нет — замороженной ячейке нужен непрозрачный
     const stickyTd: React.CSSProperties = {
-        position: 'sticky', left: 0, background: '#f5f5f7', zIndex: 1, fontWeight: 600,
+        position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 1, fontWeight: 600,
         boxShadow: '2px 0 4px rgba(0,0,0,0.05)',
     };
 
@@ -280,7 +282,7 @@ export function StockAnalytics() {
 
             {/* KPI Cards */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 16 }}>
-                <div className="glass-card" style={{ padding: '14px 16px', borderLeft: '4px solid var(--color-primary)' }}>
+                <div className="glass-card" style={{ padding: '14px 16px', borderLeft: '4px solid var(--color-accent)' }}>
                     <div style={{ fontSize: 12, opacity: 0.6, marginBottom: 4 }}>ЗАКАЗЫ ЗА 30 ДНЕЙ</div>
                     <div style={{ fontSize: 22, fontWeight: 700 }}>{formatNumber(data.orders_30d)}</div>
                     <div style={{ fontSize: 12, opacity: 0.5, marginTop: 2 }}>~ {data.total_articles} артикулов</div>
@@ -315,8 +317,8 @@ export function StockAnalytics() {
                     <button key={key}
                         style={{
                             padding: '4px 12px', borderRadius: 12, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none',
-                            background: trafficFilter === key ? c.bg : 'var(--color-bg-tertiary)',
-                            color: trafficFilter === key ? c.text : 'var(--text-primary)',
+                            background: trafficFilter === key ? c.bg : 'var(--color-bg)',
+                            color: trafficFilter === key ? c.text : 'var(--color-text)',
                             opacity: trafficFilter === key ? 1 : 0.7,
                         }}
                         onClick={() => { setTrafficFilter(trafficFilter === key ? null : key); setPage(0); }}>
@@ -327,8 +329,8 @@ export function StockAnalytics() {
                     <button
                         style={{
                             padding: '4px 12px', borderRadius: 12, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none',
-                            background: trafficFilter === 'no_wb' ? '#ff9f0a' : 'var(--color-bg-tertiary)',
-                            color: trafficFilter === 'no_wb' ? '#fff' : 'var(--text-primary)',
+                            background: trafficFilter === 'no_wb' ? 'var(--color-warning)' : 'var(--color-bg)',
+                            color: trafficFilter === 'no_wb' ? '#fff' : 'var(--color-text)',
                             opacity: trafficFilter === 'no_wb' ? 1 : 0.7,
                         }}
                         onClick={() => { setTrafficFilter(trafficFilter === 'no_wb' ? null : 'no_wb'); setPage(0); }}>
@@ -403,8 +405,8 @@ export function StockAnalytics() {
                     </thead>
                     <tbody>
                         {/* ИТОГО */}
-                        <tr style={{ fontWeight: 700, background: 'var(--color-bg-tertiary)' }}>
-                            <td style={{ ...stickyTd, background: 'var(--color-bg-tertiary)' }}>ИТОГО</td>
+                        <tr style={{ fontWeight: 700, background: 'var(--color-bg)' }}>
+                            <td style={{ ...stickyTd, background: 'var(--color-bg)' }}>ИТОГО</td>
                             <td />
                             <td style={{ textAlign: 'right' }}>{formatNumber(totals.orders_30d, 0)}</td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(filteredArticles.reduce((s, a) => s + (a.revenue_bdr ?? 0), 0), 0)}{' ₽'}</td>

@@ -16,6 +16,7 @@ from backend.auth import get_current_user
 from backend.database import get_db
 from backend.models import Project, User
 from backend.project_context import get_current_project
+from backend.rbac import require_page
 from backend.schemas.gazelka import (
     GazelkaConfigResponse,
     GazelkaDraftResponse,
@@ -32,7 +33,14 @@ from backend.services import gazelka_service
 from backend.services.gazelka_service import GazelkaServiceError
 from backend.utils.rate_limit import rate_limit_write
 
-router = APIRouter(prefix="/gazelka", tags=["Gazelka"])
+# `/send` создаёт РЕАЛЬНЫЙ заказ на перевозку в портале Газельки — деньги наружу,
+# отменить нельзя. Гейт на роутере: ключ logistics («Оплаты», «Счета ФФ»,
+# «Слоты сдачи» в меню), мутации — от editor.
+router = APIRouter(
+    prefix="/gazelka",
+    tags=["Gazelka"],
+    dependencies=[Depends(require_page("logistics"))],
+)
 
 
 def _actor(user: User) -> str:

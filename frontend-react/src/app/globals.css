@@ -26,6 +26,7 @@ input[type="number"] {
     --color-text-dim: #a1a1aa;
     --color-accent: #0071e3; /* Classic Apple Blue */
     --color-accent-hover: #0077ed;
+    --color-accent-bg: rgba(0, 113, 227, 0.1); /* Акцентная подложка: активный пункт, выбранный чип */
     --color-success: #34c759;
     --color-warning: #ff9f0a;
     --color-danger: #ff3b30;
@@ -461,7 +462,7 @@ input[type="number"] {
 }
 
 .sidebar-link.active {
-    background: rgba(0, 113, 227, 0.1);
+    background: var(--color-accent-bg);
     color: var(--color-accent);
 }
 
@@ -1753,7 +1754,7 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 
 .sc-vehicle-detail {
     padding: 16px 24px;
-    background: var(--color-bg-secondary);
+    background: var(--color-bg);
     border-top: 1px solid var(--color-border);
 }
 
@@ -2228,7 +2229,7 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 
 .sc-open-link {
     font-size: 12px;
-    color: var(--color-primary);
+    color: var(--color-accent);
     cursor: pointer;
 }
 
@@ -2669,7 +2670,7 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 }
 
 .sc-text-primary {
-    color: var(--color-primary);
+    color: var(--color-accent);
 }
 
 .sc-text-muted-sm {
@@ -2702,7 +2703,7 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 .sc-color-danger { color: var(--color-danger); }
 .sc-color-text { color: var(--color-text); }
 .sc-color-text-muted { color: var(--color-text-muted); }
-.sc-color-primary { color: var(--color-primary); }
+.sc-color-primary { color: var(--color-accent); }
 
 .sc-fw-600 { font-weight: 600; }
 .sc-fw-700 { font-weight: 700; }
@@ -3125,7 +3126,7 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 .sc-cost-total-value {
     font-size: 16px;
     font-weight: 700;
-    color: var(--color-primary);
+    color: var(--color-accent);
 }
 
 .sc-monospace-cell { font-family: monospace; }
@@ -3742,18 +3743,18 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 .sc-fin-open { color: var(--color-accent); font-weight: 700; }
 .sc-fin-due-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
 .sc-fin-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.sc-fin-table th { text-align: left; padding: 6px 10px; color: var(--color-muted); font-weight: 500; border-bottom: 1px solid var(--color-border); }
+.sc-fin-table th { text-align: left; padding: 6px 10px; color: var(--color-text-muted); font-weight: 500; border-bottom: 1px solid var(--color-border); }
 .sc-fin-table td { padding: 6px 10px; border-bottom: 1px solid var(--color-border); color: var(--color-text); }
 .sc-fin-num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.sc-fin-purpose { color: var(--color-muted); max-width: 480px; }
+.sc-fin-purpose { color: var(--color-text-muted); max-width: 480px; }
 .sc-debt-badge { margin-top: 12px; text-align: right; }
-.sc-fin-comm { color: var(--color-muted); }
+.sc-fin-comm { color: var(--color-text-muted); }
 .sc-fin-total { font-weight: 600; }
-.sc-fin-comm-tag { color: var(--color-muted); font-weight: 400; font-size: 13px; }
+.sc-fin-comm-tag { color: var(--color-text-muted); font-weight: 400; font-size: 13px; }
 .sc-fin-action { text-align: right; white-space: nowrap; }
 .sc-fin-id-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
 .sc-fin-id-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--color-bg-card); border: 1px solid var(--color-border); border-radius: 24px; padding: 4px 12px; font-size: 13px; color: var(--color-text); }
-.sc-fin-id-del { background: none; border: none; color: var(--color-muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 0; }
+.sc-fin-id-del { background: none; border: none; color: var(--color-text-muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 0; }
 .sc-fin-id-del:hover { color: var(--color-danger); }
 .sc-fin-id-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .sc-fin-id-select, .sc-fin-id-input { height: 34px; border: 1px solid var(--color-border); border-radius: 8px; padding: 0 10px; font-size: 13px; background: var(--color-bg-card); color: var(--color-text); }

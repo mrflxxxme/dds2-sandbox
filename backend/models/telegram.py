@@ -39,6 +39,9 @@ class TelegramChatBinding(Base):
     # рассылка из планировщика раз в 2ч. Независим от ff_notify_enabled — чат под
     # эти уведомления выбирается отдельно.
     supply_notify_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # Утренняя сводка задач дизайна (модуль «Дизайн карточек», джоба Ф4) —
+    # отдельный opt-in на чат, зеркало supply_notify_enabled. Дефолт false.
+    design_notify_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     # Закреплённое авто-табло заявок ФФ: отдельный opt-in (/board on) + id
     # закреплённого сообщения, которое правим на каждом синке (не шлём новое).
     ff_board_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())

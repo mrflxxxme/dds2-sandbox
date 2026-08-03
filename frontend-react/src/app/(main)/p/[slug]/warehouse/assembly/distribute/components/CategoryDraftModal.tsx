@@ -121,7 +121,7 @@ export default function CategoryDraftModal({ articles, categoryOf, warehouses, e
                                         </span>
                                     </span>
                                     {byFfSorted.length > 0 && (
-                                        <span style={{ paddingLeft: 24, fontSize: 11, color: 'var(--color-dim)', lineHeight: 1.35 }}>
+                                        <span style={{ paddingLeft: 24, fontSize: 11, color: 'var(--color-text-dim)', lineHeight: 1.35 }}>
                                             {byFfSorted.map(([fid, q], i) => (
                                                 <span key={fid} style={fid === ffId ? { color: 'var(--color-accent)', fontWeight: 600 } : undefined}>
                                                     {i > 0 && ' · '}{ffNameById.get(fid) || `ФФ ${fid}`} {formatNumber(q, 0)}

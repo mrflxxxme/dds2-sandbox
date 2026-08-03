@@ -818,9 +818,9 @@ export default function CampaignPage() {
                             {/* Редактор ставки зон не должен исчезать молча при ошибке/загрузке живого WB-вызова */}
                             {!zones && (zonesLoading || zonesError) && (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', fontSize: 12 }}>
-                                    <span style={{ fontWeight: 700, letterSpacing: 0.3, color: 'var(--color-muted)' }}>ЗОНЫ ПОКАЗОВ</span>
+                                    <span style={{ fontWeight: 700, letterSpacing: 0.3, color: 'var(--color-text-muted)' }}>ЗОНЫ ПОКАЗОВ</span>
                                     {zonesLoading ? (
-                                        <span style={{ color: 'var(--color-muted)' }}>ставки зон загружаются…</span>
+                                        <span style={{ color: 'var(--color-text-muted)' }}>ставки зон загружаются…</span>
                                     ) : (
                                         <>
                                             <span style={{ color: 'var(--color-danger)' }}>⚠️ WB не ответил — ставки зон не загрузились</span>

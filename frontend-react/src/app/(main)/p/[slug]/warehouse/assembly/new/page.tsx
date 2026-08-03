@@ -400,7 +400,7 @@ export default function AssemblyNewPage() {
                                     }}
                                     style={{
                                         background: 'none', border: 'none', cursor: 'pointer',
-                                        color: 'var(--color-primary)', fontSize: 14,
+                                        color: 'var(--color-accent)', fontSize: 14,
                                     }}
                                 >
                                     🔄
@@ -439,11 +439,11 @@ export default function AssemblyNewPage() {
                                             }}
                                             style={{
                                                 padding: '8px 12px', cursor: 'pointer',
-                                                background: s.id === fboSupplyId ? 'var(--color-bg-secondary)' : undefined,
+                                                background: s.id === fboSupplyId ? 'var(--color-accent-bg)' : undefined,
                                                 fontSize: 13,
                                             }}
-                                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-secondary)')}
-                                            onMouseLeave={e => (e.currentTarget.style.background = s.id === fboSupplyId ? 'var(--color-bg-secondary)' : '')}
+                                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-hover)')}
+                                            onMouseLeave={e => (e.currentTarget.style.background = s.id === fboSupplyId ? 'var(--color-accent-bg)' : '')}
                                         >
                                             <strong>{s.wb_supply_id}</strong> — {s.warehouse_name || 'Без склада'} ({s.total_qty} шт.)
                                         </div>
@@ -524,7 +524,7 @@ export default function AssemblyNewPage() {
                         </div>
                         <div className="form-group" style={{ flex: 1 }}>
                             <label className="form-label">Общий вес</label>
-                            <div style={{ padding: '8px 12px', background: 'var(--color-bg-secondary)', borderRadius: 8, fontWeight: 500 }}>
+                            <div style={{ padding: '8px 12px', background: 'var(--color-bg)', borderRadius: 8, fontWeight: 500 }}>
                                 {totalWeight > 0 ? formatNumber(totalWeight, 1) + ' кг' : '\u2014'}
                             </div>
                         </div>

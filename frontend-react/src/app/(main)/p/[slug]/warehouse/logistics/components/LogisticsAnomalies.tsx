@@ -36,7 +36,7 @@ export default function LogisticsAnomalies({ anomalies, slug }: Props) {
         {
             key: 'assembly_number', label: 'Заявка', sortable: true,
             render: (v: string | null, row: LogisticsAnomaly) => v
-                ? <a href={`/p/${slug}/warehouse/assembly/${row.assembly_request_id}`} style={{ fontWeight: 600, color: 'var(--color-primary)', textDecoration: 'none' }}>{v}</a>
+                ? <a href={`/p/${slug}/warehouse/assembly/${row.assembly_request_id}`} style={{ fontWeight: 600, color: 'var(--color-accent)', textDecoration: 'none' }}>{v}</a>
                 : '—',
         },
         { key: 'dest_warehouse', label: 'Склад сдачи', sortable: true },

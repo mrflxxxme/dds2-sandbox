@@ -119,7 +119,7 @@ export default function AbTestDetailPage() {
     if (loading) {
         return (
             <PageGuard page="ab-tests">
-                <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-muted)' }}>Загрузка…</div>
+                <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка…</div>
             </PageGuard>
         );
     }
@@ -144,7 +144,7 @@ export default function AbTestDetailPage() {
     const withPct = (count: number, share: string | null) => (
         <>
             {formatNumber(count, 0)}
-            {share != null && <span style={{ color: 'var(--color-dim)', fontSize: 12 }}> · {share}</span>}
+            {share != null && <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}> · {share}</span>}
         </>
     );
     const metricRows: { label: string; render: (v: AbTestVariantStats) => ReactNode; hint?: string }[] = [
@@ -205,7 +205,7 @@ export default function AbTestDetailPage() {
                     {{ draft: 'Черновик', running: 'Идёт', paused: 'Пауза', finished: 'Завершён', error: 'Ошибка' }[test.status]}
                 </span>
                 {test.started_at && (
-                    <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>
+                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
                         старт {formatDateTime(test.started_at)}{test.finished_at ? ` · финиш ${formatDateTime(test.finished_at)}` : ''}
                     </span>
                 )}
@@ -242,7 +242,7 @@ export default function AbTestDetailPage() {
             </div>
 
             {test.status === 'paused' && test.pause_reason && (
-                <div className="glass-card" style={{ marginBottom: 16, borderLeft: '3px solid var(--color-warning)', color: 'var(--color-muted)', fontSize: 13 }}>
+                <div className="glass-card" style={{ marginBottom: 16, borderLeft: '3px solid var(--color-warning)', color: 'var(--color-text-muted)', fontSize: 13 }}>
                     ⚠️ {test.pause_reason}
                 </div>
             )}
@@ -255,7 +255,7 @@ export default function AbTestDetailPage() {
                     <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>
                         Варианты фото ({uploaded.length}/10, не считая текущего)
                     </div>
-                    <div style={{ fontSize: 13, color: 'var(--color-muted)', marginBottom: 12 }}>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
                         JPEG/PNG/WebP, минимум 700×900, до 10 МБ. Текущее главное фото участвует автоматически как контроль.
                         Без текста и коллажей — WB может понизить такую карточку в поиске.
                     </div>
@@ -317,7 +317,7 @@ export default function AbTestDetailPage() {
                                                 </button>
                                             )}
                                         </div>
-                                        <div style={{ marginTop: 8, fontWeight: 600, color: v.excluded ? 'var(--color-dim)' : 'var(--color-text)' }}>
+                                        <div style={{ marginTop: 8, fontWeight: 600, color: v.excluded ? 'var(--color-text-dim)' : 'var(--color-text)' }}>
                                             {v.is_control ? 'Текущее фото' : `Вариант ${v.position}`}
                                         </div>
                                         <VariantBadges v={v} />
@@ -332,7 +332,7 @@ export default function AbTestDetailPage() {
                             <tbody>
                                 {metricRows.map((row) => (
                                     <tr key={row.label} style={{ borderTop: '1px solid var(--color-border)' }}>
-                                        <td style={{ padding: '10px 16px', color: 'var(--color-muted)', whiteSpace: 'nowrap' }} title={row.hint}>
+                                        <td style={{ padding: '10px 16px', color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }} title={row.hint}>
                                             {row.label}{row.hint ? ' ⓘ' : ''}
                                         </td>
                                         {variants.map((v) => (
@@ -340,7 +340,7 @@ export default function AbTestDetailPage() {
                                                 key={v.id}
                                                 style={{
                                                     padding: '10px 16px', textAlign: 'center',
-                                                    color: v.excluded ? 'var(--color-dim)' : 'var(--color-text)',
+                                                    color: v.excluded ? 'var(--color-text-dim)' : 'var(--color-text)',
                                                     fontWeight: row.label === 'CTR' ? 600 : 400,
                                                 }}
                                             >
@@ -360,7 +360,7 @@ export default function AbTestDetailPage() {
                     <div style={{ padding: '16px 16px 0', fontSize: 15, fontWeight: 600 }}>История кругов</div>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                         <thead>
-                            <tr style={{ color: 'var(--color-muted)', fontSize: 12 }}>
+                            <tr style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
                                 <th style={{ textAlign: 'left', padding: '10px 16px' }}>№</th>
                                 <th style={{ textAlign: 'left', padding: '10px 16px' }}>Фото</th>
                                 <th style={{ textAlign: 'left', padding: '10px 16px' }}>Начало</th>
