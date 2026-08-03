@@ -3,9 +3,13 @@ import {
     DESIGNER_PALETTE,
     buildAssigneeColors,
     buildMonthGrid,
+    buildTaskRange,
     formatMonthTitle,
+    isInTaskRange,
+    markersByDay,
     memberDisplayName,
     shiftMonth,
+    taskRangeEdge,
 } from '@/lib/designCalendar';
 
 describe('buildMonthGrid — месячная сетка (AC-1 F5: январь-2027)', () => {
@@ -136,5 +140,156 @@ describe('раскраска по дизайнеру — стабильная п
         expect(memberDisplayName({ user_id: 1, username: 'u', first_name: 'И', last_name: 'Ф' })).toBe('И Ф');
         expect(memberDisplayName({ user_id: 1, username: 'u', first_name: null, last_name: null })).toBe('u');
         expect(memberDisplayName({ user_id: 1, username: 'u', first_name: 'И', last_name: '' })).toBe('И');
+    });
+});
+
+describe('buildTaskRange — диапазон работы для персонального календаря задачи', () => {
+    const TODAY = '2027-03-20';
+
+    it('start = started_at, когда задачу взяли в работу', () => {
+        const r = buildTaskRange(
+            {
+                created_at: '2027-03-01T09:15:00',
+                started_at: '2027-03-05T12:00:00',
+                due_date: '2027-03-12',
+                status: 'IN_PROGRESS',
+            },
+            TODAY,
+        );
+        expect(r.start).toBe('2027-03-05');
+        expect(r.end).toBe('2027-03-12');
+        expect(r.due).toBe('2027-03-12');
+        expect(r.startSource).toBe('started');
+    });
+
+    it('start = created_at, когда started_at пуст (задачу ещё не взяли)', () => {
+        const r = buildTaskRange(
+            { created_at: '2027-03-01T09:15:00', started_at: null, due_date: '2027-03-12', status: 'NEW' },
+            TODAY,
+        );
+        expect(r.start).toBe('2027-03-01');
+        expect(r.end).toBe('2027-03-12');
+        expect(r.startSource).toBe('created');
+    });
+
+    it('карточка доски (есть только due_date) — полоса в один день, без падения', () => {
+        const r = buildTaskRange({ due_date: '2027-03-12', status: 'ASSIGNED' }, TODAY);
+        expect(r.start).toBe('2027-03-12');
+        expect(r.end).toBe('2027-03-12');
+        expect(r.startSource).toBeNull();
+        expect(r.markers).toEqual([{ iso: '2027-03-12', kind: 'due' }]);
+        expect(taskRangeEdge(r, '2027-03-12')).toBe('single');
+    });
+
+    it('работу начали ПОЗЖЕ срока — полоса разворачивается от срока до старта', () => {
+        const r = buildTaskRange(
+            { created_at: '2027-03-01T09:00:00', started_at: '2027-03-18T09:00:00', due_date: '2027-03-12', status: 'IN_PROGRESS' },
+            TODAY,
+        );
+        expect(r.start).toBe('2027-03-12');
+        expect(r.end).toBe('2027-03-18');
+        expect(r.due).toBe('2027-03-12');
+    });
+
+    it('стартовый месяц модалки — месяц срока; без срока — месяц события; совсем без дат — текущий', () => {
+        expect(buildTaskRange({ created_at: '2027-01-30T10:00:00', due_date: '2027-02-03' }, TODAY).month).toBe('2027-02');
+        expect(buildTaskRange({ created_at: '2027-01-30T10:00:00' }, TODAY).month).toBe('2027-01');
+        expect(buildTaskRange({}, TODAY).month).toBe('2027-03');
+    });
+
+    it('маркеры собираются по всем заданным датам и группируются по дню', () => {
+        const r = buildTaskRange(
+            {
+                created_at: '2027-03-01T09:00:00',
+                started_at: '2027-03-01T18:00:00', // тот же день, что постановка
+                due_date: '2027-03-12',
+                accepted_at: '2027-03-11T08:00:00',
+                status: 'ACCEPTED',
+            },
+            TODAY,
+        );
+        expect(r.markers.map((m) => m.kind)).toEqual(['created', 'started', 'due', 'accepted']);
+        const byDay = markersByDay(r);
+        expect(byDay.get('2027-03-01')).toEqual(['created', 'started']);
+        expect(byDay.get('2027-03-11')).toEqual(['accepted']);
+        expect(byDay.get('2027-03-12')).toEqual(['due']);
+    });
+});
+
+describe('buildTaskRange — без срока', () => {
+    const TODAY = '2027-03-20';
+
+    it('полосы нет, остаётся только точка постановки', () => {
+        const r = buildTaskRange({ created_at: '2027-03-02T09:00:00', due_date: null, status: 'NEW' }, TODAY);
+        expect(r.start).toBeNull();
+        expect(r.end).toBeNull();
+        expect(r.due).toBeNull();
+        expect(r.isOverdue).toBe(false);
+        expect(r.markers).toEqual([{ iso: '2027-03-02', kind: 'created' }]);
+    });
+
+    it('ни один день не попадает в диапазон', () => {
+        const r = buildTaskRange({ created_at: '2027-03-02T09:00:00', due_date: null }, TODAY);
+        for (const iso of ['2027-03-01', '2027-03-02', '2027-03-20', '2027-04-01']) {
+            expect(isInTaskRange(r, iso)).toBe(false);
+            expect(taskRangeEdge(r, iso)).toBeNull();
+        }
+    });
+});
+
+describe('isInTaskRange / taskRangeEdge — попадание дня в диапазон', () => {
+    const TODAY = '2027-03-20';
+    const range = buildTaskRange(
+        { created_at: '2027-03-01T09:00:00', started_at: '2027-03-05T09:00:00', due_date: '2027-03-12', status: 'IN_PROGRESS' },
+        TODAY,
+    );
+
+    it('границы включительно, соседние дни — вне', () => {
+        expect(isInTaskRange(range, '2027-03-04')).toBe(false);
+        expect(isInTaskRange(range, '2027-03-05')).toBe(true);
+        expect(isInTaskRange(range, '2027-03-09')).toBe(true);
+        expect(isInTaskRange(range, '2027-03-12')).toBe(true);
+        expect(isInTaskRange(range, '2027-03-13')).toBe(false);
+    });
+
+    it('края диапазона скругляются, середина — прямая', () => {
+        expect(taskRangeEdge(range, '2027-03-05')).toBe('start');
+        expect(taskRangeEdge(range, '2027-03-08')).toBe('middle');
+        expect(taskRangeEdge(range, '2027-03-12')).toBe('end');
+        expect(taskRangeEdge(range, '2027-03-13')).toBeNull();
+    });
+
+    it('диапазон через границу месяца сравнивается строками YYYY-MM-DD корректно', () => {
+        const r = buildTaskRange(
+            { created_at: '2027-02-25T09:00:00', started_at: null, due_date: '2027-03-03', status: 'NEW' },
+            TODAY,
+        );
+        expect(isInTaskRange(r, '2027-02-24')).toBe(false);
+        expect(isInTaskRange(r, '2027-02-28')).toBe(true);
+        expect(isInTaskRange(r, '2027-03-01')).toBe(true);
+        expect(isInTaskRange(r, '2027-03-04')).toBe(false);
+    });
+});
+
+describe('buildTaskRange — просрочка', () => {
+    const TODAY = '2027-03-20';
+
+    it('срок в прошлом и задача не завершена → просрочка', () => {
+        expect(buildTaskRange({ due_date: '2027-03-19', status: 'IN_PROGRESS' }, TODAY).isOverdue).toBe(true);
+    });
+
+    it('срок сегодня или в будущем → не просрочка (сравнение ДАТ, не моментов)', () => {
+        expect(buildTaskRange({ due_date: TODAY, status: 'IN_PROGRESS' }, TODAY).isOverdue).toBe(false);
+        expect(buildTaskRange({ due_date: '2027-03-21', status: 'IN_PROGRESS' }, TODAY).isOverdue).toBe(false);
+    });
+
+    it('принятая / отменённая / с accepted_at задача не просрочена', () => {
+        expect(buildTaskRange({ due_date: '2027-03-01', status: 'ACCEPTED' }, TODAY).isOverdue).toBe(false);
+        expect(buildTaskRange({ due_date: '2027-03-01', status: 'CANCELLED' }, TODAY).isOverdue).toBe(false);
+        expect(buildTaskRange({ due_date: '2027-03-01', accepted_at: '2027-02-28T10:00:00' }, TODAY).isOverdue).toBe(false);
+    });
+
+    it('без срока просрочки не бывает', () => {
+        expect(buildTaskRange({ created_at: '2026-01-01T00:00:00', status: 'IN_PROGRESS' }, TODAY).isOverdue).toBe(false);
     });
 });

@@ -151,3 +151,145 @@ export function buildAssigneeColors(members: DesignMemberLike[]): Map<string, st
     });
     return map;
 }
+
+// ─── Персональный календарь задачи ───────────────────────────────────────────
+
+/**
+ * Срез дат задачи для её личного календаря. Совместим И с `DesignTaskDetail`
+ * (все четыре даты), И с `DesignTaskListItem` (там из дат есть только
+ * `due_date`) — контракт API не меняется, всё берётся из уже загруженной
+ * задачи, без дополнительных запросов.
+ */
+export interface TaskDatesLike {
+    /** Поставлена (ISO datetime). */
+    created_at?: string | null;
+    /** Взята в работу (ISO datetime, null пока не взяли). */
+    started_at?: string | null;
+    /** Срок сдачи (YYYY-MM-DD, может отсутствовать). */
+    due_date?: string | null;
+    /** Принята (ISO datetime). */
+    accepted_at?: string | null;
+    /** Нужен только для просрочки: принятая/отменённая задача не просрочена. */
+    status?: DesignTaskStatus;
+}
+
+export type TaskMarkerKind = 'created' | 'started' | 'due' | 'accepted';
+
+export interface TaskRangeMarker {
+    /** День события (YYYY-MM-DD). */
+    iso: string;
+    kind: TaskMarkerKind;
+}
+
+export interface TaskRange {
+    /** Первый день полосы работы (YYYY-MM-DD); null — срок не задан. */
+    start: string | null;
+    /** Последний день полосы работы; null — срок не задан. */
+    end: string | null;
+    /** Сам срок (акцент в сетке); null — не задан. */
+    due: string | null;
+    /** Откуда взято начало полосы: started_at, иначе created_at. */
+    startSource: 'started' | 'created' | null;
+    /** Срок в прошлом и задача не завершена. */
+    isOverdue: boolean;
+    /** Точки-маркеры ключевых событий (в хронологическом порядке смысла). */
+    markers: TaskRangeMarker[];
+    /** Месяц, на котором открывать модалку: месяц срока, иначе события, иначе текущий. */
+    month: string;
+}
+
+/** День YYYY-MM-DD из ISO-строки бэка (datetime или date), null-безопасно. */
+function isoDay(value: string | null | undefined): string | null {
+    return value ? value.slice(0, 10) : null;
+}
+
+/** Задача завершена → просрочка неактуальна. */
+function isFinished(task: TaskDatesLike, accepted: string | null): boolean {
+    return task.status === 'ACCEPTED' || task.status === 'CANCELLED' || accepted != null;
+}
+
+/**
+ * Диапазон работы над задачей для её личного календаря.
+ *
+ * Полоса: от `started_at` (взята в работу), а если задачу ещё не взяли — от
+ * `created_at` (поставлена), до `due_date`. Без `due_date` полосы нет вообще
+ * (показываем только точки событий и подсказку «Срок не задан»). Если работу
+ * начали ПОЗЖЕ срока — полоса разворачивается от срока до дня старта, чтобы
+ * переработка была видна, а не схлопывалась в ноль.
+ *
+ * Сравнение дат — строками YYYY-MM-DD (как `is_overdue` бэка и деталка задачи),
+ * не моментами Date: иначе просрочка краснеет на сутки раньше.
+ */
+export function buildTaskRange(task: TaskDatesLike, todayIso?: string): TaskRange {
+    const today = todayIso ?? format(new Date(), 'yyyy-MM-dd');
+    const created = isoDay(task.created_at);
+    const started = isoDay(task.started_at);
+    const accepted = isoDay(task.accepted_at);
+    const due = isoDay(task.due_date);
+
+    const anchor = started ?? created;
+    let start: string | null = null;
+    let end: string | null = null;
+    if (due != null) {
+        start = anchor != null && anchor < due ? anchor : due;
+        end = anchor != null && anchor > due ? anchor : due;
+    }
+
+    const markers: TaskRangeMarker[] = [];
+    if (created) markers.push({ iso: created, kind: 'created' });
+    if (started) markers.push({ iso: started, kind: 'started' });
+    if (due) markers.push({ iso: due, kind: 'due' });
+    if (accepted) markers.push({ iso: accepted, kind: 'accepted' });
+
+    return {
+        start,
+        end,
+        due,
+        startSource: started != null ? 'started' : created != null ? 'created' : null,
+        isOverdue: due != null && due < today && !isFinished(task, accepted),
+        markers,
+        month: (due ?? started ?? created ?? today).slice(0, 7),
+    };
+}
+
+/** День попадает в полосу работы (границы включительно). */
+export function isInTaskRange(range: TaskRange, iso: string): boolean {
+    return range.start != null && range.end != null && iso >= range.start && iso <= range.end;
+}
+
+/** Позиция дня в полосе — для скругления краёв (референс: сплошная полоса). */
+export type TaskRangeEdge = 'single' | 'start' | 'end' | 'middle' | null;
+
+export function taskRangeEdge(range: TaskRange, iso: string): TaskRangeEdge {
+    if (!isInTaskRange(range, iso)) return null;
+    if (range.start === range.end) return 'single';
+    if (iso === range.start) return 'start';
+    if (iso === range.end) return 'end';
+    return 'middle';
+}
+
+/** Маркеры, сгруппированные по дню (в один день может попасть несколько событий). */
+export function markersByDay(range: TaskRange): Map<string, TaskMarkerKind[]> {
+    const map = new Map<string, TaskMarkerKind[]>();
+    for (const m of range.markers) {
+        const list = map.get(m.iso);
+        if (list) list.push(m.kind);
+        else map.set(m.iso, [m.kind]);
+    }
+    return map;
+}
+
+export const TASK_MARKER_LABEL: Record<TaskMarkerKind, string> = {
+    created: 'Поставлена',
+    started: 'Взята в работу',
+    due: 'Срок сдачи',
+    accepted: 'Принята',
+};
+
+/** Цвета маркеров — только var(--color-*) (design.md). */
+export const TASK_MARKER_COLOR: Record<TaskMarkerKind, string> = {
+    created: 'var(--color-text-muted)',
+    started: 'var(--color-accent)',
+    due: 'var(--color-warning)',
+    accepted: 'var(--color-success)',
+};

@@ -11,10 +11,12 @@ interface TaskCardProps {
     onDragStart?: (e: React.DragEvent) => void;
     onDragOver?: (e: React.DragEvent) => void;
     onDrop?: (e: React.DragEvent) => void;
+    /** Клик по значку срока — персональный календарь задачи (не мешает dnd/открытию). */
+    onOpenCalendar?: () => void;
 }
 
 /** Карточка задачи на доске: номер · превью · заголовок · исполнитель · срок · бейджи. */
-export default function TaskCard({ t, onClick, draggable, onDragStart, onDragOver, onDrop }: TaskCardProps) {
+export default function TaskCard({ t, onClick, draggable, onDragStart, onDragOver, onDrop, onOpenCalendar }: TaskCardProps) {
     return (
         <div
             draggable={draggable}
@@ -57,9 +59,35 @@ export default function TaskCard({ t, onClick, draggable, onDragStart, onDragOve
                 {t.due_date && (
                     <span
                         title={t.is_overdue ? 'Просрочена' : 'Срок'}
-                        style={{ marginLeft: 'auto', whiteSpace: 'nowrap', color: t.is_overdue ? 'var(--color-danger)' : 'var(--color-text-muted)', fontWeight: t.is_overdue ? 600 : 400 }}
+                        style={{ marginLeft: 'auto', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4, color: t.is_overdue ? 'var(--color-danger)' : 'var(--color-text-muted)', fontWeight: t.is_overdue ? 600 : 400 }}
                     >
                         {formatDate(t.due_date)}
+                        {onOpenCalendar && (
+                            // Отдельная маленькая мишень: drag стартует с карточки,
+                            // поэтому иконка draggable={false} + stopPropagation,
+                            // иначе клик утечёт в onClick карточки (переход на деталку).
+                            <span
+                                role="button"
+                                tabIndex={0}
+                                draggable={false}
+                                aria-label="Календарь задачи"
+                                title="Календарь задачи"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    onOpenCalendar();
+                                }}
+                                onKeyDown={(e) => {
+                                    if (e.key !== 'Enter' && e.key !== ' ') return;
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    onOpenCalendar();
+                                }}
+                                onDragStart={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                                style={{ cursor: 'pointer', fontSize: 12, lineHeight: 1, padding: 2, borderRadius: 8 }}
+                            >
+                                📅
+                            </span>
+                        )}
                     </span>
                 )}
             </div>

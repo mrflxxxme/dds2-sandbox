@@ -9,6 +9,7 @@ import {
     type BoardColumns,
     type DesignBoardStatus,
 } from '@/lib/design';
+import type { DesignTaskListItem } from '@/types/api';
 import TaskCard from './TaskCard';
 
 interface BoardViewProps {
@@ -22,10 +23,12 @@ interface BoardViewProps {
     onOpen: (taskId: number) => void;
     /** Запрос перемещения (страница решает: сразу move или модалка причины для REVISION). */
     onMoveRequest: (taskId: number, toStatus: DesignBoardStatus, beforeTaskId: number | null) => void;
+    /** Клик по значку срока на карточке — персональный календарь задачи. */
+    onOpenCalendar: (task: DesignTaskListItem) => void;
 }
 
 /** Доска: 6 колонок, нативный HTML5 drag&drop (Р8). */
-export default function BoardView({ columns, canReorder, onOpen, onMoveRequest }: BoardViewProps) {
+export default function BoardView({ columns, canReorder, onOpen, onMoveRequest, onOpenCalendar }: BoardViewProps) {
     const [dragTaskId, setDragTaskId] = useState<number | null>(null);
     const [dragOverCol, setDragOverCol] = useState<DesignBoardStatus | null>(null);
 
@@ -100,6 +103,7 @@ export default function BoardView({ columns, canReorder, onOpen, onMoveRequest }
                                         handleDrop(status, t.id);
                                     }}
                                     onClick={() => onOpen(t.id)}
+                                    onOpenCalendar={() => onOpenCalendar(t)}
                                 />
                             ))}
                             {tasks.length === 0 && (

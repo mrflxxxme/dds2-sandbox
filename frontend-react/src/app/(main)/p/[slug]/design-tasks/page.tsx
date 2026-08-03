@@ -14,11 +14,12 @@ import {
     type BoardColumns,
     type DesignBoardStatus,
 } from '@/lib/design';
-import type { DesignBoardPermissions, DesignBoardResponse } from '@/types/api';
+import type { DesignBoardPermissions, DesignBoardResponse, DesignTaskListItem } from '@/types/api';
 import BoardView from './components/BoardView';
 import ListView from './components/ListView';
 import HoldCancelledOverlay from './components/HoldCancelledOverlay';
 import ReasonModal from './components/ReasonModal';
+import TaskCalendarModal from './components/TaskCalendarModal';
 import DesignTabs from './components/DesignTabs';
 import StatsPanel from './components/StatsPanel';
 
@@ -47,6 +48,8 @@ function DesignTasksPageInner() {
     const [overlay, setOverlay] = useState<'ON_HOLD' | 'CANCELLED' | null>(null);
     // Модалка причины ПЕРЕД move: dnd/кнопка в «Правки» требует комментарий (контракт: 400 без него).
     const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
+    // Персональный календарь задачи: данные — из уже загруженной карточки доски, без запросов.
+    const [calendarTask, setCalendarTask] = useState<DesignTaskListItem | null>(null);
     const mountedRef = useRef(true);
 
     const load = useCallback(async (quiet = false) => {
@@ -177,6 +180,7 @@ function DesignTasksPageInner() {
                                 canReorder={perms.can_reorder}
                                 onOpen={openTask}
                                 onMoveRequest={onMoveRequest}
+                                onOpenCalendar={setCalendarTask}
                             />
                         )
                     )}
@@ -200,6 +204,14 @@ function DesignTasksPageInner() {
                         await doMove(mv.taskId, mv.toStatus, mv.beforeTaskId, reason);
                     }}
                     onClose={() => setPendingMove(null)}
+                />
+            )}
+
+            {calendarTask && (
+                <TaskCalendarModal
+                    task={calendarTask}
+                    onClose={() => setCalendarTask(null)}
+                    onOpenTask={() => { const id = calendarTask.id; setCalendarTask(null); openTask(id); }}
                 />
             )}
 

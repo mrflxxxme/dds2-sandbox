@@ -24,12 +24,14 @@ import ReasonModal from '../components/ReasonModal';
 import SubmitWorkModal from '../components/SubmitWorkModal';
 import AssignModal from '../components/AssignModal';
 import EditTaskModal from '../components/EditTaskModal';
+import TaskCalendarModal from '../components/TaskCalendarModal';
 
 type ModalState =
     | { kind: 'submit' }
     | { kind: 'return'; subId: number }
     | { kind: 'assign' }
     | { kind: 'edit' }
+    | { kind: 'calendar' }
     | { kind: 'status'; to: DesignTaskStatus; required: boolean }
     | { kind: 'cancel' }
     | null;
@@ -222,6 +224,13 @@ export default function DesignTaskDetailPage() {
                                     {formatDate(task.due_date)}
                                 </b>
                             </span>
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                title="Календарь этой задачи: сроки, взятие в работу, приёмка"
+                                onClick={() => setModal({ kind: 'calendar' })}
+                            >
+                                📅 Календарь задачи
+                            </button>
                             <span>Исполнитель: <b style={{ color: 'var(--color-text)' }}>{task.assignee_name ?? userName(task.assignee_user_id)}</b></span>
                         </div>
                         <div style={{ marginTop: 12 }}>
@@ -402,6 +411,9 @@ export default function DesignTaskDetailPage() {
                     onSaved={(t) => { setTask(t); setModal(null); setToast({ type: 'success', message: 'Сохранено' }); }}
                     onClose={() => setModal(null)}
                 />
+            )}
+            {modal?.kind === 'calendar' && (
+                <TaskCalendarModal task={task} onClose={() => setModal(null)} />
             )}
             {modal?.kind === 'status' && (
                 <ReasonModal
