@@ -212,10 +212,10 @@ export default function WarehouseDetailPage() {
                             padding: '10px 16px',
                             fontSize: 14,
                             fontWeight: tab === t.key ? 600 : 400,
-                            color: tab === t.key ? 'var(--color-primary)' : 'var(--color-text-muted)',
+                            color: tab === t.key ? 'var(--color-accent)' : 'var(--color-text-muted)',
                             background: 'none',
                             border: 'none',
-                            borderBottom: tab === t.key ? '2px solid var(--color-primary)' : '2px solid transparent',
+                            borderBottom: tab === t.key ? '2px solid var(--color-accent)' : '2px solid transparent',
                             cursor: 'pointer',
                             marginBottom: -1,
                         }}
@@ -827,7 +827,7 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
                                 border: '1px solid var(--color-border)',
                                 cursor: 'pointer', transition: 'all 0.15s',
                             }}
-                            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--color-primary)'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
+                            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--color-accent)'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
                             onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--color-border)'; e.currentTarget.style.transform = ''; }}
                         >
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
@@ -914,7 +914,7 @@ function ExpectedVehicles({ warehouseId, slug, ffConnected, onFfLinked }: { ware
                                 border: '1px solid var(--color-border)',
                                 cursor: 'pointer', transition: 'all 0.15s',
                             }}
-                            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--color-primary)'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
+                            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--color-accent)'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
                             onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--color-border)'; e.currentTarget.style.transform = ''; }}
                         >
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
@@ -2447,7 +2447,7 @@ function DeliveryTab({ warehouseId }: { warehouseId: number }) {
                             onBlur={() => setEditingAssembly(false)}
                             onKeyDown={e => e.key === 'Enter' && setEditingAssembly(false)}
                             autoFocus
-                            style={{ width: 50, padding: '2px 6px', fontSize: 14, border: '1px solid var(--color-primary)', borderRadius: 6, textAlign: 'center' }}
+                            style={{ width: 50, padding: '2px 6px', fontSize: 14, border: '1px solid var(--color-accent)', borderRadius: 6, textAlign: 'center' }}
                         />
                     ) : (
                         <span style={{ fontWeight: 600 }}>{assemblyDays} дн.</span>
@@ -2477,7 +2477,7 @@ function DeliveryTab({ warehouseId }: { warehouseId: number }) {
                             onBlur={() => setEditingAcceptance(false)}
                             onKeyDown={e => e.key === 'Enter' && setEditingAcceptance(false)}
                             autoFocus
-                            style={{ width: 50, padding: '2px 6px', fontSize: 14, border: '1px solid var(--color-primary)', borderRadius: 6, textAlign: 'center' }}
+                            style={{ width: 50, padding: '2px 6px', fontSize: 14, border: '1px solid var(--color-accent)', borderRadius: 6, textAlign: 'center' }}
                         />
                     ) : (
                         <span style={{ fontWeight: 600 }}>{wbAcceptanceDays} дн.</span>

@@ -1064,7 +1064,7 @@ export default function AssemblyDetailPage() {
                                     <div
                                         onClick={() => { handleFboSave(null); setFboDropdownOpen(false); }}
                                         style={{ padding: '8px 12px', cursor: 'pointer', fontSize: 13, color: 'var(--color-text-muted)', fontStyle: 'italic' }}
-                                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-secondary)')}
+                                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-hover)')}
                                         onMouseLeave={e => (e.currentTarget.style.background = '')}
                                     >
                                         Без поставки
@@ -1079,7 +1079,7 @@ export default function AssemblyDetailPage() {
                                                 key={s.id}
                                                 onClick={() => { handleFboSave(s.id); setFboDropdownOpen(false); }}
                                                 style={{ padding: '8px 12px', cursor: 'pointer', fontSize: 13 }}
-                                                onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-secondary)')}
+                                                onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-bg-hover)')}
                                                 onMouseLeave={e => (e.currentTarget.style.background = '')}
                                             >
                                                 <strong>{s.wb_supply_id}</strong> — {s.warehouse_name || 'Без склада'} ({s.total_qty} шт.)
@@ -1118,7 +1118,7 @@ export default function AssemblyDetailPage() {
                                     </a>
                                 ) : 'Без поставки'}
                                 {canEditFbo && (
-                                    <span style={{ color: 'var(--color-primary, #3b82f6)', fontSize: 13, opacity: 0.6 }}>&#x270E;</span>
+                                    <span style={{ color: 'var(--color-accent)', fontSize: 13, opacity: 0.6 }}>&#x270E;</span>
                                 )}
                             </div>
                         </div>
@@ -1709,7 +1709,7 @@ export default function AssemblyDetailPage() {
                                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 20 }}>
                                         <div style={{
                                             width: 10, height: 10, borderRadius: '50%',
-                                            background: isLast ? 'var(--color-primary)' : 'var(--color-border)',
+                                            background: isLast ? 'var(--color-accent)' : 'var(--color-border)',
                                             flexShrink: 0, marginTop: 6,
                                         }} />
                                         {!isLast && (
@@ -2203,7 +2203,7 @@ function EditableInfoField({
                 >
                     {displayValue || '\u2014'}
                     {editable && (
-                        <span style={{ color: 'var(--color-primary, #3b82f6)', fontSize: 13, opacity: 0.6 }}>✎</span>
+                        <span style={{ color: 'var(--color-accent)', fontSize: 13, opacity: 0.6 }}>✎</span>
                     )}
                 </div>
             )}

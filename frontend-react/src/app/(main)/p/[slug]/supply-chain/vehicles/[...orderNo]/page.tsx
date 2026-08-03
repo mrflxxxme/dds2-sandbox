@@ -134,9 +134,9 @@ function InfoField({ label, value, editing, input }: {
 
 function SummaryKpi({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
     return (
-        <div style={{ textAlign: 'center', padding: '6px 4px', background: accent ? 'rgba(59,130,246,0.04)' : 'var(--color-bg-secondary)', borderRadius: 8 }}>
+        <div style={{ textAlign: 'center', padding: '6px 4px', background: accent ? 'rgba(59,130,246,0.04)' : 'var(--color-bg)', borderRadius: 8 }}>
             <div style={{ fontSize: 9, color: 'var(--color-text-muted)', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.3px' }}>{label}</div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: accent ? 'var(--color-primary)' : 'var(--color-text)' }}>{value}</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: accent ? 'var(--color-accent)' : 'var(--color-text)' }}>{value}</div>
         </div>
     );
 }
@@ -1096,7 +1096,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                 {hasCosts && (
                     <tr>
                         <th colSpan={11 + (canDelete ? 1 : 0)} style={{ padding: '4px 6px', fontSize: 10, color: 'var(--color-text-muted)', borderBottom: 'none', fontWeight: 400 }}>{t('cost_goods')}</th>
-                        <th colSpan={costCols} style={{ padding: '4px 6px', fontSize: 10, color: 'var(--color-primary)', borderBottom: 'none', fontWeight: 500, textAlign: 'center', background: 'rgba(59,130,246,0.04)' }}>
+                        <th colSpan={costCols} style={{ padding: '4px 6px', fontSize: 10, color: 'var(--color-accent)', borderBottom: 'none', fontWeight: 500, textAlign: 'center', background: 'rgba(59,130,246,0.04)' }}>
                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
                                 <span>{t('col_cost')} (₽)</span>
                                 <div style={{ display: 'inline-flex', borderRadius: 6, overflow: 'hidden', border: '1px solid #cbd5e1' }}>
@@ -1479,7 +1479,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                     {hasCosts && <td style={{ ...tdF, padding: '12px 6px', whiteSpace: 'nowrap' }}>{perUnit ? '' : `${formatNumber(totalDelivery, 0)} ₽`}</td>}
                     {hasCosts && <td style={{ ...tdF, padding: '12px 6px', whiteSpace: 'nowrap' }}>{perUnit ? '' : `${formatNumber(totalDuty, 0)} ₽`}</td>}
                     {hasCosts && <td style={{ ...tdF, padding: '12px 6px', whiteSpace: 'nowrap' }}>{perUnit ? '' : `${formatNumber(totalVat, 0)} ₽`}</td>}
-                    {hasCosts && <td style={{ ...tdF, padding: '12px 6px', fontWeight: 700, fontSize: 15, color: 'var(--color-primary)', whiteSpace: 'nowrap' }}>{perUnit ? '' : `${formatNumber(totalRub, 0)} ₽`}</td>}
+                    {hasCosts && <td style={{ ...tdF, padding: '12px 6px', fontWeight: 700, fontSize: 15, color: 'var(--color-accent)', whiteSpace: 'nowrap' }}>{perUnit ? '' : `${formatNumber(totalRub, 0)} ₽`}</td>}
                     {canDelete && <td />}
                 </tr>
             </tfoot>
@@ -2247,9 +2247,9 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
                             <button key={m} onClick={() => setMode(m)}
                                 style={{
                                     padding: '6px 16px', borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: 'pointer',
-                                    border: mode === m ? '2px solid var(--color-primary)' : '1px solid var(--color-border)',
-                                    background: mode === m ? 'var(--color-primary-bg)' : 'var(--color-bg)',
-                                    color: mode === m ? 'var(--color-primary)' : 'var(--color-text)',
+                                    border: mode === m ? '2px solid var(--color-accent)' : '1px solid var(--color-border)',
+                                    background: mode === m ? 'var(--color-accent-bg)' : 'var(--color-bg)',
+                                    color: mode === m ? 'var(--color-accent)' : 'var(--color-text)',
                                 }}>
                                 {m === 'list' ? `📋 ${t('add_items_subtitle')}` : `📎 ${t('items_paste_header')}`}
                             </button>
@@ -2434,7 +2434,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
                     {/* ═══ PASTE MODE ═══ */}
                     {mode === 'paste' && (
                         <>
-                            <div style={{ padding: 10, marginBottom: 12, fontSize: 13, color: 'var(--color-text-muted)', background: 'var(--color-bg-secondary)', borderRadius: 8 }}>
+                            <div style={{ padding: 10, marginBottom: 12, fontSize: 13, color: 'var(--color-text-muted)', background: 'var(--color-bg)', borderRadius: 8 }}>
                                 {t('items_paste_sub')}
                             </div>
 
@@ -2968,7 +2968,7 @@ function DocumentsTab({ orderNo }: { orderNo: string }) {
                                     <td style={{ padding: '8px 6px' }}>
                                         <span style={{
                                             display: 'inline-block', padding: '2px 10px', borderRadius: 12,
-                                            fontSize: 11, fontWeight: 500, background: 'var(--color-bg-secondary)',
+                                            fontSize: 11, fontWeight: 500, background: 'var(--color-bg)',
                                             color: 'var(--color-text-muted)',
                                         }}>
                                             {DOC_TYPE_LABELS[doc.doc_type] || doc.doc_type}
@@ -3055,7 +3055,7 @@ function HistoryTab({ orderNo }: { orderNo: string }) {
                                 <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
                                     <span>{formatDateTime(entry.changed_at)}</span>
                                     {entry.changed_by && (
-                                        <span style={{ fontSize: 11, padding: '1px 8px', borderRadius: 8, background: 'var(--color-bg-secondary)', color: 'var(--color-text)' }}>
+                                        <span style={{ fontSize: 11, padding: '1px 8px', borderRadius: 8, background: 'var(--color-bg)', color: 'var(--color-text)' }}>
                                             {entry.changed_by}
                                         </span>
                                     )}

@@ -431,7 +431,7 @@ export default function TransferLogisticsTab({ warehouses }: { warehouses: Wareh
                                             `${formatNumber(value, n === 'cost_per_unit' ? 2 : 0)} ₽`,
                                             n === 'cost_per_unit' ? '₽/шт' : 'Стоимость',
                                         ]}
-                                        contentStyle={{ background: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 13 }}
+                                        contentStyle={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 13 }}
                                     />
                                     <RechartsLegend formatter={(v: string) => (v === 'cost_per_unit' ? '₽/шт' : 'Стоимость')} />
                                     <Bar yAxisId="left" dataKey="total_cost" name="total_cost" fill="var(--color-accent)" opacity={0.7} />

@@ -1474,7 +1474,7 @@ export default function LogisticsPage() {
                                                     className="glass-card"
                                                     style={{
                                                         padding: 16,
-                                                        border: checked ? '2px solid var(--color-primary)' : undefined,
+                                                        border: checked ? '2px solid var(--color-accent)' : undefined,
                                                         cursor: 'pointer',
                                                     }}
                                                     onClick={() => toggleCheckedNoCost(t.id)}
@@ -1486,7 +1486,7 @@ export default function LogisticsPage() {
                                                                 checked={checked}
                                                                 onChange={() => toggleCheckedNoCost(t.id)}
                                                                 onClick={e => e.stopPropagation()}
-                                                                style={{ width: 18, height: 18, accentColor: 'var(--color-primary)', cursor: 'pointer' }}
+                                                                style={{ width: 18, height: 18, accentColor: 'var(--color-accent)', cursor: 'pointer' }}
                                                             />
                                                             <Link
                                                                 href={`/p/${slug}/warehouse/transfers/${t.id}`}
@@ -1569,7 +1569,7 @@ export default function LogisticsPage() {
                                     {groupedAll.map(group => (
                                         <React.Fragment key={group.key}>
                                             <tr>
-                                                <td colSpan={13} style={{ background: 'var(--color-bg-secondary)', fontWeight: 600, fontSize: 13, padding: '8px 12px' }}>
+                                                <td colSpan={13} style={{ background: 'var(--color-bg)', fontWeight: 600, fontSize: 13, padding: '8px 12px' }}>
                                                     {group.label || 'Без склада'}
                                                     <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8 }}>
                                                         {group.items.length} заявок{group.transfers.length > 0 ? ` + ${group.transfers.length} перемещений` : ''}, {group.items.reduce((s, i) => s + (i.joint_supply ? jointTotalPallets(i) : i.pallets_count), 0) + group.transfers.reduce((s, t) => s + (t.pallets_count || 0), 0)} палет
@@ -1603,14 +1603,14 @@ export default function LogisticsPage() {
                                                                     type="checkbox"
                                                                     checked={isChecked}
                                                                     onChange={() => toggleChecked(item.id)}
-                                                                    style={{ width: 16, height: 16, accentColor: 'var(--color-primary)', cursor: 'pointer' }}
+                                                                    style={{ width: 16, height: 16, accentColor: 'var(--color-accent)', cursor: 'pointer' }}
                                                                 />
                                                             )}
                                                         </td>
                                                         <td onClick={e => e.stopPropagation()}>
                                                             <Link
                                                                 href={`/p/${slug}/warehouse/assembly/${item.id}`}
-                                                                style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-primary)' }}
+                                                                style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-accent)' }}
                                                             >
                                                                 {item.number}
                                                             </Link>
@@ -1763,7 +1763,7 @@ export default function LogisticsPage() {
                                             const ffNums = ffRequestNumbers(item);
                                             const jointPending = isJoint ? jointPendingWarehouses(item) : [];
                                             const borderColor = isChecked
-                                                ? 'var(--color-primary)'
+                                                ? 'var(--color-accent)'
                                                 : veryStuck ? 'var(--color-danger)'
                                                 : isStuck ? 'var(--color-warning)'
                                                 : undefined;
@@ -1777,7 +1777,7 @@ export default function LogisticsPage() {
                                                         // Совместную не затемняем даже «в сборке» — внутри читаемая разбивка.
                                                         opacity: (soon && !isJoint) ? 0.5 : 1,
                                                         border: borderColor ? `2px solid ${borderColor}` : undefined,
-                                                        borderLeft: isJoint ? '3px solid var(--color-primary)' : undefined,
+                                                        borderLeft: isJoint ? '3px solid var(--color-accent)' : undefined,
                                                         cursor: canCheck ? 'pointer' : undefined,
                                                     }}
                                                     onClick={canCheck ? () => toggleChecked(item.id) : undefined}
@@ -1790,7 +1790,7 @@ export default function LogisticsPage() {
                                                                     checked={isChecked}
                                                                     onChange={() => toggleChecked(item.id)}
                                                                     onClick={e => e.stopPropagation()}
-                                                                    style={{ width: 18, height: 18, accentColor: 'var(--color-primary)', cursor: 'pointer' }}
+                                                                    style={{ width: 18, height: 18, accentColor: 'var(--color-accent)', cursor: 'pointer' }}
                                                                 />
                                                             )}
                                                             <Link
@@ -2081,7 +2081,7 @@ export default function LogisticsPage() {
                                                 <YAxis tick={{ fontSize: 12 }} />
                                                 <RechartsTooltip
                                                     formatter={(value: number) => [formatNumber(value, 0) + ' ₽', 'Средняя ₽/палета']}
-                                                    contentStyle={{ background: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 13 }}
+                                                    contentStyle={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 13 }}
                                                 />
                                                 <Bar dataKey="avg_cost" radius={[4, 4, 0, 0]}>
                                                     {analyticsData.by_destination.map((entry, idx) => (
@@ -2509,7 +2509,7 @@ function HeatmapMatrix({ routes }: { routes: LogisticsRouteStat[] }) {
                             const cost = routeMap[`${sw}|${dw}`];
                             if (cost === undefined) {
                                 return (
-                                    <div key={dw} style={{ padding: 8, textAlign: 'center', fontSize: 12, color: 'var(--color-text-muted)', borderRadius: 6, background: 'var(--color-bg-secondary)' }}>
+                                    <div key={dw} style={{ padding: 8, textAlign: 'center', fontSize: 12, color: 'var(--color-text-muted)', borderRadius: 6, background: 'var(--color-bg)' }}>
                                         —
                                     </div>
                                 );

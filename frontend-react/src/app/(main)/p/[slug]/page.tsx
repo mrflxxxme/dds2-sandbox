@@ -304,9 +304,9 @@ function DashboardInner() {
                 <div style={{display:'flex',gap:4,flexWrap:'wrap',alignItems:'center'}}>
                     {allPeriods.map(p=>(<button key={p.key} className={`btn btn-sm ${period===p.key?'btn-primary':'btn-secondary'}`} onClick={()=>setPeriod(p.key)} style={period===p.key?{background:'var(--color-accent)',borderColor:'var(--color-accent)'}:{}}>{p.label}</button>))}
                     <span style={{color:'var(--color-text-muted)',fontSize:12,margin:'0 4px'}}>|</span>
-                    <input type="date" value={period==='custom'?customFrom:dateFrom} onChange={e=>{setCustomFrom(e.target.value);setPeriod('custom');}} style={{background:'var(--color-bg-elevated)',border:'1px solid var(--color-border)',borderRadius:6,padding:'4px 8px',color:'var(--color-text)',fontSize:12}}/>
+                    <input type="date" value={period==='custom'?customFrom:dateFrom} onChange={e=>{setCustomFrom(e.target.value);setPeriod('custom');}} style={{background:'var(--color-bg-input)',border:'1px solid var(--color-border)',borderRadius:6,padding:'4px 8px',color:'var(--color-text)',fontSize:12}}/>
                     <span style={{color:'var(--color-text-muted)',fontSize:12}}>—</span>
-                    <input type="date" value={period==='custom'?customTo:dateTo} onChange={e=>{setCustomTo(e.target.value);setPeriod('custom');}} style={{background:'var(--color-bg-elevated)',border:'1px solid var(--color-border)',borderRadius:6,padding:'4px 8px',color:'var(--color-text)',fontSize:12}}/>
+                    <input type="date" value={period==='custom'?customTo:dateTo} onChange={e=>{setCustomTo(e.target.value);setPeriod('custom');}} style={{background:'var(--color-bg-input)',border:'1px solid var(--color-border)',borderRadius:6,padding:'4px 8px',color:'var(--color-text)',fontSize:12}}/>
                 </div>
             </div>
 

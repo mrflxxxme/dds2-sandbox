@@ -371,7 +371,7 @@ function HistoryTab() {
                                         <div
                                             style={{
                                                 width: '80%', height: h, borderRadius: '4px 4px 0 0',
-                                                background: 'var(--color-primary, #3b82f6)',
+                                                background: 'var(--color-accent)',
                                                 opacity: 0.8,
                                             }}
                                             title={`${d.date}: всего ${formatNumber(d.total, 0)} шт (склад: ${formatNumber(d.total_qty, 0)}, к кл: ${formatNumber(d.in_way_to_client, 0)}, от кл: ${formatNumber(d.in_way_from_client, 0)})`}
@@ -511,7 +511,7 @@ export default function WbStocksPage() {
                                     padding: '8px 20px',
                                     background: 'none',
                                     border: 'none',
-                                    borderBottom: tab === t.key ? '2px solid var(--color-primary, #3b82f6)' : '2px solid transparent',
+                                    borderBottom: tab === t.key ? '2px solid var(--color-accent)' : '2px solid transparent',
                                     marginBottom: -2,
                                     fontWeight: tab === t.key ? 600 : 400,
                                     color: tab === t.key ? 'var(--color-text)' : 'var(--color-text-muted)',

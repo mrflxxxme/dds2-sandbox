@@ -57,7 +57,7 @@ function CostHistory() {
     useEffect(() => { load(); }, [load]);
 
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>⏳ Загрузка...</div>;
-    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--danger)' }}>❌ {error}</div>;
+    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>❌ {error}</div>;
     if (!data || !data.articles?.length) return <div className="glass-card" style={{ padding: 32, textAlign: 'center', opacity: 0.6 }}>Нет данных о себестоимости</div>;
 
     const orders: CostHistoryOrder[] = data.orders || [];
@@ -87,8 +87,8 @@ function CostHistory() {
 
     const selectStyle: React.CSSProperties = {
         padding: '8px 12px', borderRadius: 8,
-        border: '1px solid var(--border)',
-        background: 'var(--bg-secondary)', color: 'var(--text-primary)',
+        border: '1px solid var(--color-border)',
+        background: 'var(--color-bg-input)', color: 'var(--color-text)',
     };
 
     return (
@@ -115,12 +115,13 @@ function CostHistory() {
                 <table className="data-table" style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
                     <thead>
                         <tr>
-                            <th style={{ position: 'sticky', left: 0, background: 'var(--bg-secondary)', zIndex: 2, minWidth: 180 }}>Артикул</th>
+                            {/* Фон не задаём: .data-table thead th уже даёт frost-подложку */}
+                            <th style={{ position: 'sticky', left: 0, zIndex: 2, minWidth: 180 }}>Артикул</th>
                             <th style={{ minWidth: 100 }}>WB Артикул</th>
                             <th style={{ minWidth: 80 }}>Бренд</th>
                             <th style={{ minWidth: 100 }}>Категория</th>
-                            <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--primary)' }}>Средняя ₽</th>
-                            <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--success)' }}>Последняя ₽</th>
+                            <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--color-accent)' }}>Средняя ₽</th>
+                            <th style={{ textAlign: 'right', fontWeight: 700, color: 'var(--color-success)' }}>Последняя ₽</th>
                             {orders.map((o: CostHistoryOrder) => (
                                 <th key={o.order_no} style={{ textAlign: 'right', minWidth: 100 }}>
                                     <div>{o.order_no}</div>
@@ -133,18 +134,18 @@ function CostHistory() {
                         {articles.map((a: CostHistoryArticle, i: number) => {
                             return (
                                 <tr key={i}>
-                                    <td style={{ position: 'sticky', left: 0, background: 'var(--bg-primary)', zIndex: 1, fontWeight: 600 }}>{a.article_seller}</td>
+                                    <td style={{ position: 'sticky', left: 0, background: 'var(--color-bg)', zIndex: 1, fontWeight: 600 }}>{a.article_seller}</td>
                                     <td style={{ opacity: 0.7, fontSize: 12 }}>{a.article_wb || '—'}</td>
                                     <td><span className="badge badge-info" style={{ fontSize: 11 }}>{a.brand || '—'}</span></td>
                                     <td style={{ opacity: 0.7 }}>{a.subject || '—'}</td>
-                                    <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--primary)' }}>{a.avg_cost ? formatNumber(a.avg_cost) : '—'}</td>
-                                    <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--success)' }}>{a.latest_cost ? formatNumber(a.latest_cost) : '—'}</td>
+                                    <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-accent)' }}>{a.avg_cost ? formatNumber(a.avg_cost) : '—'}</td>
+                                    <td style={{ textAlign: 'right', fontWeight: 600, color: 'var(--color-success)' }}>{a.latest_cost ? formatNumber(a.latest_cost) : '—'}</td>
                                     {orders.map((o: CostHistoryOrder, j: number) => {
                                         const c = a.costs?.[o.order_no];
                                         if (!c) return <td key={j} style={{ textAlign: 'right', opacity: 0.2 }}>—</td>;
                                         const prev = j < orders.length - 1 ? (a.costs?.[orders[j + 1]?.order_no]?.cost || 0) : 0;
                                         const diff = prev > 0 ? ((c.cost - prev) / prev * 100) : 0;
-                                        const color = diff > 5 ? 'var(--danger)' : diff < -5 ? 'var(--success)' : 'var(--text-primary)';
+                                        const color = diff > 5 ? 'var(--color-danger)' : diff < -5 ? 'var(--color-success)' : 'var(--color-text)';
                                         return (
                                             <td key={j} style={{ textAlign: 'right', color }}>
                                                 <div>{formatNumber(c.cost)}</div>
@@ -340,7 +341,7 @@ function BulkCost() {
     };
 
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
-    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--danger)' }}>{error}</div>;
+    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div>;
 
     return (
         <div>
@@ -362,7 +363,7 @@ function BulkCost() {
             ) : (
                 <div style={{
                     background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.3)',
-                    borderRadius: 8, padding: 14, marginBottom: 16, fontSize: 13, color: 'var(--success)',
+                    borderRadius: 8, padding: 14, marginBottom: 16, fontSize: 13, color: 'var(--color-success)',
                 }}>
                     Все товары в расчётах имеют себестоимость.
                 </div>
@@ -371,7 +372,7 @@ function BulkCost() {
             {result && result.saved > 0 && (
                 <div style={{
                     background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.3)',
-                    borderRadius: 8, padding: 12, marginBottom: 12, fontSize: 13, color: 'var(--success)',
+                    borderRadius: 8, padding: 12, marginBottom: 12, fontSize: 13, color: 'var(--color-success)',
                 }}>
                     Сохранено: <b>{result.saved}</b> шт.
                 </div>
@@ -384,8 +385,8 @@ function BulkCost() {
                             type="text" placeholder="Поиск по nm_id, баркоду, артикулу, категории..."
                             value={search} onChange={e => setSearch(e.target.value)}
                             style={{
-                                padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border)',
-                                background: 'var(--bg-secondary)', color: 'var(--text-primary)', width: 320,
+                                padding: '8px 12px', borderRadius: 8, border: '1px solid var(--color-border)',
+                                background: 'var(--color-bg-input)', color: 'var(--color-text)', width: 320,
                             }}
                         />
                         <div style={{ display: 'flex', gap: 8 }}>
@@ -495,7 +496,7 @@ function BulkCost() {
             {pasteResult && pasteResult.saved > 0 && (
                 <div style={{
                     background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.3)',
-                    borderRadius: 8, padding: 12, marginBottom: 12, fontSize: 13, color: 'var(--success)',
+                    borderRadius: 8, padding: 12, marginBottom: 12, fontSize: 13, color: 'var(--color-success)',
                 }}>
                     Сохранено: <b>{pasteResult.saved}</b> шт.
                 </div>
@@ -720,8 +721,8 @@ function SkuAnalytics() {
 
     const selectStyle: React.CSSProperties = {
         padding: '8px 12px', borderRadius: 8,
-        border: '1px solid var(--border)',
-        background: 'var(--bg-secondary)', color: 'var(--text-primary)',
+        border: '1px solid var(--color-border)',
+        background: 'var(--color-bg-input)', color: 'var(--color-text)',
     };
 
     return (
@@ -748,7 +749,7 @@ function SkuAnalytics() {
                                     padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
                                     fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 8,
                                 }}
-                                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-secondary)')}
+                                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--color-bg-hover)')}
                                 onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
                             >
                                 <span style={{ fontWeight: 600 }}>{n.article_seller || n.barcode}</span>
@@ -792,7 +793,7 @@ function SkuAnalytics() {
                 <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>⏳ Загрузка...</div>
             )}
             {barcode && error && (
-                <div className="glass-card" style={{ padding: 32, color: 'var(--danger)' }}>❌ {error}</div>
+                <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>❌ {error}</div>
             )}
             {barcode && !loading && !error && val && (
                 <SkuAnalyticsPanel
@@ -898,7 +899,7 @@ function ValuationOverview({ cutoff, savedMethod, setSavedMethod, onPick }: {
             <div className="glass-card" style={{ padding: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
                     <span style={{ fontSize: 15, fontWeight: 600 }}>Искажение прибыли: FIFO vs текущий метод</span>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: 'var(--danger)' }}>{formatNumber(totalDistortion)} ₽</span>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: 'var(--color-danger)' }}>{formatNumber(totalDistortion)} ₽</span>
                     <span style={{ fontSize: 12, opacity: 0.5 }}>суммарно по проекту с {cutoff || '2025-01-01'}</span>
                     <div style={{ flex: 1 }} />
                     {gbBtn('brand', 'По брендам')}
@@ -924,7 +925,7 @@ function ValuationOverview({ cutoff, savedMethod, setSavedMethod, onPick }: {
                             <tbody>
                                 {groups.slice(0, 50).map(g => {
                                     const delta = g.cogs_current - g.cogs_fifo; // меньше COGS под FIFO → +прибыль
-                                    const color = delta > 0 ? 'var(--success)' : delta < 0 ? 'var(--danger)' : 'var(--text-primary)';
+                                    const color = delta > 0 ? 'var(--color-success)' : delta < 0 ? 'var(--color-danger)' : 'var(--color-text)';
                                     const clickable = groupBy === 'sku' && !!g.barcode;
                                     return (
                                         <tr key={g.key}
@@ -988,8 +989,8 @@ function SkuAnalyticsPanel({
 
     const kpiCardStyle: React.CSSProperties = {
         flex: '1 1 180px', padding: 16, borderRadius: 16,
-        background: 'var(--bg-card, var(--bg-secondary))',
-        border: '1px solid var(--border)',
+        background: 'var(--color-bg-card)',
+        border: '1px solid var(--color-border)',
     };
     const kpiLabel: React.CSSProperties = { fontSize: 12, opacity: 0.6, marginBottom: 6 };
     const kpiValue: React.CSSProperties = { fontSize: 24, fontWeight: 700 };
@@ -1023,11 +1024,11 @@ function SkuAnalyticsPanel({
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
                 <div style={kpiCardStyle}>
                     <div style={kpiLabel}>Себес сейчас (пожизненная)</div>
-                    <div style={{ ...kpiValue, color: 'var(--primary)' }}>{formatNumber(val.lifetime_avg)} ₽</div>
+                    <div style={{ ...kpiValue, color: 'var(--color-accent)' }}>{formatNumber(val.lifetime_avg)} ₽</div>
                 </div>
                 <div style={kpiCardStyle}>
                     <div style={kpiLabel}>FIFO сейчас</div>
-                    <div style={{ ...kpiValue, color: 'var(--success)' }}>{formatNumber(val.eff_now.fifo)} ₽</div>
+                    <div style={{ ...kpiValue, color: 'var(--color-success)' }}>{formatNumber(val.eff_now.fifo)} ₽</div>
                 </div>
                 <div style={kpiCardStyle}>
                     <div style={kpiLabel}>Оценка остатка ({METHOD_LABELS[previewMethod]})</div>
@@ -1036,7 +1037,7 @@ function SkuAnalyticsPanel({
                 </div>
                 <div style={kpiCardStyle}>
                     <div style={kpiLabel}>Искажение прибыли (FIFO vs пожизненная)</div>
-                    <div style={{ ...kpiValue, color: distortion > 0 ? 'var(--danger)' : 'var(--text-primary)' }}>
+                    <div style={{ ...kpiValue, color: distortion > 0 ? 'var(--color-danger)' : 'var(--color-text)' }}>
                         {formatNumber(distortion)} ₽
                     </div>
                 </div>
@@ -1046,7 +1047,7 @@ function SkuAnalyticsPanel({
             <div style={{
                 display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
                 marginBottom: 16, padding: 12, borderRadius: 12,
-                background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+                background: 'var(--color-bg)', border: '1px solid var(--color-border)',
             }}>
                 <span style={{ fontSize: 13, opacity: 0.7 }}>Метод (превью):</span>
                 <div style={{ display: 'flex', gap: 4 }}>
@@ -1100,7 +1101,7 @@ function SkuAnalyticsPanel({
                                 // Δ прибыли = насколько прибыль выше/ниже при превью-методе vs текущей.
                                 // Меньший COGS → больше прибыль (положительная Δ).
                                 const deltaProfit = cogsLifetime - cogsPreview;
-                                const color = deltaProfit > 0 ? 'var(--success)' : deltaProfit < 0 ? 'var(--danger)' : 'var(--text-primary)';
+                                const color = deltaProfit > 0 ? 'var(--color-success)' : deltaProfit < 0 ? 'var(--color-danger)' : 'var(--color-text)';
                                 return (
                                     <tr key={m.month}>
                                         <td style={{ fontWeight: 600 }}>{m.month}</td>
@@ -1145,7 +1146,7 @@ function SkuAnalyticsPanel({
                                                     type="date"
                                                     value={editDate}
                                                     onChange={(e: ChangeEvent<HTMLInputElement>) => setEditDate(e.target.value)}
-                                                    style={{ padding: '2px 6px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 12 }}
+                                                    style={{ padding: '2px 6px', borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-bg-input)', color: 'var(--color-text)', fontSize: 12 }}
                                                 />
                                                 <button className="btn btn-primary btn-sm" disabled={savingArr} onClick={() => saveArrival(l.order_no)}>✓</button>
                                                 <button className="btn btn-sm" disabled={savingArr} onClick={() => setEditOrder(null)}>✕</button>
@@ -1169,11 +1170,11 @@ function SkuAnalyticsPanel({
                                 {/* Bar: consumed vs remaining */}
                                 <div style={{
                                     width: `${widthPct}%`, minWidth: 60, height: 22, borderRadius: 6,
-                                    background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+                                    background: 'var(--color-bg)', border: '1px solid var(--color-border)',
                                     display: 'flex', overflow: 'hidden',
                                 }}>
                                     <div style={{
-                                        width: `${consumedPct}%`, background: 'var(--primary)',
+                                        width: `${consumedPct}%`, background: 'var(--color-accent)',
                                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                                         fontSize: 10, color: '#fff', whiteSpace: 'nowrap',
                                     }} title={`Списано: ${l.consumed} шт`}>
@@ -1232,8 +1233,8 @@ function OpeningBalanceEditor({ barcode, suggestedCost, reload }: { barcode: str
     };
 
     const inp: React.CSSProperties = {
-        padding: '6px 10px', borderRadius: 8, border: '1px solid var(--border)',
-        background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 13, width: 130,
+        padding: '6px 10px', borderRadius: 8, border: '1px solid var(--color-border)',
+        background: 'var(--color-bg-input)', color: 'var(--color-text)', fontSize: 13, width: 130,
     };
 
     return (

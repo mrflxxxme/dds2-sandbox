@@ -163,7 +163,7 @@ export default function LogisticsCostPerUnit({ dateFrom, dateTo, brand }: {
                                     <YAxis tick={{ fontSize: 12 }} />
                                     <RechartsTooltip
                                         formatter={(value: number, n: string) => [formatNumber(value, 2) + ' ₽', n === 'cost_per_unit' ? '₽/шт' : '₽/короб']}
-                                        contentStyle={{ background: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 13 }}
+                                        contentStyle={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 13 }}
                                     />
                                     <RechartsLegend formatter={(v: string) => (v === 'cost_per_unit' ? '₽/шт' : '₽/короб')} />
                                     <Line type="monotone" dataKey="cost_per_unit" name="cost_per_unit" stroke="var(--color-accent)" strokeWidth={2} dot={{ r: 3 }} />

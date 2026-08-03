@@ -101,7 +101,7 @@ function MiniProgressBar({ qty, assignedQty }: { qty: number; assignedQty: numbe
             </div>
             <div style={{
                 width: 56, height: 4, borderRadius: 2,
-                background: 'var(--color-bg-secondary)', overflow: 'hidden',
+                background: 'var(--color-bg)', overflow: 'hidden',
             }}>
                 <div style={{
                     width: `${Math.max(pct, 2)}%`, height: '100%', borderRadius: 2,
@@ -130,9 +130,9 @@ function InfoField({ label, value, editing, input }: {
 
 function SummaryKpi({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
     return (
-        <div style={{ textAlign: 'center', padding: '8px 4px', background: accent ? 'rgba(59,130,246,0.04)' : 'var(--color-bg-secondary)', borderRadius: 8 }}>
+        <div style={{ textAlign: 'center', padding: '8px 4px', background: accent ? 'rgba(59,130,246,0.04)' : 'var(--color-bg)', borderRadius: 8 }}>
             <div style={{ fontSize: 10, color: 'var(--color-text-muted)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.3px' }}>{label}</div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: accent ? 'var(--color-primary)' : 'var(--color-text)' }}>{value}</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: accent ? 'var(--color-accent)' : 'var(--color-text)' }}>{value}</div>
         </div>
     );
 }
@@ -284,7 +284,7 @@ function OrderInfoCard({ order, onUpdated }: { order: FactoryOrder; onUpdated: (
                                 </div>
                                 <div style={{
                                     height: 8, borderRadius: 4,
-                                    background: 'var(--color-bg-secondary)', overflow: 'hidden',
+                                    background: 'var(--color-bg)', overflow: 'hidden',
                                 }}>
                                     <div style={{
                                         width: `${distPct}%`, height: '100%', borderRadius: 4,
@@ -1489,7 +1489,7 @@ function FactoryOrderDetailContent() {
                                             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
                                                 <span>{formatDateTime(entry.changed_at)}</span>
                                                 {entry.changed_by && (
-                                                    <span style={{ fontSize: 11, padding: '1px 8px', borderRadius: 8, background: 'var(--color-bg-secondary)', color: 'var(--color-text)' }}>
+                                                    <span style={{ fontSize: 11, padding: '1px 8px', borderRadius: 8, background: 'var(--color-bg)', color: 'var(--color-text)' }}>
                                                         {entry.changed_by}
                                                     </span>
                                                 )}
