@@ -101,10 +101,22 @@ input[type="number"] {
 
 /* ─── Glass Card ────────────────────────────────────────────────────────────── */
 
+/* backdrop-filter: если -webkit- форма пишется руками, она обязана идти ПЕРЕД
+   стандартным свойством. Прод-сборка прогоняет CSS через Lightning CSS (входит
+   в @tailwindcss/postcss); его обработчик свойств схлопывает пару в ОДНО
+   объявление и оставляет ту форму, что идёт последней — добавить префикс к
+   стандартному свойству он умеет, а восстановить стандартное из префиксного
+   нет. При порядке «стандартное → -webkit-» в бандле остаётся только
+   -webkit-backdrop-filter, а этот алиас убран из актуальных Chrome (проверено:
+   в Chrome 148 CSS.supports уже false) — размытие пропадает везде.
+   В dev этот проход не запускается, поэтому баг виден ТОЛЬКО в прод-сборке.
+   Писать -webkit- руками вообще не обязательно: правилам без него Lightning
+   допишет префикс сам (см. .sc-matrix-*). Порядок закреплён тестом
+   src/__tests__/globalsBackdropFilter.test.ts */
 .glass-card {
     background: var(--color-bg-card);
-    backdrop-filter: blur(24px) saturate(180%);
     -webkit-backdrop-filter: blur(24px) saturate(180%);
+    backdrop-filter: blur(24px) saturate(180%);
     border: 1px solid var(--color-border);
     /* Soft white inner border for the glass edge effect */
     box-shadow: inset 0 1px 0 0 var(--color-border-inner), var(--shadow-glass);
@@ -317,8 +329,8 @@ input[type="number"] {
     position: sticky;
     top: 0;
     background: rgba(255, 255, 255, 0.85); /* Frost glass header */
-    backdrop-filter: blur(12px) saturate(180%);
     -webkit-backdrop-filter: blur(12px) saturate(180%);
+    backdrop-filter: blur(12px) saturate(180%);
     z-index: 10;
 }
 
@@ -356,8 +368,8 @@ input[type="number"] {
 
 .stat-card {
     background: var(--color-bg-card);
-    backdrop-filter: blur(24px) saturate(180%);
     -webkit-backdrop-filter: blur(24px) saturate(180%);
+    backdrop-filter: blur(24px) saturate(180%);
     border: 1px solid var(--color-border);
     box-shadow: inset 0 1px 0 0 var(--color-border-inner), var(--shadow-glass);
     border-radius: 20px;
@@ -398,8 +410,8 @@ input[type="number"] {
     left: 0;
     top: 0;
     background: var(--color-bg-sidebar);
-    backdrop-filter: blur(24px) saturate(180%);
     -webkit-backdrop-filter: blur(24px) saturate(180%);
+    backdrop-filter: blur(24px) saturate(180%);
     border-right: 1px solid var(--color-border);
     display: flex;
     flex-direction: column;
@@ -838,8 +850,8 @@ input[type="number"] {
     gap: 8px;
     padding: 10px 16px;
     background: rgba(255, 255, 255, 0.8);
-    backdrop-filter: blur(12px) saturate(180%);
     -webkit-backdrop-filter: blur(12px) saturate(180%);
+    backdrop-filter: blur(12px) saturate(180%);
     border: 1px solid var(--color-border);
     border-radius: 14px;
     cursor: pointer;
@@ -892,8 +904,8 @@ input[type="number"] {
 .auth-card {
     width: 440px;
     background: rgba(255, 255, 255, 0.75);
-    backdrop-filter: blur(40px) saturate(200%);
     -webkit-backdrop-filter: blur(40px) saturate(200%);
+    backdrop-filter: blur(40px) saturate(200%);
     border: 1px solid var(--color-border);
     box-shadow: inset 0 1px 0 0 var(--color-border-inner), var(--shadow-glass-hover);
     border-radius: 24px;
@@ -1003,8 +1015,8 @@ input[type="number"] {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.2);
-    backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1013,8 +1025,8 @@ input[type="number"] {
 
 .modal-card {
     background: var(--color-bg-card);
-    backdrop-filter: blur(40px) saturate(200%);
     -webkit-backdrop-filter: blur(40px) saturate(200%);
+    backdrop-filter: blur(40px) saturate(200%);
     border: 1px solid var(--color-border);
     box-shadow: inset 0 1px 0 0 var(--color-border-inner), 0 20px 40px rgba(0, 0, 0, 0.12);
     border-radius: 24px;
@@ -1053,8 +1065,8 @@ input[type="number"] {
    blur остаётся на overlay */
 .modal-card-solid {
     background: var(--color-bg);
-    backdrop-filter: none;
     -webkit-backdrop-filter: none;
+    backdrop-filter: none;
 }
 
 /* ─── Модал «Связать заявку» (ФФ): пикер кандидатов ─────────────────────────── */
@@ -1178,8 +1190,8 @@ input[type="number"] {
     font-weight: 500;
     color: var(--color-text);
     background: rgba(255, 255, 255, 0.85);
-    backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
     padding: 8px 12px;
     border-radius: 8px;
     border: 1px solid var(--color-border);
