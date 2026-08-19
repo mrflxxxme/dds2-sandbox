@@ -180,7 +180,7 @@ export default function ListView({ slug }: { slug: string }) {
                                     <td style={{ padding: '12px 16px', whiteSpace: 'nowrap' }}>
                                         {t.unviewed && (
                                             <InfoTip text={DESIGN_MARK_HINT.unviewed}>
-                                                <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: 'var(--color-danger)', marginRight: 6 }} />
+                                                <span role="img" aria-label="Не просмотрено ведущим" style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: 'var(--color-danger)', marginRight: 6 }} />
                                             </InfoTip>
                                         )}
                                         {t.number}

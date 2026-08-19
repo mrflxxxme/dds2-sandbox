@@ -10748,9 +10748,11 @@ export interface DesignBoardResponse {
     permissions: DesignBoardPermissions;
 }
 
-/** 16 флагов — ПОЛНЫЙ набор compute_permissions; фронт логику прав не дублирует (§6.9). */
+/** ПОЛНЫЙ набор флагов compute_permissions; фронт логику прав не дублирует (§6.9). */
 export interface DesignTaskPermissions {
     can_edit: boolean;
+    /** Р18: смена номера заявки — только ведущий и только вне терминальных статусов. */
+    can_edit_number: boolean;
     can_assign: boolean;
     can_take: boolean;
     can_change_status: boolean;
@@ -10910,6 +10912,8 @@ export interface DesignTaskUpdatePayload {
     title?: string;
     description?: string;
     sheet_url?: string;
+    /** Р18: свой номер вместо DES-N. Валидацию и её тексты держит бэк (CONTRACT-V2 §2). */
+    number?: string;
     nm_id?: number | null;
     work_type?: DesignWorkType;
     complexity?: DesignComplexity;

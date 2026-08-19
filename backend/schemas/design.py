@@ -75,6 +75,11 @@ class DesignTaskUpdate(BaseModel):
     description: str | None = Field(None, min_length=10, max_length=5000)
     sheet_url: LimitedHttpUrl | None = None
     nm_id: NmId | None = None
+    # Р18: свой номер вместо автогенерируемого DES-N. Ограничения намеренно НЕ
+    # дублируются здесь через Field: вся лесенка гвардов и её тексты — часть
+    # контракта (CONTRACT-V2 §2) и живёт в сервисе, иначе пользователь получал бы
+    # то 400 сервиса, то 422 Pydantic на одну и ту же ошибку. null = «не менять».
+    number: str | None = None
     work_type: str | None = None
     complexity: str | None = None
     is_urgent: bool | None = None
@@ -245,6 +250,8 @@ class DesignTaskPermissions(BaseModel):
     """
 
     can_edit: bool = False
+    # Р18 (волна B v2): смена номера заявки — только ведущий и только вне терминалов.
+    can_edit_number: bool = False
     can_assign: bool = False
     can_take: bool = False
     can_change_status: bool = False

@@ -40,7 +40,10 @@ export default function TaskCard({ t, onClick, draggable, onDragStart, onDragOve
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 {t.unviewed && (
                     <Tooltip text={DESIGN_MARK_HINT.unviewed}>
+                        {/* role обязателен: на голом span скринридер aria-label игнорирует,
+                            и метка «непросмотрено» просто не озвучивается. */}
                         <span
+                            role="img"
                             aria-label="Не просмотрено ведущим"
                             style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--color-danger)', flexShrink: 0 }}
                         />

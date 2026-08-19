@@ -74,7 +74,9 @@ export default function StatsPanel() {
      */
     const lowData = stats.avg_versions_to_accept == null && stats.median_cycle_days == null;
 
-    const items: { key: string; label: string; value: string }[] = [
+    // Ключ типизирован по словарю подсказок: опечатка теперь не даст пустую
+    // всплывашку молча, а свалит сборку.
+    const items: { key: keyof typeof DESIGN_METRIC_HINT; label: string; value: string }[] = [
         { key: 'on_time_share', label: 'В срок', value: pct(stats.on_time_share) },
         { key: 'avg_versions_to_accept', label: 'Версий до приёмки', value: num(stats.avg_versions_to_accept) },
         { key: 'median_cycle_days', label: 'Медиана цикла, дн', value: num(stats.median_cycle_days) },

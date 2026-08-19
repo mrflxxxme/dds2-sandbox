@@ -264,6 +264,19 @@ _CALENDAR_RANGE_LIMIT = 2000  # режим произвольного диапа
 _CALENDAR_MAX_RANGE_DAYS = 400
 
 
+def _pad(day: date, days: int) -> date:
+    """Расширение границы окна с клампом у краёв календаря.
+
+    `date.max + 1 день` бросает OverflowError — не ValueError, поэтому `_svc`
+    роутера его не поймает и пользователь получит 500 вместо 400. Запрос вида
+    `date_to=9999-12-31` вполне достижим ручным вводом в пикере.
+    """
+    try:
+        return day + timedelta(days=days)
+    except OverflowError:
+        return date.max if days > 0 else date.min
+
+
 def resolve_calendar_window(
     month: str | None, date_from: date | None, date_to: date | None
 ) -> tuple[str, date, date, int]:
@@ -288,8 +301,8 @@ def resolve_calendar_window(
             raise ValueError("Диапазон не больше 400 дней")
         return (
             date_from.strftime("%Y-%m"),
-            date_from - timedelta(days=_CALENDAR_PAD_DAYS),
-            date_to + timedelta(days=_CALENDAR_PAD_DAYS),
+            _pad(date_from, -_CALENDAR_PAD_DAYS),
+            _pad(date_to, _CALENDAR_PAD_DAYS),
             _CALENDAR_RANGE_LIMIT,
         )
 
@@ -311,8 +324,8 @@ def resolve_calendar_window(
         next_month = date(month_first.year, month_first.month + 1, 1)
     return (
         month,
-        month_first - timedelta(days=_CALENDAR_PAD_DAYS),
-        next_month + timedelta(days=_CALENDAR_PAD_DAYS - 1),
+        _pad(month_first, -_CALENDAR_PAD_DAYS),
+        _pad(next_month, _CALENDAR_PAD_DAYS - 1),
         _CALENDAR_LIMIT,
     )
 

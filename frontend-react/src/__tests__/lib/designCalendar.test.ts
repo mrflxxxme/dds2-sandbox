@@ -7,6 +7,8 @@ import {
     formatMonthTitle,
     isInTaskRange,
     markersByDay,
+    MAX_CALENDAR_MONTHS,
+    countMonthsInRange,
     defaultCalendarRange,
     memberDisplayName,
     monthsInRange,
@@ -329,5 +331,28 @@ describe('произвольный диапазон календаря (волн
         const r = { from: '2026-03-05', to: '2026-03-19' };  // 15 дней
         const moved = shiftCalendarRange(r, 2);
         expect([moved.from, moved.to]).toEqual(['2026-05-05', '2026-05-19']);
+    });
+});
+
+describe('предел числа блоков календаря (правка по ревью волны A)', () => {
+    it('месяцев не больше шести, счётчик при этом отдаёт правду', () => {
+        const year = { from: '2026-01-01', to: '2026-12-31' };
+        expect(countMonthsInRange(year)).toBe(12);
+        expect(monthsInRange(year)).toHaveLength(MAX_CALENDAR_MONTHS);
+        expect(monthsInRange(year)[0]).toBe('2026-01');
+    });
+
+    it('дефолт и трёхмесячный период под предел не попадают', () => {
+        const def = defaultCalendarRange(new Date(2026, 7, 20));
+        expect(countMonthsInRange(def)).toBe(2);
+        expect(monthsInRange(def)).toHaveLength(2);
+
+        const q = { from: '2026-05-20', to: '2026-08-20' };
+        expect(countMonthsInRange(q)).toBe(4);
+        expect(monthsInRange(q)).toHaveLength(4);
+    });
+
+    it('счётчик корректен на стыке года', () => {
+        expect(countMonthsInRange({ from: '2026-11-15', to: '2027-02-01' })).toBe(4);
     });
 });

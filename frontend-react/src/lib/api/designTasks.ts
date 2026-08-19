@@ -59,9 +59,11 @@ export function addDesignTaskMethods(api: ApiClient) {
             const qs = new URLSearchParams({ month });
             return api.request<DesignCalendarOut>('GET', `${BASE}/calendar?${qs.toString()}`);
         },
-        getDesignCalendarRange(dateFrom: string, dateTo: string) {
+        /** signal обязателен по смыслу: стрелки календаря кликают быстрее, чем
+         *  успевает вернуться окно на 2000 задач — незавершённые запросы надо рвать. */
+        getDesignCalendarRange(dateFrom: string, dateTo: string, signal?: AbortSignal) {
             const qs = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
-            return api.request<DesignCalendarOut>('GET', `${BASE}/calendar?${qs.toString()}`);
+            return api.request<DesignCalendarOut>('GET', `${BASE}/calendar?${qs.toString()}`, undefined, { signal });
         },
         getDesignStats(dateFrom?: string, dateTo?: string) {
             const qs = new URLSearchParams();

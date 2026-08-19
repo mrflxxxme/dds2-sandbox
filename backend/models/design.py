@@ -165,7 +165,9 @@ class DesignTask(Base, TimestampMixin, SoftDeleteMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     # DES-N внутри проекта (Р14): max+1 под lock; partial-unique в миграции dsn01.
-    number: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Р18 (волна B v2): ведущий может задать свой номер свободным текстом до 40
+    # символов — автогенерация DES-N остаётся дефолтом и живёт своей линейкой.
+    number: Mapped[str] = mapped_column(String(40), nullable=False)
     # Название товара/задачи свободным текстом.
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     # 2–3 строки сути, min 10 симв. (Р13, валидация в схеме).

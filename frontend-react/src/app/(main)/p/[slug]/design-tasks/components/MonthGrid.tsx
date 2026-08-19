@@ -46,10 +46,11 @@ export default function MonthGrid({ month, weeks, tasksByDay, colorFor, onDayCli
                                 borderRadius: 12,
                                 padding: 6,
                                 cursor: 'pointer',
-                                // Дни соседних месяцев приглушены цветом, а не opacity:
-                                // opacity гасила бы и цветные чипы задач вместе с ними.
+                                // Дни соседних месяцев приглушены ЦВЕТОМ номера, а не
+                                // opacity: opacity гасила бы вместе с ними и цветные
+                                // чипы задач — тот же чип в хвосте соседнего месяца
+                                // выглядел бы бледнее, чем в своём блоке.
                                 color: day.inMonth ? undefined : 'var(--color-text-dim)',
-                                opacity: day.inMonth ? 1 : 0.55,
                                 background: day.isToday ? 'var(--color-bg-hover)' : 'transparent',
                                 display: 'flex',
                                 flexDirection: 'column',
@@ -61,7 +62,12 @@ export default function MonthGrid({ month, weeks, tasksByDay, colorFor, onDayCli
                                 style={{
                                     fontSize: 12,
                                     fontWeight: day.isToday ? 700 : 500,
-                                    color: day.isToday ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                                    // undefined — чтобы номер унаследовал приглушённый
+                                    // цвет ячейки в днях соседних месяцев (иначе жёсткий
+                                    // color перебил бы наследование и приглушение исчезло).
+                                    color: day.isToday
+                                        ? 'var(--color-accent)'
+                                        : day.inMonth ? 'var(--color-text-muted)' : undefined,
                                 }}
                             >
                                 {formatNumber(day.dayOfMonth, 0)}

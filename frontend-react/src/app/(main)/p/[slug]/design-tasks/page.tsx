@@ -1,8 +1,10 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
+import { formatNumber } from '@/lib/utils';
+import { DESIGN_UI_HINT } from '@/lib/designHints';
 import PageGuard from '@/components/PageGuard';
 import PageHeader from '@/components/PageHeader';
 import Toast from '@/components/Toast';
@@ -36,6 +38,9 @@ interface PendingMove {
     beforeTaskId: number | null;
 }
 
+/** Cap ручки списка: столько строк максимум приедет за один набор вне доски. */
+const SCOPE_LIMIT = 200;
+
 /** До ответа /board кнопок нет: права считает бэк (§6.9), роль фронт не проверяет. */
 const NO_BOARD_PERMS: DesignBoardPermissions = { can_create: false, can_reorder: false };
 
@@ -59,8 +64,9 @@ function DesignTasksPageInner() {
      * запрос, дальше набор переиспользуется. Мутация задачи чистит кэш.
      */
     const [offBoard, setOffBoard] = useState<Partial<Record<Exclude<BoardScope, 'board'>, DesignTaskListItem[]>>>({});
-    const [scopeLoading, setScopeLoading] = useState(false);
-    const [scopeError, setScopeError] = useState<string | null>(null);
+    /** Ошибка хранится вместе со скоупом: иначе сбой «Отложенных» показывался бы
+     *  и на «Отменённых», у которых своя, ещё не начатая загрузка. */
+    const [scopeError, setScopeError] = useState<{ scope: BoardScope; message: string } | null>(null);
     // Модалка причины ПЕРЕД move: dnd/кнопка в «Правки» требует комментарий (контракт: 400 без него).
     const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
     // Персональный календарь задачи: данные — из уже загруженной карточки доски, без запросов.
@@ -151,14 +157,28 @@ function DesignTasksPageInner() {
         const scope = filters.scope;
         if (scope === 'board' || offBoard[scope]) return;
         let alive = true;
-        setScopeLoading(true);
         setScopeError(null);
-        api.listDesignTasks({ status: [scope], limit: 200 })
+        api.listDesignTasks({ status: [scope], limit: SCOPE_LIMIT })
             .then((rows) => { if (alive && mountedRef.current) setOffBoard((prev) => ({ ...prev, [scope]: rows })); })
-            .catch((e) => { if (alive && mountedRef.current) setScopeError(e instanceof Error ? e.message : 'Не удалось загрузить'); })
-            .finally(() => { if (alive && mountedRef.current) setScopeLoading(false); });
+            .catch((e) => {
+                if (!alive || !mountedRef.current) return;
+                setScopeError({ scope, message: e instanceof Error ? e.message : 'Не удалось загрузить' });
+            });
         return () => { alive = false; };
     }, [filters.scope, offBoard]);
+
+    /**
+     * Отложен ТОЛЬКО поиск: он меняется на каждый символ, а доска вмещает до 1200
+     * карточек (6 колонок × cap 200) — синхронный пересчёт подвешивал бы ввод.
+     * Именно useDeferredValue, а не debounce: debounce задержал бы и сам ввод.
+     * Остальные фильтры и переключатель набора остаются мгновенными: они меняются
+     * по одному клику, и отложенность дала бы им заметный провал в пустоту.
+     */
+    const deferredQ = useDeferredValue(filters.q);
+    const deferredFilters = useMemo<BoardFilterState>(
+        () => ({ ...filters, q: deferredQ }),
+        [filters, deferredQ],
+    );
 
     /** Задачи текущего набора до фильтров — из них же строится список исполнителей. */
     const scopeTasks = useMemo<DesignTaskListItem[]>(() => {
@@ -170,13 +190,26 @@ function DesignTasksPageInner() {
     const filteredColumns = useMemo<BoardColumns | null>(() => {
         if (!columns) return null;
         const out = {} as BoardColumns;
-        for (const s of DESIGN_BOARD_STATUSES) out[s] = applyBoardFilters(columns[s], filters);
+        for (const s of DESIGN_BOARD_STATUSES) out[s] = applyBoardFilters(columns[s], deferredFilters);
         return out;
-    }, [columns, filters]);
+    }, [columns, deferredFilters]);
+
+    /**
+     * Ручка списка капит выдачу 200 строками, а счётчик на чипе приходит из
+     * /board и не ограничен ничем. Молчать об этом нельзя: иначе поиск по
+     * задаче из «хвоста» ничего не находит, а пользователь считает её потерянной.
+     */
+    const scopeTruncated =
+        filters.scope !== 'board' && (offBoard[filters.scope]?.length ?? 0) >= SCOPE_LIMIT;
+    const scopeTotal = filters.scope === 'ON_HOLD' ? onHoldCount
+        : filters.scope === 'CANCELLED' ? cancelledCount : 0;
+
+    const boardEmpty = !!columns && DESIGN_BOARD_STATUSES.every((s) => columns[s].length === 0);
+    const filteredEmpty = !!filteredColumns && DESIGN_BOARD_STATUSES.every((s) => filteredColumns[s].length === 0);
 
     const filteredFlat = useMemo(
-        () => (filters.scope === 'board' ? [] : applyBoardFilters(scopeTasks, filters)),
-        [filters, scopeTasks],
+        () => (filters.scope === 'board' ? [] : applyBoardFilters(scopeTasks, deferredFilters)),
+        [filters.scope, deferredFilters, scopeTasks],
     );
 
     return (
@@ -223,27 +256,49 @@ function DesignTasksPageInner() {
                     )}
 
                     {!loading && !error && filters.scope !== 'board' && (
-                        scopeLoading && !offBoard[filters.scope] ? (
+                        // Загрузка определяется отсутствием данных, а не флагом из
+                        // эффекта: флаг поднимается после пейнта, и между ними
+                        // проскакивал кадр ложного «Нет задач».
+                        scopeError?.scope === filters.scope ? (
+                            <div className="glass-card" style={{ color: 'var(--color-danger)' }}>{scopeError.message}</div>
+                        ) : !offBoard[filters.scope] ? (
                             <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка…</div>
-                        ) : scopeError ? (
-                            <div className="glass-card" style={{ color: 'var(--color-danger)' }}>{scopeError}</div>
                         ) : (
-                            <FlatTaskList
-                                tasks={filteredFlat}
-                                emptyText={
-                                    scopeTasks.length === 0
-                                        ? `Нет задач в статусе «${DESIGN_STATUS_LABEL[filters.scope]}».`
-                                        : 'Нет задач под выбранные фильтры.'
-                                }
-                                onOpen={openTask}
-                            />
+                            <>
+                                {scopeTruncated && (
+                                    <div className="glass-card" style={{ marginBottom: 12, color: 'var(--color-warning)', padding: 12, fontSize: 13 }}>
+                                        Показаны первые {formatNumber(SCOPE_LIMIT, 0)} из {formatNumber(scopeTotal, 0)}. {DESIGN_UI_HINT.scopeTruncated}
+                                    </div>
+                                )}
+                                <FlatTaskList
+                                    tasks={filteredFlat}
+                                    emptyText={
+                                        scopeTasks.length === 0
+                                            ? `Нет задач в статусе «${DESIGN_STATUS_LABEL[filters.scope]}».`
+                                            : 'Нет задач под выбранные фильтры.'
+                                    }
+                                    onOpen={openTask}
+                                />
+                            </>
                         )
                     )}
 
                     {!loading && !error && filters.scope === 'board' && filteredColumns && columns && (
-                        DESIGN_BOARD_STATUSES.every((s) => columns[s].length === 0) && onHoldCount === 0 && cancelledCount === 0 ? (
+                        boardEmpty && onHoldCount === 0 && cancelledCount === 0 ? (
                             <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 48 }}>
                                 Заявок ещё нет. Создайте первую: «+ Новая заявка».
+                            </div>
+                        ) : filteredEmpty ? (
+                            // Шесть колонок с «Пусто» визуально неотличимы от пустого
+                            // проекта — пользователь решил бы, что доска сломалась.
+                            <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 48 }}>
+                                Нет задач под выбранные фильтры.{' '}
+                                <button
+                                    className="btn btn-sm btn-secondary"
+                                    onClick={() => setFilters({ ...EMPTY_BOARD_FILTERS, scope: filters.scope })}
+                                >
+                                    Сбросить фильтры
+                                </button>
                             </div>
                         ) : (
                             <BoardView

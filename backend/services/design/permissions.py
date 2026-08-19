@@ -45,6 +45,9 @@ def compute_permissions(
     return {
         "can_edit": (lead and not terminal)
         or (is_author and not terminal and status is not _S.REVIEW),
+        # Р18: номер меняет только ведущий и только у незакрытой задачи — гвард
+        # один-в-один с лесенкой crud._apply_number_change (CONTRACT-V2 §2).
+        "can_edit_number": lead and not terminal,
         "can_assign": lead and not terminal,
         "can_take": (is_assignee or lead) and status is _S.ASSIGNED,
         "can_submit": (lead or is_assignee) and status in (_S.IN_PROGRESS, _S.REVISION),

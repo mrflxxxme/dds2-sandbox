@@ -115,14 +115,33 @@ export function defaultCalendarRange(today?: Date): CalendarRange {
     return { from: iso(first), to: iso(endOfMonth(addMonths(first, 1))) };
 }
 
-/** Все месяцы `YYYY-MM`, которые пересекает диапазон — по блоку на каждый. */
+/**
+ * Больше шести блоков — простыня, в которой невозможно ориентироваться
+ * (референс заказчика — два месяца рядом). Бэк капит ВЫБОРКУ (2000 задач),
+ * но не число сеток: без этого предела пресет «12 месяцев» рисует 13 блоков,
+ * а руками задаётся и пятилетний диапазон — 61 блок в одном синхронном рендере.
+ */
+export const MAX_CALENDAR_MONTHS = 6;
+
+/** Сколько месяцев ФАКТИЧЕСКИ пересекает диапазон — до применения предела. */
+export function countMonthsInRange(range: CalendarRange): number {
+    const start = new Date(`${range.from}T00:00:00`);
+    const end = new Date(`${range.to}T00:00:00`);
+    return (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth()) + 1;
+}
+
+/**
+ * Месяцы `YYYY-MM`, которые пересекает диапазон — по блоку на каждый,
+ * но не больше MAX_CALENDAR_MONTHS. Усечение не тихое: страница сверяет длину
+ * с countMonthsInRange и показывает предупреждение.
+ */
 export function monthsInRange(range: CalendarRange): string[] {
     const start = new Date(`${range.from}T00:00:00`);
     const end = new Date(`${range.to}T00:00:00`);
     const months: string[] = [];
     let cur = new Date(start.getFullYear(), start.getMonth(), 1);
     const last = new Date(end.getFullYear(), end.getMonth(), 1);
-    while (cur <= last) {
+    while (cur <= last && months.length < MAX_CALENDAR_MONTHS) {
         months.push(format(cur, 'yyyy-MM'));
         cur = addMonths(cur, 1);
     }

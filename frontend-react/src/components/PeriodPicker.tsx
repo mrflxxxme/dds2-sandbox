@@ -1,5 +1,6 @@
 'use client';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { DayPicker } from 'react-day-picker';
 import type { DateRange } from 'react-day-picker';
 import { ru } from 'date-fns/locale';
@@ -65,6 +66,15 @@ interface Props {
     align?: 'left' | 'right';  // сторона раскрытия попапа (right — когда пикер у правого края)
     /** 'single' — одна дата (срок сдачи задачи): один месяц, без пресетов, from === to. */
     mode?: 'range' | 'single';
+    /**
+     * false — период обязателен, кнопки «Сбросить» нет. Нужен там, где родитель
+     * пустое значение всё равно не примет: иначе сброс обнуляет ВНУТРЕННЕЕ
+     * состояние пикера, родитель игнорирует `('','')`, пропсы не меняются —
+     * и синхронизирующий эффект не перезапускается, оставляя пикер залипшим.
+     */
+    clearable?: boolean;
+    /** Подмножество ключей PRESETS. По умолчанию — все шесть. */
+    presetKeys?: string[];
 }
 
 /** Пикер периода как в референсе: 2 месяца, пресеты справа, ручной ввод дд.мм.гггг, «Сбросить/Готово».
@@ -72,10 +82,17 @@ interface Props {
  *
  *  Общий на всё приложение (раньше жил локально в ads-manager): рекламу, воронку,
  *  ценообразование и модуль дизайна двигает один и тот же контрол. */
-export default function PeriodPicker({ from, to, onApply, placeholder = 'Выберите период', minWidth = 210, align = 'left', mode = 'range' }: Props) {
+export default function PeriodPicker({ from, to, onApply, placeholder = 'Выберите период', minWidth = 210, align = 'left', mode = 'range', clearable = true, presetKeys }: Props) {
     const single = mode === 'single';
+    const presets = useMemo(
+        () => (presetKeys ? PRESETS.filter(p => presetKeys.includes(p.key)) : PRESETS),
+        [presetKeys],
+    );
     const [open, setOpen] = useState(false);
     const wrapRef = useRef<HTMLDivElement>(null);
+    const popRef = useRef<HTMLDivElement>(null);
+    /** Координаты попапа в вьюпорте: он рендерится порталом (см. ниже). */
+    const [popPos, setPopPos] = useState<{ top: number; left: number } | null>(null);
     const [pending, setPending] = useState<DateRange | undefined>(() => {
         const f = fromIso(from); const t = fromIso(to);
         return f ? { from: f, to: t ?? f } : undefined;
@@ -91,10 +108,53 @@ export default function PeriodPicker({ from, to, onApply, placeholder = 'Выб�
 
     useEffect(() => {
         if (!open) return;
-        const onDoc = (e: MouseEvent) => { if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false); };
+        const onDoc = (e: MouseEvent) => {
+            const t = e.target as Node;
+            // Попап живёт в портале и в wrapRef не входит — иначе клик внутри
+            // календаря считался бы кликом «мимо» и закрывал бы пикер.
+            if (wrapRef.current?.contains(t) || popRef.current?.contains(t)) return;
+            setOpen(false);
+        };
         document.addEventListener('mousedown', onDoc);
         return () => document.removeEventListener('mousedown', onDoc);
     }, [open]);
+
+    /**
+     * Позиция попапа считается от триггера в координатах вьюпорта, а сам попап
+     * рендерится порталом в body с `position: fixed`. Так его не режет предок
+     * с `overflow` — например скроллящаяся оболочка модалки (ModalShell), внутри
+     * которой абсолютно спозиционированный попап обрезался кромкой независимо
+     * от z-index. Приём зеркалит Tooltip, где он уже отработан.
+     */
+    useLayoutEffect(() => {
+        if (!open) { setPopPos(null); return; }
+        const place = () => {
+            const trigger = wrapRef.current?.getBoundingClientRect();
+            if (!trigger) return;
+            const pop = popRef.current?.getBoundingClientRect();
+            const width = pop?.width ?? 0;
+            const height = pop?.height ?? 0;
+            const EDGE = 8;
+            // По горизонтали: от нужного края триггера, но внутрь вьюпорта.
+            const wanted = align === 'right' ? trigger.right - width : trigger.left;
+            const left = Math.min(Math.max(wanted, EDGE), Math.max(EDGE, window.innerWidth - width - EDGE));
+            // По вертикали: под триггером, а если не влезает — над ним.
+            const below = trigger.bottom + 6;
+            const top = height && below + height > window.innerHeight - EDGE
+                ? Math.max(EDGE, trigger.top - 6 - height)
+                : below;
+            setPopPos({ top, left });
+        };
+        place();
+        // Скролл/ресайз уводят попап от триггера — просто закрываем, как Tooltip.
+        const close = () => setOpen(false);
+        window.addEventListener('scroll', close, { passive: true, capture: true });
+        window.addEventListener('resize', close);
+        return () => {
+            window.removeEventListener('scroll', close, { capture: true });
+            window.removeEventListener('resize', close);
+        };
+    }, [open, align, single]);
 
     const setRange = (r: DateRange | undefined) => {
         setPending(r);
@@ -130,8 +190,19 @@ export default function PeriodPicker({ from, to, onApply, placeholder = 'Выб�
                     <path d="M7 10l5 5 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
             </button>
-            {open && (
-                <div className="apk-pop" role="dialog" style={align === 'right' ? { left: 'auto', right: 0 } : undefined}>
+            {open && createPortal(
+                <div
+                    ref={popRef}
+                    className="apk-pop"
+                    role="dialog"
+                    style={{
+                        top: popPos?.top ?? 0,
+                        left: popPos?.left ?? 0,
+                        // До первого замера позиция неизвестна — прячем, чтобы
+                        // попап не мигнул в левом верхнем углу экрана.
+                        visibility: popPos ? 'visible' : 'hidden',
+                    }}
+                >
                     <div className="apk-body">
                         {single ? (
                             <DayPicker mode="single" selected={pending?.from} onSelect={setDay} defaultMonth={defaultMonth}
@@ -142,7 +213,7 @@ export default function PeriodPicker({ from, to, onApply, placeholder = 'Выб�
                         )}
                         {!single && (
                             <div className="apk-presets">
-                                {PRESETS.map(p => (
+                                {presets.map(p => (
                                     <button key={p.key} type="button" className="apk-preset" onClick={() => setRange(preset(p.key))}>{p.label}</button>
                                 ))}
                             </div>
@@ -159,11 +230,12 @@ export default function PeriodPicker({ from, to, onApply, placeholder = 'Выб�
                             </>}
                         </span>
                         <span className="apk-actions">
-                            <button type="button" className="btn btn-secondary btn-sm" onClick={clear}>Сбросить</button>
+                            {clearable && <button type="button" className="btn btn-secondary btn-sm" onClick={clear}>Сбросить</button>}
                             <button type="button" className="btn btn-primary btn-sm" onClick={apply}>Готово</button>
                         </span>
                     </div>
-                </div>
+                </div>,
+                document.body,
             )}
             <style>{`
                 .apk-wrap { position: relative; display: inline-block; }
@@ -174,7 +246,7 @@ export default function PeriodPicker({ from, to, onApply, placeholder = 'Выб�
                 .apk-trigger:hover { border-color: var(--color-accent); }
                 .apk-trigger[aria-expanded="true"] { border-color: var(--color-accent); box-shadow: 0 0 0 3px rgba(0,113,227,.1); }
                 .apk-ph { color: var(--color-text-muted); }
-                .apk-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 200;
+                .apk-pop { position: fixed; z-index: 200;
                     background: #fff; border: 1px solid var(--color-border); border-radius: 14px;
                     box-shadow: 0 16px 48px rgba(0,0,0,.16); padding: 12px; }
                 .apk-body { display: flex; gap: 12px; align-items: flex-start; }

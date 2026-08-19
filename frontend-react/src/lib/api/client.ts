@@ -165,6 +165,9 @@ export class ApiClient {
         method: string,
         path: string,
         body?: unknown,
+        /** AbortSignal для отменяемых чтений: без него быстро переключаемый экран
+         *  оставляет за собой хвост запросов, которые сервер доводит до конца. */
+        opts?: { signal?: AbortSignal },
     ): Promise<T> {
         if (this.bounceExternalToFf()) {
             throw new Error('Внешний аккаунт фулфилмента: доступ только к ФФ-порталу');
@@ -184,6 +187,7 @@ export class ApiClient {
             method,
             headers,
             body: body ? JSON.stringify(body) : undefined,
+            signal: opts?.signal,
         });
 
         // On 401 — try refresh before giving up
@@ -196,6 +200,7 @@ export class ApiClient {
                     method,
                     headers,
                     body: body ? JSON.stringify(body) : undefined,
+                    signal: opts?.signal,
                 });
             } else if (refreshResult === 'unavailable') {
                 // Backend temporarily down (deploy) — don't clear tokens

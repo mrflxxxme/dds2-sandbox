@@ -12,6 +12,8 @@ import {
     UNASSIGNED_COLOR,
     buildAssigneeColors,
     buildMonthGrid,
+    MAX_CALENDAR_MONTHS,
+    countMonthsInRange,
     defaultCalendarRange,
     monthsInRange,
     shiftCalendarRange,
@@ -44,7 +46,9 @@ export default function DesignCalendarPage() {
     const rangeRef = useRef(range);
 
     const load = useCallback(async (r: CalendarRange) => {
-        // Быстрое переключение стрелками: ответ диапазона A не должен перезаписать B.
+        // Быстрое переключение стрелками: предыдущий запрос РВЁТСЯ (signal уходит
+        // в fetch), а не просто помечается протухшим — иначе пять кликов по стрелке
+        // оставляли бы пять выборок на 2000 задач, доводимых сервером до конца.
         abortRef.current?.abort();
         const controller = new AbortController();
         abortRef.current = controller;
@@ -57,7 +61,7 @@ export default function DesignCalendarPage() {
         setLoading(true);
         setError(null);
         try {
-            const res = await api.getDesignCalendarRange(r.from, r.to);
+            const res = await api.getDesignCalendarRange(r.from, r.to, controller.signal);
             if (stale()) return;
             setData(res);
         } catch (e) {
@@ -84,8 +88,9 @@ export default function DesignCalendarPage() {
             .catch(() => { /* цвета останутся нейтральными */ });
     }, [params.slug]);
 
-    /** Блок на каждый месяц, пересекающийся с диапазоном (Р22). */
+    /** Блок на каждый месяц, пересекающийся с диапазоном (Р22), но не больше шести. */
     const months = useMemo(() => monthsInRange(range), [range]);
+    const monthsClipped = useMemo(() => countMonthsInRange(range) > MAX_CALENDAR_MONTHS, [range]);
     const gridsByMonth = useMemo(
         () => months.map((m) => ({ month: m, weeks: buildMonthGrid(m) })),
         [months],
@@ -149,6 +154,13 @@ export default function DesignCalendarPage() {
                 <PeriodPicker
                     from={range.from}
                     to={range.to}
+                    // Пустой период календарь не принимает — поэтому кнопки «Сбросить»
+                    // здесь нет: иначе она обнуляла бы состояние пикера, родитель
+                    // игнорировал бы ('',''), и пикер залипал бы рассинхронизированным.
+                    clearable={false}
+                    // Длинных пресетов не предлагаем: больше шести блоков календарь
+                    // всё равно не рисует (MAX_CALENDAR_MONTHS).
+                    presetKeys={['today', 'yesterday', '30d', '3m']}
                     onApply={(from, to) => { if (from && to) setRange({ from, to }); }}
                     minWidth={230}
                 />
@@ -191,6 +203,11 @@ export default function DesignCalendarPage() {
                     {rangeTaskCount === 0 && (
                         <div className="glass-card" style={{ marginBottom: 12, textAlign: 'center', color: 'var(--color-text-muted)', padding: 16 }}>
                             В этом периоде задач со сроком нет. Срок задаётся в заявке — поле «Срок сдачи».
+                        </div>
+                    )}
+                    {monthsClipped && (
+                        <div className="glass-card" style={{ marginBottom: 12, color: 'var(--color-warning)', padding: 12, fontSize: 13 }}>
+                            {DESIGN_UI_HINT.calendarTooManyMonths}
                         </div>
                     )}
                     {data.truncated && (

@@ -11,6 +11,7 @@ unique игнорирует мёртвых, но бизнес-правило с�
 """
 
 import logging
+import re
 from typing import Any
 
 from sqlalchemy import Integer, cast, func, select, text
@@ -49,6 +50,12 @@ _NOT_NULL_FIELDS = frozenset(
 )
 _LEAD_ONLY_FIELDS = frozenset({"complexity", "is_outsourced"})
 
+# Р18: свой номер заявки. Разрешены латиница, кириллица, цифры, дефис, точка и
+# подчёркивание — без пробелов и слешей. Регекс держим В ОДНОМ месте: фронт на
+# него не полагается вовсе, а показывает текст 400 от бэка.
+_NUMBER_MAX_LEN = 40
+_NUMBER_RE = re.compile(r"^[A-Za-zА-Яа-яЁё0-9._-]+$")
+
 
 # ─── Нумерация (Р14) ─────────────────────────────────────────────────────────
 
@@ -58,6 +65,13 @@ async def next_number(db: AsyncSession, project_id: int) -> str:
 
     Замок живёт до конца транзакции (совместим с PgBouncer transaction-pooling).
     Фильтра is_deleted НЕТ намеренно: номер удалённой задачи не переиспользуется.
+
+    ⚠️ Счётчик НЕ монотонный (Р18, волна B v2). Максимум берётся по строкам, всё
+    ещё подходящим под `^DES-\\d+$`; если ведущий переименует САМУЮ СТАРШУЮ такую
+    задачу в свой номер, она выпадет из максимума и следующая заявка получит
+    освободившийся `DES-N` повторно. Уникальность не страдает — номер физически
+    свободен. Монотонность потребовала бы персистентного счётчика на проект
+    (миграция); закреплено тестом test_renaming_maximal_number_frees_it_for_reuse.
     """
     await db.execute(
         text("SELECT pg_advisory_xact_lock(:cls, :pid)"),
@@ -70,6 +84,64 @@ async def next_number(db: AsyncSession, project_id: int) -> str:
         )
     )
     return f"DES-{int(res.scalar() or 0) + 1}"
+
+
+async def _apply_number_change(
+    db: AsyncSession, project_id: int, task: DesignTask, raw: str, lead: bool, user: Any
+) -> None:
+    """Смена номера заявки: гварды CONTRACT-V2 §2 в том же порядке и с теми же текстами.
+
+    Проверка занятости и запись идут под ТЕМ ЖЕ advisory-локом, что и next_number:
+    иначе две параллельные смены на одно значение обе проходят проверку и падают
+    IntegrityError (500) вместо честного 400.
+    """
+    if not lead:
+        raise PermissionError("Номер заявки меняет только ведущий дизайнер")
+    if task.status in _TERMINAL_VALUES:
+        raise PermissionError("Номер закрытой задачи не меняется")
+
+    number = raw.strip()
+    if not number:
+        raise ValueError("Номер не может быть пустым")
+    if len(number) > _NUMBER_MAX_LEN:
+        raise ValueError("Номер длиннее 40 символов")
+    if not _NUMBER_RE.match(number):
+        raise ValueError("Номер: только буквы, цифры, дефис, точка и подчёркивание")
+    if number == task.number:
+        return  # тот же номер — не «занят», а тихий no-op: ни записи, ни события
+
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:cls, :pid)"),
+        {"cls": _NUMBER_LOCK_CLASS, "pid": project_id % 2**31},
+    )
+    taken = await db.execute(
+        select(DesignTask.id)
+        .where(
+            DesignTask.project_id == project_id,
+            DesignTask.number == number,
+            DesignTask.is_deleted == False,  # noqa: E712
+            DesignTask.id != task.id,
+        )
+        .limit(1)
+    )
+    if taken.scalar_one_or_none() is not None:
+        raise ValueError("Номер уже занят")
+
+    old = task.number
+    task.number = number
+    db.add(
+        DesignTaskEvent(
+            project_id=project_id,
+            task_id=task.id,
+            # Паттерн «не-переход» (как смена исполнителя): статус не двигается,
+            # но факт обязан остаться в журнале.
+            old_status=task.status,
+            new_status=task.status,
+            changed_at=utcnow(),
+            changed_by=actor_name(user),
+            comment=f"Номер изменён: {old} → {number}",
+        )
+    )
 
 
 # ─── Создание ────────────────────────────────────────────────────────────────
@@ -159,6 +231,15 @@ async def update_task(
     """
     task = await get_task_row(db, project_id, task_id, for_update=True)
     lead = is_lead(member_role)
+    data = payload.model_dump(exclude_unset=True)
+
+    # Номер идёт ПЕРЕД общими гвардами: у него своя лесенка с собственными
+    # текстами (CONTRACT-V2 §2), и на закрытой задаче пользователь должен узнать
+    # именно про номер, а не общее «задачи не редактируются». Явный null здесь
+    # значит «не менять» (поле NOT NULL, очистить его нельзя).
+    number_raw = data.pop("number", None)
+    if number_raw is not None:
+        await _apply_number_change(db, project_id, task, number_raw, lead, user)
 
     if task.status in _TERMINAL_VALUES:
         raise PermissionError("Принятые и отменённые задачи не редактируются")
@@ -168,7 +249,6 @@ async def update_task(
         if task.status == _S.REVIEW.value:
             raise PermissionError("На проверке заявку правит только ведущий")
 
-    data = payload.model_dump(exclude_unset=True)
     for field in _NOT_NULL_FIELDS & data.keys():
         if data[field] is None:
             raise ValueError(f"Поле {field} обязательное — его нельзя очистить")

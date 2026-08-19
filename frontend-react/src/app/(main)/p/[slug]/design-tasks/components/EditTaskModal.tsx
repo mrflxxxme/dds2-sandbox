@@ -20,6 +20,7 @@ interface EditTaskModalProps {
 
 /** Редактирование заявки (PATCH-семантика — шлём только изменённые поля). */
 export default function EditTaskModal({ task, onSaved, onClose }: EditTaskModalProps) {
+    const [number, setNumber] = useState(task.number);
     const [title, setTitle] = useState(task.title);
     const [description, setDescription] = useState(task.description);
     const [sheetUrl, setSheetUrl] = useState(task.sheet_url);
@@ -39,6 +40,9 @@ export default function EditTaskModal({ task, onSaved, onClose }: EditTaskModalP
         if (!isValidHttpUrl(sheetUrl.trim())) { setError('Ссылка на ТЗ-таблицу должна быть корректным http(s)-URL'); return; }
 
         const payload: DesignTaskUpdatePayload = {};
+        // Номер: свою валидацию не пишем — формат и его тексты держит бэк
+        // (CONTRACT-V2 §2), иначе два источника правды разъедутся.
+        if (task.permissions.can_edit_number && number.trim() !== task.number) payload.number = number.trim();
         if (title.trim() !== task.title) payload.title = title.trim();
         if (description.trim() !== task.description) payload.description = description.trim();
         if (sheetUrl.trim() !== task.sheet_url) payload.sheet_url = sheetUrl.trim();
@@ -66,6 +70,21 @@ export default function EditTaskModal({ task, onSaved, onClose }: EditTaskModalP
     return (
         <ModalShell title={`Редактировать ${task.number}`} onClose={onClose} width={560}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {task.permissions.can_edit_number && (
+                    <div>
+                        <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 4 }}>Номер</label>
+                        <input
+                            className="form-input"
+                            style={{ width: '100%' }}
+                            value={number}
+                            maxLength={40}
+                            onChange={(e) => setNumber(e.target.value)}
+                        />
+                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginTop: 4 }}>
+                            Уникален в проекте, до 40 символов: буквы, цифры, дефис, точка, подчёркивание.
+                        </div>
+                    </div>
+                )}
                 <div>
                     <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 4 }}>Название *</label>
                     <input className="form-input" style={{ width: '100%' }} value={title} maxLength={300} onChange={(e) => setTitle(e.target.value)} />
