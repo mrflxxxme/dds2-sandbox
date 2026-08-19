@@ -5,99 +5,98 @@ depends_on: []
 executors: [lead]
 reviewers: [database-reviewer, api-designer, code-reviewer]
 donors:
-  - backend/services/design/crud.py            # next_number, update_task
-  - backend/models/design.py                   # number, uq_design_tasks_project_number
-  - backend/services/design/permissions.py     # 15 флагов, куда добавляется can_edit_number
+  - backend/services/design/crud.py            # next_number (advisory-lock 0x00DE516), update_task
+  - backend/models/design.py                   # number String(20), uq_design_tasks_project_number
+  - backend/services/design/permissions.py     # 16 флагов, куда добавляется can_edit_number
   - migrations/versions/dsn03_design_fk_indexes.py   # образец аддитивной миграции модуля
-prd_refs: [CHARTER-V2 Р18]
+prd_refs: [CHARTER-V2 Р18; CONTRACT-V2 §2]
 ---
-<!-- HEAD-SUMMARY: lead получает право переименовать номер заявки свободным текстом; автогенерация DES-N остаётся дефолтом; уникальность в проекте сохраняется, смена пишется в журнал. Миграция расширяет колонку до String(40). -->
+<!-- HEAD-SUMMARY: lead переименовывает заявку свободным текстом (буквы/цифры/._-, до 40); автогенерация DES-N остаётся дефолтом; уникальность в проекте держится под тем же advisory-локом, что и нумерация; смена пишется в журнал. -->
 
 ## Goal
 
-Ведущий дизайнер может задать заявке свой номер (например, внешний номер из таблицы заказчика), не ломая ни автонумерацию, ни журнал.
+Ведущий дизайнер задаёт заявке свой номер (например, внешний номер из таблицы заказчика), не ломая автонумерацию и журнал.
 
 ## In scope
 
 `models/design.py` (длина колонки) · миграция `dsn04_design_number_len.py` ·
-`schemas/design.py` (поле `number` во входной схеме апдейта + флаг прав) ·
-`services/design/crud.py` (валидация и запись), `permissions.py` (`can_edit_number`) ·
-`routers/design_tasks.py` (без новой ручки — через существующий `PUT /{id}`) ·
-`EditTaskModal.tsx` (поле) · тесты · амендмент CONTRACT.md.
+`schemas/design.py` (`DesignTaskUpdate.number`, флаг `can_edit_number`) ·
+`services/design/crud.py`, `services/design/permissions.py` ·
+`EditTaskModal.tsx` (поле) · тесты · CONTRACT-V2 §2 уже описывает контракт.
 
 ## Out of scope
 
 Массовая перенумерация → потом · смена формата автогенерации (`DES-N` остаётся) ·
-редактирование номера автором заявки (Р18: только lead).
+редактирование номера автором заявки (Р18: только lead) · номера с пробелами и юникод-символами
+вне разрешённого класса (CONTRACT-V2 §2).
 
 ## Работы
 
 ### Модель и миграция
 
-`DesignTask.number`: `String(20)` → `String(40)` (внешние номера длиннее шаблонного `DES-N`).
-Миграция `dsn04_design_number_len.py`, `down_revision` — **голова origin/dev на момент старта волны**
-(не локальный хвост; текущая голова цепочки модуля — `dsnmrg_merge_design_dev_heads`, свериться
-`alembic heads` перед написанием). Индекс `uq_design_tasks_project_number` не пересоздаётся
-(изменение длины `varchar` не требует).
+`DesignTask.number`: `String(20)` → `String(40)`.
+Миграция `dsn04_design_number_len.py`; `down_revision` — **фактическая голова на момент старта волны**
+(проверить `docker compose exec backend alembic heads`). На 2026-08-19 голова одна, её
+**revision id — `dsnmrg_design_dev`** (файл называется иначе, `dsnmrg_merge_design_dev_heads.py`:
+в `down_revision` пишется id, не имя файла). Ревизии `dsn04`/`dsn05`/`dsn06` свободны.
+Индекс `uq_design_tasks_project_number` не пересоздаётся — изменение длины `varchar` этого не требует.
+`downgrade` — обратный `alter_column` на `String(20)`; в нём **не** усекать данные (если длинные номера
+уже есть, откат упадёт — это честнее тихой потери; отметить комментарием в миграции).
 
 ### Сервис
 
-В `crud.update_task` — ветка смены номера:
-1. право: только `is_lead` (иначе `PermissionError` → 403);
-2. нормализация: `strip()`, схлопывание пробелов; пусто → `ValueError("Номер не может быть пустым")`;
-3. длина ≤40 → `ValueError("Номер длиннее 40 символов")`;
-4. уникальность в проекте среди живых: конфликт → `ValueError("Номер уже занят")` (400).
-   Проверка + запись под тем же `pg_advisory_xact_lock(_NUMBER_LOCK_CLASS, project_id)`,
-   что и `next_number`, — иначе гонка двух переименований обходит проверку и падает `IntegrityError`;
-5. `DesignTaskEvent` со старым и новым значением (`comment = "Номер изменён: DES-7 → ABC-123"`),
-   `old_status == new_status` — паттерн «не-переход», как смена исполнителя.
+Ветка смены номера в `crud.update_task`. Порядок проверок и тексты — **дословно CONTRACT-V2 §2**:
+право lead → пусто → длина → регекс `^[A-Za-zА-Яа-яЁё0-9._-]+$` → занятость.
 
-`next_number` **не менять**: он по-прежнему считает `max+1` включая soft-deleted, и по-прежнему
-парсит только `DES-N`-строки — произвольные номера в расчёт максимума не попадают (это осознанно:
-автонумерация живёт своей линейкой; закрепить тестом).
+Критично: проверка занятости и запись идут под тем же
+`pg_advisory_xact_lock(_NUMBER_LOCK_CLASS = 0x00DE516, project_id)`, что и `next_number` —
+иначе две параллельные смены на одно значение проскакивают проверку и падают `IntegrityError` (500)
+вместо честного 400. Новый класс лока не заводить.
+
+Событие в `DesignTaskEvent`: `old_status == new_status` (паттерн «не-переход», как смена исполнителя),
+`comment = f"Номер изменён: {old} → {new}"`.
+
+`next_number` **не менять**: он по-прежнему берёт `max+1` включая soft-deleted и парсит только
+`DES-N`-строки, поэтому произвольные номера в расчёт максимума не попадают. Это осознанно —
+автонумерация живёт своей линейкой; закрепить тестом AC-6.
 
 ### Права и схемы
 
-`permissions.compute_permissions` → новый флаг `can_edit_number = is_lead and not terminal`;
-`DesignTaskPermissions` зеркалит ключ (паритет закреплён существующим
-`test_permissions_schema_matches_service` — он упадёт, если забыть).
+`permissions.compute_permissions` → `can_edit_number = is_lead and status not in (ACCEPTED, CANCELLED)`.
+`DesignTaskPermissions` зеркалит ключ — иначе упадёт существующий `test_permissions_schema_matches_service`.
 `DesignTaskUpdate` получает `number: str | None = None`.
-
-### API
-
-Новых ручек нет: номер идёт в существующий `PUT /{id}` (PATCH-семантика).
-`CONTRACT.md` — аддитивный амендмент в раздел «V2 additions»: поле входа, новые тексты ошибок
-(тексты гвардов — часть контракта!), новый флаг в `permissions`.
 
 ### Фронт
 
-`EditTaskModal.tsx`: поле «Номер» показывается только при `permissions.can_edit_number`,
-предзаполнено текущим, хелпер-текст «Уникален в проекте». Ошибку 400 показывать текстом бэка.
-Номер отображается в деталке/списке/карточке как есть (уже так).
+`EditTaskModal.tsx`: поле «Номер» рендерится только при `permissions.can_edit_number`,
+предзаполнено текущим, хелпер «Уникален в проекте, до 40 символов».
+Ошибку 400 показывать **текстом бэка**, своих сообщений не придумывать.
 
 ## AC
 
-- **AC-1:** `alembic upgrade head && alembic downgrade -1 && alembic upgrade head` — чисто, одна голова.
-- **AC-2:** lead переименовывает номер → 200, в списке и деталке новый номер, в журнале запись со старым и новым.
-- **AC-3:** editor-автор и editor-исполнитель получают 403 при попытке сменить номер (тест на оба).
-- **AC-4:** Занятый номер живой задачи → 400 «Номер уже занят»; номер soft-deleted задачи — **разрешён** (partial-unique мёртвых не видит).
-- **AC-5:** Две параллельные смены на один и тот же номер: одна 200, вторая 400 (не `IntegrityError`/500) — тест на advisory-lock.
-- **AC-6:** После переименования `DES-7 → ABC-1` создание новой заявки даёт `DES-8` (автонумерация не сбита).
-- **AC-7:** `mypy` по дизайн-скоупу чист; `check_conventions.sh` PASSED; `tsc`+`vitest` зелёные.
+- **AC-1:** `alembic upgrade head && alembic downgrade -1 && alembic upgrade head` — чисто, `alembic heads` даёт одну голову.
+- **AC-2:** lead меняет номер → 200; новый номер виден в списке, на карточке доски и в деталке; в журнале запись `«Номер изменён: DES-7 → ABC-123»`.
+- **AC-3:** editor-автор и editor-исполнитель получают 403 с текстом контракта (тест на обоих); `can_edit_number` у них `false`.
+- **AC-4:** Все 400-гварды CONTRACT-V2 §2 воспроизводятся дословно — 4 текста на 5 кейсах: пусто · >40 символов · `«ABC 123»` (пробел) и `«ABC/123»` (слеш) — оба дают текст про регекс · занятый номер. Два 403-текста проверяются в AC-3 и AC-8.
+- **AC-5:** Две параллельные смены на один номер: одна 200, вторая 400 «Номер уже занят» (не 500/`IntegrityError`).
+- **AC-6:** После `DES-7 → ABC-1` создание новой заявки даёт `DES-8` — автонумерация не сбита.
+- **AC-7:** Номер soft-deleted задачи можно занять повторно (partial-unique мёртвых строк не видит).
+- **AC-8:** Номер в терминальном статусе не меняется: `can_edit_number = false`, попытка → 403.
+- **AC-9:** `mypy` по дизайн-скоупу, `check_conventions.sh`, `tsc`, `vitest` — чисто.
 
 ## Exit-gate
 
 | Критерий | Порог | Evidence |
 |---|---|---|
 | Миграция | AC-1 | транскрипт alembic |
-| Сервис/API-тесты | AC-2..AC-6 зелёные | транскрипт pytest |
-| Статика | AC-7 | транскрипты mypy/conventions/tsc/vitest |
-| Ревью | database-reviewer + api-designer + code-reviewer без BLOCK | вердикты |
-| Подпись | tripwire-пути (`models/`, `migrations/`, `schemas/`) — правит lead, подпись архитектора ДО мержа | STATUS-строка |
+| Сервис/API-тесты | AC-2..AC-8 зелёные | транскрипт pytest |
+| Статика | AC-9 | транскрипты mypy/conventions/tsc/vitest |
+| Ревью | database-reviewer + api-designer + code-reviewer без BLOCK | 3 вердикта |
+| Подпись | tripwire (`models/`, `migrations/`, `schemas/`) — подпись архитектора ДО мержа | строка в STATUS |
 
 ## Hints
 
-- Мина `SoftDeleteMixin` + `UniqueConstraint` уже обойдена partial-индексом — не «чинить» его добавлением `is_deleted` в `next_number` (v1 DOMAIN_DESIGN «Ловушки»).
-- Advisory-локи модуля: `0x00DE516` — нумерация, `0x00DE517` — move. Переименование берёт **первый**, новый класс не заводить.
-- `ValueError` → 400, кроме текстов из `_NOT_FOUND_TEXTS` → 404. Новые тексты в этот frozenset не добавлять.
-- Все write-ручки — `Depends(rate_limit_write)` (уже есть на `PUT /{id}`).
+- Мина `SoftDeleteMixin` + `UniqueConstraint` уже обойдена partial-индексом `WHERE is_deleted = false` — не «чинить» её добавлением фильтра в `next_number` (v1 DOMAIN_DESIGN, «Ловушки»).
+- `ValueError` → 400, кроме текстов из `_NOT_FOUND_TEXTS` → 404. Новые тексты волны B в этот frozenset **не** добавлять.
+- Регекс держать в одном месте (константа рядом с валидацией), не дублировать на фронте: фронт полагается на 400 бэка.
+- `PUT /{id}` уже под `Depends(rate_limit_write)` — новой ручки нет.
