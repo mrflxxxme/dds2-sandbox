@@ -1,6 +1,13 @@
 'use client';
 import React, { useEffect, useMemo, useState } from 'react';
-import { IcSearch } from './icons';
+
+/** Лупа. Иконка инлайнится: компонент общий, а набор icons.tsx — локальный для ads-manager. */
+const IcSearch = ({ size = 15 }: { size?: number }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" />
+    </svg>
+);
 
 /** Раскрывающийся фильтр с поисковой строкой сверху (одиночный выбор). */
 export default function SearchSelect({ value, onChange, options, placeholder, allLabel = 'Все', minWidth = 160, maxWidth = 260, showAll = true, searchPlaceholder = 'Поиск…', customOption }: {

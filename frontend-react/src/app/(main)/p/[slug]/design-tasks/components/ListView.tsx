@@ -5,11 +5,14 @@ import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import WbThumb from '@/components/WbThumb';
+import InfoTip from '@/components/InfoTip';
+import Tooltip from '@/components/Tooltip';
 import {
     DESIGN_STATUS_BADGE,
     DESIGN_STATUS_LABEL,
     DESIGN_WORK_TYPE_LABEL,
 } from '@/lib/design';
+import { DESIGN_CHIP_HINT, DESIGN_MARK_HINT } from '@/lib/designHints';
 import type { DesignTaskListItem, DesignTaskStatus, DesignWorkType } from '@/types/api';
 
 type Chip = 'all' | 'NEW' | 'ASSIGNED' | 'IN_PROGRESS' | 'REVIEW' | 'REVISION' | 'ON_HOLD' | 'overdue';
@@ -110,13 +113,14 @@ export default function ListView({ slug }: { slug: string }) {
         <>
             <div className="glass-card" style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 {CHIPS.map(({ key, label }) => (
-                    <button
-                        key={key}
-                        className={`btn btn-sm ${chip === key ? 'btn-primary' : 'btn-secondary'}`}
-                        onClick={() => setChip(key)}
-                    >
-                        {label} {formatNumber(chipCount(key), 0)}
-                    </button>
+                    <Tooltip key={key} text={DESIGN_CHIP_HINT[key]}>
+                        <button
+                            className={`btn btn-sm ${chip === key ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => setChip(key)}
+                        >
+                            {label} {formatNumber(chipCount(key), 0)}
+                        </button>
+                    </Tooltip>
                 ))}
             </div>
 
@@ -175,7 +179,9 @@ export default function ListView({ slug }: { slug: string }) {
                                 >
                                     <td style={{ padding: '12px 16px', whiteSpace: 'nowrap' }}>
                                         {t.unviewed && (
-                                            <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: 'var(--color-danger)', marginRight: 6 }} />
+                                            <InfoTip text={DESIGN_MARK_HINT.unviewed}>
+                                                <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: 'var(--color-danger)', marginRight: 6 }} />
+                                            </InfoTip>
                                         )}
                                         {t.number}
                                     </td>
@@ -188,7 +194,9 @@ export default function ListView({ slug }: { slug: string }) {
                                     <td style={{ padding: '12px 16px', whiteSpace: 'nowrap' }}>{DESIGN_WORK_TYPE_LABEL[t.work_type]}</td>
                                     <td style={{ padding: '12px 16px' }}>{t.complexity}</td>
                                     <td style={{ padding: '12px 16px' }}>
-                                        {t.is_urgent ? <span className="badge badge-danger">Срочно</span> : '—'}
+                                        {t.is_urgent
+                                            ? <Tooltip text={DESIGN_MARK_HINT.urgent}><span className="badge badge-danger">Срочно</span></Tooltip>
+                                            : '—'}
                                     </td>
                                     <td style={{ padding: '12px 16px', whiteSpace: 'nowrap' }}>{t.assignee_name ?? '—'}</td>
                                     <td style={{ padding: '12px 16px', whiteSpace: 'nowrap', color: t.is_overdue ? 'var(--color-danger)' : undefined, fontWeight: t.is_overdue ? 600 : undefined }}>

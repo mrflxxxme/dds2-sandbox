@@ -1,7 +1,7 @@
 'use client';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { COLUMNS, COLUMN_BY_KEY, accumulate, fmtInt, fmtRub, type ColumnDef, type ColumnLayout, type Row } from './columns';
-import Tooltip from '../../ads-manager/components/Tooltip';
+import Tooltip from '@/components/Tooltip';
 
 /* ─── График динамики воронки ──────────────────────────────────────────────
  * Механика — как в «Управлении рекламой» (CampaignMetricsChart): слева

@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
-import Tooltip from './Tooltip';
+import Tooltip from '@/components/Tooltip';
 import Switch from './Switch';
 import { humanizeAdsError } from './adsShared';
 import type { CampaignZones } from '@/types/api';

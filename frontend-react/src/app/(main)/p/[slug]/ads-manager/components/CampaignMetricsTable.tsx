@@ -4,7 +4,7 @@ import type { CampaignMetricsResponse, CampaignMetricRow, CampaignMetricEvent } 
 import { fmt, fmtPct, thLeft, thStyle, tdLeft, tdStyle, readTargetDrr } from './adsShared';
 import { drrColor } from './ClusterTable';
 import { useFitViewport } from './useFitViewport';
-import Tooltip from './Tooltip';
+import Tooltip from '@/components/Tooltip';
 
 // Колонки посуточных метрик: РК-статистика + воронка продаж
 const RK_COLS: { k: keyof CampaignMetricRow; label: string; pct?: boolean }[] = [

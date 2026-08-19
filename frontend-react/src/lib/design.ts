@@ -17,7 +17,7 @@ import type {
 
 // ─── Словари ─────────────────────────────────────────────────────────────────
 
-/** 6 колонок доски PRD §4 (ON_HOLD/CANCELLED — вне доски, оверлеем). */
+/** 6 колонок доски PRD §4 (ON_HOLD/CANCELLED — вне доски, плоским списком). */
 export const DESIGN_BOARD_STATUSES = [
     'NEW', 'ASSIGNED', 'IN_PROGRESS', 'REVIEW', 'REVISION', 'ACCEPTED',
 ] as const;

@@ -166,7 +166,7 @@ export function TelegramBot() {
                     onClick={() => handleToggleDesign(row.id, row.design_notify_enabled)}
                     title="Утренняя сводка задач дизайна карточек в 09:00 МСК (новые/в работе/просроченные)"
                 >
-                    {row.design_notify_enabled ? '🎨 Вкл' : '🎨 Выкл'}
+                    {row.design_notify_enabled ? '🖌️ Вкл' : '🖌️ Выкл'}
                 </button>
             ),
         },

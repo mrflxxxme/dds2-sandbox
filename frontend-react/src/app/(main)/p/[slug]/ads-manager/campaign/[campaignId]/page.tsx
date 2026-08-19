@@ -18,8 +18,8 @@ import BudgetLedgerModal from '../../components/BudgetLedgerModal';
 import DepositModal from '../../components/DepositModal';
 import AutopayModal from '../../components/AutopayModal';
 import WbThumb from '@/components/WbThumb';
-import AdsPeriodPicker from '../../components/AdsPeriodPicker';
-import Tooltip from '../../components/Tooltip';
+import PeriodPicker from '@/components/PeriodPicker';
+import Tooltip from '@/components/Tooltip';
 import EditableName from '../../components/EditableName';
 import { useToast } from '../../components/Toasts';
 import ZonesPanel, { ZONES, zoneRuleText } from '../../components/ZonesPanel';
@@ -845,7 +845,7 @@ export default function CampaignPage() {
 
                         {/* Период + обновление */}
                         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-                            <AdsPeriodPicker from={dateFrom} to={dateTo} onApply={(f, t) => { if (f && t) { setDateFrom(f); setDateTo(t); } }} minWidth={230} />
+                            <PeriodPicker from={dateFrom} to={dateTo} onApply={(f, t) => { if (f && t) { setDateFrom(f); setDateTo(t); } }} minWidth={230} />
                             <button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }} onClick={() => doRefresh()} disabled={loading || metricsLoading || refreshing}><IcRefresh size={14} />{refreshing ? 'Обновление…' : 'Обновить'}</button>
                         </div>
 

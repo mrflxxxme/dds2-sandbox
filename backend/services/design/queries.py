@@ -39,7 +39,7 @@ from backend.schemas.design import (
 from backend.services.design.common import get_task_row
 from backend.services.design.permissions import compute_permissions
 from backend.services.design.state import can_user_transition
-from backend.utils.time import utcnow
+from backend.utils.time import msk_today, utcnow
 
 _S = DesignTaskStatus
 
@@ -259,36 +259,94 @@ async def list_tasks_all_projects(
 
 # Видимая сетка месяца (Р7): CSS grid 7×6 захватывает хвосты соседних месяцев.
 _CALENDAR_PAD_DAYS = 6
-_CALENDAR_LIMIT = 500
+_CALENDAR_LIMIT = 500  # режим month — унаследован из v1, не меняется
+_CALENDAR_RANGE_LIMIT = 2000  # режим произвольного диапазона (CONTRACT-V2 §1)
+_CALENDAR_MAX_RANGE_DAYS = 400
 
 
-async def list_calendar(
-    db: AsyncSession, project_id: int, month_first: date
-) -> tuple[date, date, list[DesignTaskListItem]]:
-    """Задачи месяца по due_date, границы видимой сетки ±6 дней (спек F2).
+def resolve_calendar_window(
+    month: str | None, date_from: date | None, date_to: date | None
+) -> tuple[str, date, date, int]:
+    """Разбор параметров GET /calendar → (month, окно_от, окно_до, cap).
 
-    Возвращает (date_from, date_to, items) — роутер собирает DesignCalendarOut.
+    Границы возвращаются уже расширенными на ±6 дней: календарь дорисовывает
+    недели соседних месяцев, и фронт полагается на это (v1-семантика полей
+    date_from/date_to ответа сохраняется дословно).
+
+    Тексты ошибок — часть контракта (CONTRACT-V2 §1), тесты сверяют их дословно.
     """
+    has_range = date_from is not None or date_to is not None
+    if month is not None and has_range:
+        raise ValueError("Укажите либо month, либо диапазон дат")
+
+    if has_range:
+        if date_from is None or date_to is None:
+            raise ValueError("Укажите обе границы диапазона")
+        if date_from > date_to:
+            raise ValueError("Начало диапазона позже конца")
+        if (date_to - date_from).days + 1 > _CALENDAR_MAX_RANGE_DAYS:
+            raise ValueError("Диапазон не больше 400 дней")
+        return (
+            date_from.strftime("%Y-%m"),
+            date_from - timedelta(days=_CALENDAR_PAD_DAYS),
+            date_to + timedelta(days=_CALENDAR_PAD_DAYS),
+            _CALENDAR_RANGE_LIMIT,
+        )
+
+    # Дефолт — текущий месяц по МСК: календарь пользовательский, и в 00:00–02:59
+    # МСК UTC-дата отдала бы прошлый месяц.
+    if month is None:
+        today = msk_today()
+        month_first = date(today.year, today.month, 1)
+        month = f"{today.year:04d}-{today.month:02d}"
+    else:
+        try:
+            month_first = date.fromisoformat(f"{month}-01")
+        except ValueError as e:
+            raise ValueError("month должен быть в формате YYYY-MM") from e
+
     if month_first.month == 12:
         next_month = date(month_first.year + 1, 1, 1)
     else:
         next_month = date(month_first.year, month_first.month + 1, 1)
-    date_from = month_first - timedelta(days=_CALENDAR_PAD_DAYS)
-    date_to = next_month + timedelta(days=_CALENDAR_PAD_DAYS - 1)
+    return (
+        month,
+        month_first - timedelta(days=_CALENDAR_PAD_DAYS),
+        next_month + timedelta(days=_CALENDAR_PAD_DAYS - 1),
+        _CALENDAR_LIMIT,
+    )
+
+
+async def list_calendar(
+    db: AsyncSession,
+    project_id: int,
+    *,
+    month: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> tuple[str, date, date, list[DesignTaskListItem], bool]:
+    """Задачи месяца или произвольного диапазона по due_date (спек F2 + CONTRACT-V2 §1).
+
+    Возвращает (month, окно_от, окно_до, items, truncated) — роутер собирает
+    DesignCalendarOut. Усечение по cap отдаётся явным флагом: тихие cap'ы запрещены.
+    """
+    month_out, win_from, win_to, limit = resolve_calendar_window(month, date_from, date_to)
 
     res = await db.execute(
         select(DesignTask)
         .where(
             DesignTask.project_id == project_id,
             DesignTask.is_deleted == False,  # noqa: E712
-            DesignTask.due_date >= date_from,
-            DesignTask.due_date <= date_to,
+            DesignTask.due_date >= win_from,
+            DesignTask.due_date <= win_to,
         )
         .order_by(DesignTask.due_date, DesignTask.id)
-        .limit(_CALENDAR_LIMIT)
+        .limit(limit + 1)
     )
-    items = await to_list_items(db, project_id, list(res.scalars().all()))
-    return date_from, date_to, items
+    rows = list(res.scalars().all())
+    truncated = len(rows) > limit
+    items = await to_list_items(db, project_id, rows[:limit])
+    return month_out, win_from, win_to, items, truncated
 
 
 async def get_task(

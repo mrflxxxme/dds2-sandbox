@@ -7,6 +7,9 @@
  * что бейджи колонок доски). Только var(--color-*) (design.md).
  */
 import {
+    addDays,
+    addMonths,
+    differenceInCalendarDays,
     eachDayOfInterval,
     endOfMonth,
     endOfWeek,
@@ -88,6 +91,56 @@ export function formatMonthTitle(month: string): string {
 }
 
 export const WEEKDAY_LABELS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'] as const;
+
+// ─── Произвольный диапазон (Р22) ─────────────────────────────────────────────
+
+export interface CalendarRange {
+    /** YYYY-MM-DD, включительно. */
+    from: string;
+    to: string;
+}
+
+/** ISO-день локальной даты. `format`, не `toISOString()`: вечером по МСК даёт минус сутки. */
+function iso(d: Date): string {
+    return format(d, 'yyyy-MM-dd');
+}
+
+/**
+ * Дефолт календаря — ровно два блока: текущий месяц и следующий (референс заказчика).
+ * Это единственный дефолт; «текущий месяц» отдельно нигде не используется.
+ */
+export function defaultCalendarRange(today?: Date): CalendarRange {
+    const now = today ?? new Date();
+    const first = new Date(now.getFullYear(), now.getMonth(), 1);
+    return { from: iso(first), to: iso(endOfMonth(addMonths(first, 1))) };
+}
+
+/** Все месяцы `YYYY-MM`, которые пересекает диапазон — по блоку на каждый. */
+export function monthsInRange(range: CalendarRange): string[] {
+    const start = new Date(`${range.from}T00:00:00`);
+    const end = new Date(`${range.to}T00:00:00`);
+    const months: string[] = [];
+    let cur = new Date(start.getFullYear(), start.getMonth(), 1);
+    const last = new Date(end.getFullYear(), end.getMonth(), 1);
+    while (cur <= last) {
+        months.push(format(cur, 'yyyy-MM'));
+        cur = addMonths(cur, 1);
+    }
+    return months;
+}
+
+/**
+ * Сдвиг диапазона стрелками на delta месяцев с СОХРАНЕНИЕМ длины: начало едет
+ * на месяц, конец пересчитывается от него по прежнему числу дней. Иначе
+ * addMonths обоих концов растягивал бы/сжимал диапазон на длине разных месяцев.
+ */
+export function shiftCalendarRange(range: CalendarRange, delta: number): CalendarRange {
+    const start = new Date(`${range.from}T00:00:00`);
+    const end = new Date(`${range.to}T00:00:00`);
+    const span = differenceInCalendarDays(end, start);
+    const newStart = addMonths(start, delta);
+    return { from: iso(newStart), to: iso(addDays(newStart, span)) };
+}
 
 // ─── Раскраска чипов ─────────────────────────────────────────────────────────
 

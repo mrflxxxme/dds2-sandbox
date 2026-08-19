@@ -10868,9 +10868,12 @@ export interface DesignProductSuggestion {
 
 export interface DesignCalendarOut {
     month: string;
+    /** Границы ФАКТИЧЕСКОГО окна выборки: запрошенное ±6 дней. */
     date_from: string;
     date_to: string;
     tasks: DesignTaskListItem[];
+    /** Сработал cap выборки — показать «показаны не все» (тихое усечение запрещено). */
+    truncated: boolean;
 }
 
 export interface DesignWorkloadRow {

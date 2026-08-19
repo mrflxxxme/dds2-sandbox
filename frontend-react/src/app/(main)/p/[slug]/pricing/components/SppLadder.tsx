@@ -21,8 +21,8 @@ import { MONO } from '../../funnel/components/FunnelTable';
 import WbThumb from '@/components/WbThumb';
 import { wbProductUrl } from '@/lib/wbMedia';
 import { CARD_TOOLBAR, TABLE_CARD, thFlat } from '../../funnel/components/funnelUi';
-import AdsPeriodPicker from '../../ads-manager/components/AdsPeriodPicker';
-import SearchSelect from '../../ads-manager/components/SearchSelect';
+import PeriodPicker from '@/components/PeriodPicker';
+import SearchSelect from '@/components/SearchSelect';
 import type { SppMapResponse, SppCategory, SppHint, SppThreshold } from '@/types/api';
 
 const money = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 0));
@@ -163,7 +163,7 @@ export default function SppLadder({ dateFrom, dateTo }: { dateFrom: string; date
                 своей рамке, и выпадашки календаря и шага сетки выглядят «не открылись» */}
             <div className="glass-card" style={{ ...TABLE_CARD, marginBottom: 10, flex: '0 0 auto', overflow: 'visible' }}>
                 <div style={{ ...CARD_TOOLBAR, borderBottom: 'none', flexWrap: 'nowrap', overflow: 'visible' }}>
-                    <AdsPeriodPicker from={from} to={to} minWidth={215}
+                    <PeriodPicker from={from} to={to} minWidth={215}
                         onApply={(f, t) => { setFrom(f || isoToday()); setTo(t || isoToday()); }} />
                     <span style={{ fontSize: 12, color: '#9ca3af' }} title="Шаг сетки цен, ₽">шаг</span>
                     <SearchSelect

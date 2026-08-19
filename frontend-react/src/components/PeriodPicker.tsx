@@ -33,9 +33,10 @@ function parseRu(s: string): Date | undefined {
     return new Date(y, mo - 1, d);
 }
 
-/** Пресеты периода (как в референсе). Возвращают [from, to] относительно сегодня. */
-function preset(kind: string): DateRange {
-    const now = new Date();
+/** Пресеты периода (как в референсе). Возвращают [from, to] относительно сегодня.
+ *  Экспортируется ради юнит-теста: чистая функция без React. */
+export function preset(kind: string, today?: Date): DateRange {
+    const now = today ?? new Date();
     switch (kind) {
         case 'today': return { from: now, to: now };
         case 'yesterday': { const y = subDays(now, 1); return { from: y, to: y }; }
@@ -46,7 +47,7 @@ function preset(kind: string): DateRange {
         default: return { from: now, to: now };
     }
 }
-const PRESETS: { key: string; label: string }[] = [
+export const PRESETS: { key: string; label: string }[] = [
     { key: 'today', label: 'Сегодня' },
     { key: 'yesterday', label: 'Вчера' },
     { key: '30d', label: '30 дней' },
@@ -62,11 +63,17 @@ interface Props {
     placeholder?: string;
     minWidth?: number;
     align?: 'left' | 'right';  // сторона раскрытия попапа (right — когда пикер у правого края)
+    /** 'single' — одна дата (срок сдачи задачи): один месяц, без пресетов, from === to. */
+    mode?: 'range' | 'single';
 }
 
 /** Пикер периода как в референсе: 2 месяца, пресеты справа, ручной ввод дд.мм.гггг, «Сбросить/Готово».
- *  Поддерживает пустое состояние (для фильтра «Дата добавления»). */
-export default function AdsPeriodPicker({ from, to, onApply, placeholder = 'Выберите период', minWidth = 210, align = 'left' }: Props) {
+ *  Поддерживает пустое состояние (для фильтра «Дата добавления»).
+ *
+ *  Общий на всё приложение (раньше жил локально в ads-manager): рекламу, воронку,
+ *  ценообразование и модуль дизайна двигает один и тот же контрол. */
+export default function PeriodPicker({ from, to, onApply, placeholder = 'Выберите период', minWidth = 210, align = 'left', mode = 'range' }: Props) {
+    const single = mode === 'single';
     const [open, setOpen] = useState(false);
     const wrapRef = useRef<HTMLDivElement>(null);
     const [pending, setPending] = useState<DateRange | undefined>(() => {
@@ -95,6 +102,10 @@ export default function AdsPeriodPicker({ from, to, onApply, placeholder = 'Вы
         setToText(r?.to ? r.to.toLocaleDateString('ru-RU') : '');
     };
 
+    // В режиме одной даты второй клик по календарю должен ПЕРЕставить дату,
+    // а не достраивать диапазон — иначе «срок сдачи» превращается в период.
+    const setDay = (d: Date | undefined) => setRange(d ? { from: d, to: d } : undefined);
+
     const apply = () => {
         if (!pending?.from) { onApply('', ''); setOpen(false); return; }
         onApply(ymd(pending.from), ymd(pending.to ?? pending.from));
@@ -112,7 +123,9 @@ export default function AdsPeriodPicker({ from, to, onApply, placeholder = 'Вы
                     <rect x="3" y="5" width="18" height="16" rx="2" stroke="currentColor" strokeWidth="1.6" />
                     <path d="M3 9h18M8 3v4M16 3v4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
                 </svg>
-                <span className={hasValue ? 'apk-dates' : 'apk-ph'}>{hasValue ? `${fmtRu(from)} — ${fmtRu(to)}` : placeholder}</span>
+                <span className={hasValue ? 'apk-dates' : 'apk-ph'}>
+                    {!hasValue ? placeholder : single ? fmtRu(from) : `${fmtRu(from)} — ${fmtRu(to)}`}
+                </span>
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden style={{ marginLeft: 'auto' }}>
                     <path d="M7 10l5 5 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
@@ -120,21 +133,30 @@ export default function AdsPeriodPicker({ from, to, onApply, placeholder = 'Вы
             {open && (
                 <div className="apk-pop" role="dialog" style={align === 'right' ? { left: 'auto', right: 0 } : undefined}>
                     <div className="apk-body">
-                        <DayPicker mode="range" selected={pending} onSelect={setRange} defaultMonth={defaultMonth}
-                            locale={ru} weekStartsOn={1} numberOfMonths={2} />
-                        <div className="apk-presets">
-                            {PRESETS.map(p => (
-                                <button key={p.key} type="button" className="apk-preset" onClick={() => setRange(preset(p.key))}>{p.label}</button>
-                            ))}
-                        </div>
+                        {single ? (
+                            <DayPicker mode="single" selected={pending?.from} onSelect={setDay} defaultMonth={defaultMonth}
+                                locale={ru} weekStartsOn={1} numberOfMonths={1} />
+                        ) : (
+                            <DayPicker mode="range" selected={pending} onSelect={setRange} defaultMonth={defaultMonth}
+                                locale={ru} weekStartsOn={1} numberOfMonths={2} />
+                        )}
+                        {!single && (
+                            <div className="apk-presets">
+                                {PRESETS.map(p => (
+                                    <button key={p.key} type="button" className="apk-preset" onClick={() => setRange(preset(p.key))}>{p.label}</button>
+                                ))}
+                            </div>
+                        )}
                     </div>
                     <div className="apk-footer">
                         <span className="apk-manual">
                             <input value={fromText} placeholder="дд.мм.гггг" onChange={e => setFromText(e.target.value)}
-                                onBlur={() => { const d = parseRu(fromText); if (d) setPending(prev => ({ from: d, to: prev?.to ?? d })); }} />
-                            <span className="apk-dash">—</span>
-                            <input value={toText} placeholder="дд.мм.гггг" onChange={e => setToText(e.target.value)}
-                                onBlur={() => { const d = parseRu(toText); if (d) setPending(prev => ({ from: prev?.from ?? d, to: d })); }} />
+                                onBlur={() => { const d = parseRu(fromText); if (d) setPending(prev => (single ? { from: d, to: d } : { from: d, to: prev?.to ?? d })); }} />
+                            {!single && <>
+                                <span className="apk-dash">—</span>
+                                <input value={toText} placeholder="дд.мм.гггг" onChange={e => setToText(e.target.value)}
+                                    onBlur={() => { const d = parseRu(toText); if (d) setPending(prev => ({ from: prev?.from ?? d, to: d })); }} />
+                            </>}
                         </span>
                         <span className="apk-actions">
                             <button type="button" className="btn btn-secondary btn-sm" onClick={clear}>Сбросить</button>

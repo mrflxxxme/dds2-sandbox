@@ -207,8 +207,19 @@ REVISION, ACCEPTED. ON_HOLD и CANCELLED — вне доски (видны фи�
 для модуля не активируется. Все write-ручки — `Depends(rate_limit_write)`.
 
 - **Чтение:** `GET /board` · `GET ""` (фильтры + `q`) · `GET /all-projects` ·
-  `GET /workload` · `GET /calendar?month=YYYY-MM` · `GET /stats` ·
+  `GET /workload` · `GET /calendar` · `GET /stats` ·
   `GET /product-suggest?q=` · `GET /{id}`.
+
+`GET /calendar` принимает ЛИБО `month=YYYY-MM`, ЛИБО пару `date_from`/`date_to`
+(волна A v2, CONTRACT-V2 §1) — вместе они дают 400. Без параметров берётся текущий
+месяц по МСК. Границы `date_from`/`date_to` ОТВЕТА — это фактическое окно выборки:
+запрошенное ±6 дней, календарь дорисовывает недели соседних месяцев. Cap — 500 задач
+в режиме месяца (как в v1) и 2000 в режиме диапазона, длина диапазона ≤ 400 дней;
+при срабатывании cap ответ несёт `truncated: true` (тихое усечение запрещено).
+Фронт раскладывает задачи по `tasks[].due_date`, а не по `month`.
+
+`GET /all-projects` осталась в API, хотя вкладка «Все бренды» из UI убрана (Р19):
+контракт не ломаем, потребителя у ручки сейчас нет.
 - **Задача:** `POST ""` (201) · `PUT /{id}` (PATCH-семантика) · `DELETE /{id}` (204) ·
   `POST /{id}/status` · `POST /{id}/move` · `POST /{id}/assign` · `POST /{id}/viewed`.
 - **Материалы:** `POST /{id}/materials` (LINK|NM) · `POST /{id}/materials/file`

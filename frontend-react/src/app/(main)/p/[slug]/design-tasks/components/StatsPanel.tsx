@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { format, subDays } from 'date-fns';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
+import InfoTip from '@/components/InfoTip';
+import { DESIGN_METRIC_HINT } from '@/lib/designHints';
 import type { DesignStatsOut } from '@/types/api';
 
 const WINDOW_DAYS = 30;
@@ -16,7 +18,8 @@ function num(v: number | null, digits = 1): string {
     return v == null ? '—' : formatNumber(v, digits);
 }
 
-/** Панель метрик PRD §10 над списком: 6 значений GET /stats за последние 30 дней (Ф6-довесок). */
+/** Панель метрик PRD §10 ПОД списком: 6 значений GET /stats за последние 30 дней.
+ *  Список задач первее метрик (правка заказчика); в волне D уедет во вкладку «Аналитика». */
 export default function StatsPanel() {
     const [stats, setStats] = useState<DesignStatsOut | null>(null);
     const [loading, setLoading] = useState(true);
@@ -48,14 +51,14 @@ export default function StatsPanel() {
 
     if (loading) {
         return (
-            <div className="glass-card" style={{ marginBottom: 16, color: 'var(--color-text-muted)', fontSize: 13 }}>
+            <div className="glass-card" style={{ marginTop: 16, color: 'var(--color-text-muted)', fontSize: 13 }}>
                 Метрики: загрузка…
             </div>
         );
     }
     if (error) {
         return (
-            <div className="glass-card" style={{ marginBottom: 16, color: 'var(--color-danger)', fontSize: 13 }}>
+            <div className="glass-card" style={{ marginTop: 16, color: 'var(--color-danger)', fontSize: 13 }}>
                 Метрики: {error}{' '}
                 <button className="btn btn-sm btn-secondary" onClick={() => void load()}>Повторить</button>
             </div>
@@ -71,17 +74,17 @@ export default function StatsPanel() {
      */
     const lowData = stats.avg_versions_to_accept == null && stats.median_cycle_days == null;
 
-    const items: { label: string; value: string }[] = [
-        { label: 'В срок', value: pct(stats.on_time_share) },
-        { label: 'Версий до приёмки', value: num(stats.avg_versions_to_accept) },
-        { label: 'Медиана цикла, дн', value: num(stats.median_cycle_days) },
-        { label: 'Без исполнителя >2 дн', value: formatNumber(stats.unassigned_over_2d, 0) },
-        { label: 'Аутсорс', value: pct(stats.outsourced_share) },
-        { label: 'С товаром', value: pct(stats.tracked_share) },
+    const items: { key: string; label: string; value: string }[] = [
+        { key: 'on_time_share', label: 'В срок', value: pct(stats.on_time_share) },
+        { key: 'avg_versions_to_accept', label: 'Версий до приёмки', value: num(stats.avg_versions_to_accept) },
+        { key: 'median_cycle_days', label: 'Медиана цикла, дн', value: num(stats.median_cycle_days) },
+        { key: 'unassigned_over_2d', label: 'Без исполнителя >2 дн', value: formatNumber(stats.unassigned_over_2d, 0) },
+        { key: 'outsourced_share', label: 'Аутсорс', value: pct(stats.outsourced_share) },
+        { key: 'tracked_share', label: 'С товаром', value: pct(stats.tracked_share) },
     ];
 
     return (
-        <div className="glass-card" style={{ marginBottom: 16 }}>
+        <div className="glass-card" style={{ marginTop: 16 }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
                 <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>📈 Метрики за 30 дней</h3>
                 {lowData && (
@@ -98,10 +101,12 @@ export default function StatsPanel() {
                     opacity: lowData ? 0.6 : 1,
                 }}
             >
-                {items.map(({ label, value }) => (
-                    <div key={label}>
+                {items.map(({ key, label, value }) => (
+                    <div key={key}>
                         <div style={{ fontSize: 20, fontWeight: 700 }}>{value}</div>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{label}</div>
+                        <InfoTip text={DESIGN_METRIC_HINT[key]} icon>
+                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{label}</span>
+                        </InfoTip>
                     </div>
                 ))}
             </div>

@@ -1,7 +1,9 @@
 'use client';
 
 import WbThumb from '@/components/WbThumb';
+import Tooltip from '@/components/Tooltip';
 import { formatDate } from '@/lib/utils';
+import { DESIGN_MARK_HINT } from '@/lib/designHints';
 import type { DesignTaskListItem } from '@/types/api';
 
 interface TaskCardProps {
@@ -37,13 +39,19 @@ export default function TaskCard({ t, onClick, draggable, onDragStart, onDragOve
         >
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 {t.unviewed && (
-                    <span
-                        title="Не просмотрено ведущим"
-                        style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--color-danger)', flexShrink: 0 }}
-                    />
+                    <Tooltip text={DESIGN_MARK_HINT.unviewed}>
+                        <span
+                            aria-label="Не просмотрено ведущим"
+                            style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--color-danger)', flexShrink: 0 }}
+                        />
+                    </Tooltip>
                 )}
                 <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-muted)' }}>{t.number}</span>
-                {t.is_urgent && <span className="badge badge-danger" style={{ fontSize: 10 }}>Срочно</span>}
+                {t.is_urgent && (
+                    <Tooltip text={DESIGN_MARK_HINT.urgent}>
+                        <span className="badge badge-danger" style={{ fontSize: 10 }}>Срочно</span>
+                    </Tooltip>
+                )}
                 {t.is_outsourced && <span className="badge badge-secondary" style={{ fontSize: 10 }}>Аутсорс</span>}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -58,7 +66,7 @@ export default function TaskCard({ t, onClick, draggable, onDragStart, onDragOve
                 </span>
                 {t.due_date && (
                     <span
-                        title={t.is_overdue ? 'Просрочена' : 'Срок'}
+                        title={t.is_overdue ? DESIGN_MARK_HINT.overdue : 'Срок сдачи'}
                         style={{ marginLeft: 'auto', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4, color: t.is_overdue ? 'var(--color-danger)' : 'var(--color-text-muted)', fontWeight: t.is_overdue ? 600 : 400 }}
                     >
                         {formatDate(t.due_date)}

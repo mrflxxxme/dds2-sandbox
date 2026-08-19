@@ -6,15 +6,15 @@ import PageGuard from '@/components/PageGuard';
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { IcMegaphone, IcRefresh, IcDownload, IcSliders, IcColumns, IcPause, IcPlay, IcClock, IcGear, IcHistory, IcExternal, IcSearch, IcX, IcCopy } from './components/icons';
-import SearchSelect from './components/SearchSelect';
+import SearchSelect from '@/components/SearchSelect';
 import AdSections from './components/AdSections';
 import GlueTable from './components/GlueTable';
 import ScheduleModal from './components/ScheduleModal';
 import BudgetLedgerModal from './components/BudgetLedgerModal';
 import WbThumb from '@/components/WbThumb';
-import AdsPeriodPicker from './components/AdsPeriodPicker';
-import InfoTip from './components/InfoTip';
-import Tooltip from './components/Tooltip';
+import PeriodPicker from '@/components/PeriodPicker';
+import InfoTip from '@/components/InfoTip';
+import Tooltip from '@/components/Tooltip';
 import { useToast } from './components/Toasts';
 import { fmt, num, fmtPct, iso, STATUS_BADGE, thStyle, thLeft, tdStyle, tdLeft, wbCampaignUrl, campaignTypeBadge, scheduleLabel, humanizeAdsError } from './components/adsShared';
 import type { AdsManagerCampaign, AdsScheduleSetting } from '@/types/api';
@@ -844,7 +844,7 @@ export default function AdsManagerPage() {
                     )}
                     {/* Календарь = период метрик по всем кампаниям (день/диапазон). Пусто → последние 30 дней. Сдвинут вправо. */}
                     <span style={{ marginLeft: 'auto', display: 'inline-flex' }}>
-                        <AdsPeriodPicker from={periodFrom} to={periodTo} placeholder="календарь" minWidth={230} align="right"
+                        <PeriodPicker from={periodFrom} to={periodTo} placeholder="календарь" minWidth={230} align="right"
                             onApply={(f, t) => { setPeriodFrom(f); setPeriodTo(t); }} />
                     </span>
                     {(brand || subject || article || search || campaignType || bidMode || campNmFilter.length > 0) && (

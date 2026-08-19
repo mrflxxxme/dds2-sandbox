@@ -1,5 +1,5 @@
 'use client';
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 type Placement = 'top' | 'bottom';
@@ -29,6 +29,7 @@ export default function Tooltip({ text, placement = 'top', className = '', style
     const ref = useRef<HTMLSpanElement>(null);
     const popRef = useRef<HTMLSpanElement>(null);
     const [pos, setPos] = useState<Pos | null>(null);
+    const popId = useId();
 
     const show = useCallback(() => {
         const el = ref.current;
@@ -66,12 +67,31 @@ export default function Tooltip({ text, placement = 'top', className = '', style
         };
     }, [pos, hide]);
 
+    // На тач-устройствах hover не существует: без этого подсказка на телефоне
+    // недостижима вовсе. Тап переключает, тап мимо — гасит (слушатель живёт
+    // только пока открыто). Esc — для клавиатуры.
+    useEffect(() => {
+        if (!pos) return;
+        const onDocDown = (e: PointerEvent) => {
+            if (e.pointerType !== 'mouse' && !ref.current?.contains(e.target as Node)) hide();
+        };
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') hide(); };
+        document.addEventListener('pointerdown', onDocDown);
+        document.addEventListener('keydown', onKey);
+        return () => {
+            document.removeEventListener('pointerdown', onDocDown);
+            document.removeEventListener('keydown', onKey);
+        };
+    }, [pos, hide]);
+
     return (
         <span ref={ref} className={`dds-tip ${className}`.trim()} style={style}
-            onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide}>
+            aria-describedby={pos ? popId : undefined}
+            onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide}
+            onPointerUp={e => { if (e.pointerType !== 'mouse') (pos ? hide() : show()); }}>
             {children}
             {pos && createPortal(
-                <span ref={popRef} className={`dds-tip-pop dds-tip-pop--${pos.placement}`} role="tooltip"
+                <span ref={popRef} id={popId} className={`dds-tip-pop dds-tip-pop--${pos.placement}`} role="tooltip"
                     style={{ left: pos.left, top: pos.top }}>
                     {text}
                 </span>,

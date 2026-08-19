@@ -7,7 +7,7 @@ import { formatNumber, exportToExcel } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
 import ClusterTable, { DailyBudgetBar, drrColor, clNum, clMoney, clMoneyN } from '../../components/ClusterTable';
 import type { ProductClustersResponse, SearchCluster, ProductDailyRow, ProductDailyResponse } from '@/types/api';
-import Tooltip from '../../components/Tooltip';
+import Tooltip from '@/components/Tooltip';
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const num = (v: unknown) => Number(v) || 0;

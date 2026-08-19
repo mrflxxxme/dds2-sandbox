@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import { formatNumber } from '@/lib/utils';
+import InfoTip from '@/components/InfoTip';
+import { DESIGN_STATUS_HINT } from '@/lib/designHints';
 import {
     DESIGN_BOARD_STATUSES,
     DESIGN_STATUS_LABEL,
@@ -72,7 +74,9 @@ export default function BoardView({ columns, canReorder, onOpen, onMoveRequest, 
                         }}
                     >
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 6px 10px' }}>
-                            <span style={{ fontSize: 13, fontWeight: 600 }}>{DESIGN_STATUS_LABEL[status]}</span>
+                            <InfoTip text={DESIGN_STATUS_HINT[status]}>
+                                <span style={{ fontSize: 13, fontWeight: 600 }}>{DESIGN_STATUS_LABEL[status]}</span>
+                            </InfoTip>
                             <span
                                 className="badge badge-secondary"
                                 style={{ fontSize: 11 }}

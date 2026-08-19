@@ -7,7 +7,10 @@ import {
     formatMonthTitle,
     isInTaskRange,
     markersByDay,
+    defaultCalendarRange,
     memberDisplayName,
+    monthsInRange,
+    shiftCalendarRange,
     shiftMonth,
     taskRangeEdge,
 } from '@/lib/designCalendar';
@@ -291,5 +294,40 @@ describe('buildTaskRange — просрочка', () => {
 
     it('без срока просрочки не бывает', () => {
         expect(buildTaskRange({ created_at: '2026-01-01T00:00:00', status: 'IN_PROGRESS' }, TODAY).isOverdue).toBe(false);
+    });
+});
+
+describe('произвольный диапазон календаря (волна A v2, Р22)', () => {
+    it('дефолт — ровно два блока: текущий месяц и следующий', () => {
+        const r = defaultCalendarRange(new Date(2026, 7, 20));
+        expect([r.from, r.to]).toEqual(['2026-08-01', '2026-09-30']);
+        expect(monthsInRange(r)).toEqual(['2026-08', '2026-09']);
+    });
+
+    it('дефолт на стыке года не ломается', () => {
+        const r = defaultCalendarRange(new Date(2026, 11, 5));
+        expect([r.from, r.to]).toEqual(['2026-12-01', '2027-01-31']);
+        expect(monthsInRange(r)).toEqual(['2026-12', '2027-01']);
+    });
+
+    it('блок на каждый пересечённый месяц, даже если задет одним днём', () => {
+        expect(monthsInRange({ from: '2026-08-31', to: '2026-10-01' })).toEqual(['2026-08', '2026-09', '2026-10']);
+        expect(monthsInRange({ from: '2026-08-10', to: '2026-08-11' })).toEqual(['2026-08']);
+    });
+
+    it('стрелка сдвигает диапазон, сохраняя его длину в днях', () => {
+        const start = defaultCalendarRange(new Date(2026, 7, 20));
+        const next = shiftCalendarRange(start, 1);
+        expect([next.from, next.to]).toEqual(['2026-09-01', '2026-10-31']);
+        expect(monthsInRange(next)).toEqual(['2026-09', '2026-10']);
+
+        const back = shiftCalendarRange(next, -1);
+        expect([back.from, back.to]).toEqual([start.from, start.to]);
+    });
+
+    it('длина произвольного диапазона переживает сдвиг бит-в-бит', () => {
+        const r = { from: '2026-03-05', to: '2026-03-19' };  // 15 дней
+        const moved = shiftCalendarRange(r, 2);
+        expect([moved.from, moved.to]).toEqual(['2026-05-05', '2026-05-19']);
     });
 });

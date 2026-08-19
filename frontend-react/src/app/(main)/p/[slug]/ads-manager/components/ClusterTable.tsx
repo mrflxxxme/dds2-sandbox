@@ -5,7 +5,7 @@ import type { SearchCluster, ClusterDailyPoint } from '@/types/api';
 import { cpmForTargetCpc } from './clusterBid';
 import { effectiveDrr, campaignEffAverages, recommendBid, recommendProjectedBid } from './clusterEff';
 import { TARGET_DRR_KEY, useOverlayClose } from './adsShared';
-import Tooltip from './Tooltip';
+import Tooltip from '@/components/Tooltip';
 
 // ─── Форматтеры (Decimal-поля бэка приходят строкой → Number() перед formatNumber) ───
 const num = (v: unknown) => Number(v) || 0;

@@ -54,8 +54,13 @@ export function addDesignTaskMethods(api: ApiClient) {
         getDesignWorkload() {
             return api.request<DesignWorkloadRow[]>('GET', `${BASE}/workload`);
         },
+        /** Месяц `YYYY-MM` (как раньше) ЛИБО произвольный диапазон — не одновременно (CONTRACT-V2 §1). */
         getDesignCalendar(month: string) {
             const qs = new URLSearchParams({ month });
+            return api.request<DesignCalendarOut>('GET', `${BASE}/calendar?${qs.toString()}`);
+        },
+        getDesignCalendarRange(dateFrom: string, dateTo: string) {
+            const qs = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
             return api.request<DesignCalendarOut>('GET', `${BASE}/calendar?${qs.toString()}`);
         },
         getDesignStats(dateFrom?: string, dateTo?: string) {

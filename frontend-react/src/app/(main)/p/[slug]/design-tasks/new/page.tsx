@@ -9,6 +9,7 @@ import WbThumb from '@/components/WbThumb';
 import { DESIGN_WORK_TYPE_LABEL, isValidHttpUrl } from '@/lib/design';
 import type { DesignProductSuggestion, DesignWorkType } from '@/types/api';
 import ProductSuggest from '../components/ProductSuggest';
+import PeriodPicker from '@/components/PeriodPicker';
 
 const WORK_TYPES = Object.keys(DESIGN_WORK_TYPE_LABEL) as DesignWorkType[];
 const MAX_FILE_MB = 20;
@@ -141,7 +142,7 @@ export default function DesignTaskCreatePage() {
     if (created) {
         return (
             <PageGuard page="design-tasks">
-                <PageHeader title="🎨 Новая заявка" />
+                <PageHeader title="🖌️ Новая заявка" />
                 <div className="glass-card">
                     <p style={{ marginBottom: 8 }}>
                         Заявка <b>{created.number}</b> создана, но часть материалов не загрузилась — добавьте их в карточке:
@@ -160,7 +161,7 @@ export default function DesignTaskCreatePage() {
     return (
         <PageGuard page="design-tasks">
             <PageHeader
-                title="🎨 Новая заявка на дизайн"
+                title="🖌️ Новая заявка на дизайн"
                 subtitle="Исполнителя назначит ведущий дизайнер после просмотра заявки"
                 actions={
                     <button className="btn btn-secondary btn-sm" onClick={() => router.push(`/p/${params.slug}/design-tasks`)}>
@@ -237,7 +238,14 @@ export default function DesignTaskCreatePage() {
                         </div>
                         <div>
                             <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 6 }}>Срок</label>
-                            <input className="form-input" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+                            <PeriodPicker
+                                mode="single"
+                                from={dueDate}
+                                to={dueDate}
+                                onApply={(d) => setDueDate(d)}
+                                placeholder="Срок не задан"
+                                minWidth={180}
+                            />
                         </div>
                         <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 14, cursor: 'pointer', paddingBottom: 8 }}>
                             <input type="checkbox" checked={isUrgent} onChange={(e) => setIsUrgent(e.target.checked)} />

@@ -14,7 +14,7 @@ import type {
 } from '@/types/api';
 import WbThumb from '@/components/WbThumb';
 import { productImageUrl } from '@/lib/wbMedia';
-import SearchSelect from '../ads-manager/components/SearchSelect';
+import SearchSelect from '@/components/SearchSelect';
 import FiltersPanel, { EMPTY_FILTERS, type ExchangeFilters } from './components/FiltersPanel';
 import Switch from '../ads-manager/components/Switch';
 import { Ic } from '../ads-manager/components/icons';

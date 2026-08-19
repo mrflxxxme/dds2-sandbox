@@ -14,6 +14,12 @@ Next.js 15 App Router, React 19, TypeScript. Две оболочки:
 ## Компоненты (`src/components/`)
 DataTable / TanStackDataTable (таблицы с сортировкой и Excel-экспортом), FormModal, PageHeader, PageGuard, TabLayout, KpiCard, BoxDetailCell, Toast.
 
+Общие контролы (подняты из `ads-manager` — свои копии не заводить):
+- `PeriodPicker` — период: два месяца + пресеты, `mode="single"` для одиночной даты. Потребители: реклама (список и карточка кампании), воронка, лестница СПП, календарь дизайна.
+- `Tooltip` — всплывашка порталом (не режется `overflow`), открывается по наведению, фокусу и тапу; стили `.dds-tip*` в `globals.css`.
+- `InfoTip` — обёртка над `Tooltip`: по умолчанию подсказка на самом элементе, `icon` — значок «?» рядом.
+- `SearchSelect` — выпадающий список с поиском внутри.
+
 ## Типы и утилиты
 - Типы — `src/types/api.ts` (единый источник истины).
 - `src/lib/utils.ts` — `formatNumber` (ru-RU), `formatDate`, `formatDateTime`, `exportToExcel`.

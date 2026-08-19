@@ -7,6 +7,7 @@ import { DESIGN_COMPLEXITY_LABEL, DESIGN_WORK_TYPE_LABEL, isValidHttpUrl } from 
 import type { DesignComplexity, DesignTaskDetail, DesignTaskUpdatePayload, DesignWorkType } from '@/types/api';
 import ModalShell from './ModalShell';
 import ProductSuggest from './ProductSuggest';
+import PeriodPicker from '@/components/PeriodPicker';
 
 const WORK_TYPES = Object.keys(DESIGN_WORK_TYPE_LABEL) as DesignWorkType[];
 const COMPLEXITIES = Object.keys(DESIGN_COMPLEXITY_LABEL) as DesignComplexity[];
@@ -113,7 +114,14 @@ export default function EditTaskModal({ task, onSaved, onClose }: EditTaskModalP
                     )}
                     <div>
                         <label style={{ display: 'block', fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 4 }}>Срок</label>
-                        <input className="form-input" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+                        <PeriodPicker
+                            mode="single"
+                            from={dueDate}
+                            to={dueDate}
+                            onApply={(d) => setDueDate(d)}
+                            placeholder="Срок не задан"
+                            minWidth={180}
+                            />
                     </div>
                 </div>
                 <div style={{ display: 'flex', gap: 16 }}>

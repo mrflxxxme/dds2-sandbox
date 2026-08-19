@@ -380,12 +380,18 @@ class DesignProductSuggestion(BaseModel):
 
 
 class DesignCalendarOut(BaseModel):
-    """Календарь месяца (Р7): задачи по due_date в границах видимой сетки ±6 дней."""
+    """Календарь месяца или диапазона (Р7 + Р22): задачи по due_date, окно ±6 дней.
+
+    date_from/date_to — границы ФАКТИЧЕСКОГО окна выборки (запрошенное ±6 дней).
+    truncated — сработал cap выборки (500 в режиме month, 2000 в режиме диапазона);
+    тихое усечение запрещено, фронт обязан показать «показаны не все».
+    """
 
     month: str  # YYYY-MM
     date_from: date
     date_to: date
     tasks: list[DesignTaskListItem] = []
+    truncated: bool = False
 
 
 class DesignWorkloadRow(BaseModel):

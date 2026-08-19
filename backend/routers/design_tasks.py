@@ -199,18 +199,24 @@ async def get_workload(
 
 @router.get("/calendar", response_model=DesignCalendarOut)
 async def get_calendar(
-    month: str = Query(..., pattern=r"^\d{4}-\d{2}$", description="YYYY-MM"),
+    month: str | None = Query(None, pattern=r"^\d{4}-\d{2}$", description="YYYY-MM"),
+    date_from: date | None = Query(None, description="начало диапазона (вместо month)"),
+    date_to: date | None = Query(None, description="конец диапазона (вместо month)"),
     user: User = Depends(require_viewer),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Задачи месяца по due_date; границы видимой сетки ±6 дней (Р7)."""
-    try:
-        month_first = date.fromisoformat(f"{month}-01")
-    except ValueError as e:
-        raise HTTPException(400, "month должен быть в формате YYYY-MM") from e
-    date_from, date_to, tasks = await queries.list_calendar(db, project.id, month_first)
-    return DesignCalendarOut(month=month, date_from=date_from, date_to=date_to, tasks=tasks)
+    """Задачи месяца или произвольного диапазона по due_date; окно ±6 дней (Р7)."""
+    month_out, win_from, win_to, tasks, truncated = await _svc(
+        queries.list_calendar(db, project.id, month=month, date_from=date_from, date_to=date_to)
+    )
+    return DesignCalendarOut(
+        month=month_out,
+        date_from=win_from,
+        date_to=win_to,
+        tasks=tasks,
+        truncated=truncated,
+    )
 
 
 @router.get("/stats", response_model=DesignStatsOut)

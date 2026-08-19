@@ -25,6 +25,8 @@ import SubmitWorkModal from '../components/SubmitWorkModal';
 import AssignModal from '../components/AssignModal';
 import EditTaskModal from '../components/EditTaskModal';
 import TaskCalendarModal from '../components/TaskCalendarModal';
+import Tooltip from '@/components/Tooltip';
+import { DESIGN_ACTION_HINT, DESIGN_STATUS_HINT } from '@/lib/designHints';
 
 type ModalState =
     | { kind: 'submit' }
@@ -273,18 +275,18 @@ export default function DesignTaskDetailPage() {
                         <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 12px' }}>Действия</h3>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                             {perms.can_take && status === 'ASSIGNED' && (
-                                <button className="btn btn-primary btn-sm" onClick={() => void changeStatus('IN_PROGRESS')}>
+                                <Tooltip text={DESIGN_ACTION_HINT.take}><button className="btn btn-primary btn-sm" onClick={() => void changeStatus('IN_PROGRESS')}>
                                     ▶ Взять в работу
-                                </button>
+                                </button></Tooltip>
                             )}
                             {perms.can_submit && (
-                                <button className="btn btn-primary btn-sm" onClick={() => setModal({ kind: 'submit' })}>
+                                <Tooltip text={DESIGN_ACTION_HINT.submit}><button className="btn btn-primary btn-sm" onClick={() => setModal({ kind: 'submit' })}>
                                     📤 Сдать работу
-                                </button>
+                                </button></Tooltip>
                             )}
                             {perms.can_verdict && pendingSub && (
                                 <>
-                                    <button
+                                    <Tooltip text={DESIGN_ACTION_HINT.accept}><button
                                         className="btn btn-success btn-sm"
                                         onClick={() => void apply(
                                             () => api.setDesignVerdict(taskId, pendingSub.id, { verdict: 'ACCEPTED' }),
@@ -292,41 +294,46 @@ export default function DesignTaskDetailPage() {
                                         )}
                                     >
                                         ✅ Принять
-                                    </button>
-                                    <button className="btn btn-danger btn-sm" onClick={() => setModal({ kind: 'return', subId: pendingSub.id })}>
+                                    </button></Tooltip>
+                                    <Tooltip text={DESIGN_ACTION_HINT.revision}><button className="btn btn-danger btn-sm" onClick={() => setModal({ kind: 'return', subId: pendingSub.id })}>
                                         ↩ Вернуть
-                                    </button>
+                                    </button></Tooltip>
                                 </>
                             )}
                             {perms.can_assign && (
-                                <button className="btn btn-secondary btn-sm" onClick={() => setModal({ kind: 'assign' })}>
+                                <Tooltip text={DESIGN_ACTION_HINT.assign}><button className="btn btn-secondary btn-sm" onClick={() => setModal({ kind: 'assign' })}>
                                     👤 {task.assignee_user_id == null ? 'Назначить' : 'Переназначить'}
-                                </button>
+                                </button></Tooltip>
                             )}
                             {perms.can_hold && status !== 'ON_HOLD' && (
-                                <button className="btn btn-secondary btn-sm" onClick={() => setModal({ kind: 'status', to: 'ON_HOLD', required: false })}>
+                                <Tooltip text={DESIGN_ACTION_HINT.hold}><button className="btn btn-secondary btn-sm" onClick={() => setModal({ kind: 'status', to: 'ON_HOLD', required: false })}>
                                     ⏸ Отложить
-                                </button>
+                                </button></Tooltip>
                             )}
                             {status === 'ON_HOLD' && allowed.has(task.held_from_status ?? 'NEW') && (
-                                <button
-                                    className="btn btn-primary btn-sm"
-                                    onClick={() => void changeStatus(task.held_from_status ?? 'NEW')}
-                                >
-                                    ▶ Вернуть из отложенных ({DESIGN_STATUS_LABEL[task.held_from_status ?? 'NEW']})
-                                </button>
+                                <Tooltip text={DESIGN_STATUS_HINT[task.held_from_status ?? 'NEW']}>
+                                    <button
+                                        className="btn btn-primary btn-sm"
+                                        onClick={() => void changeStatus(task.held_from_status ?? 'NEW')}
+                                    >
+                                        ▶ Вернуть из отложенных ({DESIGN_STATUS_LABEL[task.held_from_status ?? 'NEW']})
+                                    </button>
+                                </Tooltip>
                             )}
                             {genericTargets.map((t) => (
-                                <button
-                                    key={t}
-                                    className="btn btn-secondary btn-sm"
-                                    onClick={() => {
-                                        if (t === 'REVISION') setModal({ kind: 'status', to: t, required: true });
-                                        else void changeStatus(t);
-                                    }}
-                                >
-                                    → {DESIGN_STATUS_LABEL[t]}
-                                </button>
+                                // Подсказка — про ЦЕЛЕВОЙ статус: кнопка «→ На проверке» сама
+                                // по себе не говорит, что там будет и кто двигает дальше.
+                                <Tooltip key={t} text={DESIGN_STATUS_HINT[t]}>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => {
+                                            if (t === 'REVISION') setModal({ kind: 'status', to: t, required: true });
+                                            else void changeStatus(t);
+                                        }}
+                                    >
+                                        → {DESIGN_STATUS_LABEL[t]}
+                                    </button>
+                                </Tooltip>
                             ))}
                             {/* Право на создание теста считает бэк, но кнопка ВЕДЁТ на
                                 страницу /ab-tests: без page-доступа к ней клик упёрся бы
@@ -347,12 +354,12 @@ export default function DesignTaskDetailPage() {
                                 </button>
                             )}
                             {perms.can_cancel && (
-                                <button className="btn btn-danger btn-sm" onClick={() => setModal({ kind: 'cancel' })}>
+                                <Tooltip text={DESIGN_ACTION_HINT.cancel}><button className="btn btn-danger btn-sm" onClick={() => setModal({ kind: 'cancel' })}>
                                     ✖ Отменить задачу
-                                </button>
+                                </button></Tooltip>
                             )}
                             {perms.can_delete && (
-                                <button
+                                <Tooltip text={DESIGN_ACTION_HINT.delete}><button
                                     className="btn btn-danger btn-sm"
                                     onClick={() => {
                                         if (!window.confirm(`Удалить заявку ${task.number}?`)) return;
@@ -362,7 +369,7 @@ export default function DesignTaskDetailPage() {
                                     }}
                                 >
                                     🗑 Удалить
-                                </button>
+                                </button></Tooltip>
                             )}
                         </div>
                     </div>

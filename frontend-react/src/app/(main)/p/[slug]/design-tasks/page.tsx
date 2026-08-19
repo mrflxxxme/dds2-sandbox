@@ -1,13 +1,14 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatNumber } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
 import PageHeader from '@/components/PageHeader';
 import Toast from '@/components/Toast';
 import {
+    DESIGN_BOARD_STATUSES,
+    DESIGN_STATUS_LABEL,
     applyOptimisticMove,
     buildBoardColumns,
     findTaskColumn,
@@ -17,7 +18,13 @@ import {
 import type { DesignBoardPermissions, DesignBoardResponse, DesignTaskListItem } from '@/types/api';
 import BoardView from './components/BoardView';
 import ListView from './components/ListView';
-import HoldCancelledOverlay from './components/HoldCancelledOverlay';
+import BoardFilters, {
+    EMPTY_BOARD_FILTERS,
+    applyBoardFilters,
+    type BoardFilterState,
+    type BoardScope,
+} from './components/BoardFilters';
+import FlatTaskList from './components/FlatTaskList';
 import ReasonModal from './components/ReasonModal';
 import TaskCalendarModal from './components/TaskCalendarModal';
 import DesignTabs from './components/DesignTabs';
@@ -45,7 +52,15 @@ function DesignTasksPageInner() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-    const [overlay, setOverlay] = useState<'ON_HOLD' | 'CANCELLED' | null>(null);
+    const [filters, setFilters] = useState<BoardFilterState>(EMPTY_BOARD_FILTERS);
+    /**
+     * Кэш наборов вне доски (Р21). Отложенные и отменённые на доске не лежат —
+     * это ДРУГОЙ набор данных, а не фильтр: первое переключение делает один
+     * запрос, дальше набор переиспользуется. Мутация задачи чистит кэш.
+     */
+    const [offBoard, setOffBoard] = useState<Partial<Record<Exclude<BoardScope, 'board'>, DesignTaskListItem[]>>>({});
+    const [scopeLoading, setScopeLoading] = useState(false);
+    const [scopeError, setScopeError] = useState<string | null>(null);
     // Модалка причины ПЕРЕД move: dnd/кнопка в «Правки» требует комментарий (контракт: 400 без него).
     const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
     // Персональный календарь задачи: данные — из уже загруженной карточки доски, без запросов.
@@ -100,6 +115,9 @@ function DesignTasksPageInner() {
                     after_task_id: mv.afterTaskId,
                     comment: comment?.trim() ? comment.trim() : null,
                 });
+                // Мутация могла увести задачу из отложенных/отменённых — кэш наборов
+                // вне доски протух, следующее переключение перезапросит его.
+                setOffBoard({});
                 void load(true);
             } catch (e) {
                 if (!mountedRef.current) return;
@@ -127,10 +145,44 @@ function DesignTasksPageInner() {
     const onHoldCount = counts.ON_HOLD ?? 0;
     const cancelledCount = counts.CANCELLED ?? 0;
 
+    // Ленивая догрузка набора вне доски: ровно один запрос на статус за сессию
+    // страницы. Возврат на «На доске» и повторное переключение — без сети.
+    useEffect(() => {
+        const scope = filters.scope;
+        if (scope === 'board' || offBoard[scope]) return;
+        let alive = true;
+        setScopeLoading(true);
+        setScopeError(null);
+        api.listDesignTasks({ status: [scope], limit: 200 })
+            .then((rows) => { if (alive && mountedRef.current) setOffBoard((prev) => ({ ...prev, [scope]: rows })); })
+            .catch((e) => { if (alive && mountedRef.current) setScopeError(e instanceof Error ? e.message : 'Не удалось загрузить'); })
+            .finally(() => { if (alive && mountedRef.current) setScopeLoading(false); });
+        return () => { alive = false; };
+    }, [filters.scope, offBoard]);
+
+    /** Задачи текущего набора до фильтров — из них же строится список исполнителей. */
+    const scopeTasks = useMemo<DesignTaskListItem[]>(() => {
+        if (filters.scope !== 'board') return offBoard[filters.scope] ?? [];
+        return columns ? DESIGN_BOARD_STATUSES.flatMap((s) => columns[s]) : [];
+    }, [filters.scope, offBoard, columns]);
+
+    /** Колонки доски после клиентских фильтров — сеть не трогается (Р21). */
+    const filteredColumns = useMemo<BoardColumns | null>(() => {
+        if (!columns) return null;
+        const out = {} as BoardColumns;
+        for (const s of DESIGN_BOARD_STATUSES) out[s] = applyBoardFilters(columns[s], filters);
+        return out;
+    }, [columns, filters]);
+
+    const filteredFlat = useMemo(
+        () => (filters.scope === 'board' ? [] : applyBoardFilters(scopeTasks, filters)),
+        [filters, scopeTasks],
+    );
+
     return (
         <PageGuard page="design-tasks">
             <PageHeader
-                title="🎨 Дизайн карточек"
+                title="🖌️ Дизайн карточек"
                 subtitle="Задачи на инфографику: заявка → назначение → работа → версии сдач → приёмка"
                 actions={
                     <>
@@ -146,20 +198,20 @@ function DesignTasksPageInner() {
 
             {view === 'list' ? (
                 <>
-                    {/* Панель метрик PRD §10 — над списком (Ф6-довесок, спек F5 п.5в). */}
-                    <StatsPanel />
                     <ListView slug={params.slug} />
+                    {/* Список задач первее всего: метрики опускаются ПОД таблицу
+                        (в волне D уедут во вкладку «Аналитика»). */}
+                    <StatsPanel />
                 </>
             ) : (
                 <>
-                    <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-                        <button className="btn btn-sm btn-secondary" onClick={() => setOverlay('ON_HOLD')}>
-                            ⏸ Отложенные ({formatNumber(onHoldCount, 0)})
-                        </button>
-                        <button className="btn btn-sm btn-secondary" onClick={() => setOverlay('CANCELLED')}>
-                            ✖ Отменённые ({formatNumber(cancelledCount, 0)})
-                        </button>
-                    </div>
+                    <BoardFilters
+                        value={filters}
+                        onChange={setFilters}
+                        tasks={scopeTasks}
+                        onHoldCount={onHoldCount}
+                        cancelledCount={cancelledCount}
+                    />
 
                     {loading && (
                         <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка…</div>
@@ -169,14 +221,33 @@ function DesignTasksPageInner() {
                             {error} <button className="btn btn-sm btn-secondary" onClick={() => void load()}>Повторить</button>
                         </div>
                     )}
-                    {!loading && !error && columns && (
-                        Object.values(columns).every((c) => c.length === 0) && onHoldCount === 0 && cancelledCount === 0 ? (
+
+                    {!loading && !error && filters.scope !== 'board' && (
+                        scopeLoading && !offBoard[filters.scope] ? (
+                            <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка…</div>
+                        ) : scopeError ? (
+                            <div className="glass-card" style={{ color: 'var(--color-danger)' }}>{scopeError}</div>
+                        ) : (
+                            <FlatTaskList
+                                tasks={filteredFlat}
+                                emptyText={
+                                    scopeTasks.length === 0
+                                        ? `Нет задач в статусе «${DESIGN_STATUS_LABEL[filters.scope]}».`
+                                        : 'Нет задач под выбранные фильтры.'
+                                }
+                                onOpen={openTask}
+                            />
+                        )
+                    )}
+
+                    {!loading && !error && filters.scope === 'board' && filteredColumns && columns && (
+                        DESIGN_BOARD_STATUSES.every((s) => columns[s].length === 0) && onHoldCount === 0 && cancelledCount === 0 ? (
                             <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 48 }}>
                                 Заявок ещё нет. Создайте первую: «+ Новая заявка».
                             </div>
                         ) : (
                             <BoardView
-                                columns={columns}
+                                columns={filteredColumns}
                                 canReorder={perms.can_reorder}
                                 onOpen={openTask}
                                 onMoveRequest={onMoveRequest}
@@ -185,10 +256,6 @@ function DesignTasksPageInner() {
                         )
                     )}
                 </>
-            )}
-
-            {overlay && (
-                <HoldCancelledOverlay status={overlay} onOpen={openTask} onClose={() => setOverlay(null)} />
             )}
 
             {pendingMove && (

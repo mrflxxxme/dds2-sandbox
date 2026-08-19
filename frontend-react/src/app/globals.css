@@ -3202,6 +3202,17 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 .dds-tip--label { cursor: default; }
 .dds-tip-label { transition: opacity .15s; }
 .dds-tip--label:hover .dds-tip-label { opacity: .65; }
+/* Режим InfoTip icon: значок «?» рядом с элементом — там, где саму подсказку
+   вешать не на что (цифра метрики, цветной чип, иконка-точка). */
+.dds-tip-host { display: inline-flex; align-items: center; gap: 4px; }
+.dds-tip-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--color-bg-hover); color: var(--color-text-muted);
+    font-size: 10px; font-weight: 600; line-height: 1;
+    cursor: help; user-select: none; transition: background .15s, color .15s;
+}
+.dds-tip-icon:hover, .dds-tip-icon:focus-visible { background: var(--color-accent); color: #fff; }
 
 
 /* ─── Вайбкодинг ────────────────────────────────────────────────────────────── */

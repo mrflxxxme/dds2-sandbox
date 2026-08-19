@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CampaignMetricRow } from '@/types/api';
 import { fmt, fmtPct } from './adsShared';
-import Tooltip from './Tooltip';
+import Tooltip from '@/components/Tooltip';
 
 /**
  * Комбо-график посуточных метрик кампании: одна «объёмная» метрика — фоновыми

@@ -9,8 +9,8 @@ import { DayAnalysisTab } from './components/DayAnalysisTab';
 import { AdsTab } from './components/AdsTab';
 // Контролы и иконки берём из раздела-референса «Управление рекламой» —
 // один и тот же элемент не должен выглядеть в двух разделах по-разному.
-import SearchSelect from '../ads-manager/components/SearchSelect';
-import AdsPeriodPicker from '../ads-manager/components/AdsPeriodPicker';
+import SearchSelect from '@/components/SearchSelect';
+import PeriodPicker from '@/components/PeriodPicker';
 import { IcChart, IcDownload, IcColumns, IcSliders, IcSun, IcX, IcRefresh } from '../ads-manager/components/icons';
 import WbThumb from '@/components/WbThumb';
 import { PAGE_SHELL, PAGE_H1, TABLE_CARD, CARD_TOOLBAR, CARD_FOOTER, Segmented, ToggleBtn } from './components/funnelUi';
@@ -907,7 +907,7 @@ export default function FunnelPage() {
                 справа в тулбаре таблицы. */}
             {(tab === 'funnel' || tab === 'ads') && (
                 <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexShrink: 0, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <AdsPeriodPicker from={dateFrom} to={dateTo} placeholder="Период" minWidth={235} onApply={applyPeriod} />
+                    <PeriodPicker from={dateFrom} to={dateTo} placeholder="Период" minWidth={235} onApply={applyPeriod} />
                     <SearchSelect value={subject} onChange={onSubject} placeholder="Предмет: все" allLabel="Все предметы" minWidth={150} maxWidth={230}
                         options={subjectOptions.map(s => ({ value: s, label: s }))} />
                     <SearchSelect value={brand} onChange={onBrand} placeholder="Бренд: все" allLabel="Все бренды" minWidth={140} maxWidth={200}
