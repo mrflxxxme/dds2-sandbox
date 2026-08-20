@@ -38,6 +38,12 @@ export const EMPTY_BOARD_FILTERS: BoardFilterState = {
 
 const WORK_TYPES = Object.keys(DESIGN_WORK_TYPE_LABEL) as DesignWorkType[];
 
+/** Хоть один клиентский фильтр сужает выдачу (переключатель набора — не фильтр). */
+export function hasActiveFilters(f: BoardFilterState): boolean {
+    return !!(f.assignee || f.workType || f.urgentOnly || f.q.trim() || f.labelId
+        || Object.values(f.attributeValues).some(Boolean));
+}
+
 /**
  * Применение фильтров — ЧИСТАЯ функция над уже загруженными задачами (Р21).
  * Сеть не трогается вообще: смена любого из четырёх фильтров пересчитывается

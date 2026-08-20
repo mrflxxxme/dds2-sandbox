@@ -291,8 +291,12 @@ def test_every_route_of_domain_is_gated(module: str):
 # Точечные исключения ТОЛЬКО для правила «мутация требует editor».
 # Page-гейт с этих ручек НЕ снимается (они не в EXEMPT_ROUTES) — снимается
 # ровно требование роли, и только там, где write не трогает данные проекта.
+#
+# Ключ — «МЕТОД путь», а не один путь: иначе исключение, выданное на PUT,
+# автоматически распространилось бы на DELETE и POST того же пути, если их
+# однажды заведут. Исключение обязано истекать вместе с конкретным методом.
 VIEWER_WRITABLE_ROUTES: dict[str, str] = {
-    "/api/v1/design-tasks/dashboard/layout": (
+    "PUT /api/v1/design-tasks/dashboard/layout": (
         "Р32/Р23 модуля дизайна: аналитика доступна viewer-руководителю, а дашборд "
         "без права сохранить СВОЮ раскладку бесполезен. Ручка не пишет данных "
         "проекта — только персональную настройку интерфейса, скоупленную user_id "
@@ -307,9 +311,11 @@ def test_domain_mutations_require_editor(module: str):
     """Мутации закрытого домена требуют роль не ниже editor — viewer только читает."""
     weak = []
     for route, path, mod in _iter_api_routes():
-        if mod != module or path in EXEMPT_ROUTES or path in VIEWER_WRITABLE_ROUTES:
+        if mod != module or path in EXEMPT_ROUTES:
             continue
-        if not (set(route.methods or ()) & WRITE_METHODS):
+        methods = set(route.methods or ()) & WRITE_METHODS
+        methods -= {m for m in methods if f"{m} {path}" in VIEWER_WRITABLE_ROUTES}
+        if not methods:
             continue
         gates = _gates(route, path)
         # POST-ради-тела (поиск/витрина) объявлен чтением через read_paths —
@@ -321,7 +327,7 @@ def test_domain_mutations_require_editor(module: str):
             continue
         roles = {g.get("write_role") for g in gates}
         if not (roles & WRITE_ROLES):
-            weak.append(f"{sorted(route.methods)} {path} -> write_role={sorted(r for r in roles if r)}")
+            weak.append(f"{sorted(methods)} {path} -> write_role={sorted(r for r in roles if r)}")
     assert weak == [], f"мутации {module} доступны роли viewer: {weak}"
 
 

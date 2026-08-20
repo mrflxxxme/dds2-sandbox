@@ -32,7 +32,7 @@ from backend.services.design import ab_bridge
 from backend.services.design import files as design_files
 from backend.services.design import stats as design_stats
 from backend.services.funnel import ab_photo_tests
-from backend.utils.time import utcnow
+from backend.utils.time import msk_today, utcnow
 from tests.design_helpers import actor, add_submission, make_task, make_team
 
 BASE = "/api/v1/design-tasks"
@@ -544,10 +544,23 @@ async def test_ac5_stats_exact_values_on_six_tasks(db_session, project):
         db_session, project.id, team.author.id, status=DesignTaskStatus.NEW, nm_id=104
     )
 
-    out = await design_stats.get_stats(db_session, project.id)
+    #  Окно задаётся явно. С волны D `get_stats()` БЕЗ дат означает «последние
+    #  30 дней» (CONTRACT-V2 §4: одно правило окна на все ручки статистики),
+    #  а данные этого набора начинаются ровно 30 дней назад и в такое окно
+    #  краем не попадают. Явные границы проверяют арифметику метрик, а не то,
+    #  где сегодня проходит граница дефолтного окна.
+    window_from = (base - timedelta(days=1)).date()
+    out = await design_stats.get_stats(
+        db_session, project.id, date_from=window_from, date_to=msk_today()
+    )
     assert out.on_time_share == pytest.approx(2 / 3)  # 2 из 3 принятых — в срок
     assert out.avg_versions_to_accept == pytest.approx(2.0)  # (1+2+3)/3
     assert out.median_cycle_days == pytest.approx(4.0)  # медиана {2, 4, 10}
     assert out.unassigned_over_2d == 1
     assert out.outsourced_share == pytest.approx(1 / 3)
     assert out.tracked_share == pytest.approx(4 / 6)  # 101/102/103/104 из шести
+
+    #  А вот и сам дефолт: те же данные без дат видны лишь частично — это и
+    #  есть 30-дневное окно, и оно закреплено, чтобы смена дефолта не прошла тихо.
+    default_out = await design_stats.get_stats(db_session, project.id)
+    assert default_out.tracked_share == pytest.approx(1 / 3)

@@ -87,9 +87,17 @@ export function addDesignTaskMethods(api: ApiClient) {
             return api.request<DesignCalendarOut>('GET', `${BASE}/calendar?${qs.toString()}`, undefined, { signal });
         },
         // ── Справочники и разметка (волна C) ──
-        listDesignLabels(includeArchived = false) {
-            const qs = includeArchived ? '?include_archived=true' : '';
-            return api.request<DesignLabelOut[]>('GET', `${BASE}/refs/labels${qs}`);
+        /**
+         * withUsage=false — не считать usage_count на бэке.
+         * Счётчик рисуют только «Настройки»; деталка задачи и фильтры доски
+         * зовут эту ручку на каждом открытии, и лишний GROUP BY им не нужен.
+         */
+        listDesignLabels(includeArchived = false, withUsage = true) {
+            const qs = new URLSearchParams();
+            if (includeArchived) qs.set('include_archived', 'true');
+            if (!withUsage) qs.set('with_usage', 'false');
+            const tail = qs.toString() ? `?${qs.toString()}` : '';
+            return api.request<DesignLabelOut[]>('GET', `${BASE}/refs/labels${tail}`);
         },
         createDesignLabel(payload: DesignLabelPayload) {
             return api.request<DesignLabelOut>('POST', `${BASE}/refs/labels`, payload);
@@ -101,9 +109,12 @@ export function addDesignTaskMethods(api: ApiClient) {
         archiveDesignLabel(labelId: number) {
             return api.request<void>('DELETE', `${BASE}/refs/labels/${labelId}`);
         },
-        listDesignAttributes(includeArchived = false) {
-            const qs = includeArchived ? '?include_archived=true' : '';
-            return api.request<DesignAttributeOut[]>('GET', `${BASE}/refs/attributes${qs}`);
+        listDesignAttributes(includeArchived = false, withUsage = true) {
+            const qs = new URLSearchParams();
+            if (includeArchived) qs.set('include_archived', 'true');
+            if (!withUsage) qs.set('with_usage', 'false');
+            const tail = qs.toString() ? `?${qs.toString()}` : '';
+            return api.request<DesignAttributeOut[]>('GET', `${BASE}/refs/attributes${tail}`);
         },
         createDesignAttribute(payload: DesignAttributePayload) {
             return api.request<DesignAttributeOut>('POST', `${BASE}/refs/attributes`, payload);
@@ -164,6 +175,23 @@ export function addDesignTaskMethods(api: ApiClient) {
         },
         saveDesignDashboardLayout(widgets: DesignDashboardWidget[]) {
             return api.request<DesignDashboardLayoutOut>('PUT', `${BASE}/dashboard/layout`, { widgets });
+        },
+        /**
+         * Скачать XLSX аналитики. Именно `requestBlob`, а НЕ `<a href>`:
+         * сырая навигация не несёт ни `Authorization`, ни `X-Project-Id`,
+         * и на проде с отдельным origin ведёт вообще не туда — ручка гарантированно
+         * ответила бы 401.
+         */
+        async downloadDesignStatsExcel(dateFrom?: string, dateTo?: string): Promise<void> {
+            const blob = await api.requestBlob(`${BASE}/stats/export.xlsx${statsQuery(dateFrom, dateTo)}`);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `design-tasks_${dateFrom ?? ''}_${dateTo ?? ''}.xlsx`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
         },
         designProductSuggest(q: string) {
             const qs = new URLSearchParams({ q });

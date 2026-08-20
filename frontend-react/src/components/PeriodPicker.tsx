@@ -246,7 +246,10 @@ export default function PeriodPicker({ from, to, onApply, placeholder = 'Выб�
                 .apk-trigger:hover { border-color: var(--color-accent); }
                 .apk-trigger[aria-expanded="true"] { border-color: var(--color-accent); box-shadow: 0 0 0 3px rgba(0,113,227,.1); }
                 .apk-ph { color: var(--color-text-muted); }
-                .apk-pop { position: fixed; z-index: 200;
+                /* z-index выше модального слоя (ModalShell = 1000): попап
+                   портируется в body и конкурирует с оверлеем в корневом
+                   stacking-контексте — с 200 он открывался бы ЗА затемнением. */
+                .apk-pop { position: fixed; z-index: 1100;
                     background: #fff; border: 1px solid var(--color-border); border-radius: 14px;
                     box-shadow: 0 16px 48px rgba(0,0,0,.16); padding: 12px; }
                 .apk-body { display: flex; gap: 12px; align-items: flex-start; }

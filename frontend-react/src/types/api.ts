@@ -10726,7 +10726,8 @@ export interface DesignTaskListItem {
     versions_count: number;
     sort_order: number;
     /** Заполняется только в GET /all-projects. */
-    project_name?: string | null;    /** Волна C: текущие метки и выбранные реквизиты (грузятся батчем). */
+    project_name?: string | null;
+    /** Волна C: текущие метки и выбранные реквизиты (грузятся батчем). */
     labels: DesignLabelRef[];
     attributes: DesignAttributeRef[];
 }
@@ -11019,7 +11020,8 @@ export interface DesignTaskDetail {
      * (DESIGN_TASK_TRANSITIONS × матрица прав бэка). Кнопки переходов в деталке
      * строятся по этому списку (amended 2026-08-02, аддитивно).
      */
-    allowed_transitions: DesignTaskStatus[];    /** Волна C: разметка задачи + счётчик истории меток (Р20). */
+    allowed_transitions: DesignTaskStatus[];
+    /** Волна C: разметка задачи + счётчик истории меток (Р20). */
     labels: DesignLabelRef[];
     attributes: DesignAttributeRef[];
     label_history: DesignLabelHistoryRow[];

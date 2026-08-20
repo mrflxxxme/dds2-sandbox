@@ -8,6 +8,7 @@
 как у донора problem_digest_xlsx; StreamingResponse не нужен.
 """
 
+import asyncio
 import io
 from collections.abc import Sequence
 from datetime import date
@@ -17,7 +18,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.design import DesignAttribute, DesignTask
@@ -28,11 +29,7 @@ from backend.schemas.design import (
     DesignStatsOut,
 )
 from backend.services.design import analytics, stats
-from backend.services.design.queries import (
-    load_attributes_by_task,
-    load_labels_by_task,
-    to_list_items,
-)
+from backend.services.design.queries import to_list_items
 
 #  Cap листа «Задачи»: при усечении в «Сводке» появляется явная строка.
 MAX_TASK_ROWS = 5000
@@ -56,6 +53,19 @@ STATUS_LABEL = {
     "ACCEPTED": "Принято",
     "CANCELLED": "Отменена",
 }
+
+
+def _txt(value: str | None) -> str:
+    """Обезвредить пользовательский текст перед записью в ячейку.
+
+    openpyxl помечает ЛЮБУЮ строку, начинающуюся с `=`, как формулу — и Excel
+    её выполнит. В книгу попадает свободный текст: заголовки задач (их пишет
+    любой editor), имена меток и полей, имена пользователей. Ведущий скачивает
+    отчёт — и получает чужую формулу. Ведущий апостроф заставляет Excel
+    трактовать значение как текст и в самой ячейке не отображается.
+    """
+    s = "" if value is None else str(value)
+    return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
 
 
 def _pct(value: float | None) -> str:
@@ -103,7 +113,7 @@ async def build_export(
         .where(
             DesignTask.project_id == project_id,
             DesignTask.is_deleted == False,  # noqa: E712
-            *analytics._window(DesignTask.created_at, win_from, win_to),
+            *analytics.stats_window(DesignTask.created_at, win_from, win_to),
         )
         .order_by(DesignTask.created_at.desc(), DesignTask.id.desc())
         .limit(MAX_TASK_ROWS + 1)
@@ -115,41 +125,46 @@ async def build_export(
     #  Точное общее число нужно для честной строки усечения.
     total_tasks = len(tasks)
     if tasks_clipped:
-        from sqlalchemy import func as sa_func
-
         count_res = await db.execute(
-            select(sa_func.count()).select_from(DesignTask).where(
+            select(func.count()).select_from(DesignTask).where(
                 DesignTask.project_id == project_id,
                 DesignTask.is_deleted == False,  # noqa: E712
-                *analytics._window(DesignTask.created_at, win_from, win_to),
+                *analytics.stats_window(DesignTask.created_at, win_from, win_to),
             )
         )
         total_tasks = int(count_res.scalar() or 0)
 
-    wb = Workbook()
-    summary = wb.active
-    summary.title = "Сводка"
-    _fill_summary(
-        summary,
-        win_from,
-        win_to,
-        metrics,
-        by_assignee,
-        funnel,
-        by_attribute,
-        tasks_clipped=tasks_clipped,
-        total_tasks=total_tasks,
-        fields_clipped=fields_clipped,
-        fields_total=fields_total,
-    )
+    #  Все обращения к БД закончены — дальше чистый CPU, и он уходит в поток:
+    #  openpyxl на 5000×60 это секунды под GIL, иначе встаёт весь воркер.
+    items = await to_list_items(db, project_id, tasks)
+    by_id = {task.id: task for task in tasks}
+    rows = [(item, by_id[item.id]) for item in items]
 
-    sheet = wb.create_sheet("Задачи")
-    await _fill_tasks(db, project_id, sheet, tasks, fields)
+    def _render() -> bytes:
+        wb = Workbook()
+        summary = wb.active
+        summary.title = "Сводка"
+        _fill_summary(
+            summary,
+            win_from,
+            win_to,
+            metrics,
+            by_assignee,
+            funnel,
+            by_attribute,
+            tasks_clipped=tasks_clipped,
+            total_tasks=total_tasks,
+            fields_clipped=fields_clipped,
+            fields_total=fields_total,
+        )
+        _fill_tasks(wb.create_sheet("Задачи"), rows, fields)
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        return buffer.getvalue()
 
-    buffer = io.BytesIO()
-    wb.save(buffer)
+    data = await asyncio.to_thread(_render)
     name = f"design-tasks_{win_from.isoformat()}_{win_to.isoformat()}.xlsx"
-    return buffer.getvalue(), name
+    return data, name
 
 
 def _fill_summary(
@@ -211,7 +226,7 @@ def _fill_summary(
         ws.cell(row=row, column=i, value=head).font = _HEAD
     row += 1
     for who in by_assignee.rows:
-        ws.cell(row=row, column=1, value=who.name)
+        ws.cell(row=row, column=1, value=_txt(who.name))
         ws.cell(row=row, column=2, value=who.active)
         ws.cell(row=row, column=3, value=who.accepted)
         ws.cell(row=row, column=4, value=_pct(who.on_time_share))
@@ -236,10 +251,10 @@ def _fill_summary(
     row += 1
 
     for group in by_attribute.attributes:
-        ws.cell(row=row, column=1, value=f"Реквизит: {group.attribute_name}").font = _HEAD
+        ws.cell(row=row, column=1, value=_txt(f"Реквизит: {group.attribute_name}")).font = _HEAD
         row += 1
         for value_row in group.rows:
-            ws.cell(row=row, column=1, value=value_row.value)
+            ws.cell(row=row, column=1, value=_txt(value_row.value))
             ws.cell(row=row, column=2, value=value_row.count)
             row += 1
         row += 1
@@ -248,18 +263,16 @@ def _fill_summary(
         ws.cell(row=row, column=1, value="Метки").font = _HEAD
         row += 1
         for label_row in by_attribute.labels:
-            ws.cell(row=row, column=1, value=label_row.name)
+            ws.cell(row=row, column=1, value=_txt(label_row.name))
             ws.cell(row=row, column=2, value=label_row.count)
             row += 1
 
     _autosize(ws, [34, 16, 14, 12, 12, 10])
 
 
-async def _fill_tasks(
-    db: AsyncSession,
-    project_id: int,
+def _fill_tasks(
     ws: Worksheet,
-    tasks: list[DesignTask],
+    rows: Sequence[tuple[Any, DesignTask]],
     fields: Sequence[Any],
 ) -> None:
     head = [
@@ -269,45 +282,36 @@ async def _fill_tasks(
         "Создано", "Принято",
     ]
     for i, title in enumerate(head, start=1):
-        cell = ws.cell(row=1, column=i, value=title)
+        #  Заголовки колонок реквизитов задаёт пользователь — тоже через _txt.
+        cell = ws.cell(row=1, column=i, value=_txt(title))
         cell.font = _HEAD
         cell.alignment = Alignment(vertical="center")
     ws.freeze_panes = "A2"
 
-    if not tasks:
+    if not rows:
         _autosize(ws, [14, 40, 16, 12, 10, 20, 20, 12, 16, 9, 24])
         return
 
-    items = await to_list_items(db, project_id, tasks)
-    task_ids = [t.id for t in tasks]
-    labels_by_task = await load_labels_by_task(db, project_id, task_ids)
-    attrs_by_task = await load_attributes_by_task(db, project_id, task_ids)
-    by_id = {t.id: t for t in tasks}
-
     row = 2
-    for item in items:
-        task = by_id[item.id]
+    for item, task in rows:
         values_by_field: dict[int, list[str]] = {}
-        for a in attrs_by_task.get(item.id, []):
+        for a in item.attributes:
             values_by_field.setdefault(a.attribute_id, []).append(a.value)
 
-        ws.cell(row=row, column=1, value=item.number)
-        ws.cell(row=row, column=2, value=item.title)
+        ws.cell(row=row, column=1, value=_txt(item.number))
+        ws.cell(row=row, column=2, value=_txt(item.title))
         ws.cell(row=row, column=3, value=item.work_type)
         ws.cell(row=row, column=4, value=item.complexity)
         ws.cell(row=row, column=5, value="да" if item.is_urgent else "")
-        ws.cell(row=row, column=6, value=item.assignee_name or "")
-        ws.cell(row=row, column=7, value=item.author_name or "")
+        ws.cell(row=row, column=6, value=_txt(item.assignee_name))
+        ws.cell(row=row, column=7, value=_txt(item.author_name))
         ws.cell(row=row, column=8, value=item.due_date.isoformat() if item.due_date else "")
         ws.cell(row=row, column=9, value=STATUS_LABEL.get(item.status, item.status))
         ws.cell(row=row, column=10, value=item.versions_count)
-        ws.cell(
-            row=row, column=11,
-            value=_JOIN.join(lb.name for lb in labels_by_task.get(item.id, [])),
-        )
+        ws.cell(row=row, column=11, value=_txt(_JOIN.join(lb.name for lb in item.labels)))
         col = 12
         for field_id, _name in fields:
-            ws.cell(row=row, column=col, value=_JOIN.join(values_by_field.get(field_id, [])))
+            ws.cell(row=row, column=col, value=_txt(_JOIN.join(values_by_field.get(field_id, []))))
             col += 1
         ws.cell(row=row, column=col, value=task.created_at.isoformat(sep=" ", timespec="minutes"))
         col += 1

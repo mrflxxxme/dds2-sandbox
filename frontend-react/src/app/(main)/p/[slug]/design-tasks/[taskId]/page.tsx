@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import { format } from 'date-fns';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
@@ -223,7 +224,7 @@ export default function DesignTaskDetailPage() {
                             <span>
                                 Срок:{' '}
                                 {/* Просрочка — сравнением ДАТ (YYYY-MM-DD, UTC), не Date-моментов: иначе краснеет на сутки раньше is_overdue бэка (due_date < today). */}
-                                <b style={{ color: task.due_date && task.due_date < new Date().toISOString().slice(0, 10) && status !== 'ACCEPTED' && status !== 'CANCELLED' ? 'var(--color-danger)' : 'var(--color-text)' }}>
+                                <b style={{ color: task.due_date && task.due_date < format(new Date(), 'yyyy-MM-dd') && status !== 'ACCEPTED' && status !== 'CANCELLED' ? 'var(--color-danger)' : 'var(--color-text)' }}>
                                     {formatDate(task.due_date)}
                                 </b>
                             </span>

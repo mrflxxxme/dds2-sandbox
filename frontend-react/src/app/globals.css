@@ -3200,7 +3200,9 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
     white-space: normal; width: max-content; max-width: 240px;
     padding: 8px 11px; border-radius: 10px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
-    z-index: 200; pointer-events: none;
+    /* Выше модального слоя (ModalShell = 1000): иначе подсказка внутри
+       модалки открывается за её затемнением. */
+    z-index: 1100; pointer-events: none;
     animation: ddsTipIn .15s ease-out;
 }
 @keyframes ddsTipIn { from { opacity: 0; } to { opacity: 1; } }

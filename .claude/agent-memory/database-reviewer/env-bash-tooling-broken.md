@@ -1,12 +1,17 @@
 ---
 name: env-bash-tooling-broken
-description: In dds2 worktrees the Bash tool often has no grep/sed/tail/python — use Grep/Read/Glob tools instead of shell pipelines
+description: Bash tooling in dds2 worktrees is inconsistent — probe once (python/psql often DO work), fall back to Grep/Read only if it fails
 metadata:
   type: project
 ---
 
-В worktree-сессиях dds2 Bash-инструмент запускается с урезанным Git Bash: `grep`, `sed`, `tail`, `where`, `python` возвращают `command not found`, а `cmd.exe /c ...` падает с `fatal error - add_item ("C:\Program Files\Git", "/") failed`. Проверено 2026-08-02 в worktree `dds2-card-design-spec-8a2392`.
+Проверять инструментарий одним дешёвым пробным вызовом, а не считать его сломанным по памяти.
 
-**Why:** Ревью схемы БД требует агрегатов по многим файлам (например, «посчитать alembic heads» = собрать все `revision`/`down_revision` и вычесть). Попытка сделать это одноразовым shell/python-скриптом стоила 4 провалившихся вызова подряд.
+**Why:** 2026-08-02 (worktree `dds2-card-design-spec-8a2392`) `grep`/`sed`/`tail`/`python` возвращали `command not found`, и я записал среду как безнадёжную. 2026-08-20 (worktree `dialog-analysis-improvements-9f7e8f`) `python` и `docker exec … psql` работают штатно — и именно они дали два факта, которые статическим чтением получить нельзя:
+- граф ревизий (239 штук) → единственная голова, за 1 вызов;
+- эмпирика PG: при `ALTER COLUMN … TYPE varchar(40)` из `varchar(20)` таблица НЕ переписывается и обычный индекс на колонке НЕ пересоздаётся, а **partial-индекс на той же колонке пересоздаётся** (relfilenode меняется). Проверяется пробой `BEGIN; CREATE TABLE …; SELECT relfilenode FROM pg_class …; ALTER …; SELECT relfilenode …; ROLLBACK;`.
 
-**How to apply:** Для любых выборок по репозиторию сразу брать Grep (`output_mode: content`, `-o`) / Glob / Read, не шелл. Если аналитика реально требует кода (граф ревизий, диффы множеств) — либо считать по выводу Grep вручную, либо честно записать в вердикт, что гейт (`alembic heads`, `alembic upgrade/downgrade`) не прогнан и нужен транскрипт от исполнителя, а не выдавать статический разбор за прогон. Перед тем как полагаться на это, один дешёвый пробный вызов не помешает — окружение может почениться.
+**How to apply:**
+- Сначала пробный вызов (`python -c "print(1)"`), потом решение. Пайпы через heredoc в `docker exec -i psql` иногда молча глотают вывод — надёжнее `printf > /tmp/x.sql` + `docker exec -i … < /tmp/x.sql`.
+- `python -c "import backend…"` падает на `Settings` (`extra_forbidden` из `.env`) — метаданные моделей так не выгрузить; сравнение модели с миграцией делать чтением, а инференс nullable проверять на изолированном `DeclarativeBase` в отдельном процессе.
+- Гейты `alembic upgrade/downgrade` и pytest по-прежнему требовать транскриптом от исполнителя (см. [[local-db-verification-access]] — не трогать `dds_db`).

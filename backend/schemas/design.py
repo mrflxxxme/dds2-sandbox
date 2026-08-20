@@ -265,22 +265,14 @@ class DesignDashboardWidget(BaseModel):
 
 
 class DesignDashboardLayoutIn(BaseModel):
-    widgets: list[DesignDashboardWidget]
+    """Состав набора проверяет СЕРВИС, а не схема.
 
-    @model_validator(mode="after")
-    def _validate_full_set(self) -> "DesignDashboardLayoutIn":
-        """Набор обязан быть полным и точным (CONTRACT-V2 §4)."""
-        seen: set[str] = set()
-        for w in self.widgets:
-            if w.id not in DASHBOARD_WIDGET_IDS:
-                raise ValueError(f"Неизвестный виджет: {w.id}")
-            if w.id in seen:
-                raise ValueError(f"Виджет повторяется: {w.id}")
-            seen.add(w.id)
-        for known in DASHBOARD_WIDGET_IDS:
-            if known not in seen:
-                raise ValueError(f"Не хватает виджета: {known}")
-        return self
+    В схеме проверка давала бы 422 в конверте FastAPI `{"detail": [...]}`, тогда
+    как контракт (CONTRACT-V2 §4) обещает 400 в конверте модуля с дословным
+    текстом. Валидация живёт в analytics.validate_widget_set.
+    """
+
+    widgets: list[DesignDashboardWidget]
 
 
 class DesignDashboardLayoutOut(BaseModel):
@@ -380,14 +372,27 @@ class DesignAttributeOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+#  Верхние границы списков id обязательны: без них 40 000 элементов уходят в
+#  `IN (...)` и упираются в лимит asyncpg (32767 bind-параметров) — а это уже
+#  не ValueError, значит 500 вместо честного 422. Значения совпадают с
+#  потолками выборки в queries.py.
+#
+#  ВАЖНО: task_ids здесь НЕ ограничивается. Его потолок (refs.MAX_BULK_TASKS)
+#  — часть контракта: 400 с текстом «Не больше 500 задач за раз», и он должен
+#  прийти из сервиса. Дубль в схеме перехватывал бы запрос раньше и отдавал
+#  422 без этого текста (поймано test_bulk_cap).
+_MAX_LABEL_IDS = 100
+_MAX_VALUE_IDS = 200
+
+
 class DesignTaskLabelsIn(BaseModel):
     """Семантика REPLACE: что передали — то и стало. Пустой массив снимает всё."""
 
-    label_ids: list[int] = []
+    label_ids: list[int] = Field(default_factory=list, max_length=_MAX_LABEL_IDS)
 
 
 class DesignTaskAttributesIn(BaseModel):
-    value_ids: list[int] = []
+    value_ids: list[int] = Field(default_factory=list, max_length=_MAX_VALUE_IDS)
 
 
 class DesignBulkLabelsIn(BaseModel):
@@ -395,7 +400,7 @@ class DesignBulkLabelsIn(BaseModel):
     недостающее, не затирая чужую разметку."""
 
     task_ids: list[int]
-    label_ids: list[int]
+    label_ids: list[int] = Field(..., max_length=_MAX_LABEL_IDS)
     mode: str = "add"
 
     @field_validator("mode")
@@ -408,7 +413,7 @@ class DesignBulkLabelsIn(BaseModel):
 
 class DesignBulkAttributesIn(BaseModel):
     task_ids: list[int]
-    value_ids: list[int]
+    value_ids: list[int] = Field(..., max_length=_MAX_VALUE_IDS)
     mode: str = "add"
 
     @field_validator("mode")

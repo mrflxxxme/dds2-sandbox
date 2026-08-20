@@ -6,4 +6,4 @@
 - [Bulk `ids` без границы](bulk-ids-unbounded-amplification.md) — сквозной паттерн всех bulk-ручек; rate-limit считает запросы, не элементы → MEDIUM, не гейт
 - [Газелька = необратимый write](gazelka-irreversible-write-path.md) — реальный заказ перевозчику без отмены; чек-лист ревью: ключ (kind,id), маркер TR, `None`=дефолт формы
 - [Review tooling env](project_review_tooling_env.md) — Bash-инструмент в worktree без coreutils/python; check_conventions.sh и pytest — только через test-runner
-- [Дизайн карточек: security carry-over](project_design_module_security_carryover.md) — закрыто на Ф0/Ф1/Ф2; открытые пункты для Ф3/Ф6/Ф7 (page-гейт /all-projects, SVG-inline)
+- [Дизайн карточек: security carry-over](project_design_module_security_carryover.md) — закрыто Ф1/Ф2/волны A–D; открыто: SVG-inline, XLSX formula injection, `_window` OverflowError

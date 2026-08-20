@@ -244,6 +244,13 @@ class DesignTask(Base, TimestampMixin, SoftDeleteMixin):
             postgresql_where=text("is_deleted = false"),
         ),
         Index("ix_design_tasks_author", "project_id", "author_user_id"),
+        # Окно периода аналитики и выгрузки режет по created_at (dsn07).
+        Index(
+            "ix_design_tasks_project_created",
+            "project_id",
+            "created_at",
+            postgresql_where=text("is_deleted = false"),
+        ),
         # Partial-unique номера DES-N (Р14); дублирует dsn01 — иначе autogenerate-дрейф.
         Index(
             "uq_design_tasks_project_number",
@@ -433,7 +440,9 @@ class DesignTaskEvent(Base):
             ["design_tasks.id", "design_tasks.project_id"],
             ondelete="CASCADE",
         ),
-        Index("ix_design_task_events_project_task", "project_id", "task_id"),
+        # Поглощает прежний (project_id, task_id): третья колонка даёт порядок
+        # оконной функции воронки без отдельной сортировки (dsn07).
+        Index("ix_design_task_events_project_task_changed", "project_id", "task_id", "changed_at"),
         Index("ix_design_task_events_task_id", "task_id"),
     )
 
@@ -547,6 +556,11 @@ class DesignTaskLabel(Base):
             postgresql_where=text("removed_at IS NULL"),
         ),
         Index("ix_design_task_labels_project_label", "project_id", "label_id"),
+        # FK ⇒ индекс: составные FK ведут по task_id и label_id, а индексы выше
+        # начинаются с project_id и каскадных проверок не покрывают (та же правка,
+        # что делала dsn03 для материалов и версий).
+        Index("ix_design_task_labels_task_id", "task_id"),
+        Index("ix_design_task_labels_label_id", "label_id"),
     )
 
 
@@ -614,12 +628,11 @@ class DesignAttributeValue(Base, SoftDeleteMixin):
             unique=True,
             postgresql_where=text("is_deleted = false AND is_archived = false"),
         ),
-        Index(
-            "ix_design_attribute_values_project_attribute",
-            "project_id",
-            "attribute_id",
-            postgresql_where=text("is_deleted = false"),
-        ),
+        # Без postgresql_where: партиальный индекс не применим к RI-проверке
+        # каскада, а строк с is_deleted = true у справочника не бывает вовсе
+        # («удаление» здесь — архивирование).
+        Index("ix_design_attribute_values_project_attribute", "project_id", "attribute_id"),
+        Index("ix_design_attribute_values_attribute_id", "attribute_id"),
     )
 
 
@@ -650,6 +663,8 @@ class DesignTaskAttributeValue(Base):
         ),
         Index("ix_design_task_attr_values_project_task", "project_id", "task_id"),
         Index("ix_design_task_attr_values_project_value", "project_id", "value_id"),
+        # PK (task_id, value_id) покрывает поиск по task_id, а по value_id — нет.
+        Index("ix_design_task_attr_values_value_id", "value_id"),
     )
 
 
@@ -679,6 +694,8 @@ class DesignDashboardLayout(Base, TimestampMixin):
     widgets: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
 
     __table_args__ = (
+        # Индекса по (project_id, user_id) нет намеренно: UniqueConstraint уже
+        # создаёт ровно такой btree. Отдельный нужен только под FK на users.id.
         UniqueConstraint("project_id", "user_id", name="uq_design_dashboard_project_user"),
-        Index("ix_design_dashboard_project_user", "project_id", "user_id"),
+        Index("ix_design_dashboard_user_id", "user_id"),
     )

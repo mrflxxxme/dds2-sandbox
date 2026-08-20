@@ -29,20 +29,19 @@ def upgrade() -> None:
         sa.Column("project_id", sa.Integer(), nullable=False),
         sa.Column("user_id", sa.Integer(), nullable=False),
         sa.Column("widgets", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("created_at", sa.DateTime(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=True),
         sa.ForeignKeyConstraint(["project_id"], ["projects.id"]),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("project_id", "user_id", name="uq_design_dashboard_project_user"),
     )
-    op.create_index(
-        "ix_design_dashboard_project_user",
-        "design_dashboard_layouts",
-        ["project_id", "user_id"],
-    )
+    #  Индекса по (project_id, user_id) не заводим: UniqueConstraint выше уже
+    #  создал ровно такой btree, и он обслуживает единственный запрос сервиса.
+    #  А вот FK на users.id не покрыт ничем — правило «FK ⇒ индекс» (dsn03).
+    op.create_index("ix_design_dashboard_user_id", "design_dashboard_layouts", ["user_id"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_design_dashboard_project_user", table_name="design_dashboard_layouts")
+    op.drop_index("ix_design_dashboard_user_id", table_name="design_dashboard_layouts")
     op.drop_table("design_dashboard_layouts")

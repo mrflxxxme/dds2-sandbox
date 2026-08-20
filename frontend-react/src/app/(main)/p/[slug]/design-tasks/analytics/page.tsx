@@ -25,6 +25,9 @@ import { useDesignBoardPermissions } from '../components/useDesignBoardPermissio
 
 const WINDOW_DAYS = 30;
 
+/** Литерал на каждый рендер ломал бы useMemo внутри пикера. */
+const ANALYTICS_PRESETS = ['today', 'yesterday', '30d', '3m'];
+
 const WIDGET_TITLE: Record<DesignDashboardWidgetId, string> = {
     metrics: '📈 Метрики',
     by_assignee: '👤 По исполнителям',
@@ -58,17 +61,30 @@ export default function DesignAnalyticsPage() {
 
     const [window_, setWindow] = useState(defaultWindow);
     const [layout, setLayout] = useState<DesignDashboardWidget[] | null>(null);
+    const [layoutError, setLayoutError] = useState<string | null>(null);
     const [tuning, setTuning] = useState(false);
+    const [exporting, setExporting] = useState(false);
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
     const mountedRef = useRef(true);
 
-    useEffect(() => {
-        mountedRef.current = true;
+    const loadLayout = useCallback(() => {
+        setLayoutError(null);
         api.getDesignDashboardLayout()
             .then((r) => { if (mountedRef.current) setLayout(r.widgets); })
-            .catch(() => { if (mountedRef.current) setLayout(null); });
-        return () => { mountedRef.current = false; };
+            .catch((e) => {
+                // Ошибка обязана отличаться от загрузки: иначе пользователь
+                // навсегда остаётся на «Загрузка…» без текста и без «Повторить».
+                if (mountedRef.current) {
+                    setLayoutError(e instanceof Error ? e.message : 'Не удалось загрузить раскладку');
+                }
+            });
     }, []);
+
+    useEffect(() => {
+        mountedRef.current = true;
+        loadLayout();
+        return () => { mountedRef.current = false; };
+    }, [loadLayout]);
 
     const visible = useMemo(
         () => (layout ?? []).filter((w) => w.visible).sort((a, b) => a.order - b.order),
@@ -104,7 +120,16 @@ export default function DesignAnalyticsPage() {
         void persist(sorted.map((w, idx) => ({ ...w, order: idx })));
     };
 
-    const exportUrl = `/api/v1/design-tasks/stats/export.xlsx?date_from=${window_.from}&date_to=${window_.to}`;
+    const download = useCallback(async () => {
+        setExporting(true);
+        try {
+            await api.downloadDesignStatsExcel(window_.from, window_.to);
+        } catch (e) {
+            setToast({ type: 'error', message: e instanceof Error ? e.message : 'Не удалось скачать отчёт' });
+        } finally {
+            if (mountedRef.current) setExporting(false);
+        }
+    }, [window_.from, window_.to]);
 
     return (
         <PageGuard page="design-tasks">
@@ -119,6 +144,7 @@ export default function DesignAnalyticsPage() {
                     from={window_.from}
                     to={window_.to}
                     clearable={false}
+                    presetKeys={ANALYTICS_PRESETS}
                     onApply={(from, to) => { if (from && to) setWindow({ from, to }); }}
                     minWidth={230}
                 />
@@ -126,9 +152,14 @@ export default function DesignAnalyticsPage() {
                 <button className="btn btn-secondary btn-sm" onClick={() => setWindow(defaultWindow())}>
                     Последние 30 дней
                 </button>
-                <a className="btn btn-primary btn-sm" style={{ marginLeft: 'auto' }} href={exportUrl}>
-                    ⬇ Скачать отчёт
-                </a>
+                <button
+                    className="btn btn-primary btn-sm"
+                    style={{ marginLeft: 'auto' }}
+                    disabled={exporting}
+                    onClick={() => void download()}
+                >
+                    {exporting ? '⏳ Готовим…' : '⬇ Скачать отчёт'}
+                </button>
                 <button className="btn btn-secondary btn-sm" onClick={() => setTuning((v) => !v)}>
                     ⚙ Настроить виджеты
                 </button>
@@ -152,7 +183,12 @@ export default function DesignAnalyticsPage() {
                 </div>
             )}
 
-            {layout === null && (
+            {layoutError && (
+                <div className="glass-card" style={{ color: 'var(--color-danger)' }}>
+                    {layoutError} <button className="btn btn-sm btn-secondary" onClick={loadLayout}>Повторить</button>
+                </div>
+            )}
+            {layout === null && !layoutError && (
                 <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка…</div>
             )}
             {layout !== null && visible.length === 0 && (
@@ -174,34 +210,34 @@ export default function DesignAnalyticsPage() {
 
 /** Один виджет: свой запрос, свои четыре состояния. Ошибка не выходит за карточку. */
 function Widget({ id, from, to }: { id: DesignDashboardWidgetId; from: string; to: string }) {
-    const [data, setData] = useState<unknown>(null);
+    const [data, setData] = useState<WidgetData | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const mountedRef = useRef(true);
+    /** Поколение запроса: смена периода не должна дать медленному ответу
+     *  прошлого окна перезаписать свежий (mountedRef для этого не годится —
+     *  тело эффекта возвращает его в true сразу после cleanup). */
+    const genRef = useRef(0);
 
     const load = useCallback(async () => {
+        const gen = ++genRef.current;
         setLoading(true);
         setError(null);
         try {
-            const fetcher = {
-                metrics: () => api.getDesignStats(from, to),
-                by_assignee: () => api.getDesignStatsByAssignee(from, to),
-                funnel: () => api.getDesignStatsFunnel(from, to),
-                by_attribute: () => api.getDesignStatsByAttribute(from, to),
-            }[id];
-            const res = await fetcher();
-            if (mountedRef.current) setData(res);
+            const res = await fetchWidget(id, from, to);
+            if (gen === genRef.current) setData(res);
         } catch (e) {
-            if (mountedRef.current) setError(e instanceof Error ? e.message : 'Не удалось загрузить виджет');
+            if (gen === genRef.current) {
+                setError(e instanceof Error ? e.message : 'Не удалось загрузить виджет');
+            }
         } finally {
-            if (mountedRef.current) setLoading(false);
+            if (gen === genRef.current) setLoading(false);
         }
     }, [id, from, to]);
 
     useEffect(() => {
-        mountedRef.current = true;
         void load();
-        return () => { mountedRef.current = false; };
+        // Отменить сетевой ответ нечем, но поколение обесценит его результат.
+        return () => { genRef.current++; };
     }, [load]);
 
     return (
@@ -213,16 +249,45 @@ function Widget({ id, from, to }: { id: DesignDashboardWidgetId; from: string; t
                     {error} <button className="btn btn-sm btn-secondary" onClick={() => void load()}>Повторить</button>
                 </div>
             )}
-            {!loading && !error && data != null && <WidgetBody id={id} data={data} />}
+            {!loading && !error && data && <WidgetBody data={data} />}
         </div>
     );
 }
 
-function WidgetBody({ id, data }: { id: DesignDashboardWidgetId; data: unknown }) {
-    if (id === 'metrics') return <MetricsBody stats={data as DesignStatsOut} />;
-    if (id === 'by_assignee') return <AssigneeBody stats={data as DesignStatsByAssigneeOut} />;
-    if (id === 'funnel') return <FunnelBody stats={data as DesignStatsFunnelOut} />;
-    return <AttributeBody stats={data as DesignStatsByAttributeOut} />;
+/**
+ * Дискриминированное объединение вместо `unknown` + каст: перепутать виджет и
+ * его данные теперь нельзя — tsc не соберёт.
+ */
+type WidgetData =
+    | { id: 'metrics'; stats: DesignStatsOut }
+    | { id: 'by_assignee'; stats: DesignStatsByAssigneeOut }
+    | { id: 'funnel'; stats: DesignStatsFunnelOut }
+    | { id: 'by_attribute'; stats: DesignStatsByAttributeOut };
+
+async function fetchWidget(id: DesignDashboardWidgetId, from: string, to: string): Promise<WidgetData> {
+    switch (id) {
+        case 'metrics':
+            return { id, stats: await api.getDesignStats(from, to) };
+        case 'by_assignee':
+            return { id, stats: await api.getDesignStatsByAssignee(from, to) };
+        case 'funnel':
+            return { id, stats: await api.getDesignStatsFunnel(from, to) };
+        case 'by_attribute':
+            return { id, stats: await api.getDesignStatsByAttribute(from, to) };
+    }
+}
+
+function WidgetBody({ data }: { data: WidgetData }) {
+    switch (data.id) {
+        case 'metrics':
+            return <MetricsBody stats={data.stats} />;
+        case 'by_assignee':
+            return <AssigneeBody stats={data.stats} />;
+        case 'funnel':
+            return <FunnelBody stats={data.stats} />;
+        case 'by_attribute':
+            return <AttributeBody stats={data.stats} />;
+    }
 }
 
 function MetricsBody({ stats }: { stats: DesignStatsOut }) {
@@ -299,6 +364,9 @@ function AssigneeBody({ stats }: { stats: DesignStatsByAssigneeOut }) {
 }
 
 function FunnelBody({ stats }: { stats: DesignStatsFunnelOut }) {
+    if (stats.rows.every((r) => r.count === 0)) {
+        return <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>На доске сейчас задач нет.</div>;
+    }
     return (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 12 }}>
             {stats.rows.map((r) => (

@@ -319,7 +319,12 @@ async def stats_export(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """XLSX: «Сводка» + «Задачи». Read-ручка, без rate_limit_write (Р32)."""
+    """XLSX: «Сводка» + «Задачи». Read-ручка, без rate_limit_write (Р32).
+
+    Данные читаются в корутине, а САМА книга собирается в отдельном потоке:
+    openpyxl на 5000 строк × 60 колонок — это секунды чистого CPU под GIL,
+    и без to_thread на это время встал бы весь воркер (донор — payment_requests).
+    """
     data, filename = await _svc(
         export_xlsx.build_export(db, project.id, date_from, date_to)
     )
@@ -377,12 +382,20 @@ async def product_suggest(
 @router.get("/refs/labels", response_model=list[DesignLabelOut])
 async def list_labels(
     include_archived: bool = Query(False),
+    with_usage: bool = Query(True),
     user: User = Depends(require_viewer),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Метки проекта с usage_count (числом задач, где метка стоит сейчас)."""
-    return await refs.list_labels(db, project.id, include_archived=include_archived)
+    """Метки проекта с usage_count (числом задач, где метка стоит сейчас).
+
+    with_usage=false отдаёт usage_count нулями, не считая их: счётчик рисуют
+    только «Настройки», а деталка и фильтры доски дёргают эту же ручку на
+    каждом открытии — им GROUP BY по всей таблице связей ни к чему.
+    """
+    return await refs.list_labels(
+        db, project.id, include_archived=include_archived, with_usage=with_usage
+    )
 
 
 @router.post(
@@ -435,12 +448,15 @@ async def delete_label(
 @router.get("/refs/attributes", response_model=list[DesignAttributeOut])
 async def list_attributes(
     include_archived: bool = Query(False),
+    with_usage: bool = Query(True),
     user: User = Depends(require_viewer),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Поля-списки со вложенными значениями; include_archived действует и на значения."""
-    return await refs.list_attributes(db, project.id, include_archived=include_archived)
+    return await refs.list_attributes(
+        db, project.id, include_archived=include_archived, with_usage=with_usage
+    )
 
 
 @router.post(

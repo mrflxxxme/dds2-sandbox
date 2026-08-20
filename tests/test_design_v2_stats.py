@@ -267,8 +267,11 @@ async def test_layout_validation(client, env, widgets, expected):
     resp = await client.put(
         f"{BASE}/dashboard/layout", json={"widgets": widgets}, headers=env.lead.h
     )
-    assert resp.status_code == 422, resp.text  # валидация схемы
-    assert expected in resp.text
+    #  400, а не 422: CONTRACT-V2 §4 обещает дословный текст в конверте модуля,
+    #  а 422 отдаёт FastAPI своим `{"detail": [...]}`. Поэтому набор проверяет
+    #  сервис (analytics.validate_widget_set), а не Pydantic-валидатор схемы.
+    assert resp.status_code == 400, resp.text
+    assert _msg(resp) == expected
 
 
 async def test_viewer_can_read_and_save_layout(client, env):

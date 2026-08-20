@@ -32,7 +32,10 @@ export default function TaskMarkupCard({ task, onChanged, onError }: {
 
     useEffect(() => {
         mountedRef.current = true;
-        Promise.all([api.listDesignLabels(), api.listDesignAttributes()])
+        // withUsage=false: карточка рисует имена и цвета, счётчик использования
+        // здесь не показывается — незачем гонять GROUP BY по связям на каждом
+        // открытии деталки.
+        Promise.all([api.listDesignLabels(false, false), api.listDesignAttributes(false, false)])
             .then(([lbs, attrs]) => {
                 if (!mountedRef.current) return;
                 setLabels(lbs);
@@ -124,8 +127,11 @@ export default function TaskMarkupCard({ task, onChanged, onError }: {
                                     <span className="dds-label-dot" />
                                     {l.name}
                                     {times > 1 && (
+                                        // Нейтральная форма вместо «была 5 раза»:
+                                        // плюрализацию русского счётного слова ради
+                                        // одной подписи заводить не стоит.
                                         <span style={{ color: 'var(--color-text-muted)' }}>
-                                            · была {formatNumber(times, 0)} раза
+                                            · вешали {formatNumber(times, 0)}×
                                         </span>
                                     )}
                                 </button>

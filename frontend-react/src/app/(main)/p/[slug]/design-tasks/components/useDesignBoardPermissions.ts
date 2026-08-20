@@ -19,10 +19,10 @@ const NONE: DesignBoardPermissions = {
  * модуля делала бы лишний GET /board только ради двух булевых полей. Сбоя не
  * маскируем — при ошибке флаги остаются false и вкладки просто нет.
  */
-let cached: Promise<DesignBoardPermissions> | null = null;
+const cache = new Map<number, Promise<DesignBoardPermissions>>();
 
 export function resetDesignBoardPermissionsCache(): void {
-    cached = null;
+    cache.clear();
 }
 
 export function useDesignBoardPermissions(): DesignBoardPermissions {
@@ -30,13 +30,20 @@ export function useDesignBoardPermissions(): DesignBoardPermissions {
 
     useEffect(() => {
         let alive = true;
-        if (!cached) {
-            cached = api.getDesignBoard().then((r) => r.permissions);
+        // Кэш ключуется проектом: без этого переход между проектами клиентской
+        // навигацией показал бы права предыдущего (сегодня спасает только жёсткая
+        // перезагрузка при смене проекта — на такой инвариант полагаться нельзя).
+        const projectId = api.getProjectId();
+        if (projectId == null) return;
+        let pending = cache.get(projectId);
+        if (!pending) {
+            pending = api.getDesignBoard().then((r) => r.permissions);
             // Провалившийся промис нельзя оставлять в кэше: следующая страница
             // получила бы ту же ошибку навсегда.
-            cached.catch(() => { cached = null; });
+            pending.catch(() => cache.delete(projectId));
+            cache.set(projectId, pending);
         }
-        cached
+        pending
             .then((p) => { if (alive) setPerms(p); })
             .catch(() => { /* флаги остаются false — вкладки просто нет */ });
         return () => { alive = false; };

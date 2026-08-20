@@ -1,16 +1,19 @@
 ---
 name: design-module-schema-freeze
-description: Модуль «Дизайн карточек» — схема БД фризится после Ф0; статус DB-ревью по фазам (Ф0 WARNING закрыт, Ф1 WARNING открыт)
+description: Модуль «Дизайн карточек» — схема БД фризится после Ф0; статус DB-ревью по фазам/волнам (Ф0 закрыт, Ф1 частично, волны B/C/D — WARNING)
 metadata:
   type: project
 ---
 
-Модуль «Дизайн карточек» (`docs/specs/design/`: CHARTER.md · STATUS.md · phases/F0..F7) строится фазами Ф0–Ф7, песочница без пуша в `origin` (Р16).
+Модуль «Дизайн карточек» (`docs/specs/design/`: CHARTER.md · STATUS.md · phases/F0..F7) строится фазами, песочница без пуша в `origin` (Р16). Миграции: `dsn01`…`dsn06`, голова цепочки — `dsn06_design_dashboard_layout`.
 
-**Why:** По CHARTER §7 после мержа Ф0 изменение схемы = эскалация к архитектору. Значит «доиндексируем потом» здесь дороже обычного — индексные правки вносить прямо в `dsn01`, пока таблицы пустые.
+**Why:** По CHARTER §7 после мержа Ф0 изменение схемы = эскалация к архитектору. Значит «доиндексируем потом» здесь дороже обычного — индексные правки вносить в ТУ ЖЕ ещё не смёрженную миграцию (сейчас это `dsn05`/`dsn06`), пока таблицы пустые; `dsn01` трогать уже нельзя.
 
 **How to apply:**
-- **Ф0 (2026-08-02, WARNING) — ЗАКРЫТО в Ф1:** FK-индексы CASCADE-детей (`*.task_id`, `submission_id`), `(project_id, author_user_id)`, partial-предикат `is_deleted = false` на индексах доски и partial-unique `uq_design_tasks_project_number` в `__table_args__` — всё есть и в `dsn01`, и в `backend/models/design.py`. W4 закрыт: `crud.next_number` считает max ВКЛЮЧАЯ soft-deleted.
-- **Ф1 (2026-08-02, WARNING) — открытые пункты, проверять в Ф2/Ф4:** (1) `files.create_submission` держит `FOR UPDATE` + открытую транзакцию через N MinIO-загрузок (учтён инцидент idle-in-transaction 2026-07-16 из learnings.md); (2) `board.get_board` берёт общий `LIMIT 200×6` вместо лимита на колонку — терминальная ACCEPTED (60+ задач/мес) со временем съедает бюджет и колонки NEW/REVIEW/REVISION приходят пустыми; (3) `common.get_task_row(for_update=True)` без `populate_existing` — в сессии, где задача уже загружена (типичный роутер Ф2: сначала `get_task`, потом мутация), FOR UPDATE лочит строку, но ORM отдаёт устаревший снапшот → гвард считается по старому статусу.
+- **Ф0 (2026-08-02) — ЗАКРЫТО.** **Ф1 W3 (`get_task_row` без `populate_existing`) — ЗАКРЫТО:** `populate_existing` есть в `services/design/common.py`.
+- **Ф1 — открыто, проверять дальше:** `files.create_submission` держит `FOR UPDATE` + открытую транзакцию через N MinIO-загрузок (инцидент idle-in-transaction 2026-07-16); `board.get_board` берёт общий `LIMIT 200×6` вместо лимита на колонку.
+- **Волны B/C/D (2026-08-20, WARNING):** главное — `design_task_labels` имеет только ПАРТИАЛЬНЫЕ индексы с `task_id` (`WHERE removed_at IS NULL`), а запрос истории Р20 (`queries._label_history`) и CASCADE по задаче читают строки СО снятыми метками; `get_funnel` считает LEAD по `design_task_events` не отфильтровав «не-переходы» (`old_status = new_status` — метки/реквизиты/номер/исполнитель), из-за чего `avg_days_in_status` занижается; `created_at` в `dsn05`/`dsn06` объявлен `nullable=True`, а модель через `TimestampMixin` даёт NOT NULL (в `dsn01` было правильно) → autogenerate-дрейф.
+- Ключевой инвариант модуля: partial-unique справочников условен по ОБОИМ флагам (`is_deleted = false AND is_archived = false`), потому что «Удалить» в UI = архивирование (Р30). Гварды в `services/design/refs.py` этому зеркалу соответствуют — но без advisory-лока (в отличие от `crud._apply_number_change`), т.е. гонка двух кликов даёт 500.
 - Advisory-lock нумерации: `pg_advisory_xact_lock(0x00DE516, project_id)` — 2-аргументная (int4,int4) форма, xact-scoped, с PgBouncer transaction pooling корректна; неймспейс не пересекается с 0x50524D / 0x41534D / 0x505244 / 0x46465359 / 0x57425257.
-- См. [[env-bash-tooling-broken]] — гейты `alembic heads` / up-down-up / pytest в этой среде прогнать нечем, требовать транскрипт.
+- `migrations/env.py` НЕ ставит `transaction_per_migration` → один `alembic upgrade/downgrade` = одна транзакция: падение поздней ревизии откатывает и ранние. Это снимает страх «половинчатого отката» в этой репе.
+- См. [[env-bash-tooling-broken]] и [[local-db-verification-access]].

@@ -29,6 +29,7 @@ import ListView from './components/ListView';
 import BoardFilters, {
     EMPTY_BOARD_FILTERS,
     applyBoardFilters,
+    hasActiveFilters,
     type BoardFilterState,
     type BoardScope,
 } from './components/BoardFilters';
@@ -113,7 +114,8 @@ function DesignTasksPageInner() {
     useEffect(() => {
         // Справочники нужны только доске (селекты фильтров) и грузятся один раз.
         let alive = true;
-        Promise.all([api.listDesignLabels(), api.listDesignAttributes()])
+        // withUsage=false: селектам фильтров нужны имена, а не счётчики.
+        Promise.all([api.listDesignLabels(false, false), api.listDesignAttributes(false, false)])
             .then(([lbs, attrs]) => {
                 if (!alive || !mountedRef.current) return;
                 setLabels(lbs);
@@ -225,6 +227,14 @@ function DesignTasksPageInner() {
     const scopeTotal = filters.scope === 'ON_HOLD' ? onHoldCount
         : filters.scope === 'CANCELLED' ? cancelledCount : 0;
 
+    /**
+     * Под активным фильтром перестановка внутри колонки запрещена: «положить
+     * между A и C» вычисляется по ВИДИМЫМ карточкам, а бэк вставляет в полную
+     * колонку — скрытые между ними задачи молча оказались бы не там, где
+     * пользователь ожидал. Перенос МЕЖДУ колонками при этом остаётся.
+     */
+    const filtersActive = hasActiveFilters(filters);
+
     const boardEmpty = !!columns && DESIGN_BOARD_STATUSES.every((s) => columns[s].length === 0);
     const filteredEmpty = !!filteredColumns && DESIGN_BOARD_STATUSES.every((s) => filteredColumns[s].length === 0);
 
@@ -253,7 +263,11 @@ function DesignTasksPageInner() {
             {view === 'list' ? (
                 // Метрики переехали во вкладку «Аналитика» (волна D): список задач
                 // остаётся списком задач.
-                <ListView slug={params.slug} />
+                // canBulk = can_create: этот флаг — зеркало гейта require_editor
+                // (см. permissions.board_permissions), под которым и живут
+                // /bulk/labels и /bulk/attributes. Внутри батча права по каждой
+                // задаче ещё раз считает бэк и возвращает их в skipped.
+                <ListView slug={params.slug} canBulk={perms.can_create} />
             ) : (
                 <>
                     <BoardFilters
@@ -323,7 +337,7 @@ function DesignTasksPageInner() {
                         ) : (
                             <BoardView
                                 columns={filteredColumns}
-                                canReorder={perms.can_reorder}
+                                canReorder={perms.can_reorder && !filtersActive}
                                 onOpen={openTask}
                                 onMoveRequest={onMoveRequest}
                                 onOpenCalendar={setCalendarTask}

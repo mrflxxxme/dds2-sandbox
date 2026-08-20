@@ -39,7 +39,16 @@ async def get_stats(
     date_from: date | None = None,
     date_to: date | None = None,
 ) -> DesignStatsOut:
-    """Агрегаты одним-двумя запросами; None = «нет данных» (пустой знаменатель)."""
+    """Агрегаты одним-двумя запросами; None = «нет данных» (пустой знаменатель).
+
+    Окно разбирается ОБЩИМ правилом модуля (CONTRACT-V2 §4), тем же, что у трёх
+    новых разрезов: иначе `/stats` без параметров считал бы за всё время, а
+    соседние ручки — за 30 дней, и цифры дашборда не сходились бы между виджетами.
+    Поведение одиночного `date_from` (то, что шлёт панель метрик) сохраняется дословно.
+    """
+    from backend.services.design.analytics import resolve_stats_window
+
+    date_from, date_to = resolve_stats_window(date_from, date_to)
     accepted_conds = [
         DesignTask.project_id == project_id,
         DesignTask.is_deleted == False,  # noqa: E712

@@ -18,7 +18,7 @@
 import logging
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.design import (
@@ -55,6 +55,10 @@ MAX_ATTRIBUTES = 200
 MAX_VALUES_PER_ATTRIBUTE = 500
 MAX_BULK_TASKS = 500
 
+#  Класс advisory-lock справочников. Отдельный от нумерации (0x00DE516), чтобы
+#  массовое заведение значений не блокировало создание задач.
+_REFS_LOCK_CLASS = 0x00DE518
+
 _LEAD_ONLY = "Справочник ведёт ведущий дизайнер"
 _LIMIT_REACHED = "Достигнут предел справочника"
 _LABEL_NOT_FOUND = "Метка не найдена"
@@ -67,6 +71,23 @@ def _require_lead(member_role: str) -> None:
         raise PermissionError(_LEAD_ONLY)
 
 
+async def _lock_refs(db: AsyncSession, project_id: int) -> None:
+    """Сериализовать проверку уникальности и вставку в пределах проекта.
+
+    Схема «SELECT-проверка → INSERT» не атомарна: два параллельных запроса с
+    одним именем оба проходят проверку, второй ловит IntegrityError на
+    partial-unique — а обработчика IntegrityError в дизайн-роутере нет, и
+    наружу ушла бы 500 вместо контрактного 400 «Такое название уже есть».
+    Держат его И create_*, И update_*: переименование проходит ту же
+    неатомарную схему, а с волны C оно ещё и доступно из «Настроек».
+    Тот же приём, что у смены номера заявки (crud._apply_number_change).
+    """
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:cls, :pid)"),
+        {"cls": _REFS_LOCK_CLASS, "pid": project_id % 2**31},
+    )
+
+
 def _active(model: Any) -> tuple[Any, Any]:
     """Условие «запись активна» — зеркало partial-unique индексов."""
     return (model.is_deleted == False, model.is_archived == False)  # noqa: E712
@@ -76,32 +97,59 @@ def _active(model: Any) -> tuple[Any, Any]:
 
 
 async def list_labels(
-    db: AsyncSession, project_id: int, *, include_archived: bool = False
+    db: AsyncSession,
+    project_id: int,
+    *,
+    include_archived: bool = False,
+    with_usage: bool = True,
 ) -> list[DesignLabelOut]:
-    """Список меток с usage_count одним GROUP BY (не per-row — инвариант §6.10)."""
+    """Список меток с usage_count одним GROUP BY (не per-row — инвариант §6.10).
+
+    usage_count нужен ровно одной странице — «Настройкам». Деталка задачи и
+    строка фильтров доски рисуют только имя и цвет, но платили за тот же
+    GROUP BY по всей таблице связей: with_usage=false его выключает.
+    """
     conds = [DesignLabel.project_id == project_id, DesignLabel.is_deleted == False]  # noqa: E712
     if not include_archived:
         conds.append(DesignLabel.is_archived == False)  # noqa: E712
+    #  MAX_LABELS ограничивает АКТИВНЫЕ метки, а архив копится без потолка —
+    #  выборка с архивом легко его перерастает. Сортировка по is_archived
+    #  гарантирует, что усечение съедает только архивные, и пишет об этом в лог,
+    #  иначе «часть архива не показали» выглядит как «архив пуст».
+    limit = MAX_LABELS * 4 if include_archived else MAX_LABELS
     res = await db.execute(
         select(DesignLabel)
         .where(*conds)
-        .order_by(DesignLabel.sort_order, DesignLabel.id)
-        .limit(MAX_LABELS)
+        .order_by(DesignLabel.is_archived, DesignLabel.sort_order, DesignLabel.id)
+        .limit(limit)
     )
     labels = list(res.scalars().all())
+    if len(labels) == limit:
+        logger.warning(
+            "design refs: список меток проекта %s усечён до %s — архив вырос",
+            project_id,
+            limit,
+        )
     if not labels:
         return []
 
-    usage_res = await db.execute(
-        select(DesignTaskLabel.label_id, func.count())
-        .where(
-            DesignTaskLabel.project_id == project_id,
-            DesignTaskLabel.label_id.in_([lb.id for lb in labels]),
-            DesignTaskLabel.removed_at.is_(None),
+    #  JOIN с задачей обязателен: связи мягко удалённых задач в таблице остаются,
+    #  и без фильтра usage_count расходился бы с разрезом /stats/by-attribute,
+    #  который такие задачи не считает.
+    usage: dict[int, int] = {}
+    if with_usage:
+        usage_res = await db.execute(
+            select(DesignTaskLabel.label_id, func.count())
+            .join(DesignTask, DesignTask.id == DesignTaskLabel.task_id)
+            .where(
+                DesignTaskLabel.project_id == project_id,
+                DesignTaskLabel.label_id.in_([lb.id for lb in labels]),
+                DesignTaskLabel.removed_at.is_(None),
+                DesignTask.is_deleted == False,  # noqa: E712
+            )
+            .group_by(DesignTaskLabel.label_id)
         )
-        .group_by(DesignTaskLabel.label_id)
-    )
-    usage = {row[0]: row[1] for row in usage_res.all()}
+        usage = {row[0]: row[1] for row in usage_res.all()}
     return [
         DesignLabelOut(
             id=lb.id,
@@ -145,6 +193,7 @@ async def create_label(
     db: AsyncSession, project_id: int, payload: DesignLabelIn, member_role: str
 ) -> DesignLabelOut:
     _require_lead(member_role)
+    await _lock_refs(db, project_id)
     count_res = await db.execute(
         select(func.count()).select_from(DesignLabel).where(
             DesignLabel.project_id == project_id, *_active(DesignLabel)
@@ -171,6 +220,7 @@ async def update_label(
     db: AsyncSession, project_id: int, label_id: int, payload: DesignLabelIn, member_role: str
 ) -> DesignLabelOut:
     _require_lead(member_role)
+    await _lock_refs(db, project_id)
     label = await _label_row(db, project_id, label_id)
     if await _label_name_taken(db, project_id, payload.name, exclude_id=label_id):
         raise ValueError("Такое название уже есть")
@@ -198,9 +248,17 @@ async def archive_label(
 
 
 async def list_attributes(
-    db: AsyncSession, project_id: int, *, include_archived: bool = False
+    db: AsyncSession,
+    project_id: int,
+    *,
+    include_archived: bool = False,
+    with_usage: bool = True,
 ) -> list[DesignAttributeOut]:
-    """Поля со вложенными значениями. include_archived действует и на значения."""
+    """Поля со вложенными значениями. include_archived действует и на значения.
+
+    with_usage=false снимает два GROUP BY по таблице связей — их читают только
+    «Настройки»; деталка и фильтры доски берут отсюда лишь имена и значения.
+    """
     attr_conds = [
         DesignAttribute.project_id == project_id,
         DesignAttribute.is_deleted == False,  # noqa: E712
@@ -225,22 +283,37 @@ async def list_attributes(
     ]
     if not include_archived:
         value_conds.append(DesignAttributeValue.is_archived == False)  # noqa: E712
+    values_limit = MAX_ATTRIBUTES * MAX_VALUES_PER_ATTRIBUTE
     values_res = await db.execute(
         select(DesignAttributeValue)
         .where(*value_conds)
-        .order_by(DesignAttributeValue.sort_order, DesignAttributeValue.id)
-        .limit(MAX_ATTRIBUTES * MAX_VALUES_PER_ATTRIBUTE)
+        #  is_archived первым ключом — усечение по limit не может выбросить
+        #  активное значение и оставить архивное (см. комментарий в list_labels).
+        .order_by(
+            DesignAttributeValue.is_archived,
+            DesignAttributeValue.sort_order,
+            DesignAttributeValue.id,
+        )
+        .limit(values_limit)
     )
     values = list(values_res.scalars().all())
+    if len(values) == values_limit:
+        logger.warning(
+            "design refs: значения реквизитов проекта %s усечены до %s",
+            project_id,
+            values_limit,
+        )
 
     # usage_count значений — один GROUP BY на всю выдачу.
     usage: dict[int, int] = {}
-    if values:
+    if values and with_usage:
         usage_res = await db.execute(
             select(DesignTaskAttributeValue.value_id, func.count())
+            .join(DesignTask, DesignTask.id == DesignTaskAttributeValue.task_id)
             .where(
                 DesignTaskAttributeValue.project_id == project_id,
                 DesignTaskAttributeValue.value_id.in_([v.id for v in values]),
+                DesignTask.is_deleted == False,  # noqa: E712
             )
             .group_by(DesignTaskAttributeValue.value_id)
         )
@@ -249,17 +322,19 @@ async def list_attributes(
     # usage_count поля — число ЗАДАЧ, где выбрано любое его значение (не сумма
     # по значениям: у is_multi-поля одна задача могла бы посчитаться дважды).
     attr_usage: dict[int, int] = {}
-    if values:
+    if values and with_usage:
         attr_usage_res = await db.execute(
             select(DesignAttributeValue.attribute_id, func.count(func.distinct(DesignTaskAttributeValue.task_id)))
             .join(
                 DesignTaskAttributeValue,
                 DesignTaskAttributeValue.value_id == DesignAttributeValue.id,
             )
+            .join(DesignTask, DesignTask.id == DesignTaskAttributeValue.task_id)
             .where(
                 DesignAttributeValue.project_id == project_id,
                 DesignAttributeValue.attribute_id.in_(attr_ids),
                 DesignTaskAttributeValue.project_id == project_id,
+                DesignTask.is_deleted == False,  # noqa: E712
             )
             .group_by(DesignAttributeValue.attribute_id)
         )
@@ -328,6 +403,7 @@ async def create_attribute(
     db: AsyncSession, project_id: int, payload: DesignAttributeIn, member_role: str
 ) -> DesignAttributeOut:
     _require_lead(member_role)
+    await _lock_refs(db, project_id)
     count_res = await db.execute(
         select(func.count()).select_from(DesignAttribute).where(
             DesignAttribute.project_id == project_id, *_active(DesignAttribute)
@@ -367,6 +443,7 @@ async def update_attribute(
     member_role: str,
 ) -> DesignAttributeOut:
     _require_lead(member_role)
+    await _lock_refs(db, project_id)
     attribute = await _attribute_row(db, project_id, attribute_id)
     taken = await db.execute(
         select(DesignAttribute.id)
@@ -417,6 +494,7 @@ async def create_value(
     member_role: str,
 ) -> DesignAttributeValueOut:
     _require_lead(member_role)
+    await _lock_refs(db, project_id)
     await _attribute_row(db, project_id, attribute_id)
     count_res = await db.execute(
         select(func.count()).select_from(DesignAttributeValue).where(
@@ -460,6 +538,7 @@ async def update_value(
     member_role: str,
 ) -> DesignAttributeValueOut:
     _require_lead(member_role)
+    await _lock_refs(db, project_id)
     value = await _value_row(db, project_id, value_id)
     taken = await db.execute(
         select(DesignAttributeValue.id)
@@ -519,13 +598,18 @@ async def set_task_labels(
     label_ids: list[int],
     user: Any,
     member_role: str,
+    *,
+    task: DesignTask | None = None,
+    commit: bool = True,
 ) -> None:
     """REPLACE набора меток. Метки меняются и в терминальных статусах (Р31).
 
     Снятие — removed_at, не удаление строки: из этого считается история (Р20).
     Набор не изменился → ни строк, ни события (идемпотентность).
     """
-    task = await get_task_row(db, project_id, task_id)
+    #  Задачу можно передать снаружи: массовая операция уже её прочитала, и
+    #  повторный SELECT на каждой из 500 задач — чистая потеря round-trip'а.
+    task = task or await get_task_row(db, project_id, task_id)
     if not _can_touch(task, user, member_role):
         raise PermissionError("Метки ставит ведущий, автор или исполнитель")
 
@@ -597,7 +681,10 @@ async def set_task_labels(
             comment=f"Метки: {', '.join(names) if names else '—'}",
         )
     )
-    await db.commit()
+    #  В массовой операции коммит один на весь батч: 500 коммитов подряд держали
+    #  бы серверный коннект PgBouncer и не давали бы никакой атомарности.
+    if commit:
+        await db.commit()
 
 
 async def set_task_attribute_values(
@@ -607,9 +694,12 @@ async def set_task_attribute_values(
     value_ids: list[int],
     user: Any,
     member_role: str,
+    *,
+    task: DesignTask | None = None,
+    commit: bool = True,
 ) -> None:
     """REPLACE набора значений реквизитов. В терминальных статусах запрещено (Р31)."""
-    task = await get_task_row(db, project_id, task_id)
+    task = task or await get_task_row(db, project_id, task_id)
     if not _can_touch(task, user, member_role):
         raise PermissionError("Реквизиты ставит ведущий, автор или исполнитель")
     if task.status in _TERMINAL_VALUES:
@@ -677,7 +767,8 @@ async def set_task_attribute_values(
             comment=f"Реквизиты: {await _describe_values(db, project_id, rows)}",
         )
     )
-    await db.commit()
+    if commit:
+        await db.commit()
 
 
 async def _guard_single_value(
@@ -727,6 +818,43 @@ async def _describe_values(
 # ─── Массовое проставление (Р33) ─────────────────────────────────────────────
 
 
+async def _load_tasks(
+    db: AsyncSession, project_id: int, task_ids: list[int]
+) -> dict[int, DesignTask]:
+    """Все задачи батча ОДНИМ запросом вместо get_task_row по каждой."""
+    if not task_ids:
+        return {}
+    res = await db.execute(
+        select(DesignTask)
+        .where(
+            DesignTask.id.in_(task_ids),
+            DesignTask.project_id == project_id,
+            DesignTask.is_deleted == False,  # noqa: E712
+        )
+        .limit(len(task_ids))
+    )
+    return {task.id: task for task in res.scalars().all()}
+
+
+async def _current_labels_by_task(
+    db: AsyncSession, project_id: int, task_ids: list[int]
+) -> dict[int, set[int]]:
+    """Текущие метки всего батча ОДНИМ запросом."""
+    if not task_ids:
+        return {}
+    res = await db.execute(
+        select(DesignTaskLabel.task_id, DesignTaskLabel.label_id).where(
+            DesignTaskLabel.project_id == project_id,
+            DesignTaskLabel.task_id.in_(task_ids),
+            DesignTaskLabel.removed_at.is_(None),
+        )
+    )
+    out: dict[int, set[int]] = {}
+    for task_id, label_id in res.all():
+        out.setdefault(task_id, set()).add(label_id)
+    return out
+
+
 async def bulk_set_labels(
     db: AsyncSession,
     project_id: int,
@@ -740,22 +868,27 @@ async def bulk_set_labels(
     if len(task_ids) > MAX_BULK_TASKS:
         raise ValueError("Не больше 500 задач за раз")
     result = DesignBulkResultOut()
+    tasks = await _load_tasks(db, project_id, task_ids)
+    current_by_task = await _current_labels_by_task(db, project_id, list(tasks))
     for task_id in task_ids:
-        try:
-            task = await get_task_row(db, project_id, task_id)
-        except ValueError:
+        task = tasks.get(task_id)
+        if task is None:
             result.errors.append(DesignBulkErrorRow(task_id=task_id, message="Задача не найдена"))
             continue
         if not _can_touch(task, user, member_role):
             result.skipped += 1
             continue
-        current = await _current_label_ids(db, project_id, task_id)
+        current = current_by_task.get(task_id, set())
         wanted = (current | set(label_ids)) if mode == "add" else (current - set(label_ids))
         try:
-            await set_task_labels(db, project_id, task_id, sorted(wanted), user, member_role)
+            await set_task_labels(
+                db, project_id, task_id, sorted(wanted), user, member_role,
+                task=task, commit=False,
+            )
             result.updated += 1
         except (ValueError, PermissionError) as e:
             result.errors.append(DesignBulkErrorRow(task_id=task_id, message=str(e)))
+    await db.commit()
     return result
 
 
@@ -771,28 +904,34 @@ async def bulk_set_attribute_values(
     if len(task_ids) > MAX_BULK_TASKS:
         raise ValueError("Не больше 500 задач за раз")
     result = DesignBulkResultOut()
+    tasks = await _load_tasks(db, project_id, task_ids)
+    cur_res = await db.execute(
+        select(DesignTaskAttributeValue.task_id, DesignTaskAttributeValue.value_id).where(
+            DesignTaskAttributeValue.project_id == project_id,
+            DesignTaskAttributeValue.task_id.in_(list(tasks) or [-1]),
+        )
+    )
+    current_by_task: dict[int, set[int]] = {}
+    for tid, value_id in cur_res.all():
+        current_by_task.setdefault(tid, set()).add(value_id)
+
     for task_id in task_ids:
-        try:
-            task = await get_task_row(db, project_id, task_id)
-        except ValueError:
+        task = tasks.get(task_id)
+        if task is None:
             result.errors.append(DesignBulkErrorRow(task_id=task_id, message="Задача не найдена"))
             continue
         if not _can_touch(task, user, member_role):
             result.skipped += 1
             continue
-        cur_res = await db.execute(
-            select(DesignTaskAttributeValue.value_id).where(
-                DesignTaskAttributeValue.project_id == project_id,
-                DesignTaskAttributeValue.task_id == task_id,
-            )
-        )
-        current = {row[0] for row in cur_res.all()}
+        current = current_by_task.get(task_id, set())
         wanted = (current | set(value_ids)) if mode == "add" else (current - set(value_ids))
         try:
             await set_task_attribute_values(
-                db, project_id, task_id, sorted(wanted), user, member_role
+                db, project_id, task_id, sorted(wanted), user, member_role,
+                task=task, commit=False,
             )
             result.updated += 1
         except (ValueError, PermissionError) as e:
             result.errors.append(DesignBulkErrorRow(task_id=task_id, message=str(e)))
+    await db.commit()
     return result

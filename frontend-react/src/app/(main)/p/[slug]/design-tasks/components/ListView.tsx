@@ -14,7 +14,15 @@ import {
 } from '@/lib/design';
 import { DESIGN_CHIP_HINT, DESIGN_MARK_HINT } from '@/lib/designHints';
 import LabelChips from './LabelChips';
-import type { DesignTaskListItem, DesignTaskStatus, DesignWorkType } from '@/types/api';
+import BulkMarkupBar from './BulkMarkupBar';
+import Toast from '@/components/Toast';
+import type {
+    DesignAttributeOut,
+    DesignLabelOut,
+    DesignTaskListItem,
+    DesignTaskStatus,
+    DesignWorkType,
+} from '@/types/api';
 
 type Chip = 'all' | 'NEW' | 'ASSIGNED' | 'IN_PROGRESS' | 'REVIEW' | 'REVISION' | 'ON_HOLD' | 'overdue';
 
@@ -32,7 +40,7 @@ const CHIPS: { key: Chip; label: string }[] = [
 const WORK_TYPES = Object.keys(DESIGN_WORK_TYPE_LABEL) as DesignWorkType[];
 
 /** Список задач (второй вид): чипы со счётчиками → фильтры → таблица, сортировка по сроку. */
-export default function ListView({ slug }: { slug: string }) {
+export default function ListView({ slug, canBulk }: { slug: string; canBulk: boolean }) {
     const router = useRouter();
     const [tasks, setTasks] = useState<DesignTaskListItem[]>([]);
     const [loading, setLoading] = useState(true);
@@ -42,6 +50,12 @@ export default function ListView({ slug }: { slug: string }) {
     const [workType, setWorkType] = useState<DesignWorkType | ''>('');
     const [urgentOnly, setUrgentOnly] = useState(false);
     const [q, setQ] = useState('');
+    /** Отмеченные строки для массовой разметки (Р33). Храним id, а не индексы:
+     *  фильтр и сортировка меняют порядок строк под руками у пользователя. */
+    const [selected, setSelected] = useState<Set<number>>(new Set());
+    const [labels, setLabels] = useState<DesignLabelOut[]>([]);
+    const [attributes, setAttributes] = useState<DesignAttributeOut[]>([]);
+    const [toast, setToast] = useState<string | null>(null);
     const mountedRef = useRef(true);
 
     const load = useCallback(async () => {
@@ -64,6 +78,20 @@ export default function ListView({ slug }: { slug: string }) {
         void load();
         return () => { mountedRef.current = false; };
     }, [load]);
+
+    useEffect(() => {
+        // Справочники для панели массовой разметки — один раз и без usage_count.
+        if (!canBulk) return;
+        let alive = true;
+        Promise.all([api.listDesignLabels(false, false), api.listDesignAttributes(false, false)])
+            .then(([lbs, attrs]) => {
+                if (!alive || !mountedRef.current) return;
+                setLabels(lbs);
+                setAttributes(attrs);
+            })
+            .catch(() => { /* панель просто не предложит выбор */ });
+        return () => { alive = false; };
+    }, [canBulk]);
 
     const chipCount = useCallback(
         (c: Chip) => {
@@ -98,6 +126,37 @@ export default function ListView({ slug }: { slug: string }) {
             return a.number.localeCompare(b.number);
         });
     }, [tasks, chip, assignee, workType, urgentOnly, q]);
+
+    const toggleOne = useCallback((taskId: number) => {
+        setSelected((prev) => {
+            const next = new Set(prev);
+            if (next.has(taskId)) next.delete(taskId);
+            else next.add(taskId);
+            return next;
+        });
+    }, []);
+
+    //  «Выделить все» работает по ВИДИМЫМ строкам: скрытые фильтром задачи в
+    //  массовую операцию попадать не должны — пользователь их не видит.
+    const visibleIds = useMemo(() => visible.map((t) => t.id), [visible]);
+    const allVisibleChecked = visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
+    const toggleAllVisible = useCallback(() => {
+        setSelected((prev) => {
+            const next = new Set(prev);
+            const everyChecked = visibleIds.every((id) => next.has(id));
+            for (const id of visibleIds) {
+                if (everyChecked) next.delete(id);
+                else next.add(id);
+            }
+            return next;
+        });
+    }, [visibleIds]);
+
+    const onBulkDone = useCallback((summary: string) => {
+        setToast(summary);
+        setSelected(new Set());
+        void load();
+    }, [load]);
 
     if (loading) {
         return <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка…</div>;
@@ -147,6 +206,16 @@ export default function ListView({ slug }: { slug: string }) {
                 />
             </div>
 
+            {canBulk && selected.size > 0 && (
+                <BulkMarkupBar
+                    selectedIds={[...selected]}
+                    labels={labels}
+                    attributes={attributes}
+                    onDone={onBulkDone}
+                    onClear={() => setSelected(new Set())}
+                />
+            )}
+
             {visible.length === 0 && (
                 <div className="glass-card" style={{ textAlign: 'center', color: 'var(--color-text-muted)', padding: 48 }}>
                     {tasks.length === 0
@@ -160,6 +229,16 @@ export default function ListView({ slug }: { slug: string }) {
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
                         <thead>
                             <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-muted)', fontSize: 12 }}>
+                                {canBulk && (
+                                    <th style={{ textAlign: 'left', padding: '12px 16px', width: 36 }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={allVisibleChecked}
+                                            onChange={toggleAllVisible}
+                                            aria-label="Выделить все видимые задачи"
+                                        />
+                                    </th>
+                                )}
                                 <th style={{ textAlign: 'left', padding: '12px 16px' }}>Номер</th>
                                 <th style={{ textAlign: 'left', padding: '12px 16px' }}>Товар</th>
                                 <th style={{ textAlign: 'left', padding: '12px 16px' }}>Тип</th>
@@ -178,6 +257,18 @@ export default function ListView({ slug }: { slug: string }) {
                                     onClick={() => router.push(`/p/${slug}/design-tasks/${t.id}`)}
                                     style={{ borderBottom: '1px solid var(--color-border)', cursor: 'pointer' }}
                                 >
+                                    {canBulk && (
+                                        // stopPropagation обязателен: клик по строке открывает
+                                        // задачу, и без него отметка сразу уводила бы со списка.
+                                        <td style={{ padding: '12px 16px' }} onClick={(e) => e.stopPropagation()}>
+                                            <input
+                                                type="checkbox"
+                                                checked={selected.has(t.id)}
+                                                onChange={() => toggleOne(t.id)}
+                                                aria-label={`Отметить ${t.number}`}
+                                            />
+                                        </td>
+                                    )}
                                     <td style={{ padding: '12px 16px', whiteSpace: 'nowrap' }}>
                                         {t.unviewed && (
                                             <InfoTip text={DESIGN_MARK_HINT.unviewed}>
@@ -216,6 +307,8 @@ export default function ListView({ slug }: { slug: string }) {
                     </table>
                 </div>
             )}
+
+            {toast && <Toast message={toast} type="success" onClose={() => setToast(null)} />}
         </>
     );
 }

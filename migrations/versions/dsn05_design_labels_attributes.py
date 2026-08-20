@@ -46,7 +46,7 @@ def upgrade() -> None:
         sa.Column("is_archived", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("is_deleted", sa.Boolean(), nullable=False, server_default="false"),
         sa.Column("deleted_at", sa.DateTime(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=True),
         sa.ForeignKeyConstraint(["project_id"], ["projects.id"]),
         sa.PrimaryKeyConstraint("id"),
@@ -105,6 +105,11 @@ def upgrade() -> None:
     op.create_index(
         "ix_design_task_labels_project_label", "design_task_labels", ["project_id", "label_id"]
     )
+    #  FK ⇒ индекс: составные FK ведут по task_id и label_id, а индексы выше
+    #  начинаются с project_id и каскадных проверок не покрывают (та же правка,
+    #  что dsn03 делала для материалов и версий).
+    op.create_index("ix_design_task_labels_task_id", "design_task_labels", ["task_id"])
+    op.create_index("ix_design_task_labels_label_id", "design_task_labels", ["label_id"])
 
     op.create_table(
         "design_attributes",
@@ -116,7 +121,7 @@ def upgrade() -> None:
         sa.Column("is_archived", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("is_deleted", sa.Boolean(), nullable=False, server_default="false"),
         sa.Column("deleted_at", sa.DateTime(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=True),
         sa.ForeignKeyConstraint(["project_id"], ["projects.id"]),
         sa.PrimaryKeyConstraint("id"),
@@ -162,11 +167,15 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("is_deleted = false AND is_archived = false"),
     )
+    #  Без postgresql_where: партиальный индекс не применим к RI-проверке
+    #  каскада, а строк с is_deleted = true у справочника не бывает вовсе.
     op.create_index(
         "ix_design_attribute_values_project_attribute",
         "design_attribute_values",
         ["project_id", "attribute_id"],
-        postgresql_where=sa.text("is_deleted = false"),
+    )
+    op.create_index(
+        "ix_design_attribute_values_attribute_id", "design_attribute_values", ["attribute_id"]
     )
 
     op.create_table(
@@ -198,6 +207,10 @@ def upgrade() -> None:
         "ix_design_task_attr_values_project_value",
         "design_task_attribute_values",
         ["project_id", "value_id"],
+    )
+    #  PK (task_id, value_id) покрывает поиск по task_id, а по value_id — нет.
+    op.create_index(
+        "ix_design_task_attr_values_value_id", "design_task_attribute_values", ["value_id"]
     )
 
     seed_refs(op.get_bind())
@@ -258,7 +271,9 @@ def seed_refs(conn) -> None:  # noqa: ANN001  (alembic Connection, тип не �
 
 
 def downgrade() -> None:
-    # Строки сида уходят вместе с таблицами — чужих данных здесь нет по построению.
+    # ⚠️ Откат уничтожает ИСТОРИЮ МЕТОК (Р20) безвозвратно: счётчик «была с
+    # меткой N раз» живёт только в design_task_labels и ниоткуда не выводится.
+    # Перед откатом на живом проекте — pg_dump -t design_task_labels.
     op.drop_table("design_task_attribute_values")
     op.drop_table("design_attribute_values")
     op.drop_table("design_attributes")

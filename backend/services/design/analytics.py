@@ -17,7 +17,7 @@
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
-from sqlalchemy import Date, and_, case, cast, func, select
+from sqlalchemy import Date, and_, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.auth import User
@@ -48,7 +48,7 @@ from backend.schemas.design import (
     DesignStatsLabelRow,
     DesignStatsValueRow,
 )
-from backend.utils.time import utcnow
+from backend.utils.time import msk_today
 
 # Cap'ы выдачи (CONTRACT-V2 §4). Усечение всегда отдаётся флагом truncated.
 MAX_ASSIGNEE_ROWS = 200
@@ -70,12 +70,12 @@ def resolve_stats_window(date_from: date | None, date_to: date | None) -> tuple[
     Тексты ошибок те же, что у `GET /calendar`: один набор на модуль.
     """
     if date_from is None and date_to is None:
-        today = utcnow().date()
+        today = msk_today()
         return today - timedelta(days=DEFAULT_WINDOW_DAYS - 1), today
     if date_from is None:
         raise ValueError("Укажите обе границы диапазона")
     if date_to is None:
-        date_to = utcnow().date()  # поведение v1 сохраняется дословно
+        date_to = msk_today()  # поведение v1 сохраняется дословно
     if date_from > date_to:
         raise ValueError("Начало диапазона позже конца")
     if (date_to - date_from).days + 1 > MAX_WINDOW_DAYS:
@@ -83,11 +83,19 @@ def resolve_stats_window(date_from: date | None, date_to: date | None) -> tuple[
     return date_from, date_to
 
 
-def _window(column: Any, date_from: date, date_to: date) -> list[Any]:
-    return [
-        column >= datetime.combine(date_from, time.min),
-        column < datetime.combine(date_to + timedelta(days=1), time.min),
-    ]
+def stats_window(column: Any, date_from: date, date_to: date) -> list[Any]:
+    """Условие «столбец внутри окна». Публичная: ею пользуется и выгрузка.
+
+    Верхняя граница клампится: `date.max + 1 день` бросает OverflowError, а он
+    НЕ ValueError — маппер ошибок роутера его не поймает и пользователь получит
+    500 вместо 400 на вполне достижимом `date_to=9999-12-31`.
+    """
+    upper = (
+        datetime.max
+        if date_to >= date.max
+        else datetime.combine(date_to + timedelta(days=1), time.min)
+    )
+    return [column >= datetime.combine(date_from, time.min), column < upper]
 
 
 def _f(value: Any) -> float | None:
@@ -154,7 +162,7 @@ async def get_by_assignee(
             DesignTask.is_deleted == False,  # noqa: E712
             DesignTask.assignee_user_id.isnot(None),
             DesignTask.accepted_at.isnot(None),
-            *_window(DesignTask.accepted_at, win_from, win_to),
+            *stats_window(DesignTask.accepted_at, win_from, win_to),
         )
         .group_by(DesignTask.assignee_user_id)
     )
@@ -230,9 +238,24 @@ async def get_funnel(
             DesignTaskEvent.new_status.label("status"),
             (func.extract("epoch", nxt - DesignTaskEvent.changed_at) / 86400.0).label("days"),
         )
+        .select_from(DesignTaskEvent)
+        # JOIN с задачей: журнал append-only и хранит события мягко удалённых
+        # задач тоже — без фильтра они тянули бы среднее время в статусе.
+        .join(DesignTask, DesignTask.id == DesignTaskEvent.task_id)
         .where(
             DesignTaskEvent.project_id == project_id,
-            *_window(DesignTaskEvent.changed_at, win_from, win_to),
+            DesignTask.project_id == project_id,
+            DesignTask.is_deleted == False,  # noqa: E712
+            # В журнал пишутся и события-«не-переходы» (old == new): смена
+            # исполнителя, смена номера, правка меток и реквизитов. Без этого
+            # фильтра каждая такая запись резала бы интервал пребывания в
+            # статусе на куски и систематически занижала среднее — тем сильнее,
+            # чем активнее команда пользуется метками.
+            or_(
+                DesignTaskEvent.old_status.is_(None),  # создание задачи — вход в NEW
+                DesignTaskEvent.old_status != DesignTaskEvent.new_status,
+            ),
+            *stats_window(DesignTaskEvent.changed_at, win_from, win_to),
         )
         .subquery()
     )
@@ -270,7 +293,7 @@ async def get_by_attribute(
     task_window = [
         DesignTask.project_id == project_id,
         DesignTask.is_deleted == False,  # noqa: E712
-        *_window(DesignTask.created_at, win_from, win_to),
+        *stats_window(DesignTask.created_at, win_from, win_to),
     ]
 
     total_res = await db.execute(select(func.count()).select_from(DesignTask).where(*task_window))
@@ -320,15 +343,40 @@ async def get_by_attribute(
             .limit(MAX_ATTRIBUTE_FIELDS * MAX_VALUES_PER_FIELD)
         )
         by_attr: dict[int, list[DesignStatsValueRow]] = {}
-        filled: dict[int, int] = {}
         for attribute_id, value_id, value, count in dist_res.all():
             by_attr.setdefault(attribute_id, []).append(
                 DesignStatsValueRow(value_id=value_id, value=value, count=count)
             )
-            filled[attribute_id] = filled.get(attribute_id, 0) + count
+
+        #  Сколько РАЗЛИЧНЫХ задач имеют хоть одно значение поля. Сумма счётчиков
+        #  по значениям для этого не годится: у поля с is_multi задача с двумя
+        #  значениями посчиталась бы дважды, «Без значения» ушло бы в минус и
+        #  строка молча исчезла бы — разрез перестал бы сходиться с числом задач.
+        filled_res = await db.execute(
+            select(
+                DesignAttributeValue.attribute_id,
+                func.count(func.distinct(DesignTask.id)),
+            )
+            .select_from(DesignTask)
+            .join(DesignTaskAttributeValue, DesignTaskAttributeValue.task_id == DesignTask.id)
+            .join(
+                DesignAttributeValue,
+                DesignAttributeValue.id == DesignTaskAttributeValue.value_id,
+            )
+            .where(
+                *task_window,
+                DesignTaskAttributeValue.project_id == project_id,
+                DesignAttributeValue.attribute_id.in_(attr_ids),
+            )
+            .group_by(DesignAttributeValue.attribute_id)
+        )
+        filled = {row[0]: row[1] for row in filled_res.all()}
 
         for attribute_id, name in attrs:
-            rows = by_attr.get(attribute_id, [])[:MAX_VALUES_PER_FIELD]
+            all_rows = by_attr.get(attribute_id, [])
+            if len(all_rows) > MAX_VALUES_PER_FIELD:
+                truncated = True
+            rows = all_rows[:MAX_VALUES_PER_FIELD]
             #  Задачи без выбранного значения — отдельной строкой (Р33): иначе
             #  сумма по разрезу молча не сходилась бы с числом задач периода.
             empty = total_tasks - filled.get(attribute_id, 0)
@@ -376,6 +424,28 @@ async def get_by_attribute(
 # ─── Раскладка дашборда (Р23) ────────────────────────────────────────────────
 
 
+def validate_widget_set(widgets: list[DesignDashboardWidget]) -> None:
+    """Набор виджетов обязан быть ПОЛНЫМ и точным (CONTRACT-V2 §4).
+
+    Проверка живёт в сервисе, а не в схеме, ради кода ответа: из схемы это было
+    бы 422 в конверте FastAPI, а контракт обещает 400 в конверте модуля с
+    дословным текстом.
+
+    Полный набор требуется намеренно: иначе появление нового виджета в следующей
+    версии молча оставляло бы его скрытым у всех, кто хоть раз сохранял раскладку.
+    """
+    seen: set[str] = set()
+    for w in widgets:
+        if w.id not in DASHBOARD_WIDGET_IDS:
+            raise ValueError(f"Неизвестный виджет: {w.id}")
+        if w.id in seen:
+            raise ValueError(f"Виджет повторяется: {w.id}")
+        seen.add(w.id)
+    for known in DASHBOARD_WIDGET_IDS:
+        if known not in seen:
+            raise ValueError(f"Не хватает виджета: {known}")
+
+
 def _default_layout() -> list[DesignDashboardWidget]:
     return [
         DesignDashboardWidget(id=wid, visible=True, order=i)
@@ -405,6 +475,7 @@ async def save_layout(
     db: AsyncSession, project_id: int, user_id: int, payload: DesignDashboardLayoutIn
 ) -> DesignDashboardLayoutOut:
     """Сохранение раскладки. `user_id` — ИЗ СЕССИИ, никогда из тела запроса."""
+    validate_widget_set(payload.widgets)
     #  order нормализуется к 0..N-1: наружу важен только относительный порядок.
     ordered = sorted(payload.widgets, key=lambda w: w.order)
     widgets = [
