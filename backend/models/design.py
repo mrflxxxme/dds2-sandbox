@@ -434,3 +434,218 @@ class DesignTaskEvent(Base):
         Index("ix_design_task_events_project_task", "project_id", "task_id"),
         Index("ix_design_task_events_task_id", "task_id"),
     )
+
+
+# ─── Справочники волны C v2: метки и реквизиты ───────────────────────────────
+#
+# Все таблицы project_id-scoped, изоляция детей — составными FK, как в v1.
+#
+# Про SoftDeleteMixin у справочников: он есть ради инварианта §6.2 и
+# единообразия выборок, но soft_delete() по ним НЕ вызывается никогда.
+# Пользовательское «Удалить» — это АРХИВИРОВАНИЕ (Р30): запись пропадает из
+# выбора для новых задач, но остаётся видимой на старых и в аналитике.
+# is_deleted зарезервирован на будущее жёсткое удаление и всегда false.
+# Поэтому все partial-unique условны по ОБОИМ флагам: индекс только по
+# is_deleted держал бы имя архивной записи занятым навсегда, и попытка завести
+# запись с тем же именем падала бы IntegrityError (500) вместо контрактного 400.
+# Условие индекса и гвард уникальности в сервисе обязаны совпадать.
+
+
+class DesignLabelColor(str, enum.Enum):
+    """Десять цветов меток (Р26). Произвольный hex запрещён: палитра — часть
+    дизайн-системы, токены --color-label-* живут в globals.css."""
+
+    RED = "red"
+    ORANGE = "orange"
+    AMBER = "amber"
+    GREEN = "green"
+    TEAL = "teal"
+    BLUE = "blue"
+    VIOLET = "violet"
+    PINK = "pink"
+    BROWN = "brown"
+    SLATE = "slate"
+
+
+class DesignLabel(Base, TimestampMixin, SoftDeleteMixin):
+    """Цветная метка проекта. Ведёт ведущий дизайнер."""
+
+    __tablename__ = "design_labels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(60), nullable=False)
+    # Значение DesignLabelColor; String, не pg-enum — правило модуля (Alembic-churn).
+    color: Mapped[str] = mapped_column(String(20), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    is_archived: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_design_labels_id_project"),
+        Index(
+            "uq_design_labels_project_name",
+            "project_id",
+            "name",
+            unique=True,
+            postgresql_where=text("is_deleted = false AND is_archived = false"),
+        ),
+        Index(
+            "ix_design_labels_project_sort",
+            "project_id",
+            "sort_order",
+            postgresql_where=text("is_deleted = false"),
+        ),
+    )
+
+
+class DesignTaskLabel(Base):
+    """Связь «задача ↔ метка» С ИСТОРИЕЙ.
+
+    Снятие метки не удаляет строку, а проставляет removed_at — это и есть
+    счётчик Р20 «была с меткой N раз». Считать историю по DesignTaskEvent.comment
+    нельзя: там свободный текст, и счёт сломался бы при переименовании метки.
+    """
+
+    __tablename__ = "design_task_labels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    task_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    label_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    attached_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    attached_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    removed_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_id", "project_id"],
+            ["design_tasks.id", "design_tasks.project_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["label_id", "project_id"],
+            ["design_labels.id", "design_labels.project_id"],
+            ondelete="CASCADE",
+        ),
+        # Метка не задваивается среди ТЕКУЩИХ, но история хранит все прошлые.
+        Index(
+            "uq_design_task_labels_active",
+            "task_id",
+            "label_id",
+            unique=True,
+            postgresql_where=text("removed_at IS NULL"),
+        ),
+        Index(
+            "ix_design_task_labels_project_task",
+            "project_id",
+            "task_id",
+            postgresql_where=text("removed_at IS NULL"),
+        ),
+        Index("ix_design_task_labels_project_label", "project_id", "label_id"),
+    )
+
+
+class DesignAttribute(Base, TimestampMixin, SoftDeleteMixin):
+    """Поле-список («Бренд», «Кабинет ВБ»). Универсальный справочник, не хардкод."""
+
+    __tablename__ = "design_attributes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(60), nullable=False)
+    # true — на задаче можно выбрать несколько значений этого поля.
+    is_multi: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    is_archived: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_design_attributes_id_project"),
+        Index(
+            "uq_design_attributes_project_name",
+            "project_id",
+            "name",
+            unique=True,
+            postgresql_where=text("is_deleted = false AND is_archived = false"),
+        ),
+        Index(
+            "ix_design_attributes_project_sort",
+            "project_id",
+            "sort_order",
+            postgresql_where=text("is_deleted = false"),
+        ),
+    )
+
+
+class DesignAttributeValue(Base, SoftDeleteMixin):
+    """Значение поля-списка («Меллори» у поля «Бренд»)."""
+
+    __tablename__ = "design_attribute_values"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    attribute_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    value: Mapped[str] = mapped_column(String(120), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    is_archived: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("id", "project_id", name="uq_design_attribute_values_id_project"),
+        ForeignKeyConstraint(
+            ["attribute_id", "project_id"],
+            ["design_attributes.id", "design_attributes.project_id"],
+            ondelete="CASCADE",
+        ),
+        Index(
+            "uq_design_attribute_values_unique",
+            "project_id",
+            "attribute_id",
+            "value",
+            unique=True,
+            postgresql_where=text("is_deleted = false AND is_archived = false"),
+        ),
+        Index(
+            "ix_design_attribute_values_project_attribute",
+            "project_id",
+            "attribute_id",
+            postgresql_where=text("is_deleted = false"),
+        ),
+    )
+
+
+class DesignTaskAttributeValue(Base):
+    """Связь «задача ↔ значение реквизита». Без истории: Р20 — про метки.
+
+    Снятие значения — жёсткий DELETE строки (в отличие от меток).
+    """
+
+    __tablename__ = "design_task_attribute_values"
+
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    task_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    value_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    created_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_id", "project_id"],
+            ["design_tasks.id", "design_tasks.project_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["value_id", "project_id"],
+            ["design_attribute_values.id", "design_attribute_values.project_id"],
+            ondelete="CASCADE",
+        ),
+        Index("ix_design_task_attr_values_project_task", "project_id", "task_id"),
+        Index("ix_design_task_attr_values_project_value", "project_id", "value_id"),
+    )

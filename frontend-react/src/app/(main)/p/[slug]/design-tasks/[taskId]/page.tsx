@@ -20,6 +20,7 @@ import MaterialsCard from '../components/MaterialsCard';
 import SubmissionsCard from '../components/SubmissionsCard';
 import CommentsCard from '../components/CommentsCard';
 import EventsCard from '../components/EventsCard';
+import TaskMarkupCard from '../components/TaskMarkupCard';
 import ReasonModal from '../components/ReasonModal';
 import SubmitWorkModal from '../components/SubmitWorkModal';
 import AssignModal from '../components/AssignModal';
@@ -263,6 +264,12 @@ export default function DesignTaskDetailPage() {
                     <MaterialsCard
                         task={task}
                         onChanged={() => void load()}
+                        onError={(m) => setToast({ type: 'error', message: m })}
+                    />
+
+                    <TaskMarkupCard
+                        task={task}
+                        onChanged={setTask}
                         onError={(m) => setToast({ type: 'error', message: m })}
                     />
 

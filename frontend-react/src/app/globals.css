@@ -30,6 +30,19 @@ input[type="number"] {
     --color-success: #34c759;
     --color-warning: #ff9f0a;
     --color-danger: #ff3b30;
+    /* Палитра меток дизайна (Р26). Ровно десять фиксированных цветов —
+       произвольный hex запрещён, иначе команда наберёт неразличимые оттенки.
+       Каждый даёт ≥3:1 к фону карточки (замер в STATUS волны C). */
+    --color-label-red: #d92d20;
+    --color-label-orange: #e04f16;
+    --color-label-amber: #b54708;
+    --color-label-green: #067647;
+    --color-label-teal: #107569;
+    --color-label-blue: #175cd3;
+    --color-label-violet: #6941c6;
+    --color-label-pink: #c11574;
+    --color-label-brown: #8a5a2b;
+    --color-label-slate: #475467;
     --font-sans: var(--font-roboto), 'Roboto', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
 
     /* Apple style glass shadows */
@@ -3213,6 +3226,45 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
     cursor: help; user-select: none; transition: background .15s, color .15s;
 }
 .dds-tip-icon:hover, .dds-tip-icon:focus-visible { background: var(--color-accent); color: #fff; }
+
+/* ─── Метки дизайна (волна C) ────────────────────────────────────────────────
+   Классы обязаны ссылаться на токены ИМЕННО ЗДЕСЬ: Tailwind v4 эмитит в :root
+   только «использованные» переменные, а inline-стиль в .tsx использованием не
+   считается — токен просто не доехал бы до браузера, и цвет молча пропал бы. */
+.dds-label-dot {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    flex-shrink: 0; vertical-align: middle;
+}
+.dds-label-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 1px 8px 1px 6px; border-radius: 24px;
+    font-size: 11px; font-weight: 500; line-height: 1.6;
+    border: 1px solid currentColor;
+    background: var(--color-bg-card);
+}
+.dds-label--red { color: var(--color-label-red); }
+.dds-label--orange { color: var(--color-label-orange); }
+.dds-label--amber { color: var(--color-label-amber); }
+.dds-label--green { color: var(--color-label-green); }
+.dds-label--teal { color: var(--color-label-teal); }
+.dds-label--blue { color: var(--color-label-blue); }
+.dds-label--violet { color: var(--color-label-violet); }
+.dds-label--pink { color: var(--color-label-pink); }
+.dds-label--brown { color: var(--color-label-brown); }
+.dds-label--slate { color: var(--color-label-slate); }
+/* Кружок наследует цвет от модификатора на родителе. */
+.dds-label--red .dds-label-dot,
+.dds-label--orange .dds-label-dot,
+.dds-label--amber .dds-label-dot,
+.dds-label--green .dds-label-dot,
+.dds-label--teal .dds-label-dot,
+.dds-label--blue .dds-label-dot,
+.dds-label--violet .dds-label-dot,
+.dds-label--pink .dds-label-dot,
+.dds-label--brown .dds-label-dot,
+.dds-label--slate .dds-label-dot { background: currentColor; }
+/* Ряд кружков на карточке: не растягивает её по высоте. */
+.dds-label-dots { display: inline-flex; align-items: center; gap: 3px; line-height: 1; }
 
 
 /* ─── Вайбкодинг ────────────────────────────────────────────────────────────── */

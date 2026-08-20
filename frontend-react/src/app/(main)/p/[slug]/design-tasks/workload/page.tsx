@@ -9,6 +9,7 @@ import PageHeader from '@/components/PageHeader';
 import { DESIGN_STATUS_BADGE, DESIGN_STATUS_LABEL } from '@/lib/design';
 import type { DesignTaskListItem, DesignTaskStatus, DesignWorkloadRow } from '@/types/api';
 import DesignTabs from '../components/DesignTabs';
+import { useDesignBoardPermissions } from '../components/useDesignBoardPermissions';
 
 /**
  * Зеркало DESIGN_ACTIVE_STATUSES бэка (workload.py): ON_HOLD и терминалы — вне
@@ -34,6 +35,7 @@ const UNASSIGNED_KEY = -1;
 /** Экран «Загрузка команды»: GET /workload + строка «Не назначено» + разворот в задачи. */
 export default function DesignWorkloadPage() {
     const params = useParams<{ slug: string }>();
+    const boardPerms = useDesignBoardPermissions();
     const router = useRouter();
 
     const [rows, setRows] = useState<DesignWorkloadRow[]>([]);
@@ -151,7 +153,7 @@ export default function DesignWorkloadPage() {
             <PageHeader
                 title="👥 Дизайн карточек — загрузка"
                 subtitle="Активные задачи по исполнителям: просрочка, правки, ближайший срок"
-                actions={<DesignTabs slug={params.slug} active="workload" />}
+                actions={<DesignTabs slug={params.slug} active="workload" canManageRefs={boardPerms.can_manage_refs} />}
             />
 
             {loading && (

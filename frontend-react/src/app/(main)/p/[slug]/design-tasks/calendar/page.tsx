@@ -24,6 +24,7 @@ import {
 import { DESIGN_UI_HINT } from '@/lib/designHints';
 import type { DesignCalendarOut, DesignTaskListItem } from '@/types/api';
 import DesignTabs from '../components/DesignTabs';
+import { useDesignBoardPermissions } from '../components/useDesignBoardPermissions';
 import MonthGrid from '../components/MonthGrid';
 import DayPanel from '../components/DayPanel';
 
@@ -31,6 +32,7 @@ import DayPanel from '../components/DayPanel';
  *  раскраска по дизайнеру/статусу. Дефолт — текущий и следующий месяц. */
 export default function DesignCalendarPage() {
     const params = useParams<{ slug: string }>();
+    const boardPerms = useDesignBoardPermissions();
     const router = useRouter();
 
     const [range, setRange] = useState<CalendarRange>(defaultCalendarRange);
@@ -144,7 +146,7 @@ export default function DesignCalendarPage() {
             <PageHeader
                 title="📅 Дизайн карточек — календарь"
                 subtitle="Задачи по сроку сдачи (due date) за выбранный период"
-                actions={<DesignTabs slug={params.slug} active="calendar" />}
+                actions={<DesignTabs slug={params.slug} active="calendar" canManageRefs={boardPerms.can_manage_refs} />}
             />
 
             <div className="glass-card" style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: 12 }}>

@@ -9,11 +9,43 @@
 import type {
     DesignBoardResponse,
     DesignComplexity,
+    DesignLabelColor,
     DesignTaskListItem,
     DesignTaskStatus,
     DesignVerdict,
     DesignWorkType,
 } from '@/types/api';
+
+// ─── Палитра меток (Р26) ─────────────────────────────────────────────────────
+
+/**
+ * Десять цветов метки. Фронт НИГДЕ не пишет hex: цвет приезжает с бэка ключом,
+ * а рисуется классом `.dds-label--{key}` из globals.css. Так палитра остаётся
+ * в одном месте и переживает смену темы.
+ */
+export const LABEL_COLORS: DesignLabelColor[] = [
+    'red', 'orange', 'amber', 'green', 'teal', 'blue', 'violet', 'pink', 'brown', 'slate',
+];
+
+export const LABEL_COLOR_LABEL: Record<DesignLabelColor, string> = {
+    red: 'Красный',
+    orange: 'Оранжевый',
+    amber: 'Янтарный',
+    green: 'Зелёный',
+    teal: 'Бирюзовый',
+    blue: 'Синий',
+    violet: 'Фиолетовый',
+    pink: 'Розовый',
+    brown: 'Коричневый',
+    slate: 'Серый',
+};
+
+/** CSS-класс модификатора цвета метки. Неизвестный ключ с бэка → нейтральный серый. */
+export function labelColorClass(color: string): string {
+    return (LABEL_COLORS as string[]).includes(color)
+        ? `dds-label--${color}`
+        : 'dds-label--slate';
+}
 
 // ─── Словари ─────────────────────────────────────────────────────────────────
 

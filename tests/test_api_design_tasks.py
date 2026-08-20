@@ -331,6 +331,17 @@ async def test_openapi_contract(client):
         f"{BASE}/{{task_id}}/comments/file": {"post"},
         f"{BASE}/{{task_id}}/comments/{{comment_id}}/file": {"get"},
         f"{BASE}/{{task_id}}/ab-test": {"post"},
+        # Волна C: справочники, разметка задачи, массовое проставление.
+        f"{BASE}/refs/labels": {"get", "post"},
+        f"{BASE}/refs/labels/{{label_id}}": {"put", "delete"},
+        f"{BASE}/refs/attributes": {"get", "post"},
+        f"{BASE}/refs/attributes/{{attribute_id}}": {"put", "delete"},
+        f"{BASE}/refs/attributes/{{attribute_id}}/values": {"post"},
+        f"{BASE}/refs/values/{{value_id}}": {"put", "delete"},
+        f"{BASE}/{{task_id}}/labels": {"put"},
+        f"{BASE}/{{task_id}}/attributes": {"put"},
+        f"{BASE}/bulk/labels": {"post"},
+        f"{BASE}/bulk/attributes": {"post"},
     }
     for path, methods in expected.items():
         assert path in paths, f"нет пути в openapi: {path}"
@@ -397,12 +408,16 @@ def test_board_can_reorder_matches_task_permissions():
 
 
 async def test_board_returns_permissions_by_role(client, env):
-    """GET /board отдаёт права уровня доски: lead — обе, editor — только create,
-    viewer — ничего (фронт гейтит кнопки этим, не ролью; §6.9)."""
+    """GET /board отдаёт права уровня доски: lead — все, editor — только create,
+    viewer — ничего (фронт гейтит кнопки этим, не ролью; §6.9).
+
+    can_manage_refs добавлен волной C: вкладка «Настройки» рисуется до открытия
+    любой задачи, поэтому флаг нужен именно здесь, а не только в permissions задачи.
+    """
     for who, expected in (
-        (env.lead, {"can_create": True, "can_reorder": True}),
-        (env.author, {"can_create": True, "can_reorder": False}),
-        (env.viewer, {"can_create": False, "can_reorder": False}),
+        (env.lead, {"can_create": True, "can_reorder": True, "can_manage_refs": True}),
+        (env.author, {"can_create": True, "can_reorder": False, "can_manage_refs": False}),
+        (env.viewer, {"can_create": False, "can_reorder": False, "can_manage_refs": False}),
     ):
         resp = await client.get(f"{BASE}/board", headers=who.h)
         assert resp.status_code == 200, resp.text

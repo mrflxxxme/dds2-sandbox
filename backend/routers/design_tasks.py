@@ -34,24 +34,35 @@ from backend.schemas.design import (
     DesignAbTestIn,
     DesignAbTestOut,
     DesignAssign,
+    DesignAttributeIn,
+    DesignAttributeOut,
+    DesignAttributeValueIn,
+    DesignAttributeValueOut,
     DesignBoardResponse,
+    DesignBulkAttributesIn,
+    DesignBulkLabelsIn,
+    DesignBulkResultOut,
     DesignCalendarOut,
     DesignCommentIn,
     DesignCommentOut,
+    DesignLabelIn,
+    DesignLabelOut,
     DesignMaterialIn,
     DesignMaterialOut,
     DesignMoveIn,
     DesignProductSuggestion,
     DesignStatsOut,
     DesignStatusChange,
+    DesignTaskAttributesIn,
     DesignTaskCreate,
     DesignTaskDetail,
+    DesignTaskLabelsIn,
     DesignTaskListItem,
     DesignTaskUpdate,
     DesignVerdictIn,
     DesignWorkloadRow,
 )
-from backend.services.design import ab_bridge, board, crud, queries, state, stats, workload
+from backend.services.design import ab_bridge, board, crud, queries, refs, state, stats, workload
 from backend.services.design import files as design_files
 from backend.utils.rate_limit import rate_limit_write
 
@@ -64,7 +75,16 @@ require_editor = require_role("editor", page="design-tasks")
 
 # Тексты ValueError сервиса, означающие «ресурса нет в скоупе проекта» → 404;
 # остальные ValueError — невалидная операция/гвард → 400 (соглашение пакета Ф1).
-_NOT_FOUND_TEXTS = frozenset({"Задача не найдена", "Версия сдачи не найдена"})
+_NOT_FOUND_TEXTS = frozenset(
+    {
+        "Задача не найдена",
+        "Версия сдачи не найдена",
+        # Волна C: три текста справочников — иначе стали бы 400 вместо 404.
+        "Метка не найдена",
+        "Поле не найдено",
+        "Значение не найдено",
+    }
+)
 
 _T = TypeVar("_T")
 
@@ -242,6 +262,217 @@ async def product_suggest(
     return await queries.product_suggest(db, project.id, q)
 
 
+# ─── Справочники (волна C) ───────────────────────────────────────────────────
+#
+# ВСЕ статические пути объявлены ДО /{task_id}: FastAPI матчит по порядку, иначе
+# «refs» уедет в task_id и даст 422. Закреплено test_refs_not_captured_by_task_id.
+# Чтение — любому с page-ключом; запись — editor-гейт + тонкая проверка «только
+# ведущий» в сервисе (там же её текст).
+
+
+@router.get("/refs/labels", response_model=list[DesignLabelOut])
+async def list_labels(
+    include_archived: bool = Query(False),
+    user: User = Depends(require_viewer),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Метки проекта с usage_count (числом задач, где метка стоит сейчас)."""
+    return await refs.list_labels(db, project.id, include_archived=include_archived)
+
+
+@router.post(
+    "/refs/labels",
+    response_model=DesignLabelOut,
+    status_code=201,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def create_label(
+    payload: DesignLabelIn,
+    user: User = Depends(require_editor),
+    project: Project = Depends(get_current_project),
+    member_role: str = Depends(get_member_role),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _svc(refs.create_label(db, project.id, payload, member_role))
+
+
+@router.put(
+    "/refs/labels/{label_id}",
+    response_model=DesignLabelOut,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def update_label(
+    label_id: int,
+    payload: DesignLabelIn,
+    user: User = Depends(require_editor),
+    project: Project = Depends(get_current_project),
+    member_role: str = Depends(get_member_role),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _svc(refs.update_label(db, project.id, label_id, payload, member_role))
+
+
+@router.delete(
+    "/refs/labels/{label_id}", status_code=204, dependencies=[Depends(rate_limit_write)]
+)
+async def delete_label(
+    label_id: int,
+    user: User = Depends(require_editor),
+    project: Project = Depends(get_current_project),
+    member_role: str = Depends(get_member_role),
+    db: AsyncSession = Depends(get_db),
+):
+    """Архивирование, не удаление (Р30): метка остаётся на старых задачах."""
+    await _svc(refs.archive_label(db, project.id, label_id, member_role))
+    return Response(status_code=204)
+
+
+@router.get("/refs/attributes", response_model=list[DesignAttributeOut])
+async def list_attributes(
+    include_archived: bool = Query(False),
+    user: User = Depends(require_viewer),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Поля-списки со вложенными значениями; include_archived действует и на значения."""
+    return await refs.list_attributes(db, project.id, include_archived=include_archived)
+
+
+@router.post(
+    "/refs/attributes",
+    response_model=DesignAttributeOut,
+    status_code=201,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def create_attribute(
+    payload: DesignAttributeIn,
+    user: User = Depends(require_editor),
+    project: Project = Depends(get_current_project),
+    member_role: str = Depends(get_member_role),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _svc(refs.create_attribute(db, project.id, payload, member_role))
+
+
+@router.put(
+    "/refs/attributes/{attribute_id}",
+    response_model=DesignAttributeOut,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def update_attribute(
+    attribute_id: int,
+    payload: DesignAttributeIn,
+    user: User = Depends(require_editor),
+    project: Project = Depends(get_current_project),
+    member_role: str = Depends(get_member_role),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _svc(refs.update_attribute(db, project.id, attribute_id, payload, member_role))
+
+
+@router.delete(
+    "/refs/attributes/{attribute_id}", status_code=204, dependencies=[Depends(rate_limit_write)]
+)
+async def delete_attribute(
+    attribute_id: int,
+    user: User = Depends(require_editor),
+    project: Project = Depends(get_current_project),
+    member_role: str = Depends(get_member_role),
+    db: AsyncSession = Depends(get_db),
+):
+    """Архивирует поле И каскадом все его значения (Р30)."""
+    await _svc(refs.archive_attribute(db, project.id, attribute_id, member_role))
+    return Response(status_code=204)
+
+
+@router.post(
+    "/refs/attributes/{attribute_id}/values",
+    response_model=DesignAttributeValueOut,
+    status_code=201,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def create_attribute_value(
+    attribute_id: int,
+    payload: DesignAttributeValueIn,
+    user: User = Depends(require_editor),
+    project: Project = Depends(get_current_project),
+    member_role: str = Depends(get_member_role),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _svc(refs.create_value(db, project.id, attribute_id, payload, member_role))
+
+
+@router.put(
+    "/refs/values/{value_id}",
+    response_model=DesignAttributeValueOut,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def update_attribute_value(
+    value_id: int,
+    payload: DesignAttributeValueIn,
+    user: User = Depends(require_editor),
+    project: Project = Depends(get_current_project),
+    member_role: str = Depends(get_member_role),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _svc(refs.update_value(db, project.id, value_id, payload, member_role))
+
+
+@router.delete(
+    "/refs/values/{value_id}", status_code=204, dependencies=[Depends(rate_limit_write)]
+)
+async def delete_attribute_value(
+    value_id: int,
+    user: User = Depends(require_editor),
+    project: Project = Depends(get_current_project),
+    member_role: str = Depends(get_member_role),
+    db: AsyncSession = Depends(get_db),
+):
+    await _svc(refs.archive_value(db, project.id, value_id, member_role))
+    return Response(status_code=204)
+
+
+# ─── Массовое проставление разметки (Р33) ────────────────────────────────────
+
+
+@router.post(
+    "/bulk/labels", response_model=DesignBulkResultOut, dependencies=[Depends(rate_limit_write)]
+)
+async def bulk_labels(
+    payload: DesignBulkLabelsIn,
+    user: User = Depends(require_editor),
+    project: Project = Depends(get_current_project),
+    member_role: str = Depends(get_member_role),
+    db: AsyncSession = Depends(get_db),
+):
+    """200 даже с непустыми skipped/errors: частичный успех — не ошибка вызова."""
+    return await _svc(
+        refs.bulk_set_labels(
+            db, project.id, payload.task_ids, payload.label_ids, payload.mode, user, member_role
+        )
+    )
+
+
+@router.post(
+    "/bulk/attributes",
+    response_model=DesignBulkResultOut,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def bulk_attributes(
+    payload: DesignBulkAttributesIn,
+    user: User = Depends(require_editor),
+    project: Project = Depends(get_current_project),
+    member_role: str = Depends(get_member_role),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _svc(
+        refs.bulk_set_attribute_values(
+            db, project.id, payload.task_ids, payload.value_ids, payload.mode, user, member_role
+        )
+    )
+
+
 # ─── Список / создание ───────────────────────────────────────────────────────
 
 
@@ -412,6 +643,48 @@ async def mark_viewed(
 ):
     """Отметка просмотра лидом (Р5): идемпотентно снимает красную метку."""
     await _svc(crud.mark_viewed(db, project.id, task_id, user, member_role))
+    return await _detail(db, project.id, task_id, user, member_role)
+
+
+@router.put(
+    "/{task_id}/labels", response_model=DesignTaskDetail, dependencies=[Depends(rate_limit_write)]
+)
+async def set_task_labels(
+    task_id: int,
+    payload: DesignTaskLabelsIn,
+    user: User = Depends(require_editor),
+    member_role: str = Depends(get_member_role),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """REPLACE набора меток: что передали — то и стало, пустой массив снимает всё.
+
+    В терминальных статусах метки менять МОЖНО (Р31): задача закрыта, но её
+    разметка нужна аналитике.
+    """
+    await _svc(refs.set_task_labels(db, project.id, task_id, payload.label_ids, user, member_role))
+    return await _detail(db, project.id, task_id, user, member_role)
+
+
+@router.put(
+    "/{task_id}/attributes",
+    response_model=DesignTaskDetail,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def set_task_attributes(
+    task_id: int,
+    payload: DesignTaskAttributesIn,
+    user: User = Depends(require_editor),
+    member_role: str = Depends(get_member_role),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """REPLACE набора значений реквизитов; в терминальных статусах запрещено (Р31)."""
+    await _svc(
+        refs.set_task_attribute_values(
+            db, project.id, task_id, payload.value_ids, user, member_role
+        )
+    )
     return await _detail(db, project.id, task_id, user, member_role)
 
 

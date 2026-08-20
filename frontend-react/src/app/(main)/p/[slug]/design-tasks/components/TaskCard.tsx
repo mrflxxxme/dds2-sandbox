@@ -2,6 +2,7 @@
 
 import WbThumb from '@/components/WbThumb';
 import Tooltip from '@/components/Tooltip';
+import LabelChips from './LabelChips';
 import { formatDate } from '@/lib/utils';
 import { DESIGN_MARK_HINT } from '@/lib/designHints';
 import type { DesignTaskListItem } from '@/types/api';
@@ -56,6 +57,7 @@ export default function TaskCard({ t, onClick, draggable, onDragStart, onDragOve
                     </Tooltip>
                 )}
                 {t.is_outsourced && <span className="badge badge-secondary" style={{ fontSize: 10 }}>Аутсорс</span>}
+                <LabelChips labels={t.labels} />
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <WbThumb nmId={t.nm_id} size={28} height={36} />

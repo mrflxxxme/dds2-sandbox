@@ -6,7 +6,7 @@ import SearchSelect from '@/components/SearchSelect';
 import InfoTip from '@/components/InfoTip';
 import { DESIGN_WORK_TYPE_LABEL } from '@/lib/design';
 import { DESIGN_UI_HINT } from '@/lib/designHints';
-import type { DesignTaskListItem, DesignWorkType } from '@/types/api';
+import type { DesignAttributeOut, DesignLabelOut, DesignTaskListItem, DesignWorkType } from '@/types/api';
 
 /** Что показывать вместо доски. 'board' — шесть колонок, остальное — плоский список. */
 export type BoardScope = 'board' | 'ON_HOLD' | 'CANCELLED';
@@ -17,6 +17,10 @@ export interface BoardFilterState {
     workType: DesignWorkType | '';
     urgentOnly: boolean;
     q: string;
+    /** Волна C: id метки; 0 = без фильтра. */
+    labelId: number;
+    /** Волна C: attributeId → выбранный valueId. Фильтруется по И между полями. */
+    attributeValues: Record<number, number>;
 }
 
 /** Значение фильтра «исполнитель» для задач без исполнителя. */
@@ -28,6 +32,8 @@ export const EMPTY_BOARD_FILTERS: BoardFilterState = {
     workType: '',
     urgentOnly: false,
     q: '',
+    labelId: 0,
+    attributeValues: {},
 };
 
 const WORK_TYPES = Object.keys(DESIGN_WORK_TYPE_LABEL) as DesignWorkType[];
@@ -48,6 +54,10 @@ export function applyBoardFilters(tasks: DesignTaskListItem[], f: BoardFilterSta
         }
         if (f.workType && t.work_type !== f.workType) return false;
         if (f.urgentOnly && !t.is_urgent) return false;
+        if (f.labelId && !t.labels.some((l) => l.id === f.labelId)) return false;
+        for (const valueId of Object.values(f.attributeValues)) {
+            if (valueId && !t.attributes.some((a) => a.value_id === valueId)) return false;
+        }
         if (needle
             && !t.title.toLowerCase().includes(needle)
             && !t.number.toLowerCase().includes(needle)) return false;
@@ -62,10 +72,13 @@ interface BoardFiltersProps {
     tasks: DesignTaskListItem[];
     onHoldCount: number;
     cancelledCount: number;
+    /** Справочники проекта: селекты рисуются только по активным записям. */
+    labels: DesignLabelOut[];
+    attributes: DesignAttributeOut[];
 }
 
 /** Строка фильтров над доской (Р21): вместо двух overlay-панелей — обычные контролы. */
-export default function BoardFilters({ value, onChange, tasks, onHoldCount, cancelledCount }: BoardFiltersProps) {
+export default function BoardFilters({ value, onChange, tasks, onHoldCount, cancelledCount, labels, attributes }: BoardFiltersProps) {
     const set = <K extends keyof BoardFilterState>(key: K, v: BoardFilterState[K]) =>
         onChange({ ...value, [key]: v });
 
@@ -119,6 +132,33 @@ export default function BoardFilters({ value, onChange, tasks, onHoldCount, canc
                 allLabel="Все типы работ"
                 searchPlaceholder="Тип работы…"
             />
+
+            {labels.length > 0 && (
+                <SearchSelect
+                    value={value.labelId ? String(value.labelId) : ''}
+                    onChange={(v) => set('labelId', v ? Number(v) : 0)}
+                    options={labels.map((l) => ({ value: String(l.id), label: l.name }))}
+                    placeholder="Все метки"
+                    allLabel="Все метки"
+                    searchPlaceholder="Метка…"
+                />
+            )}
+            {attributes.filter((a) => a.values.length > 0).map((a) => (
+                <SearchSelect
+                    key={a.id}
+                    value={value.attributeValues[a.id] ? String(value.attributeValues[a.id]) : ''}
+                    onChange={(v) => {
+                        const next = { ...value.attributeValues };
+                        if (v) next[a.id] = Number(v);
+                        else delete next[a.id];
+                        set('attributeValues', next);
+                    }}
+                    options={a.values.map((v) => ({ value: String(v.id), label: v.value }))}
+                    placeholder={`Все: ${a.name}`}
+                    allLabel={`Все: ${a.name}`}
+                    searchPlaceholder={`${a.name}…`}
+                />
+            ))}
 
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
                 <input type="checkbox" checked={value.urgentOnly} onChange={(e) => set('urgentOnly', e.target.checked)} />

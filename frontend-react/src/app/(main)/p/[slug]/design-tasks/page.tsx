@@ -17,7 +17,13 @@ import {
     type BoardColumns,
     type DesignBoardStatus,
 } from '@/lib/design';
-import type { DesignBoardPermissions, DesignBoardResponse, DesignTaskListItem } from '@/types/api';
+import type {
+    DesignAttributeOut,
+    DesignBoardPermissions,
+    DesignBoardResponse,
+    DesignLabelOut,
+    DesignTaskListItem,
+} from '@/types/api';
 import BoardView from './components/BoardView';
 import ListView from './components/ListView';
 import BoardFilters, {
@@ -42,7 +48,7 @@ interface PendingMove {
 const SCOPE_LIMIT = 200;
 
 /** До ответа /board кнопок нет: права считает бэк (§6.9), роль фронт не проверяет. */
-const NO_BOARD_PERMS: DesignBoardPermissions = { can_create: false, can_reorder: false };
+const NO_BOARD_PERMS: DesignBoardPermissions = { can_create: false, can_reorder: false, can_manage_refs: false };
 
 function DesignTasksPageInner() {
     const params = useParams<{ slug: string }>();
@@ -67,6 +73,9 @@ function DesignTasksPageInner() {
     /** Ошибка хранится вместе со скоупом: иначе сбой «Отложенных» показывался бы
      *  и на «Отменённых», у которых своя, ещё не начатая загрузка. */
     const [scopeError, setScopeError] = useState<{ scope: BoardScope; message: string } | null>(null);
+    /** Справочники для селектов фильтров. Best-effort: без них фильтры просто уже. */
+    const [labels, setLabels] = useState<DesignLabelOut[]>([]);
+    const [attributes, setAttributes] = useState<DesignAttributeOut[]>([]);
     // Модалка причины ПЕРЕД move: dnd/кнопка в «Правки» требует комментарий (контракт: 400 без него).
     const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
     // Персональный календарь задачи: данные — из уже загруженной карточки доски, без запросов.
@@ -101,6 +110,19 @@ function DesignTasksPageInner() {
         void load(view !== 'board');
         return () => { mountedRef.current = false; };
     }, [load, view]);
+
+    useEffect(() => {
+        // Справочники нужны только доске (селекты фильтров) и грузятся один раз.
+        let alive = true;
+        Promise.all([api.listDesignLabels(), api.listDesignAttributes()])
+            .then(([lbs, attrs]) => {
+                if (!alive || !mountedRef.current) return;
+                setLabels(lbs);
+                setAttributes(attrs);
+            })
+            .catch(() => { /* фильтры по разметке просто не появятся */ });
+        return () => { alive = false; };
+    }, []);
 
     const openTask = useCallback(
         (taskId: number) => router.push(`/p/${params.slug}/design-tasks/${taskId}`),
@@ -219,7 +241,7 @@ function DesignTasksPageInner() {
                 subtitle="Задачи на инфографику: заявка → назначение → работа → версии сдач → приёмка"
                 actions={
                     <>
-                        <DesignTabs slug={params.slug} active={view} />
+                        <DesignTabs slug={params.slug} active={view} canManageRefs={perms.can_manage_refs} />
                         {perms.can_create && (
                             <button className="btn btn-primary btn-sm" onClick={() => router.push(`/p/${params.slug}/design-tasks/new`)}>
                                 + Новая заявка
@@ -244,6 +266,8 @@ function DesignTasksPageInner() {
                         tasks={scopeTasks}
                         onHoldCount={onHoldCount}
                         cancelledCount={cancelledCount}
+                        labels={labels}
+                        attributes={attributes}
                     />
 
                     {loading && (

@@ -3,7 +3,14 @@ import { ApiClient } from './client';
 import type {
     DesignAbTestOut,
     DesignAssignPayload,
+    DesignAttributeOut,
+    DesignAttributePayload,
+    DesignAttributeValueOut,
+    DesignAttributeValuePayload,
     DesignBoardResponse,
+    DesignBulkResultOut,
+    DesignLabelOut,
+    DesignLabelPayload,
     DesignCalendarOut,
     DesignCommentInPayload,
     DesignCommentOut,
@@ -64,6 +71,62 @@ export function addDesignTaskMethods(api: ApiClient) {
         getDesignCalendarRange(dateFrom: string, dateTo: string, signal?: AbortSignal) {
             const qs = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
             return api.request<DesignCalendarOut>('GET', `${BASE}/calendar?${qs.toString()}`, undefined, { signal });
+        },
+        // ── Справочники и разметка (волна C) ──
+        listDesignLabels(includeArchived = false) {
+            const qs = includeArchived ? '?include_archived=true' : '';
+            return api.request<DesignLabelOut[]>('GET', `${BASE}/refs/labels${qs}`);
+        },
+        createDesignLabel(payload: DesignLabelPayload) {
+            return api.request<DesignLabelOut>('POST', `${BASE}/refs/labels`, payload);
+        },
+        updateDesignLabel(labelId: number, payload: DesignLabelPayload) {
+            return api.request<DesignLabelOut>('PUT', `${BASE}/refs/labels/${labelId}`, payload);
+        },
+        /** Архивирование, не удаление (Р30): метка остаётся на старых задачах. */
+        archiveDesignLabel(labelId: number) {
+            return api.request<void>('DELETE', `${BASE}/refs/labels/${labelId}`);
+        },
+        listDesignAttributes(includeArchived = false) {
+            const qs = includeArchived ? '?include_archived=true' : '';
+            return api.request<DesignAttributeOut[]>('GET', `${BASE}/refs/attributes${qs}`);
+        },
+        createDesignAttribute(payload: DesignAttributePayload) {
+            return api.request<DesignAttributeOut>('POST', `${BASE}/refs/attributes`, payload);
+        },
+        updateDesignAttribute(attributeId: number, payload: DesignAttributePayload) {
+            return api.request<DesignAttributeOut>('PUT', `${BASE}/refs/attributes/${attributeId}`, payload);
+        },
+        archiveDesignAttribute(attributeId: number) {
+            return api.request<void>('DELETE', `${BASE}/refs/attributes/${attributeId}`);
+        },
+        createDesignAttributeValue(attributeId: number, payload: DesignAttributeValuePayload) {
+            return api.request<DesignAttributeValueOut>(
+                'POST', `${BASE}/refs/attributes/${attributeId}/values`, payload,
+            );
+        },
+        updateDesignAttributeValue(valueId: number, payload: DesignAttributeValuePayload) {
+            return api.request<DesignAttributeValueOut>('PUT', `${BASE}/refs/values/${valueId}`, payload);
+        },
+        archiveDesignAttributeValue(valueId: number) {
+            return api.request<void>('DELETE', `${BASE}/refs/values/${valueId}`);
+        },
+        /** REPLACE набора: что передали — то и стало, пустой массив снимает всё. */
+        setDesignTaskLabels(taskId: number, labelIds: number[]) {
+            return api.request<DesignTaskDetail>('PUT', `${BASE}/${taskId}/labels`, { label_ids: labelIds });
+        },
+        setDesignTaskAttributes(taskId: number, valueIds: number[]) {
+            return api.request<DesignTaskDetail>('PUT', `${BASE}/${taskId}/attributes`, { value_ids: valueIds });
+        },
+        bulkDesignLabels(taskIds: number[], labelIds: number[], mode: 'add' | 'remove') {
+            return api.request<DesignBulkResultOut>('POST', `${BASE}/bulk/labels`, {
+                task_ids: taskIds, label_ids: labelIds, mode,
+            });
+        },
+        bulkDesignAttributes(taskIds: number[], valueIds: number[], mode: 'add' | 'remove') {
+            return api.request<DesignBulkResultOut>('POST', `${BASE}/bulk/attributes`, {
+                task_ids: taskIds, value_ids: valueIds, mode,
+            });
         },
         getDesignStats(dateFrom?: string, dateTo?: string) {
             const qs = new URLSearchParams();

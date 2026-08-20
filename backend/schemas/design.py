@@ -23,6 +23,7 @@ from pydantic import (
 from backend.models.design import (
     DESIGN_BOARD_STATUSES,
     DesignComplexity,
+    DesignLabelColor,
     DesignMaterialKind,
     DesignTaskStatus,
     DesignVerdict,
@@ -194,6 +195,179 @@ class DesignVerdictIn(BaseModel):
 # ─── Read models ──────────────────────────────────────────────────────────────
 
 
+# ─── Справочники волны C (CONTRACT-V2 §3) ────────────────────────────────────
+
+_ALLOWED_LABEL_COLORS = {c.value for c in DesignLabelColor}
+
+
+class DesignLabelIn(BaseModel):
+    """Создание/правка метки. Цвет — только из палитры Р26, произвольный hex запрещён."""
+
+    name: str = Field(..., min_length=1, max_length=60)
+    color: str
+    sort_order: int = 0
+
+    @field_validator("color")
+    @classmethod
+    def _validate_color(cls, v: str) -> str:
+        if v not in _ALLOWED_LABEL_COLORS:
+            raise ValueError(f"color must be one of: {sorted(_ALLOWED_LABEL_COLORS)}")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("name must not be blank")
+        return cleaned
+
+
+class DesignLabelOut(BaseModel):
+    id: int
+    name: str
+    color: str
+    sort_order: int
+    is_archived: bool
+    # Число задач с этой меткой СЕЙЧАС. Считается одним GROUP BY на список.
+    usage_count: int = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DesignAttributeIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=60)
+    is_multi: bool = False
+    sort_order: int = 0
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("name must not be blank")
+        return cleaned
+
+
+class DesignAttributeValueIn(BaseModel):
+    value: str = Field(..., min_length=1, max_length=120)
+    sort_order: int = 0
+
+    @field_validator("value")
+    @classmethod
+    def _strip_value(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("value must not be blank")
+        return cleaned
+
+
+class DesignAttributeValueOut(BaseModel):
+    id: int
+    attribute_id: int
+    value: str
+    sort_order: int
+    is_archived: bool
+    usage_count: int = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DesignAttributeOut(BaseModel):
+    id: int
+    name: str
+    is_multi: bool
+    sort_order: int
+    is_archived: bool
+    # Задачи, где выбрано ЛЮБОЕ значение поля — для предупреждения при архивировании.
+    usage_count: int = 0
+    values: list[DesignAttributeValueOut] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DesignTaskLabelsIn(BaseModel):
+    """Семантика REPLACE: что передали — то и стало. Пустой массив снимает всё."""
+
+    label_ids: list[int] = []
+
+
+class DesignTaskAttributesIn(BaseModel):
+    value_ids: list[int] = []
+
+
+class DesignBulkLabelsIn(BaseModel):
+    """Массовое проставление: add/remove, а НЕ replace — пачкой добавляют
+    недостающее, не затирая чужую разметку."""
+
+    task_ids: list[int]
+    label_ids: list[int]
+    mode: str = "add"
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, v: str) -> str:
+        if v not in ("add", "remove"):
+            raise ValueError("mode must be 'add' or 'remove'")
+        return v
+
+
+class DesignBulkAttributesIn(BaseModel):
+    task_ids: list[int]
+    value_ids: list[int]
+    mode: str = "add"
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, v: str) -> str:
+        if v not in ("add", "remove"):
+            raise ValueError("mode must be 'add' or 'remove'")
+        return v
+
+
+class DesignBulkErrorRow(BaseModel):
+    task_id: int
+    message: str
+
+
+class DesignBulkResultOut(BaseModel):
+    """`skipped` — ТОЛЬКО «нет прав на эту задачу»; всё остальное, что не
+    применилось, уходит в `errors` с текстом гварда (CONTRACT-V2 §3)."""
+
+    updated: int = 0
+    skipped: int = 0
+    errors: list[DesignBulkErrorRow] = []
+
+
+class DesignLabelRef(BaseModel):
+    """Метка на задаче — минимальный срез для карточки и списка (CONTRACT-V2 §3)."""
+
+    id: int
+    name: str
+    color: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DesignAttributeRef(BaseModel):
+    """Выбранное значение реквизита на задаче (порядок — по sort_order поля)."""
+
+    attribute_id: int
+    attribute_name: str
+    value_id: int
+    value: str
+
+
+class DesignLabelHistoryRow(BaseModel):
+    """Р20: «задача была с этой меткой N раз». Считается по строкам связи,
+    а не по журналу событий — иначе счёт ломался бы при переименовании метки."""
+
+    label_id: int
+    name: str
+    color: str
+    times: int
+
+
 class DesignTaskListItem(BaseModel):
     id: int
     number: str
@@ -213,6 +387,9 @@ class DesignTaskListItem(BaseModel):
     sort_order: int = 0
     # Заполняется только в сквозном режиме GET /all-projects.
     project_name: str | None = None
+    # Волна C: текущие метки и выбранные реквизиты. Грузятся батчем на страницу.
+    labels: list[DesignLabelRef] = []
+    attributes: list[DesignAttributeRef] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -226,6 +403,8 @@ class DesignBoardPermissions(BaseModel):
 
     can_create: bool = False
     can_reorder: bool = False
+    # Вкладка «Настройки» рисуется до открытия любой задачи — флаг нужен доске.
+    can_manage_refs: bool = False
 
 
 class DesignBoardResponse(BaseModel):
@@ -268,6 +447,11 @@ class DesignTaskPermissions(BaseModel):
     can_create_ab_test: bool = False
     # Р5: отметка «лид просмотрел» (POST /{task_id}/viewed) — amended 2026-08-03.
     can_mark_viewed: bool = False
+    # Волна C (Р29, Р31): метки можно менять и в терминалах, реквизиты — нельзя.
+    can_set_labels: bool = False
+    can_set_attributes: bool = False
+    # Показывает вкладку «Настройки» модуля.
+    can_manage_refs: bool = False
 
 
 class DesignMaterialOut(BaseModel):
@@ -368,6 +552,10 @@ class DesignTaskDetail(BaseModel):
     submissions: list[DesignSubmissionOut] = []
     comments: list[DesignCommentOut] = []
     events: list[DesignEventOut] = []
+    # Волна C: текущая разметка задачи + счётчик истории меток (Р20).
+    labels: list[DesignLabelRef] = []
+    attributes: list[DesignAttributeRef] = []
+    label_history: list[DesignLabelHistoryRow] = []
     permissions: DesignTaskPermissions = DesignTaskPermissions()
     # amended 2026-08-02 (аддитивно, санкция lead): целевые статусы, куда ТЕКУЩИЙ
     # пользователь реально может перевести задачу — DESIGN_TASK_TRANSITIONS[status],

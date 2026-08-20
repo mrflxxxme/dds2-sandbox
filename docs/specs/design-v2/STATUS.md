@@ -18,7 +18,7 @@
 |---|---|---|---|---|---|---|
 | A | UI-правки + двухмесячный календарь | ✅ signed | 2026-08-20 | `30be4804` | ниже | **подписано владельцем 2026-08-20** (`schemas/design.py`, `globals.css` — см. DECISIONS-LOG 2026-08-20) |
 | B | Редактируемый номер заявки | 🟢 done-unsigned | 2026-08-20 | — | 20 тестов, миграция up→down→up | **требуется ДО мержа** (models/migrations/schemas) |
-| C | Метки + справочник реквизитов | ⏳ planned | — | — | — | **требуется ДО мержа** (models/migrations/schemas/globals.css) |
+| C | Метки + справочник реквизитов | 🟢 done-unsigned | 2026-08-20 | — | 38 тестов, миграция up→down→up | **требуется ДО мержа** (models/migrations/schemas/globals.css) |
 | D | Вкладка «Аналитика» + XLSX | ⏳ planned | — | — | — | **требуется ДО мержа** (models/migrations/schemas) |
 
 Статусы: ⏳ planned · 🔨 active · 🟢 done-unsigned · ✅ signed.
@@ -104,6 +104,27 @@
 | `pytest tests/test_design_v2_calendar_range.py` (после правок ревью) | **10 passed** |
 | `pytest tests/ -k design` | **232 passed** (было 209 до волны B) |
 | `mypy` по дизайн-скоупу · `tsc` · `vitest src/__tests__/lib/` | чисто · чисто · 1372 зелёных |
+
+## Волна C — evidence
+
+| Гейт | Результат |
+|---|---|
+| `alembic upgrade head → downgrade -1 → upgrade head` | чисто, голова одна: `dsn05_design_labels_attributes` |
+| `pytest test_design_v2_refs.py + test_design_v2_task_labels.py` | **38 passed** |
+| `pytest tests/ -k design` | **270 passed** (было 232 после волны B) |
+| `mypy` по дизайн-скоупу | Success, no issues in 16 source files |
+| `check_conventions.sh` | PASSED, те же 9 предупреждений |
+| `tsc --noEmit` · `vitest src/__tests__/lib/` | чисто · **1378 зелёных** |
+
+Контраст палитры меток к фону карточки (`#fbfbfc` = `--color-bg-card` поверх `--color-bg`):
+red 4.67 · orange 3.83 · amber 5.25 · green 5.50 · teal 5.39 · blue 5.79 · violet 6.40 ·
+pink 5.60 · brown 5.68 · slate 7.43 — все ≥ 3:1 с запасом.
+
+Два существующих гварда сработали как задумано и потребовали правки:
+`test_all_mutations_have_rate_limit_write` читает текст ДЕКОРАТОРА, поэтому
+`rate_limit_write` у новых ручек переехал из параметра в `dependencies=[...]`;
+`test_board_returns_permissions_by_role` сверяет полный словарь прав доски и
+поймал новый флаг `can_manage_refs`. Оба обновлены осознанно, не «под зелёное».
 
 ## evidence_gap
 

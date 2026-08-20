@@ -2,6 +2,7 @@
 
 import { formatDate } from '@/lib/utils';
 import WbThumb from '@/components/WbThumb';
+import LabelChips from './LabelChips';
 import type { DesignTaskListItem } from '@/types/api';
 
 /**
@@ -37,6 +38,9 @@ export default function FlatTaskList({ tasks, emptyText, onOpen }: {
                         <span style={{ display: 'block', fontSize: 13 }}>
                             <span style={{ color: 'var(--color-text-muted)', fontWeight: 600, marginRight: 6 }}>{t.number}</span>
                             {t.title}
+                            {t.labels.length > 0 && (
+                                <span style={{ marginLeft: 6 }}><LabelChips labels={t.labels} /></span>
+                            )}
                         </span>
                         <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)' }}>
                             {t.assignee_name ?? 'без исполнителя'}

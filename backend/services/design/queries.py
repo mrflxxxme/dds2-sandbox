@@ -17,17 +17,25 @@ from backend.models.cost import Nomenclature
 from backend.rbac import get_effective_pages
 from backend.models.design import (
     DESIGN_ACTIVE_STATUSES,
+    DesignAttribute,
+    DesignAttributeValue,
+    DesignLabel,
     DesignMaterial,
     DesignSubmission,
     DesignSubmissionFile,
     DesignTask,
+    DesignTaskAttributeValue,
     DesignTaskComment,
     DesignTaskEvent,
+    DesignTaskLabel,
     DesignTaskStatus,
 )
 from backend.schemas.design import (
+    DesignAttributeRef,
     DesignCommentOut,
     DesignEventOut,
+    DesignLabelHistoryRow,
+    DesignLabelRef,
     DesignMaterialOut,
     DesignProductSuggestion,
     DesignSubmissionFileOut,
@@ -42,6 +50,11 @@ from backend.services.design.state import can_user_transition
 from backend.utils.time import msk_today, utcnow
 
 _S = DesignTaskStatus
+
+# Потолки на задачу для .limit() батч-выборок разметки: без них выборка
+# формально безлимитная (правило backend.md), а лишних строк там и не бывает.
+_MAX_LABELS_PER_TASK = 100
+_MAX_ATTRS_PER_TASK = 200
 
 
 def escape_like(value: str) -> str:
@@ -64,13 +77,86 @@ async def _user_names(db: AsyncSession, user_ids: set[int]) -> dict[int, str]:
     }
 
 
+async def load_labels_by_task(
+    db: AsyncSession, project_id: int, task_ids: list[int]
+) -> dict[int, list[DesignLabelRef]]:
+    """Текущие метки задач ОДНИМ запросом на страницу (инвариант §6.10, без N+1)."""
+    if not task_ids:
+        return {}
+    res = await db.execute(
+        select(
+            DesignTaskLabel.task_id,
+            DesignLabel.id,
+            DesignLabel.name,
+            DesignLabel.color,
+        )
+        .join(DesignLabel, DesignLabel.id == DesignTaskLabel.label_id)
+        .where(
+            DesignTaskLabel.project_id == project_id,
+            DesignTaskLabel.task_id.in_(task_ids),
+            DesignTaskLabel.removed_at.is_(None),
+            DesignLabel.is_deleted == False,  # noqa: E712
+        )
+        # Архивные метки из выдачи НЕ исключаются (Р30): история не должна ломаться.
+        .order_by(DesignLabel.sort_order, DesignLabel.id)
+        .limit(len(task_ids) * _MAX_LABELS_PER_TASK)
+    )
+    out: dict[int, list[DesignLabelRef]] = {}
+    for task_id, label_id, name, color in res.all():
+        out.setdefault(task_id, []).append(DesignLabelRef(id=label_id, name=name, color=color))
+    return out
+
+
+async def load_attributes_by_task(
+    db: AsyncSession, project_id: int, task_ids: list[int]
+) -> dict[int, list[DesignAttributeRef]]:
+    """Выбранные реквизиты задач ОДНИМ запросом на страницу."""
+    if not task_ids:
+        return {}
+    res = await db.execute(
+        select(
+            DesignTaskAttributeValue.task_id,
+            DesignAttribute.id,
+            DesignAttribute.name,
+            DesignAttributeValue.id,
+            DesignAttributeValue.value,
+        )
+        .join(
+            DesignAttributeValue,
+            DesignAttributeValue.id == DesignTaskAttributeValue.value_id,
+        )
+        .join(DesignAttribute, DesignAttribute.id == DesignAttributeValue.attribute_id)
+        .where(
+            DesignTaskAttributeValue.project_id == project_id,
+            DesignTaskAttributeValue.task_id.in_(task_ids),
+            DesignAttributeValue.is_deleted == False,  # noqa: E712
+            DesignAttribute.is_deleted == False,  # noqa: E712
+        )
+        .order_by(DesignAttribute.sort_order, DesignAttribute.id, DesignAttributeValue.sort_order)
+        .limit(len(task_ids) * _MAX_ATTRS_PER_TASK)
+    )
+    out: dict[int, list[DesignAttributeRef]] = {}
+    for task_id, attribute_id, attribute_name, value_id, value in res.all():
+        out.setdefault(task_id, []).append(
+            DesignAttributeRef(
+                attribute_id=attribute_id,
+                attribute_name=attribute_name,
+                value_id=value_id,
+                value=value,
+            )
+        )
+    return out
+
+
 async def to_list_items(
     db: AsyncSession, project_id: int, tasks: list[DesignTask]
 ) -> list[DesignTaskListItem]:
-    """Батч-обогащение имён и счётчиков версий одним запросом — без N+1."""
+    """Батч-обогащение имён, счётчиков версий и разметки — без N+1."""
     if not tasks:
         return []
     task_ids = [t.id for t in tasks]
+    labels_by_task = await load_labels_by_task(db, project_id, task_ids)
+    attrs_by_task = await load_attributes_by_task(db, project_id, task_ids)
     counts_res = await db.execute(
         select(DesignSubmission.task_id, sa_func.count())
         .where(
@@ -110,6 +196,8 @@ async def to_list_items(
                 author_name=names.get(t.author_user_id),
                 versions_count=versions.get(t.id, 0),
                 sort_order=t.sort_order,
+                labels=labels_by_task.get(t.id, []),
+                attributes=attrs_by_task.get(t.id, []),
             )
         )
     return items
@@ -432,6 +520,10 @@ async def get_task(
         user_ids.add(task.assignee_user_id)
     names = await _user_names(db, user_ids)
 
+    labels = (await load_labels_by_task(db, project_id, [task_id])).get(task_id, [])
+    attributes = (await load_attributes_by_task(db, project_id, [task_id])).get(task_id, [])
+    label_history = await _label_history(db, project_id, task_id)
+
     # Полный набор флагов без фильтрации-пересечения (инвариант §6.9): схема
     # DesignTaskPermissions зеркалит ключи compute_permissions один-в-один.
     permissions = DesignTaskPermissions(**compute_permissions(task, user, member_role))
@@ -500,9 +592,43 @@ async def get_task(
             for c in comments
         ],
         events=[DesignEventOut.model_validate(e) for e in events],
+        labels=labels,
+        attributes=attributes,
+        label_history=label_history,
         permissions=permissions,
         allowed_transitions=allowed_transitions,
     )
+
+
+async def _label_history(
+    db: AsyncSession, project_id: int, task_id: int
+) -> list[DesignLabelHistoryRow]:
+    """Р20: «была с меткой N раз» — COUNT по строкам связи, включая снятые.
+
+    Считается по label_id, а НЕ парсингом DesignTaskEvent.comment: там свободный
+    текст, и счёт сломался бы при первом переименовании метки.
+    """
+    res = await db.execute(
+        select(
+            DesignTaskLabel.label_id,
+            DesignLabel.name,
+            DesignLabel.color,
+            sa_func.count(),
+        )
+        .join(DesignLabel, DesignLabel.id == DesignTaskLabel.label_id)
+        .where(
+            DesignTaskLabel.project_id == project_id,
+            DesignTaskLabel.task_id == task_id,
+            DesignLabel.is_deleted == False,  # noqa: E712
+        )
+        .group_by(DesignTaskLabel.label_id, DesignLabel.name, DesignLabel.color, DesignLabel.sort_order)
+        .order_by(DesignLabel.sort_order, DesignTaskLabel.label_id)
+        .limit(_MAX_LABELS_PER_TASK)
+    )
+    return [
+        DesignLabelHistoryRow(label_id=label_id, name=name, color=color, times=times)
+        for label_id, name, color, times in res.all()
+    ]
 
 
 async def product_suggest(

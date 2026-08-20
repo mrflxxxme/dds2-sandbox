@@ -10726,7 +10726,9 @@ export interface DesignTaskListItem {
     versions_count: number;
     sort_order: number;
     /** Заполняется только в GET /all-projects. */
-    project_name?: string | null;
+    project_name?: string | null;    /** Волна C: текущие метки и выбранные реквизиты (грузятся батчем). */
+    labels: DesignLabelRef[];
+    attributes: DesignAttributeRef[];
 }
 
 /**
@@ -10738,6 +10740,8 @@ export interface DesignBoardPermissions {
     can_create: boolean;
     /** Перестановка карточек внутри колонки (lead) — dnd между колонками не гейтит. */
     can_reorder: boolean;
+    /** Вкладка «Настройки» (справочники) рисуется до открытия любой задачи. */
+    can_manage_refs: boolean;
 }
 
 export interface DesignBoardResponse {
@@ -10746,6 +10750,89 @@ export interface DesignBoardResponse {
     /** Счётчики по всем 8 статусам. */
     counts: Partial<Record<DesignTaskStatus, number>>;
     permissions: DesignBoardPermissions;
+}
+
+/** Десять фиксированных цветов метки (Р26): произвольный hex запрещён. */
+export type DesignLabelColor =
+    | 'red' | 'orange' | 'amber' | 'green' | 'teal'
+    | 'blue' | 'violet' | 'pink' | 'brown' | 'slate';
+
+/** Метка на задаче — минимальный срез для карточки и списка. */
+export interface DesignLabelRef {
+    id: number;
+    name: string;
+    color: DesignLabelColor;
+}
+
+/** Выбранное значение реквизита на задаче. */
+export interface DesignAttributeRef {
+    attribute_id: number;
+    attribute_name: string;
+    value_id: number;
+    value: string;
+}
+
+/** Р20: «задача была с этой меткой N раз» — счётчик по строкам связи. */
+export interface DesignLabelHistoryRow {
+    label_id: number;
+    name: string;
+    color: DesignLabelColor;
+    times: number;
+}
+
+export interface DesignLabelOut {
+    id: number;
+    name: string;
+    color: DesignLabelColor;
+    sort_order: number;
+    is_archived: boolean;
+    /** Число задач, где метка стоит СЕЙЧАС (для предупреждения при архивировании). */
+    usage_count: number;
+}
+
+export interface DesignLabelPayload {
+    name: string;
+    color: DesignLabelColor;
+    sort_order?: number;
+}
+
+export interface DesignAttributeValueOut {
+    id: number;
+    attribute_id: number;
+    value: string;
+    sort_order: number;
+    is_archived: boolean;
+    usage_count: number;
+}
+
+export interface DesignAttributeOut {
+    id: number;
+    name: string;
+    /** true — на задаче можно выбрать несколько значений этого поля. */
+    is_multi: boolean;
+    sort_order: number;
+    is_archived: boolean;
+    /** Число ЗАДАЧ, где выбрано любое значение поля. */
+    usage_count: number;
+    values: DesignAttributeValueOut[];
+}
+
+export interface DesignAttributePayload {
+    name: string;
+    is_multi?: boolean;
+    sort_order?: number;
+}
+
+export interface DesignAttributeValuePayload {
+    value: string;
+    sort_order?: number;
+}
+
+export interface DesignBulkResultOut {
+    updated: number;
+    /** Только «нет прав на эту задачу»; всё остальное — в errors. */
+    skipped: number;
+    errors: { task_id: number; message: string }[];
 }
 
 /** ПОЛНЫЙ набор флагов compute_permissions; фронт логику прав не дублирует (§6.9). */
@@ -10769,6 +10856,11 @@ export interface DesignTaskPermissions {
     can_create_ab_test: boolean;
     /** Р5: отметка «лид просмотрел» — POST /{task_id}/viewed (amended 2026-08-03). */
     can_mark_viewed: boolean;
+    /** Волна C (Р31): метки меняются и в терминалах, реквизиты — нет. */
+    can_set_labels: boolean;
+    can_set_attributes: boolean;
+    /** Показывает вкладку «Настройки» модуля. */
+    can_manage_refs: boolean;
 }
 
 /** Без minio_path: скачивание — только GET-ручкой materials/{mat_id}/file. */
@@ -10857,7 +10949,10 @@ export interface DesignTaskDetail {
      * (DESIGN_TASK_TRANSITIONS × матрица прав бэка). Кнопки переходов в деталке
      * строятся по этому списку (amended 2026-08-02, аддитивно).
      */
-    allowed_transitions: DesignTaskStatus[];
+    allowed_transitions: DesignTaskStatus[];    /** Волна C: разметка задачи + счётчик истории меток (Р20). */
+    labels: DesignLabelRef[];
+    attributes: DesignAttributeRef[];
+    label_history: DesignLabelHistoryRow[];
 }
 
 /** Автоподсказка товара (nm_id = Nomenclature.article_wb). */

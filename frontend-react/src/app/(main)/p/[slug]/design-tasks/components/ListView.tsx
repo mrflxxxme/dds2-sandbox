@@ -13,6 +13,7 @@ import {
     DESIGN_WORK_TYPE_LABEL,
 } from '@/lib/design';
 import { DESIGN_CHIP_HINT, DESIGN_MARK_HINT } from '@/lib/designHints';
+import LabelChips from './LabelChips';
 import type { DesignTaskListItem, DesignTaskStatus, DesignWorkType } from '@/types/api';
 
 type Chip = 'all' | 'NEW' | 'ASSIGNED' | 'IN_PROGRESS' | 'REVIEW' | 'REVISION' | 'ON_HOLD' | 'overdue';
@@ -184,6 +185,9 @@ export default function ListView({ slug }: { slug: string }) {
                                             </InfoTip>
                                         )}
                                         {t.number}
+                                        {t.labels.length > 0 && (
+                                            <span style={{ marginLeft: 6 }}><LabelChips labels={t.labels} /></span>
+                                        )}
                                     </td>
                                     <td style={{ padding: '12px 16px' }}>
                                         <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>

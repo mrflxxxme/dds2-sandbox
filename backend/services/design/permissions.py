@@ -66,6 +66,12 @@ def compute_permissions(
         "can_move": lead or can_change_status,
         # Отметка просмотра лидом (Р5, crud.mark_viewed) — гвард is_lead один-в-один.
         "can_mark_viewed": lead,
+        # Волна C. Р29 — кто размечает; Р31 — где: метки живут и в терминалах
+        # (задачу закрыли, но разметка для аналитики нужна), реквизиты — нет.
+        # Гварды зеркалят refs.set_task_labels / set_task_attribute_values.
+        "can_set_labels": lead or is_author or is_assignee,
+        "can_set_attributes": (lead or is_author or is_assignee) and not terminal,
+        "can_manage_refs": lead,
     }
 
 
@@ -87,4 +93,7 @@ def compute_board_permissions(member_role: str) -> dict[str, bool]:
     return {
         "can_create": member_role != "viewer",
         "can_reorder": is_lead(member_role),
+        # Вкладка «Настройки» (справочники волны C) рисуется до открытия задачи,
+        # поэтому флаг нужен и здесь; зеркало can_manage_refs в compute_permissions.
+        "can_manage_refs": is_lead(member_role),
     }

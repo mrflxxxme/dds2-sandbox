@@ -30,6 +30,8 @@ function task(over: Partial<DesignTaskListItem>): DesignTaskListItem {
         assignee_name: null,
         nm_id: null,
         versions_count: 0,
+        labels: [],
+        attributes: [],
         ...over,
     } as DesignTaskListItem;
 }
@@ -79,5 +81,36 @@ describe('applyBoardFilters', () => {
         const before = [...TASKS];
         applyBoardFilters(TASKS, f({ urgentOnly: true }));
         expect(TASKS).toEqual(before);
+    });
+});
+
+describe('фильтры по разметке (волна C)', () => {
+    const RED = { id: 10, name: 'Срочно', color: 'red' as const };
+    const BLUE = { id: 11, name: 'Переделка', color: 'blue' as const };
+    const BRAND = (valueId: number, value: string) => ({
+        attribute_id: 1, attribute_name: 'Бренд', value_id: valueId, value,
+    });
+    const ROWS: DesignTaskListItem[] = [
+        task({ id: 1, labels: [RED], attributes: [BRAND(100, 'Меллори')] }),
+        task({ id: 2, labels: [RED, BLUE], attributes: [BRAND(101, 'Уютопия')] }),
+        task({ id: 3, labels: [], attributes: [] }),
+    ];
+
+    it('фильтр по метке оставляет задачи, где она есть', () => {
+        expect(ids(applyBoardFilters(ROWS, f({ labelId: RED.id })))).toEqual([1, 2]);
+        expect(ids(applyBoardFilters(ROWS, f({ labelId: BLUE.id })))).toEqual([2]);
+    });
+
+    it('фильтр по значению реквизита точечный', () => {
+        expect(ids(applyBoardFilters(ROWS, f({ attributeValues: { 1: 100 } })))).toEqual([1]);
+    });
+
+    it('метка и реквизит складываются через И', () => {
+        expect(ids(applyBoardFilters(ROWS, f({ labelId: RED.id, attributeValues: { 1: 101 } })))).toEqual([2]);
+        expect(ids(applyBoardFilters(ROWS, f({ labelId: BLUE.id, attributeValues: { 1: 100 } })))).toEqual([]);
+    });
+
+    it('нулевые значения фильтров ничего не отсекают', () => {
+        expect(ids(applyBoardFilters(ROWS, f({ labelId: 0, attributeValues: {} })))).toEqual([1, 2, 3]);
     });
 });

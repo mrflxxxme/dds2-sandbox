@@ -13,15 +13,18 @@
 
 | Слой | Файл | Содержимое |
 |---|---|---|
-| Модели | `models/design.py` | 6 таблиц, 5 строковых enum'ов, `DESIGN_TASK_TRANSITIONS` (источник правды), `DESIGN_BOARD_STATUSES`, `DESIGN_ACTIVE_STATUSES` |
+| Модели | `models/design.py` | 11 таблиц (6 базовых + 5 справочных волны C), 6 строковых enum'ов, `DESIGN_TASK_TRANSITIONS` (источник правды), `DESIGN_BOARD_STATUSES`, `DESIGN_ACTIVE_STATUSES` |
 | Миграции | `migrations/versions/dsn01_design_tasks.py` | 6 таблиц + индексы (аддитивно, revises `spp03_price_probes`) |
 | | `migrations/versions/dsn02_design_notify_flag.py` | `telegram_chat_bindings.design_notify_enabled` |
-| Схемы | `schemas/design.py` | вход/выход, `DesignTaskPermissions` (15 флагов) |
+| | `migrations/versions/dsn04_design_number_len.py` | номер заявки 20 → 40 символов (Р18) |
+| | `migrations/versions/dsn05_design_labels_attributes.py` | 5 таблиц справочников + сид полей «Кабинет ВБ» и «Бренд» (Р33) |
+| Схемы | `schemas/design.py` | вход/выход, `DesignTaskPermissions` (20 флагов), схемы справочников и массовых операций |
 | Сервис | `services/design/common.py` | `is_lead`, `actor_name`, `get_task_row` (скоуп проекта + `FOR UPDATE`) — на него завязаны все остальные, чтобы не было циклов |
 | | `services/design/state.py` | `validate_transition`, `can_user_transition`, `apply_transition_locked`, `change_status`, `_commit_and_notify` |
-| | `services/design/permissions.py` | `compute_permissions` — 15 булевых флагов |
+| | `services/design/permissions.py` | `compute_permissions` — 20 булевых флагов |
 | | `services/design/crud.py` | `next_number`, `create_task`, `mark_viewed`, `update_task`, `assign`, `delete_task`, `add_comment` (+реэкспорт read-side) |
 | | `services/design/queries.py` | `list_tasks`, `list_tasks_all_projects`, `list_calendar`, `get_task`, `product_suggest`, `to_list_items` |
+| | `services/design/refs.py` | справочники меток и реквизитов, разметка задачи, массовое проставление (волна C) |
 | | `services/design/board.py` | `get_board` (6 колонок одним ответом), `move_task` (dnd) |
 | | `services/design/files.py` | материалы, версии сдач, вердикты, скачивание, allowlist/blocklist типов |
 | | `services/design/workload.py` | «Загрузка команды» |
@@ -226,6 +229,13 @@ REVISION, ACCEPTED. ON_HOLD и CANCELLED — вне доски (видны фи�
 
 `GET /all-projects` осталась в API, хотя вкладка «Все бренды» из UI убрана (Р19):
 контракт не ломаем, потребителя у ручки сейчас нет.
+
+**Справочники (волна C v2):** `GET|POST /refs/labels`, `PUT|DELETE /refs/labels/{id}`,
+`GET|POST /refs/attributes`, `PUT|DELETE /refs/attributes/{id}`,
+`POST /refs/attributes/{id}/values`, `PUT|DELETE /refs/values/{id}`,
+`PUT /{task_id}/labels`, `PUT /{task_id}/attributes`, `POST /bulk/labels|attributes`.
+Чтение — любому с page-ключом, запись — `editor`-гейт плюс тонкая проверка «только
+ведущий» в сервисе. `DELETE` здесь **архивирует**, а не удаляет (Р30), и идемпотентен.
 - **Задача:** `POST ""` (201) · `PUT /{id}` (PATCH-семантика) · `DELETE /{id}` (204) ·
   `POST /{id}/status` · `POST /{id}/move` · `POST /{id}/assign` · `POST /{id}/viewed`.
 - **Материалы:** `POST /{id}/materials` (LINK|NM) · `POST /{id}/materials/file`

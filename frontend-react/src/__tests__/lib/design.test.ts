@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
     DESIGN_BOARD_STATUSES,
     applyOptimisticMove,
+    LABEL_COLORS,
+    LABEL_COLOR_LABEL,
     buildBoardColumns,
     findTaskColumn,
+    labelColorClass,
     type BoardColumns,
 } from '@/lib/design';
 import type { DesignBoardResponse, DesignTaskListItem, DesignTaskStatus } from '@/types/api';
@@ -26,11 +29,13 @@ function task(id: number, status: DesignTaskStatus, sortOrder = id * 1000): Desi
         author_name: null,
         versions_count: 0,
         sort_order: sortOrder,
+        labels: [],
+        attributes: [],
     };
 }
 
 /** Права уровня доски в маппинге колонок не участвуют — фиксируем нейтральные. */
-const NO_PERMS: DesignBoardResponse['permissions'] = { can_create: false, can_reorder: false };
+const NO_PERMS: DesignBoardResponse['permissions'] = { can_create: false, can_reorder: false, can_manage_refs: false };
 
 function boardOf(...tasks: DesignTaskListItem[]): BoardColumns {
     const res: DesignBoardResponse = { columns: {}, counts: {}, permissions: NO_PERMS };
@@ -131,5 +136,19 @@ describe('applyOptimisticMove — оптимистичное перемещен�
     it('неизвестная карточка → null', () => {
         const columns = boardOf(task(1, 'NEW'));
         expect(applyOptimisticMove(columns, 999, 'ASSIGNED', null)).toBeNull();
+    });
+});
+
+describe('палитра меток (Р26)', () => {
+    it('ровно десять цветов, у каждого есть подпись', () => {
+        expect(LABEL_COLORS).toHaveLength(10);
+        expect(new Set(LABEL_COLORS).size).toBe(10);
+        for (const c of LABEL_COLORS) expect(LABEL_COLOR_LABEL[c]).toBeTruthy();
+    });
+
+    it('класс собирается по ключу, неизвестный цвет падает в серый', () => {
+        expect(labelColorClass('red')).toBe('dds-label--red');
+        expect(labelColorClass('#ff00aa')).toBe('dds-label--slate');
+        expect(labelColorClass('')).toBe('dds-label--slate');
     });
 });
