@@ -45,12 +45,17 @@ from backend.schemas.design import (
     DesignCalendarOut,
     DesignCommentIn,
     DesignCommentOut,
+    DesignDashboardLayoutIn,
+    DesignDashboardLayoutOut,
     DesignLabelIn,
     DesignLabelOut,
     DesignMaterialIn,
     DesignMaterialOut,
     DesignMoveIn,
     DesignProductSuggestion,
+    DesignStatsByAssigneeOut,
+    DesignStatsByAttributeOut,
+    DesignStatsFunnelOut,
     DesignStatsOut,
     DesignStatusChange,
     DesignTaskAttributesIn,
@@ -62,7 +67,18 @@ from backend.schemas.design import (
     DesignVerdictIn,
     DesignWorkloadRow,
 )
-from backend.services.design import ab_bridge, board, crud, queries, refs, state, stats, workload
+from backend.services.design import (
+    ab_bridge,
+    analytics,
+    board,
+    crud,
+    export_xlsx,
+    queries,
+    refs,
+    state,
+    stats,
+    workload,
+)
 from backend.services.design import files as design_files
 from backend.utils.rate_limit import rate_limit_write
 
@@ -249,6 +265,94 @@ async def get_stats(
 ):
     """Метрики PRD §10 (панель метрик — потребитель Ф6)."""
     return await stats.get_stats(db, project.id, date_from, date_to)
+
+
+# ─── Аналитика (волна D) ─────────────────────────────────────────────────────
+#
+# Все ручки — чтение под require_viewer и БЕЗ rate_limit_write (Р32: дашборд и
+# выгрузка доступны всем с page-ключом, включая viewer). Единственное исключение —
+# PUT /dashboard/layout: он пишет, но тоже под viewer, потому что дашборд без
+# права сохранить свою раскладку бесполезен, а данных проекта ручка не трогает.
+
+
+@router.get("/stats/by-assignee", response_model=DesignStatsByAssigneeOut)
+async def stats_by_assignee(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    user: User = Depends(require_viewer),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Разрез по исполнителям; `active` — снимок сейчас, сходится с GET /workload."""
+    return await _svc(analytics.get_by_assignee(db, project.id, date_from, date_to))
+
+
+@router.get("/stats/funnel", response_model=DesignStatsFunnelOut)
+async def stats_funnel(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    user: User = Depends(require_viewer),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Шесть колонок доски: сколько задач сейчас и сколько в среднем в них сидят."""
+    return await _svc(analytics.get_funnel(db, project.id, date_from, date_to))
+
+
+@router.get("/stats/by-attribute", response_model=DesignStatsByAttributeOut)
+async def stats_by_attribute(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    user: User = Depends(require_viewer),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Распределение задач по значениям реквизитов и по меткам."""
+    return await _svc(analytics.get_by_attribute(db, project.id, date_from, date_to))
+
+
+@router.get("/stats/export.xlsx")
+async def stats_export(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    user: User = Depends(require_viewer),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """XLSX: «Сводка» + «Задачи». Read-ручка, без rate_limit_write (Р32)."""
+    data, filename = await _svc(
+        export_xlsx.build_export(db, project.id, date_from, date_to)
+    )
+    return _attachment(
+        data,
+        filename,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@router.get("/dashboard/layout", response_model=DesignDashboardLayoutOut)
+async def get_dashboard_layout(
+    user: User = Depends(require_viewer),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Персональная раскладка; без сохранённой — дефолт с is_default = true."""
+    return await analytics.get_layout(db, project.id, user.id)
+
+
+@router.put(
+    "/dashboard/layout",
+    response_model=DesignDashboardLayoutOut,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def put_dashboard_layout(
+    payload: DesignDashboardLayoutIn,
+    user: User = Depends(require_viewer),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Сохранение раскладки. `user_id` берётся ИЗ СЕССИИ, никогда из тела."""
+    return await _svc(analytics.save_layout(db, project.id, user.id, payload))
 
 
 @router.get("/product-suggest", response_model=list[DesignProductSuggestion])

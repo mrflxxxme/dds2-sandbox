@@ -36,7 +36,6 @@ import FlatTaskList from './components/FlatTaskList';
 import ReasonModal from './components/ReasonModal';
 import TaskCalendarModal from './components/TaskCalendarModal';
 import DesignTabs from './components/DesignTabs';
-import StatsPanel from './components/StatsPanel';
 
 interface PendingMove {
     taskId: number;
@@ -252,12 +251,9 @@ function DesignTasksPageInner() {
             />
 
             {view === 'list' ? (
-                <>
-                    <ListView slug={params.slug} />
-                    {/* Список задач первее всего: метрики опускаются ПОД таблицу
-                        (в волне D уедут во вкладку «Аналитика»). */}
-                    <StatsPanel />
-                </>
+                // Метрики переехали во вкладку «Аналитика» (волна D): список задач
+                // остаётся списком задач.
+                <ListView slug={params.slug} />
             ) : (
                 <>
                     <BoardFilters

@@ -195,6 +195,100 @@ class DesignVerdictIn(BaseModel):
 # ─── Read models ──────────────────────────────────────────────────────────────
 
 
+# ─── Аналитика волны D (CONTRACT-V2 §4) ──────────────────────────────────────
+
+# Известные виджеты дашборда и порядок по умолчанию. Набор ПОЛНЫЙ и точный:
+# частичный апдейт не поддерживается намеренно — иначе появление нового виджета
+# в следующей версии молча оставляло бы его скрытым у всех, кто хоть раз
+# сохранял раскладку.
+DASHBOARD_WIDGET_IDS: tuple[str, ...] = ("metrics", "by_assignee", "funnel", "by_attribute")
+
+
+class DesignStatsAssigneeRow(BaseModel):
+    user_id: int
+    name: str
+    #  Снимок «сейчас», окно периода на него НЕ влияет — как unassigned_over_2d.
+    active: int = 0
+    accepted: int = 0
+    on_time_share: float | None = None
+    avg_cycle_days: float | None = None
+    avg_versions: float | None = None
+
+
+class DesignStatsByAssigneeOut(BaseModel):
+    rows: list[DesignStatsAssigneeRow] = []
+    truncated: bool = False
+
+
+class DesignStatsFunnelRow(BaseModel):
+    status: str
+    #  count — снимок текущего состояния, avg_days_in_status — за окно периода.
+    count: int = 0
+    avg_days_in_status: float | None = None
+
+
+class DesignStatsFunnelOut(BaseModel):
+    rows: list[DesignStatsFunnelRow] = []
+
+
+class DesignStatsValueRow(BaseModel):
+    #  value_id = None + value = «Без значения» — задачи, где поле не заполнено (Р33).
+    value_id: int | None = None
+    value: str
+    count: int = 0
+
+
+class DesignStatsAttributeGroup(BaseModel):
+    attribute_id: int
+    attribute_name: str
+    rows: list[DesignStatsValueRow] = []
+
+
+class DesignStatsLabelRow(BaseModel):
+    label_id: int
+    name: str
+    color: str
+    count: int = 0
+
+
+class DesignStatsByAttributeOut(BaseModel):
+    attributes: list[DesignStatsAttributeGroup] = []
+    labels: list[DesignStatsLabelRow] = []
+    truncated: bool = False
+
+
+class DesignDashboardWidget(BaseModel):
+    id: str
+    visible: bool = True
+    #  Любые целые: важен только относительный порядок, сервер нормализует к 0..N-1.
+    order: int = 0
+
+
+class DesignDashboardLayoutIn(BaseModel):
+    widgets: list[DesignDashboardWidget]
+
+    @model_validator(mode="after")
+    def _validate_full_set(self) -> "DesignDashboardLayoutIn":
+        """Набор обязан быть полным и точным (CONTRACT-V2 §4)."""
+        seen: set[str] = set()
+        for w in self.widgets:
+            if w.id not in DASHBOARD_WIDGET_IDS:
+                raise ValueError(f"Неизвестный виджет: {w.id}")
+            if w.id in seen:
+                raise ValueError(f"Виджет повторяется: {w.id}")
+            seen.add(w.id)
+        for known in DASHBOARD_WIDGET_IDS:
+            if known not in seen:
+                raise ValueError(f"Не хватает виджета: {known}")
+        return self
+
+
+class DesignDashboardLayoutOut(BaseModel):
+    widgets: list[DesignDashboardWidget] = []
+    #  true — раскладку ещё не сохраняли, отдан дефолт.
+    is_default: bool = False
+
+
 # ─── Справочники волны C (CONTRACT-V2 §3) ────────────────────────────────────
 
 _ALLOWED_LABEL_COLORS = {c.value for c in DesignLabelColor}

@@ -19,7 +19,7 @@
 | A | UI-правки + двухмесячный календарь | ✅ signed | 2026-08-20 | `30be4804` | ниже | **подписано владельцем 2026-08-20** (`schemas/design.py`, `globals.css` — см. DECISIONS-LOG 2026-08-20) |
 | B | Редактируемый номер заявки | 🟢 done-unsigned | 2026-08-20 | — | 20 тестов, миграция up→down→up | **требуется ДО мержа** (models/migrations/schemas) |
 | C | Метки + справочник реквизитов | 🟢 done-unsigned | 2026-08-20 | — | 38 тестов, миграция up→down→up | **требуется ДО мержа** (models/migrations/schemas/globals.css) |
-| D | Вкладка «Аналитика» + XLSX | ⏳ planned | — | — | — | **требуется ДО мержа** (models/migrations/schemas) |
+| D | Вкладка «Аналитика» + XLSX | 🟢 done-unsigned | 2026-08-20 | — | 28 тестов, миграция up→down→up | **требуется ДО мержа** (models/migrations/schemas) |
 
 Статусы: ⏳ planned · 🔨 active · 🟢 done-unsigned · ✅ signed.
 
@@ -125,6 +125,28 @@ pink 5.60 · brown 5.68 · slate 7.43 — все ≥ 3:1 с запасом.
 `rate_limit_write` у новых ручек переехал из параметра в `dependencies=[...]`;
 `test_board_returns_permissions_by_role` сверяет полный словарь прав доски и
 поймал новый флаг `can_manage_refs`. Оба обновлены осознанно, не «под зелёное».
+
+## Волна D — evidence
+
+| Гейт | Результат |
+|---|---|
+| `alembic upgrade head → downgrade -1 → upgrade head` | чисто, голова одна: `dsn06_design_dashboard_layout` |
+| `pytest test_design_v2_stats.py + test_design_v2_export.py` | **28 passed** |
+| `pytest tests/ -k design` | **298 passed** (было 270 после волны C) |
+| `pytest tests/test_rbac_page_gates.py` | **78 passed** |
+| `mypy` по дизайн-скоупу | Success, no issues in 18 source files |
+| `check_conventions.sh` · `tsc` · `vitest src/__tests__/lib/` | PASSED (те же 9) · чисто · 1378 зелёных |
+
+XLSX проверяется не «ручка ответила 200», а чтением файла обратно через openpyxl
+в самом тесте: сверяются состав листов, цифры «Сводки» с ответами ручек, формат
+мультизначных ячеек и обе строки усечения.
+
+**Гвард RBAC потребовал точечного исключения.** `tests/test_rbac_page_gates.py`
+требует, чтобы ни одна мутация домена не была доступна viewer'у, — а `PUT
+/dashboard/layout` по Р32 именно такая. Вместо ослабления правила заведён
+отдельный список `VIEWER_WRITABLE_ROUTES` с обоснованием: ручка не пишет данных
+проекта, `user_id` берётся из сессии, page-гейт и `rate_limit_write` на месте.
+Общий гвард продолжает действовать на все остальные ручки модуля.
 
 ## evidence_gap
 

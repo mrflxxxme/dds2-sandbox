@@ -9,6 +9,8 @@ import type {
     DesignAttributeValuePayload,
     DesignBoardResponse,
     DesignBulkResultOut,
+    DesignDashboardLayoutOut,
+    DesignDashboardWidget,
     DesignLabelOut,
     DesignLabelPayload,
     DesignCalendarOut,
@@ -18,6 +20,9 @@ import type {
     DesignMaterialOut,
     DesignMovePayload,
     DesignProductSuggestion,
+    DesignStatsByAssigneeOut,
+    DesignStatsByAttributeOut,
+    DesignStatsFunnelOut,
     DesignStatsOut,
     DesignStatusChangePayload,
     DesignTaskCreatePayload,
@@ -42,6 +47,15 @@ function listQuery(params: DesignTaskListParams): string {
     if (params.q) qs.set('q', params.q);
     if (params.limit != null) qs.set('limit', String(params.limit));
     if (params.offset != null) qs.set('offset', String(params.offset));
+    const query = qs.toString();
+    return query ? `?${query}` : '';
+}
+
+/** Общий хвост запроса окна периода — одно правило на все ручки статистики. */
+function statsQuery(dateFrom?: string, dateTo?: string): string {
+    const qs = new URLSearchParams();
+    if (dateFrom) qs.set('date_from', dateFrom);
+    if (dateTo) qs.set('date_to', dateTo);
     const query = qs.toString();
     return query ? `?${query}` : '';
 }
@@ -134,6 +148,22 @@ export function addDesignTaskMethods(api: ApiClient) {
             if (dateTo) qs.set('date_to', dateTo);
             const query = qs.toString();
             return api.request<DesignStatsOut>('GET', `${BASE}/stats${query ? `?${query}` : ''}`);
+        },
+        // ── Аналитика (волна D) ──
+        getDesignStatsByAssignee(dateFrom?: string, dateTo?: string) {
+            return api.request<DesignStatsByAssigneeOut>('GET', `${BASE}/stats/by-assignee${statsQuery(dateFrom, dateTo)}`);
+        },
+        getDesignStatsFunnel(dateFrom?: string, dateTo?: string) {
+            return api.request<DesignStatsFunnelOut>('GET', `${BASE}/stats/funnel${statsQuery(dateFrom, dateTo)}`);
+        },
+        getDesignStatsByAttribute(dateFrom?: string, dateTo?: string) {
+            return api.request<DesignStatsByAttributeOut>('GET', `${BASE}/stats/by-attribute${statsQuery(dateFrom, dateTo)}`);
+        },
+        getDesignDashboardLayout() {
+            return api.request<DesignDashboardLayoutOut>('GET', `${BASE}/dashboard/layout`);
+        },
+        saveDesignDashboardLayout(widgets: DesignDashboardWidget[]) {
+            return api.request<DesignDashboardLayoutOut>('PUT', `${BASE}/dashboard/layout`, { widgets });
         },
         designProductSuggest(q: string) {
             const qs = new URLSearchParams({ q });

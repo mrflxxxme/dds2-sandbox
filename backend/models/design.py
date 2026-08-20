@@ -29,6 +29,7 @@ design_tasks(id, project_id) — чужой project_id падает IntegrityErr
 
 import enum
 from datetime import date, datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -46,6 +47,7 @@ from sqlalchemy import (
     false,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -648,4 +650,35 @@ class DesignTaskAttributeValue(Base):
         ),
         Index("ix_design_task_attr_values_project_task", "project_id", "task_id"),
         Index("ix_design_task_attr_values_project_value", "project_id", "value_id"),
+    )
+
+
+# ─── Дашборд аналитики (волна D v2) ──────────────────────────────────────────
+
+
+class DesignDashboardLayout(Base, TimestampMixin):
+    """Персональная раскладка виджетов дашборда: пользователь × проект (Р23).
+
+    Таблица БЕЗДЕТНАЯ и намеренно выведена из-под паттерна
+    `UniqueConstraint(id, project_id)`: он нужен только родителям составных FK,
+    а на раскладку никто не ссылается. Изоляция обеспечивается парой
+    `(project_id, user_id)` в каждом запросе — это единственное исключение в v2.
+
+    `user_id` берётся ИЗ СЕССИИ, никогда из тела запроса: иначе один пользователь
+    перезаписал бы раскладку другому.
+
+    `widgets` — JSONB `[{id, visible, order}]`. CHECK в БД нет намеренно: состав
+    виджетов будет меняться чаще схемы, валидация живёт в Pydantic.
+    """
+
+    __tablename__ = "design_dashboard_layouts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    widgets: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "user_id", name="uq_design_dashboard_project_user"),
+        Index("ix_design_dashboard_project_user", "project_id", "user_id"),
     )

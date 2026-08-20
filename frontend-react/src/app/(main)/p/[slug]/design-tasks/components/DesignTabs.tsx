@@ -2,7 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 
-export type DesignTabKey = 'board' | 'list' | 'calendar' | 'workload' | 'settings';
+export type DesignTabKey = 'board' | 'list' | 'calendar' | 'workload' | 'analytics' | 'settings';
 
 // Вкладка «Все бренды» убрана (Р19): межпроектный список путал — задачи чужих
 // проектов нельзя было ни двигать, ни фильтровать. Сама ручка GET /all-projects
@@ -12,6 +12,7 @@ const TABS: { key: DesignTabKey; label: string; path: (slug: string) => string }
     { key: 'list', label: 'Список', path: (s) => `/p/${s}/design-tasks?view=list` },
     { key: 'calendar', label: 'Календарь', path: (s) => `/p/${s}/design-tasks/calendar` },
     { key: 'workload', label: 'Загрузка', path: (s) => `/p/${s}/design-tasks/workload` },
+    { key: 'analytics', label: 'Аналитика', path: (s) => `/p/${s}/design-tasks/analytics` },
     // Последняя вкладка: видна только по флагу бэка can_manage_refs (Р30).
     { key: 'settings', label: 'Настройки', path: (s) => `/p/${s}/design-tasks/settings` },
 ];

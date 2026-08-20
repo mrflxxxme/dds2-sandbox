@@ -10835,6 +10835,76 @@ export interface DesignBulkResultOut {
     errors: { task_id: number; message: string }[];
 }
 
+// ─── Аналитика (волна D) ─────────────────────────────────────────────────────
+
+export interface DesignStatsAssigneeRow {
+    user_id: number;
+    name: string;
+    /** Снимок «сейчас» — окно периода на него не влияет. */
+    active: number;
+    accepted: number;
+    on_time_share: number | null;
+    avg_cycle_days: number | null;
+    avg_versions: number | null;
+}
+
+export interface DesignStatsByAssigneeOut {
+    rows: DesignStatsAssigneeRow[];
+    /** Показаны не все строки — cap выдачи сработал. */
+    truncated: boolean;
+}
+
+export interface DesignStatsFunnelRow {
+    status: DesignTaskStatus;
+    count: number;
+    avg_days_in_status: number | null;
+}
+
+export interface DesignStatsFunnelOut {
+    rows: DesignStatsFunnelRow[];
+}
+
+export interface DesignStatsValueRow {
+    /** null + «Без значения» — задачи, где поле не заполнено. */
+    value_id: number | null;
+    value: string;
+    count: number;
+}
+
+export interface DesignStatsAttributeGroup {
+    attribute_id: number;
+    attribute_name: string;
+    rows: DesignStatsValueRow[];
+}
+
+export interface DesignStatsLabelRow {
+    label_id: number;
+    name: string;
+    color: DesignLabelColor;
+    count: number;
+}
+
+export interface DesignStatsByAttributeOut {
+    attributes: DesignStatsAttributeGroup[];
+    labels: DesignStatsLabelRow[];
+    truncated: boolean;
+}
+
+/** Известные виджеты дашборда. Набор в PUT обязан быть полным и точным. */
+export type DesignDashboardWidgetId = 'metrics' | 'by_assignee' | 'funnel' | 'by_attribute';
+
+export interface DesignDashboardWidget {
+    id: DesignDashboardWidgetId;
+    visible: boolean;
+    order: number;
+}
+
+export interface DesignDashboardLayoutOut {
+    widgets: DesignDashboardWidget[];
+    /** true — раскладку ещё не сохраняли, отдан дефолт. */
+    is_default: boolean;
+}
+
 /** ПОЛНЫЙ набор флагов compute_permissions; фронт логику прав не дублирует (§6.9). */
 export interface DesignTaskPermissions {
     can_edit: boolean;

@@ -13,12 +13,13 @@
 
 | Слой | Файл | Содержимое |
 |---|---|---|
-| Модели | `models/design.py` | 11 таблиц (6 базовых + 5 справочных волны C), 6 строковых enum'ов, `DESIGN_TASK_TRANSITIONS` (источник правды), `DESIGN_BOARD_STATUSES`, `DESIGN_ACTIVE_STATUSES` |
+| Модели | `models/design.py` | 12 таблиц (6 базовых + 5 справочных волны C + раскладка дашборда), 6 строковых enum'ов, `DESIGN_TASK_TRANSITIONS` (источник правды), `DESIGN_BOARD_STATUSES`, `DESIGN_ACTIVE_STATUSES` |
 | Миграции | `migrations/versions/dsn01_design_tasks.py` | 6 таблиц + индексы (аддитивно, revises `spp03_price_probes`) |
 | | `migrations/versions/dsn02_design_notify_flag.py` | `telegram_chat_bindings.design_notify_enabled` |
 | | `migrations/versions/dsn04_design_number_len.py` | номер заявки 20 → 40 символов (Р18) |
 | | `migrations/versions/dsn05_design_labels_attributes.py` | 5 таблиц справочников + сид полей «Кабинет ВБ» и «Бренд» (Р33) |
-| Схемы | `schemas/design.py` | вход/выход, `DesignTaskPermissions` (20 флагов), схемы справочников и массовых операций |
+| | `migrations/versions/dsn06_design_dashboard_layout.py` | персональная раскладка виджетов дашборда (Р23) |
+| Схемы | `schemas/design.py` | вход/выход, `DesignTaskPermissions` (20 флагов), схемы справочников, массовых операций и аналитики |
 | Сервис | `services/design/common.py` | `is_lead`, `actor_name`, `get_task_row` (скоуп проекта + `FOR UPDATE`) — на него завязаны все остальные, чтобы не было циклов |
 | | `services/design/state.py` | `validate_transition`, `can_user_transition`, `apply_transition_locked`, `change_status`, `_commit_and_notify` |
 | | `services/design/permissions.py` | `compute_permissions` — 20 булевых флагов |
@@ -29,6 +30,8 @@
 | | `services/design/files.py` | материалы, версии сдач, вердикты, скачивание, allowlist/blocklist типов |
 | | `services/design/workload.py` | «Загрузка команды» |
 | | `services/design/stats.py` | метрики PRD §10 |
+| | `services/design/analytics.py` | три разреза статистики + раскладка дашборда (волна D) |
+| | `services/design/export_xlsx.py` | XLSX «Сводка» + «Задачи» (волна D) |
 | | `services/design/notify.py` | 4 личных TG-события |
 | | `services/design/ab_bridge.py` | мост «принятая задача → АБ-тест главного фото» |
 | HTTP | `routers/design_tasks.py` | 24 ручки, `require_role(..., page="design-tasks")` |
@@ -229,6 +232,19 @@ REVISION, ACCEPTED. ON_HOLD и CANCELLED — вне доски (видны фи�
 
 `GET /all-projects` осталась в API, хотя вкладка «Все бренды» из UI убрана (Р19):
 контракт не ломаем, потребителя у ручки сейчас нет.
+
+**Аналитика (волна D v2):** `GET /stats/by-assignee`, `/stats/funnel`,
+`/stats/by-attribute`, `/stats/export.xlsx`, `GET|PUT /dashboard/layout`.
+Все под `require_viewer` (Р32: дашборд и выгрузка доступны всем с page-ключом).
+`PUT /dashboard/layout` — **единственная write-ручка модуля с гейтом viewer**:
+она не пишет данных проекта, только персональную настройку интерфейса,
+скоупленную `user_id` из СЕССИИ. Исключение задокументировано в
+`tests/test_rbac_page_gates.py::VIEWER_WRITABLE_ROUTES`; page-гейт и
+`rate_limit_write` с неё не сняты.
+
+Окно периода у всех ручек статистики одно: обе границы или ни одной; только
+`date_from` → `date_to = сегодня` (поведение v1 сохраняется дословно, панель
+метрик шлёт именно такой вызов); без параметров — последние 30 дней.
 
 **Справочники (волна C v2):** `GET|POST /refs/labels`, `PUT|DELETE /refs/labels/{id}`,
 `GET|POST /refs/attributes`, `PUT|DELETE /refs/attributes/{id}`,

@@ -288,12 +288,26 @@ def test_every_route_of_domain_is_gated(module: str):
     assert wrong_page == [], f"ручки {module} с чужим ключом (ожидался один из {sorted(allowed)}): {wrong_page}"
 
 
+# Точечные исключения ТОЛЬКО для правила «мутация требует editor».
+# Page-гейт с этих ручек НЕ снимается (они не в EXEMPT_ROUTES) — снимается
+# ровно требование роли, и только там, где write не трогает данные проекта.
+VIEWER_WRITABLE_ROUTES: dict[str, str] = {
+    "/api/v1/design-tasks/dashboard/layout": (
+        "Р32/Р23 модуля дизайна: аналитика доступна viewer-руководителю, а дашборд "
+        "без права сохранить СВОЮ раскладку бесполезен. Ручка не пишет данных "
+        "проекта — только персональную настройку интерфейса, скоупленную user_id "
+        "ИЗ СЕССИИ (из тела он не берётся никогда, см. analytics.save_layout). "
+        "Чужую раскладку затереть нельзя по построению. rate_limit_write на месте."
+    ),
+}
+
+
 @pytest.mark.parametrize("module", sorted(GATED_DOMAINS))
 def test_domain_mutations_require_editor(module: str):
     """Мутации закрытого домена требуют роль не ниже editor — viewer только читает."""
     weak = []
     for route, path, mod in _iter_api_routes():
-        if mod != module or path in EXEMPT_ROUTES:
+        if mod != module or path in EXEMPT_ROUTES or path in VIEWER_WRITABLE_ROUTES:
             continue
         if not (set(route.methods or ()) & WRITE_METHODS):
             continue
