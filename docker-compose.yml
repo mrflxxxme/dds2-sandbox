@@ -74,9 +74,31 @@ services:
     networks:
       - internal
 
+  #  Готовит том хранилища ДО старта minio. Образ alpine/minio работает под
+  #  uid 100, а каталог /data внутри него принадлежит root без прав записи для
+  #  группы. Свежий named-том наследует ровно эти права, поэтому на ЧИСТОЙ
+  #  установке minio падает в цикл: «unable to create (/data/.minio.sys/tmp)
+  #  file access denied». На уже развёрнутых установках том создан раньше и
+  #  права на нём верные — chown там no-op, поведение не меняется.
+  #
+  #  Правим владельца тома, а не поднимаем minio из-под root: root писал бы
+  #  файлы от своего имени, и возврат к штатному пользователю позже сломал бы
+  #  хранилище задним числом.
+  minio-init:
+    image: alpine:3
+    command: chown 100:101 /data
+    volumes:
+      - miniodata:/data
+    restart: "no"
+    networks:
+      - internal
+
   minio:
     image: alpine/minio:RELEASE.2025-10-15T17-29-55Z
     command: server /data --console-address ":9001"
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
